@@ -690,7 +690,7 @@ impl Default for SimulationSettings {
             trail_decay: 0.995,
             trail_opacity: 0.5,
             trail_show: false,
-            interior_isotropic: true,
+            interior_isotropic: false,  // Use asymmetric left/right multipliers from amino acids
             ignore_stop_codons: false,  // Stop codons (UAA, UAG, UGA) terminate translation
             require_start_codon: true,  // Translation starts at AUG (Methionine)
         }
@@ -4122,6 +4122,10 @@ fn main() {
                                     ui.checkbox(&mut state.ignore_stop_codons, "Ignore stop codons (experimental)")
                                         .on_hover_text("When enabled, genomes translate to full 64 amino acids regardless of stop codons");
                                     ui.separator();
+                                    ui.heading("Signal Propagation");
+                                    ui.checkbox(&mut state.interior_isotropic, "Isotropic diffusion (simple averaging)")
+                                        .on_hover_text("When enabled, uses simple neighbor averaging. When disabled, uses asymmetric left/right multipliers from amino acid properties");
+                                    ui.separator();
                                     if ui.button("Spawn 5000 Random Agents").clicked() && !state.is_paused {
                                         state.queue_random_spawns(5000);
                                     }                                        ui.separator();
@@ -4852,42 +4856,119 @@ fn main() {
                                             }
                                             ui.label(job);
 
-                                            // Show only active organs (built parts)
+                                            // Show only active organs (built parts) with signal visualization
                                             ui.separator();
-                                            ui.heading("Active organs");
+                                            ui.heading("Active organs (colored by α/β signals)");
                                             let amino_names = [
                                                 "Ala", "Cys", "Asp", "Glu", "Phe", "Gly", "His", "Ile", "Lys(MOUTH)", "Leu",
                                                 "Met", "Asn", "Pro", "Gln", "Arg", "Ser", "Thr", "Val", "Trp(STORAGE)", "Tyr"
                                             ];
-                                            let mut organ_line = String::new();
                                             let mut m_count: u32 = 0; // Lysine (Mouth) index 8
                                             let mut w_count: u32 = 0; // Tryptophan (Storage) index 18
+                                            
+                                            // Build colored organ display using LayoutJob
+                                            let mut organ_job = egui::text::LayoutJob::default();
+                                            let mut has_parts = false;
+                                            
                                             if let Some((dbg_count, dbg_types)) = state.debug_parts_data.as_ref() {
                                                 for i in 0..(*dbg_count as usize).min(MAX_BODY_PARTS) {
+                                                    has_parts = true;
                                                     let t = dbg_types[i] as usize;
                                                     let name = if t < amino_names.len() { amino_names[t] } else { "?" };
-                                                    organ_line.push_str(name);
+                                                    
+                                                    // Get signal values for this body part
+                                                    let alpha = agent_data.body[i].alpha_signal;
+                                                    let beta = agent_data.body[i].beta_signal;
+                                                    
+                                                    // Match shader debug mode color scheme:
+                                                    // r = max(beta, 0.0)
+                                                    // g = max(alpha, 0.0)  
+                                                    // b = max(-alpha, -beta, 0.0)
+                                                    let r = beta.max(0.0);
+                                                    let g = alpha.max(0.0);
+                                                    let bl = (-alpha).max(-beta).max(0.0);
+                                                    
+                                                    // Apply sqrt for enhanced visibility
+                                                    let r_enhanced = r.sqrt();
+                                                    let g_enhanced = g.sqrt();
+                                                    let bl_enhanced = bl.sqrt();
+                                                    
+                                                    let color = egui::Color32::from_rgb(
+                                                        (r_enhanced * 255.0) as u8,
+                                                        (g_enhanced * 255.0) as u8,
+                                                        (bl_enhanced * 255.0) as u8
+                                                    );
+                                                    
+                                                    let format = egui::text::TextFormat {
+                                                        font_id: egui::FontId::monospace(10.0),
+                                                        color,
+                                                        ..Default::default()
+                                                    };
+                                                    organ_job.append(name, 0.0, format);
+                                                    
                                                     if t == 8 { m_count += 1; }
                                                     if t == 18 { w_count += 1; }
-                                                    if i + 1 < *dbg_count as usize { organ_line.push('-'); }
+                                                    if i + 1 < *dbg_count as usize {
+                                                        let separator_format = egui::text::TextFormat {
+                                                            font_id: egui::FontId::monospace(10.0),
+                                                            color: egui::Color32::GRAY,
+                                                            ..Default::default()
+                                                        };
+                                                        organ_job.append("-", 0.0, separator_format);
+                                                    }
                                                 }
                                             } else {
                                                 let safe_body_count = agent_data.body_count.min(MAX_BODY_PARTS as u32) as usize;
                                                 for i in 0..safe_body_count {
+                                                    has_parts = true;
                                                     let t = agent_data.body[i].part_type as usize;
                                                     let name = if t < amino_names.len() { amino_names[t] } else { "?" };
-                                                    organ_line.push_str(name);
+                                                    
+                                                    // Get signal values for this body part
+                                                    let alpha = agent_data.body[i].alpha_signal;
+                                                    let beta = agent_data.body[i].beta_signal;
+                                                    
+                                                    // Match shader debug mode color scheme
+                                                    let r = beta.max(0.0);
+                                                    let g = alpha.max(0.0);
+                                                    let bl = (-alpha).max(-beta).max(0.0);
+                                                    let r_enhanced = r.sqrt();
+                                                    let g_enhanced = g.sqrt();
+                                                    let bl_enhanced = bl.sqrt();
+                                                    
+                                                    let color = egui::Color32::from_rgb(
+                                                        (r_enhanced * 255.0) as u8,
+                                                        (g_enhanced * 255.0) as u8,
+                                                        (bl_enhanced * 255.0) as u8
+                                                    );
+                                                    
+                                                    let format = egui::text::TextFormat {
+                                                        font_id: egui::FontId::monospace(10.0),
+                                                        color,
+                                                        ..Default::default()
+                                                    };
+                                                    organ_job.append(name, 0.0, format);
+                                                    
                                                     if t == 8 { m_count += 1; }
                                                     if t == 18 { w_count += 1; }
-                                                    if i + 1 < safe_body_count { organ_line.push('-'); }
+                                                    if i + 1 < safe_body_count {
+                                                        let separator_format = egui::text::TextFormat {
+                                                            font_id: egui::FontId::monospace(10.0),
+                                                            color: egui::Color32::GRAY,
+                                                            ..Default::default()
+                                                        };
+                                                        organ_job.append("-", 0.0, separator_format);
+                                                    }
                                                 }
                                             }
-                                            if organ_line.is_empty() {
+                                            
+                                            if !has_parts {
                                                 ui.label("(none)");
                                             } else {
-                                                ui.label(egui::RichText::new(organ_line)
-                                                    .font(egui::FontId::monospace(10.0))
-                                                    .color(egui::Color32::GREEN));
+                                                ui.label(organ_job);
+                                                ui.label(egui::RichText::new("α+→green  β+→red  α-/β-→blue")
+                                                    .font(egui::FontId::monospace(8.0))
+                                                    .color(egui::Color32::GRAY));
                                             }
 
                                             // Capacity cross-check: estimate from Mouth/Storage counts (Lys and Trp)
