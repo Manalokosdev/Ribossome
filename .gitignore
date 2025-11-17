@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+
+# Cargo.lock for binaries (optional - some keep it, some don't)
+# Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Old git history backup
+.git-old/
