@@ -1,3 +1,7 @@
+// Ribossome - GPU-Accelerated Artificial Life Simulator
+// Copyright (c) 2025 Filipe da Veiga Ventura Alves
+// Licensed under MIT License
+
 // Single unified shader for minimal GPU artificial life simulator
 // Agents store genes, build bodies, sense environment grids, and draw themselves
 

@@ -1,3 +1,7 @@
+// Ribossome - GPU-Accelerated Artificial Life Simulator
+// Copyright (c) 2025 Filipe da Veiga Ventura Alves
+// Licensed under MIT License
+
 use bytemuck::{Pod, Zeroable};
 use egui_wgpu::ScreenDescriptor;
 use image::imageops::FilterType;
