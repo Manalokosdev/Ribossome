@@ -208,7 +208,7 @@ pub fn get_default_amino_acids() -> [AminoAcidProperties; 20] {
         },
         // 5: G - Glycine
         AminoAcidProperties {
-            segment_length: 4.0, thickness: 1.5, base_angle: 0.0,
+            segment_length: 4.0, thickness: 0.75, base_angle: 0.0,
             alpha_sensitivity: 0.9, beta_sensitivity: 0.9,
             is_propeller: 0, thrust_force: 0.0, _pad0: 0.0,
             color: [0.32, 0.32, 0.32], _pad_color: 0.0, is_mouth: 0,
@@ -376,7 +376,7 @@ pub fn get_default_amino_acids() -> [AminoAcidProperties; 20] {
         },
         // 19: Y - Tyrosine
         AminoAcidProperties {
-            segment_length: 11.5, thickness: 8.0, base_angle: 0.9,
+            segment_length: 11.5, thickness: 4.0, base_angle: 0.9,
             alpha_sensitivity: -0.2, beta_sensitivity: 0.2,
             is_propeller: 0, thrust_force: 0.0, _pad0: 0.0,
             color: [0.26, 0.26, 0.26], _pad_color: 0.0, is_mouth: 0,

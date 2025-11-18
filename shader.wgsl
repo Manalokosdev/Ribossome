@@ -139,6 +139,23 @@ struct SimParams {
     require_start_codon: u32,
 }
 
+struct EnvironmentInitParams {
+    grid_resolution: u32,
+    seed: u32,
+    noise_octaves: u32,
+    slope_octaves: u32,
+    noise_scale: f32,
+    noise_contrast: f32,
+    slope_scale: f32,
+    slope_contrast: f32,
+    alpha_range: vec2<f32>,
+    beta_range: vec2<f32>,
+    gamma_height_range: vec2<f32>,
+    trail_values: vec4<f32>,
+    slope_pair: vec2<f32>,
+    _padding: vec4<f32>,
+}
+
 // ============================================================================
 // BINDINGS
 // ============================================================================
@@ -189,6 +206,9 @@ var<storage, read_write> gamma_grid: array<f32>; // Terrain height field + slope
 // NOTE: Use vec4 for std430-friendly 16-byte stride to match host buffer layout
 var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGBA (A unused)
 
+@group(0) @binding(15)
+var<uniform> environment_init: EnvironmentInitParams;
+
 // ============================================================================
 // AMINO ACID PROPERTIES
 // ============================================================================
@@ -219,6 +239,7 @@ struct AminoAcidProperties {
     beta_right_mult: f32,
     is_displacer: bool,
     is_inhibitor: bool,
+    is_condenser: bool,
 }
 
 // Returns per-amino-acid properties used to build and simulate body parts
@@ -250,6 +271,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     props.beta_right_mult = 0.5;
     props.is_displacer = false;
     props.is_inhibitor = false;
+    props.is_condenser = false;
     switch (amino_type) {
         case 0u: { // A - Alanine - Small, simple, common (real: CH3 side chain)
             props.segment_length = 8.5;
@@ -378,16 +400,16 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.45;
             props.mass = 2.0; // Very heavy - slows agent down significantly
         }
-        case 5u: { // G - Glycine - Smallest, most flexible (real: just H as side chain)
+        case 5u: { // G - Glycine - BETA CONDENSER
             props.segment_length = 4.0;
-            props.thickness = 1.5;
+            props.thickness = 0.75;
             // Old CSV: Seed Angle = -20°
             props.base_angle = -0.349066;
             props.alpha_sensitivity = 1.2;
             props.beta_sensitivity = 0.1;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.32, 0.32, 0.32); // Dark grey
+            props.color = vec3<f32>(0.4, 0.0, 0.0); // Dark red
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.2;
@@ -402,6 +424,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 0.5;
             props.beta_right_mult = 0.5;
             props.mass = 0.02;
+            props.is_condenser = true;
         }
         case 6u: { // H - Histidine - Aromatic, charged (real: imidazole ring, pH-sensitive)
             props.segment_length = 9.0;
@@ -735,16 +758,16 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.4;
             props.mass = 1.3;
         }
-        case 19u: { // Y - Tyrosine - Bulky aromatic (real: phenol ring, similar to F but with OH)
+        case 19u: { // Y - Tyrosine - ALPHA CONDENSER - Absorbs, stores, and discharges alpha signals
             props.segment_length = 11.5;
-            props.thickness = 8.0;
+            props.thickness = 4.0;
             // Old CSV: Seed Angle = -30°
             props.base_angle = -0.523599;
             props.alpha_sensitivity = -0.2;
             props.beta_sensitivity = 0.52;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.26, 0.26, 0.26); // Dark grey
+            props.color = vec3<f32>(0.0, 0.4, 0.0); // Dark green for condenser
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
@@ -759,6 +782,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = -0.4;
             props.beta_right_mult = 1.4;
             props.mass = 0.04;
+            props.is_condenser = true;
         }
         default: { // Fallback (should never happen)
             props.segment_length = 8.0;
@@ -1059,6 +1083,41 @@ fn noise2d(p: vec2<f32>) -> f32 {
     
     // Bilinear interpolation
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn layered_noise(
+    coord: vec2<f32>,
+    seed: u32,
+    octaves: u32,
+    scale: f32,
+    contrast: f32,
+) -> f32 {
+    let octave_count = max(octaves, 1u);
+    var amplitude = 1.0;
+    var frequency = 1.0;
+    var sum = 0.0;
+    var total = 0.0;
+    var octave_seed = seed ^ 0x9E3779B1u;
+    let safe_scale = max(scale, 0.0001);
+
+    for (var i = 0u; i < octave_count; i = i + 1u) {
+        let offset = vec2<f32>(
+            hash_f32(octave_seed ^ 0xA511E9B5u) * 512.0,
+            hash_f32(octave_seed ^ 0x63D3F6ABu) * 512.0,
+        );
+        sum = sum + noise2d(coord * frequency * safe_scale + offset) * amplitude;
+        total = total + amplitude;
+        amplitude = amplitude * 0.5;
+        frequency = frequency * 2.0;
+        octave_seed = hash(octave_seed ^ i);
+    }
+
+    let normalized = sum / max(total, 0.0001);
+    return clamp((normalized - 0.5) * contrast + 0.5, 0.0, 1.0);
+}
+
+fn remap_unit(value: f32, range: vec2<f32>) -> f32 {
+    return mix(range.x, range.y, value);
 }
 
 fn rotate_vec2(v: vec2<f32>, angle: f32) -> vec2<f32> {
@@ -1691,9 +1750,64 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             new_beta += energy_beta * accumulation_rate;
         }
         
-        // Apply decay to non-sensor signals only (sensors are direct sources)
-        if (!amino_props.is_alpha_sensor) { new_alpha *= 0.85; }
-        if (!amino_props.is_beta_sensor) { new_beta *= 0.85; }
+        // CONDENSER: Absorbs signal into storage, then discharges at controlled rate
+        // Uses _pad.y to store charge level with sign indicating mode:
+        // NEGATIVE = charging mode (e.g., -5.0 = has 5.0 charge, still absorbing)
+        // POSITIVE = discharging mode (e.g., +5.0 = has 5.0 charge, releasing)
+        // Tyrosine (19u) = alpha condenser, Glycine (5u) = beta condenser
+        if (amino_props.is_condenser) {
+            let signed_charge = agents_out[agent_id].body[i]._pad.y; // Signed charge level
+            let absorption_amount = 0.1; // Absorb 0.1 units per frame
+            let max_charge = 10.0;
+            let discharge_rate = 0.2; // Discharge 0.2 per frame
+            
+            let amino_type = agents_out[agent_id].body[i].part_type;
+            let is_alpha_condenser = (amino_type == 19u); // Tyrosine
+            let is_beta_condenser = (amino_type == 5u);   // Glycine
+            
+            if (signed_charge <= 0.0) {
+                // CHARGING MODE (negative value)
+                let charge = -signed_charge; // Get absolute charge value
+                
+                if (charge >= max_charge) {
+                    // Reached full charge - switch to discharge mode (make positive)
+                    agents_out[agent_id].body[i]._pad.y = max_charge;
+                } else {
+                    // Continue charging - absorb from signal
+                    var absorbed = 0.0;
+                    if (is_alpha_condenser && new_alpha > 0.0) {
+                        absorbed = min(min(new_alpha, absorption_amount), max_charge - charge);
+                        new_alpha -= absorbed;
+                    } else if (is_beta_condenser && new_beta > 0.0) {
+                        absorbed = min(min(new_beta, absorption_amount), max_charge - charge);
+                        new_beta -= absorbed;
+                    }
+                    // Store as negative (charging mode)
+                    agents_out[agent_id].body[i]._pad.y = -(charge + absorbed);
+                }
+            } else {
+                // DISCHARGING MODE (positive value) or empty (0.0)
+                let charge = signed_charge;
+                
+                if (charge <= 0.0) {
+                    // Empty - restart charging with negative value
+                    agents_out[agent_id].body[i]._pad.y = -1e-6;
+                } else {
+                    // Continue discharging
+                    if (is_alpha_condenser) {
+                        new_alpha += discharge_rate;
+                    } else if (is_beta_condenser) {
+                        new_beta += discharge_rate;
+                    }
+                    agents_out[agent_id].body[i]._pad.y = max(charge - discharge_rate, 0.0);
+                }
+            }
+        }
+        
+        // Apply decay to non-sensor/non-condenser signals
+        // Sensors are direct sources, condensers store independently
+        if (!amino_props.is_alpha_sensor && !amino_props.is_condenser) { new_alpha *= 0.85; }
+        if (!amino_props.is_beta_sensor && !amino_props.is_condenser) { new_beta *= 0.85; }
         
         // Clamp to -1.0 to 1.0 (allows inhibitory and excitatory signals)
         agents_out[agent_id].body[i].alpha_signal = clamp(new_alpha, -1.0, 1.0);
@@ -2588,6 +2702,63 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 draw_thick_line(p1, p2, perp_thickness, vec4<f32>(amino_props.color, 1.0));
             }
             
+            // Special rendering for CONDENSER - filled circle with charge level
+            // Tyrosine (alpha) = green fill, Glycine (beta) = red fill, white outline
+            // FLASH: White when discharging (positive charge value)
+            if (amino_props.is_condenser) {
+                let signed_charge = part._pad.y; // Signed charge: negative=charging, positive=discharging
+                let charge = abs(signed_charge); // Absolute charge level (0.0 to 10.0)
+                let max_charge = 10.0;
+                let is_discharging = (signed_charge > 0.0); // Positive = discharging
+                let charge_ratio = clamp(charge / max_charge, 0.0, 1.0); // 0.0 to 1.0
+                
+                let min_radius = 6.0;
+                let radius = max(part.size * 0.75, min_radius);
+                let segments = 24u;
+                
+                let amino_type = part.part_type;
+                let is_alpha_condenser = (amino_type == 19u); // Tyrosine - green
+                let is_beta_condenser = (amino_type == 5u);   // Glycine - red
+                
+                // Fill color based on charge level: dark -> bright as it charges
+                // FLASH WHITE when discharging. Both condensers share the exact same shading; only tint differs.
+                var fill_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+                if (is_discharging) {
+                    // Flash white when discharging
+                    fill_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+                } else {
+                    // Base tint per condenser type
+                    var base_tint = vec3<f32>(0.0, 1.0, 0.0); // Alpha condenser = green
+                    if (is_beta_condenser) {
+                        base_tint = vec3<f32>(1.0, 0.0, 0.0); // Beta condenser = red
+                    }
+                    let low_tint = base_tint * 0.25; // Keep color identity even when uncharged
+                    let fill_rgb = mix(low_tint, base_tint, charge_ratio);
+                    fill_color = vec4<f32>(fill_rgb, 1.0);
+                }
+                
+                // Draw filled circle by drawing many lines from center to edge
+                let fill_segments = 32u;
+                for (var s = 0u; s < fill_segments; s++) {
+                    let ang1 = f32(s) / f32(fill_segments) * 6.28318530718;
+                    let ang2 = f32(s + 1u) / f32(fill_segments) * 6.28318530718;
+                    let p1 = world_pos + vec2<f32>(cos(ang1) * radius, sin(ang1) * radius);
+                    let p2 = world_pos + vec2<f32>(cos(ang2) * radius, sin(ang2) * radius);
+                    draw_thick_line(world_pos, p1, radius * 0.5, fill_color);
+                    draw_thick_line(p1, p2, 1.0, fill_color);
+                }
+                
+                // Draw white outline
+                var prev = world_pos + vec2<f32>(radius, 0.0);
+                for (var s = 1u; s <= segments; s++) {
+                    let t = f32(s) / f32(segments);
+                    let ang = t * 6.28318530718;
+                    let p = world_pos + vec2<f32>(cos(ang) * radius, sin(ang) * radius);
+                    draw_thick_line(prev, p, 0.5, vec4<f32>(1.0, 1.0, 1.0, 1.0));
+                    prev = p;
+                }
+            }
+            
             // Draw ultra-subtle circular outline for ENABLER amino acids (was inhibitor)
             // Fade rules: fully visible at zoom >= 15, starts fading below 15, fully transparent at zoom <= 5
             // Only visible in debug mode
@@ -3329,6 +3500,9 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     var gamma_display = gamma;
     if (params.gamma_hidden != 0u) {
         gamma_display = 0.0;
+    } else {
+        let vis_range = max(params.gamma_vis_max - params.gamma_vis_min, 0.0001);
+        gamma_display = clamp((gamma - params.gamma_vis_min) / vis_range, 0.0, 1.0);
     }
 
     // Compute base color for environment visualization without early returns,
@@ -3449,6 +3623,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The agents already drew in screen space with camera applied
     let color = textureSample(visual_tex, visual_sampler, in.uv);
     return vec4<f32>(color.rgb, 1.0);
+}
+
+// ============================================================================
+// ENVIRONMENT INITIALIZATION
+// ============================================================================
+
+@compute @workgroup_size(16, 16)
+fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= GRID_SIZE || y >= GRID_SIZE) {
+        return;
+    }
+
+    let idx = y * GRID_SIZE + x;
+    
+    // Use constant values for fast startup (can be overridden by loading terrain images)
+    alpha_grid[idx] = environment_init.alpha_range.x; // Use minimum alpha value
+    beta_grid[idx] = environment_init.beta_range.x;   // Use minimum beta value
+    gamma_grid[idx] = 0.0;
+
+    gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = environment_init.slope_pair.x;
+    gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET] = environment_init.slope_pair.y;
+
+    trail_grid[idx] = environment_init.trail_values;
 }
 
 // ============================================================================

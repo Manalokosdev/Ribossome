@@ -38,29 +38,30 @@ const GENOME_BYTES: usize = 128; // ASCII bases including padding
 const GENOME_WORDS: usize = GENOME_BYTES / std::mem::size_of::<u32>();
 const PACKED_GENOME_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const MIN_GENE_LENGTH: usize = 6;
+const MAX_SPAWN_REQUESTS: usize = 2000;
 
 // RGB colors per amino acid, kept in sync with shader get_amino_acid_properties()
 const AMINO_COLORS: [[f32; 3]; 20] = [
     [0.3, 0.3, 0.3],    // A
     [1.0, 0.0, 0.0],    // C (beta sensor)
-    [0.1, 0.1, 0.1],    // D
-    [0.2, 0.2, 0.2],    // E
+    [0.35, 0.35, 0.35], // D
+    [0.4, 0.4, 0.4],    // E
     [1.0, 0.4, 0.7],    // F (poison resistant) - pink, very fat
-    [0.32, 0.32, 0.32], // G
+    [0.4, 0.0, 0.0],    // G (beta condenser)
     [0.28, 0.28, 0.28], // H
     [0.38, 0.38, 0.38], // I
     [1.0, 1.0, 0.0],    // K (mouth)
-    [0.0, 1.0, 1.0],    // L (chiral flipper) - cyan, very wide
+    [0.36, 0.36, 0.36], // L (chiral flipper)
     [0.8, 0.8, 0.2],    // M
-    [0.27, 0.0, 0.27],  // N
-    [0.0, 0.0, 1.0],    // P (propeller)
+    [0.27, 0.27, 0.27], // N (enabler)
+    [0.0, 0.0, 0.5],    // P (propeller)
     [0.34, 0.34, 0.34], // Q
     [0.29, 0.29, 0.29], // R
     [0.0, 1.0, 0.0],    // S (alpha sensor)
-    [0.6, 0.2, 0.8],    // T (energy sensor)
-    [0.0, 1.0, 1.0],    // V (displacer)
+    [0.31, 0.31, 0.31], // T (energy sensor)
+    [0.37, 0.37, 0.37], // V (displacer)
     [1.0, 0.5, 0.0],    // W (storage)
-    [0.26, 0.26, 0.26], // Y
+    [0.26, 0.26, 0.26], // Y (alpha condenser)
 ];
 
 #[derive(Clone, Copy)]
@@ -70,6 +71,8 @@ struct AminoVisualFlags {
     is_beta_sensor: bool,
     is_energy_sensor: bool,
     is_inhibitor: bool,
+    is_propeller: bool,
+    is_condenser: bool,
 }
 
 const DEFAULT_AMINO_FLAGS: AminoVisualFlags = AminoVisualFlags {
@@ -78,7 +81,44 @@ const DEFAULT_AMINO_FLAGS: AminoVisualFlags = AminoVisualFlags {
     is_beta_sensor: false,
     is_energy_sensor: false,
     is_inhibitor: false,
+    is_propeller: false,
+    is_condenser: false,
 };
+
+struct StartupProfiler {
+    enabled: bool,
+    start: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl StartupProfiler {
+    fn new() -> Self {
+        let enabled = std::env::var("ALSIM_TRACE_STARTUP")
+            .map(|value| value != "0")
+            .unwrap_or(false);
+        let now = std::time::Instant::now();
+        Self {
+            enabled,
+            start: now,
+            last: now,
+        }
+    }
+
+    fn mark(&mut self, label: &str) {
+        if !self.enabled {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let delta_ms = now.duration_since(self.last).as_secs_f64() * 1000.0;
+        let total_ms = now.duration_since(self.start).as_secs_f64() * 1000.0;
+        println!(
+            "[startup] {:>28}: +{:7.2} ms (total {:7.2} ms)",
+            label, delta_ms, total_ms
+        );
+        self.last = now;
+    }
+}
 
 const AMINO_FLAGS: [AminoVisualFlags; 20] = [
     AminoVisualFlags {
@@ -87,6 +127,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // A
     AminoVisualFlags {
         is_mouth: false,
@@ -94,6 +136,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: true,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // C (beta sensor)
     AminoVisualFlags {
         is_mouth: false,
@@ -101,6 +145,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // D
     AminoVisualFlags {
         is_mouth: false,
@@ -108,6 +154,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // E
     AminoVisualFlags {
         is_mouth: false,
@@ -115,6 +163,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // F
     AminoVisualFlags {
         is_mouth: false,
@@ -122,13 +172,17 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
-    }, // G
+        is_propeller: false,
+        is_condenser: true,
+    }, // G (beta condenser)
     AminoVisualFlags {
         is_mouth: false,
         is_alpha_sensor: false,
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // H
     AminoVisualFlags {
         is_mouth: false,
@@ -136,6 +190,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // I
     AminoVisualFlags {
         is_mouth: true,
@@ -143,6 +199,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // K (mouth)
     AminoVisualFlags {
         is_mouth: false,
@@ -150,6 +208,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // L
     AminoVisualFlags {
         is_mouth: false,
@@ -157,6 +217,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // M
     AminoVisualFlags {
         is_mouth: false,
@@ -164,6 +226,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: true,
+        is_propeller: false,
+        is_condenser: false,
     }, // N - INHIBITOR (replaces Asparagine)
     AminoVisualFlags {
         is_mouth: false,
@@ -171,6 +235,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: true,
+        is_condenser: false,
     }, // P (propeller)
     AminoVisualFlags {
         is_mouth: false,
@@ -178,6 +244,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // Q
     AminoVisualFlags {
         is_mouth: false,
@@ -185,6 +253,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // R
     AminoVisualFlags {
         is_mouth: false,
@@ -192,6 +262,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // S (alpha sensor)
     AminoVisualFlags {
         is_mouth: false,
@@ -199,6 +271,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: true,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // T (energy sensor)
     AminoVisualFlags {
         is_mouth: false,
@@ -206,6 +280,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // V
     AminoVisualFlags {
         is_mouth: false,
@@ -213,6 +289,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
+        is_propeller: false,
+        is_condenser: false,
     }, // W (storage)
     AminoVisualFlags {
         is_mouth: false,
@@ -220,7 +298,9 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
-    }, // Y
+        is_propeller: false,
+        is_condenser: true,
+    }, // Y (alpha condenser)
 ];
 
 const DEFAULT_PART_COLOR: [f32; 3] = [0.5, 0.5, 0.5];
@@ -605,6 +685,30 @@ struct SimParams {
     require_start_codon: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct EnvironmentInitParams {
+    grid_resolution: u32,
+    seed: u32,
+    noise_octaves: u32,
+    slope_octaves: u32,
+    noise_scale: f32,
+    noise_contrast: f32,
+    slope_scale: f32,
+    slope_contrast: f32,
+    alpha_range: [f32; 2],
+    beta_range: [f32; 2],
+    gamma_height_range: [f32; 2],
+    _trail_alignment: [f32; 2],
+    trail_values: [f32; 4],
+    slope_pair: [f32; 2],
+    _slope_alignment: [f32; 2],
+    _padding: [f32; 4],
+}
+
+// Keep host layout in sync with the WGSL uniform buffer (std140, 112 bytes total).
+const _: [(); 112] = [(); std::mem::size_of::<EnvironmentInitParams>()];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 struct SimulationSettings {
@@ -681,7 +785,7 @@ impl Default for SimulationSettings {
             gamma_hidden: false,
             debug_per_segment: false,
             gamma_vis_min: 0.0,
-            gamma_vis_max: 1.0,
+            gamma_vis_max: 0.5,
             alpha_show: true,
             beta_show: true,
             gamma_show: true,
@@ -772,6 +876,7 @@ struct GpuState {
     trail_grid: wgpu::Buffer,
     visual_grid_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
+    environment_init_params_buffer: wgpu::Buffer,
     alive_counter: wgpu::Buffer,
     debug_counter: wgpu::Buffer,
     alive_readbacks: [Arc<wgpu::Buffer>; 2],
@@ -805,6 +910,7 @@ struct GpuState {
     finalize_merge_pipeline: wgpu::ComputePipeline, // Reset spawn counter
     cpu_spawn_pipeline: wgpu::ComputePipeline, // Materialize CPU spawn requests on GPU
     initialize_dead_pipeline: wgpu::ComputePipeline, // Sanitize unused agent slots
+    environment_init_pipeline: wgpu::ComputePipeline, // Fill alpha/beta/gamma/trails on GPU
     render_pipeline: wgpu::RenderPipeline,
 
     // Bind groups
@@ -922,6 +1028,8 @@ struct GpuState {
 impl GpuState {
     async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
+        let mut profiler = StartupProfiler::new();
+        profiler.mark("GpuState::new begin");
 
         debug_assert_eq!(std::mem::size_of::<BodyPart>(), 32);
         debug_assert_eq!(std::mem::align_of::<BodyPart>(), 16);
@@ -951,10 +1059,12 @@ impl GpuState {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
+        profiler.mark("Instance created");
 
         // Clone window Arc before surface consumes it
         let window_clone = window.clone();
         let surface = instance.create_surface(window).unwrap();
+        profiler.mark("Surface created");
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -964,6 +1074,7 @@ impl GpuState {
             })
             .await
             .unwrap();
+        profiler.mark("Adapter acquired");
 
         let (device, queue) = adapter
             .request_device(
@@ -980,6 +1091,7 @@ impl GpuState {
             )
             .await
             .unwrap();
+        profiler.mark("Device and queue");
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps.formats[0];
@@ -996,9 +1108,11 @@ impl GpuState {
         };
 
         surface.configure(&device, &surface_config);
+    profiler.mark("Surface configured");
 
         // Create egui renderer before device gets moved
         let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
+    profiler.mark("egui renderer");
 
         // Simulation size constant (original)
         const SIM_SIZE: f32 = 30720.0;
@@ -1006,7 +1120,10 @@ impl GpuState {
         // Initialize agents with minimal data - GPU will generate genome and build body
         let max_agents = 50_000usize; // Limited by 128MB WebGPU buffer size (~2.2 KB/agent)
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
-        let mut agents = vec![Agent::zeroed(); max_agents];
+        let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
+
+    let mut agents = Vec::with_capacity(max_agents);
+    agents.resize(initial_agents, Agent::zeroed());
 
         // Simple random seed for GPU
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -1015,88 +1132,30 @@ impl GpuState {
             .unwrap()
             .as_nanos() as u64;
 
-        let mut rng_state = seed;
-        let mut next_random = || -> u32 {
-            rng_state ^= rng_state << 13;
-            rng_state ^= rng_state >> 7;
-            rng_state ^= rng_state << 17;
-            (rng_state >> 32) as u32
-        };
-
-        // Minimal initialization - only position, rotation, energy, and alive status
-        // GPU will generate genome and build body structure from it
-        for (i, agent) in agents.iter_mut().take(initial_agents).enumerate() {
-            // Diversify RNG state per agent using golden ratio constant
-            // Do this by calling next_random multiple times with agent index
-            for _ in 0..(i * 7) {
-                let _ = next_random(); // Advance RNG state uniquely per agent
-            }
-
-            // Spawn agents anywhere in the world
-            agent.position = [
-                (next_random() as f32 / u32::MAX as f32) * SIM_SIZE,
-                (next_random() as f32 / u32::MAX as f32) * SIM_SIZE,
-            ];
-            agent.velocity = [0.0, 0.0];
-            agent.rotation = (next_random() as f32 / u32::MAX as f32) * std::f32::consts::TAU;
-            agent.energy = 10.0;
-            agent.alive = 1;
-            agent.body_count = 0; // GPU will set this when building body
-            agent.rna_progress = 0;
-            agent.pairing_counter = 0;
-            agent.generation = 0;
-            agent.age = 0;
-            agent.total_mass = 0.0;
-
-            // Generate random variable-length genome centered within GENOME_BYTES buffer
-            // Valid RNA bases (A=65, U=85, C=67, G=71); padding is 'X'=88
-            const RNA_BASES: [u8; 4] = [65, 85, 67, 71]; // A, U, C, G
-            let mut bytes = [88u8; GENOME_BYTES]; // prefill with 'X' padding
-                                                  // Choose a random gene length in [MIN_GENE_LENGTH, GENOME_BYTES]
-            let gene_span = GENOME_BYTES.saturating_sub(MIN_GENE_LENGTH);
-            let gene_len = MIN_GENE_LENGTH + ((next_random() as usize) % (gene_span + 1));
-            let left_pad = (GENOME_BYTES - gene_len) / 2;
-            for k in 0..gene_len {
-                bytes[left_pad + k] = RNA_BASES[(next_random() % 4) as usize];
-            }
-            // Write into 16 u32 words
-            for j in 0..GENOME_WORDS {
-                let b0 = bytes[j * 4 + 0];
-                let b1 = bytes[j * 4 + 1];
-                let b2 = bytes[j * 4 + 2];
-                let b3 = bytes[j * 4 + 3];
-                agent.genome[j] =
-                    (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24);
-            }
-
-            // Body parts left at zero - GPU morphology system will build them on first frame
-        }
-
-        // Create buffers
-        let agents_buffer_a = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        // Create GPU agent buffers without pre-filling from CPU memory; we'll clear them via GPU commands next
+        let agents_buffer_a = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Agents Buffer A"),
-            contents: bytemuck::cast_slice(&agents),
+            size: agent_buffer_size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
 
-        let agents_buffer_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let agents_buffer_b = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Agents Buffer B"),
-            contents: bytemuck::cast_slice(&agents),
+            size: agent_buffer_size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
+        profiler.mark("Agent buffers");
 
-        let grid_size = GRID_CELL_COUNT;
+    let grid_size = GRID_CELL_COUNT;
 
-        // Initialize alpha grid with simple pattern for fast startup
-        // (Can be replaced with Perlin noise later if needed)
-        let alpha_data = vec![0.5f32; grid_size]; // Start with uniform medium value
-
-        // Proper Perlin noise implementation (kept for potential later use)
-        fn perlin_noise(x: f32, y: f32) -> f32 {
+    // Proper Perlin noise implementation (kept for potential later use)
+    fn perlin_noise(x: f32, y: f32) -> f32 {
             // Permutation table for Perlin noise
             const PERM: [u8; 256] = [
                 151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36,
@@ -1168,60 +1227,77 @@ impl GpuState {
             ((normalized - 0.5) * contrast + 0.5).clamp(0.0, 1.0)
         }
 
-        // Skip expensive Perlin noise generation at startup for faster launch
-        // Alpha grid already initialized with uniform 0.5 values above
-        // (Uncomment to generate Perlin noise - adds ~10 seconds to startup)
-        // for y in 0..GRID_DIM {
-        //     for x in 0..GRID_DIM {
-        //         let idx = y * GRID_DIM + x;
-        //         alpha_data[idx] = fractal_noise(x as f32, y as f32, 3, 0.02, 3.0);
-        //     }
-        // }
+        // Skip expensive Perlin noise generation at startup for faster launch (GPU kernels will write defaults)
+        // Alpha grid previously initialized to 0.5 everywhere; this value is now written via an initialization compute pass.
 
-        let alpha_grid = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let alpha_buffer_size = (grid_size * std::mem::size_of::<f32>()) as u64;
+        let alpha_grid = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Alpha Grid"),
-            contents: bytemuck::cast_slice(&alpha_data),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            size: alpha_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
 
-        // Initialize beta grid at 0 (will be created by agent decomposition)
-        let beta_data = vec![0.0f32; grid_size];
-
-        let beta_grid = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let beta_buffer_size = (grid_size * std::mem::size_of::<f32>()) as u64;
+        let beta_grid = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Beta Grid"),
-            contents: bytemuck::cast_slice(&beta_data),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            size: beta_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
 
-        // Initialize gamma grid (terrain) with flat terrain for fast startup
-        // User can load terrain image or generate noise later if desired
-        let gamma_data = vec![0.0f32; grid_size * 3]; // Flat terrain at height 0
-        
-        // Skip expensive Perlin noise generation at startup for faster launch
-        // (Uncomment to generate default terrain - adds ~10 seconds to startup)
-        // for y in 0..GRID_DIM {
-        //     for x in 0..GRID_DIM {
-        //         let idx = y * GRID_DIM + x;
-        //         let noise = fractal_noise(x as f32, y as f32, 4, 0.01, 2.0);
-        //         gamma_data[idx] = (noise - 0.5) * 0.5;
-        //     }
-        // }
-
-        let gamma_grid = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        // Gamma grid packs height + 2 slope components per cell (3 floats)
+        let gamma_buffer_size = (grid_size * 3 * std::mem::size_of::<f32>()) as u64;
+        let gamma_grid = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Gamma Grid"),
-            contents: bytemuck::cast_slice(&gamma_data),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            size: gamma_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
 
-        // Initialize RGB trail grid at 0 (will be populated by agent movement)
-        // Use 4 floats per cell to match std430 16-byte stride (WGSL vec4<f32>)
-        let trail_data_vec4 = vec![[0.0f32, 0.0f32, 0.0f32, 1.0f32]; grid_size];
-
-        let trail_grid = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let trail_buffer_size = (grid_size * std::mem::size_of::<[f32; 4]>()) as u64;
+        let trail_grid = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Trail Grid"),
-            contents: bytemuck::cast_slice(&trail_data_vec4),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            size: trail_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
+        profiler.mark("Alpha/Beta/Gamma/Trail buffers");
+
+        let env_seed = (seed ^ (seed >> 32)) as u32;
+        let environment_init = EnvironmentInitParams {
+            grid_resolution: GRID_DIM_U32,
+            seed: env_seed,
+            noise_octaves: 5,
+            slope_octaves: 3,
+            noise_scale: 0.00035,
+            noise_contrast: 1.35,
+            slope_scale: 0.0015,
+            slope_contrast: 1.0,
+            alpha_range: [0.35, 0.85],
+            beta_range: [0.0, 0.25],
+            gamma_height_range: [-15.0, 20.0],
+            _trail_alignment: [0.0; 2],
+            trail_values: [0.0, 0.0, 0.0, 0.0],
+            slope_pair: [0.0, 0.0],
+            _slope_alignment: [0.0; 2],
+            _padding: [0.0, 0.0, 0.0, 0.0],
+        };
+
+        let environment_init_params_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Environment Init Params"),
+                contents: bytemuck::bytes_of(&environment_init),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
 
         // Create visual grid buffer with 256-byte aligned row stride
         let bytes_per_pixel: u32 = 16; // Rgba32Float
@@ -1231,9 +1307,12 @@ impl GpuState {
         let visual_grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Visual Grid"),
             size: (stride_bytes * surface_config.height) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        profiler.mark("Visual grid buffer");
 
         let params = SimParams {
             dt: 0.016,
@@ -1271,7 +1350,7 @@ impl GpuState {
             gamma_strength: 10.0 * TERRAIN_FORCE_SCALE,
             prop_wash_strength: 1.0,
             gamma_vis_min: 0.0,
-            gamma_vis_max: 1.0,
+            gamma_vis_max: 0.5,
             draw_enabled: 1,
             gamma_debug: 0,
             gamma_hidden: 0,
@@ -1314,6 +1393,9 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
+        queue.write_buffer(&alive_counter, 0, bytemuck::bytes_of(&0u32));
+        queue.write_buffer(&debug_counter, 0, bytemuck::bytes_of(&0u32));
+
         let alive_readbacks = [
             Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Alive Readback A"),
@@ -1349,7 +1431,9 @@ impl GpuState {
         let selected_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Selected Agent Buffer"),
             size: std::mem::size_of::<Agent>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -1377,16 +1461,22 @@ impl GpuState {
         });
 
         // Spawn/death buffers
-        let new_agents_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let new_agents_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("New Agents Buffer"),
-            contents: bytemuck::cast_slice(&vec![Agent::zeroed(); 2000]), // Max 2000 spawns per frame
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            size: (std::mem::size_of::<Agent>() * MAX_SPAWN_REQUESTS) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
 
-        let spawn_requests_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let spawn_requests_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spawn Requests Buffer"),
-            contents: bytemuck::cast_slice(&vec![SpawnRequest::zeroed(); 2000]),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            size: (std::mem::size_of::<SpawnRequest>() * MAX_SPAWN_REQUESTS) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
 
         let spawn_counter = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1406,6 +1496,7 @@ impl GpuState {
         });
         // Initialize spawn_counter to 0 to avoid undefined first-frame content
         queue.write_buffer(&spawn_counter, 0, bytemuck::bytes_of(&0u32));
+        profiler.mark("Counters and readbacks");
 
         // Create visual texture at window resolution for crisp rendering
         let visual_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1424,6 +1515,7 @@ impl GpuState {
                 | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        profiler.mark("Visual texture");
 
         let visual_texture_view =
             visual_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1437,12 +1529,14 @@ impl GpuState {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        profiler.mark("Sampler");
 
         // Load shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shader.wgsl").into()),
         });
+        profiler.mark("Shader compiled");
 
         // Create bind group layouts
         let compute_bind_group_layout =
@@ -1599,8 +1693,20 @@ impl GpuState {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 15,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
+    profiler.mark("Compute bind layout");
+
 
         // Create compute bind groups (ping-pong)
         let compute_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1666,6 +1772,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 14,
                     resource: trail_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: environment_init_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1734,8 +1844,14 @@ impl GpuState {
                     binding: 14,
                     resource: trail_grid.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: environment_init_params_buffer.as_entire_binding(),
+                },
             ],
         });
+        profiler.mark("Compute bind groups");
+
 
         // Create compute pipelines
         let compute_pipeline_layout =
@@ -1744,6 +1860,8 @@ impl GpuState {
                 bind_group_layouts: &[&compute_bind_group_layout],
                 push_constant_ranges: &[],
             });
+        profiler.mark("Compute pipeline layout");
+
 
         let process_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Process Agents Pipeline"),
@@ -1753,6 +1871,7 @@ impl GpuState {
             compilation_options: Default::default(),
             cache: None,
         });
+        profiler.mark("process_agents pipeline");
 
         let diffuse_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Diffuse Pipeline"),
@@ -1762,6 +1881,7 @@ impl GpuState {
             compilation_options: Default::default(),
             cache: None,
         });
+        profiler.mark("diffuse pipeline");
 
         let diffuse_trails_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1772,6 +1892,7 @@ impl GpuState {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        profiler.mark("diffuse trails pipeline");
 
         let gamma_slope_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1782,6 +1903,7 @@ impl GpuState {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        profiler.mark("gamma slope pipeline");
 
         let clear_visual_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1792,6 +1914,7 @@ impl GpuState {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        profiler.mark("clear visual pipeline");
 
         let merge_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Merge Agents Pipeline"),
@@ -1801,6 +1924,7 @@ impl GpuState {
             compilation_options: Default::default(),
             cache: None,
         });
+        profiler.mark("merge pipeline");
 
         let compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Compact Agents Pipeline"),
@@ -1810,6 +1934,7 @@ impl GpuState {
             compilation_options: Default::default(),
             cache: None,
         });
+        profiler.mark("compact pipeline");
 
         let finalize_merge_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1820,6 +1945,7 @@ impl GpuState {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        profiler.mark("reset spawn counter pipeline");
 
         let cpu_spawn_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("CPU Spawn Requests Pipeline"),
@@ -1829,6 +1955,7 @@ impl GpuState {
             compilation_options: Default::default(),
             cache: None,
         });
+        profiler.mark("cpu spawn pipeline");
 
         let initialize_dead_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1839,6 +1966,18 @@ impl GpuState {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        profiler.mark("initialize_dead pipeline");
+
+        let environment_init_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Environment Init Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "initialize_environment",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("environment init pipeline");
 
         // Create render bind group layout
         let render_bind_group_layout =
@@ -1929,6 +2068,61 @@ impl GpuState {
             multiview: None,
             cache: None,
         });
+        profiler.mark("render pipeline");
+
+        let mut init_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Startup Clear Encoder"),
+        });
+
+        for buffer in [
+            &agents_buffer_a,
+            &agents_buffer_b,
+            &new_agents_buffer,
+            &spawn_requests_buffer,
+            &alive_counter,
+            &debug_counter,
+            &spawn_counter,
+            &debug_parts_buffer,
+            &selected_agent_buffer,
+            &visual_grid_buffer,
+        ] {
+            init_encoder.clear_buffer(buffer, 0, None);
+        }
+
+        let env_groups_x = (GRID_DIM_U32 + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
+        let env_groups_y = (GRID_DIM_U32 + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
+        {
+            let mut pass = init_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Environment Init Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&environment_init_pipeline);
+            pass.set_bind_group(0, &compute_bind_group_a, &[]);
+            pass.dispatch_workgroups(env_groups_x, env_groups_y, 1);
+        }
+
+        let agent_clear_groups = ((max_agents as u32) + 255) / 256;
+        {
+            let mut pass = init_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Initialize Dead Agents A->B"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&initialize_dead_pipeline);
+            pass.set_bind_group(0, &compute_bind_group_a, &[]);
+            pass.dispatch_workgroups(agent_clear_groups, 1, 1);
+        }
+        {
+            let mut pass = init_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Initialize Dead Agents B->A"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&initialize_dead_pipeline);
+            pass.set_bind_group(0, &compute_bind_group_b, &[]);
+            pass.dispatch_workgroups(agent_clear_groups, 1, 1);
+        }
+
+        queue.submit(std::iter::once(init_encoder.finish()));
+        profiler.mark("Initial GPU passes submitted");
 
         let settings_path = SimulationSettings::default_path();
         let (mut settings, mut needs_save) =
@@ -1947,6 +2141,7 @@ impl GpuState {
         if settings != original_settings {
             needs_save = true;
         }
+        profiler.mark("Settings loaded");
 
         let mut state = Self {
             device,
@@ -1961,6 +2156,7 @@ impl GpuState {
             trail_grid,
             visual_grid_buffer,
             params_buffer,
+            environment_init_params_buffer,
             alive_counter,
             debug_counter,
             alive_readbacks,
@@ -1990,6 +2186,7 @@ impl GpuState {
             finalize_merge_pipeline,
             cpu_spawn_pipeline,
             initialize_dead_pipeline,
+            environment_init_pipeline,
             render_pipeline,
             compute_bind_group_a,
             compute_bind_group_b,
@@ -2076,7 +2273,9 @@ impl GpuState {
             destroyed: false,
         };
 
-        state.update_present_mode();
+    profiler.mark("GpuState constructed");
+
+    state.update_present_mode();
 
         if needs_save || !settings_path.exists() {
             if let Err(err) = settings.save_to_disk(&settings_path) {
@@ -2181,8 +2380,9 @@ impl GpuState {
 
     // Replenish population - spawns random agents when population is low
     fn replenish_population(&mut self) {
-        // Only replenish if population drops below 100 agents
-        if self.alive_count >= 100 {
+        // Only replenish if population drops below 100 agents AND there was a population before
+        // (prevents spawning on startup with 0 agents)
+        if self.alive_count >= 100 || self.alive_count == 0 {
             return;
         }
 
@@ -2342,6 +2542,12 @@ impl GpuState {
                     binding: 14,
                     resource: self.trail_grid.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: self
+                        .environment_init_params_buffer
+                        .as_entire_binding(),
+                },
             ],
         });
         self.compute_bind_group_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2407,6 +2613,12 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 14,
                     resource: self.trail_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: self
+                        .environment_init_params_buffer
+                        .as_entire_binding(),
                 },
             ],
         });
@@ -2541,8 +2753,10 @@ impl GpuState {
         self.alpha_grid.destroy();
         self.beta_grid.destroy();
         self.gamma_grid.destroy();
+    self.trail_grid.destroy();
         self.visual_grid_buffer.destroy();
         self.params_buffer.destroy();
+    self.environment_init_params_buffer.destroy();
         self.alive_counter.destroy();
         self.debug_counter.destroy();
         for buffer in &self.alive_readbacks {
@@ -3620,6 +3834,12 @@ impl GpuState {
                     binding: 14,
                     resource: self.trail_grid.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: self
+                        .environment_init_params_buffer
+                        .as_entire_binding(),
+                },
             ],
         });
 
@@ -3687,6 +3907,12 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 14,
                     resource: self.trail_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: self
+                        .environment_init_params_buffer
+                        .as_entire_binding(),
                 },
             ],
         });
@@ -4451,10 +4677,68 @@ fn main() {
                                                     egui::Color32::LIGHT_GRAY,
                                                 );
                                             } else {
+                                                let uses_world_positions = agent_data
+                                                    .body
+                                                    .iter()
+                                                    .take(part_count)
+                                                    .any(|part| part.pos[0].abs() > 200.0 || part.pos[1].abs() > 200.0);
+
+                                                let agent_pos_vec = egui::Vec2::new(agent_data.position[0], agent_data.position[1]);
+                                                let (sin_r, cos_r) = agent_data.rotation.sin_cos();
+                                                let to_local = |pos: [f32; 2]| -> egui::Vec2 {
+                                                    let v = egui::Vec2::new(pos[0], pos[1]);
+                                                    if uses_world_positions {
+                                                        let rel = v - agent_pos_vec;
+                                                        egui::Vec2::new(
+                                                            rel.x * cos_r + rel.y * sin_r,
+                                                            -rel.x * sin_r + rel.y * cos_r,
+                                                        )
+                                                    } else {
+                                                        v
+                                                    }
+                                                };
+
+                                                let mut origin_local = to_local(agent_data.morphology_origin);
+                                                let mut local_positions: Vec<egui::Vec2> = agent_data
+                                                    .body
+                                                    .iter()
+                                                    .take(part_count)
+                                                    .map(|part| to_local(part.pos))
+                                                    .collect();
+
+                                                let start_point = local_positions
+                                                    .first()
+                                                    .copied()
+                                                    .unwrap_or(origin_local);
+                                                let end_point = if part_count > 1 {
+                                                    local_positions
+                                                        .last()
+                                                        .copied()
+                                                        .unwrap_or(start_point)
+                                                } else {
+                                                    start_point + egui::Vec2::new(1.0, 0.0)
+                                                };
+                                                let axis_vec = end_point - start_point;
+                                                let axis_len = axis_vec.length();
+                                                let (align_cos, align_sin) = if axis_len > 1e-4 {
+                                                    (axis_vec.x / axis_len, axis_vec.y / axis_len)
+                                                } else {
+                                                    (1.0, 0.0)
+                                                };
+                                                let rotate_local = |v: egui::Vec2| -> egui::Vec2 {
+                                                    egui::Vec2::new(
+                                                        v.x * align_cos + v.y * align_sin,
+                                                        -v.x * align_sin + v.y * align_cos,
+                                                    )
+                                                };
+                                                origin_local = rotate_local(origin_local);
+                                                for pos in &mut local_positions {
+                                                    *pos = rotate_local(*pos);
+                                                }
+
                                                 let mut max_extent = 1.0f32;
-                                                for part in agent_data.body.iter().take(part_count) {
-                                                    let pos = egui::Vec2::new(part.pos[0], part.pos[1]);
-                                                    let extent = pos.length() + part.size.max(0.5);
+                                                for (local, part) in local_positions.iter().zip(agent_data.body.iter()) {
+                                                    let extent = local.length() + part.size.max(0.5);
                                                     if extent > max_extent {
                                                         max_extent = extent;
                                                     }
@@ -4467,18 +4751,24 @@ fn main() {
                                                     1.0
                                                 };
 
-                                                // No rotation applied - show body-space coordinates only
-                                                // Draw unified with simulator: segment per part from previous (or origin) and endpoint circles for terminals
-                                                let mut prev_point: Option<egui::Pos2> = None;
+                                                let to_screen_vec = |v: egui::Vec2| -> egui::Vec2 {
+                                                    egui::vec2(v.x * scale, -v.y * scale)
+                                                };
+                                                let to_screen_pos = |v: egui::Vec2| -> egui::Pos2 {
+                                                    center + to_screen_vec(v)
+                                                };
+                                                let normalize_vec2 = |v: egui::Vec2| -> egui::Vec2 {
+                                                    let len = v.length();
+                                                    if len > 1e-4 { v / len } else { egui::Vec2::new(1.0, 0.0) }
+                                                };
 
-                                                // Compute morphology origin in preview/body space
-                                                let origin_local = egui::Vec2::new(
-                                                    agent_data.morphology_origin[0],
-                                                    agent_data.morphology_origin[1],
-                                                );
-                                                let origin_screen = center + egui::Vec2::new(origin_local.x * scale, -origin_local.y * scale);
-
-                                                for (idx, part) in agent_data.body.iter().take(part_count).enumerate() {
+                                                for (idx, (part, local)) in agent_data
+                                                    .body
+                                                    .iter()
+                                                    .zip(local_positions.iter())
+                                                    .take(part_count)
+                                                    .enumerate()
+                                                {
                                                     let flags = AMINO_FLAGS
                                                         .get(part.part_type as usize)
                                                         .copied()
@@ -4489,27 +4779,24 @@ fn main() {
                                                         .unwrap_or(DEFAULT_PART_COLOR);
                                                     let part_color = rgb_to_color32(raw_color);
 
-                                                    // Use body-space position directly (no rotation)
-                                                    let local = egui::Vec2::new(part.pos[0], part.pos[1]);
-                                                    let screen_offset = egui::Vec2::new(local.x * scale, -local.y * scale);
-                                                    let screen_pos = center + screen_offset;
+                                                    let screen_pos = to_screen_pos(*local);
+                                                    let segment_start_local = if idx == 0 {
+                                                        origin_local
+                                                    } else {
+                                                        local_positions[idx - 1]
+                                                    };
+                                                    let segment_start = to_screen_pos(segment_start_local);
 
-                                                    // Determine segment start: for first part, start at morphology origin (stored in agent_data.position? Not available here);
-                                                    // In inspector we approximate origin as center of preview (0,0 in body space).
                                                     let is_first = idx == 0;
                                                     let is_last = idx == part_count - 1;
-                                                    let stroke_width = (part.size.max(0.5) * scale * 0.5).max(1.0);
-                                                    if is_first {
-                                                        // Draw from morphology origin (local chain start) to first part
-                                                        painter.line_segment(
-                                                            [origin_screen, screen_pos],
-                                                            egui::Stroke::new(stroke_width, part_color),
-                                                        );
-                                                    } else if let Some(prev) = prev_point {
-                                                        painter.line_segment(
-                                                            [prev, screen_pos],
-                                                            egui::Stroke::new(stroke_width, part_color),
-                                                        );
+                                                    let is_single = part_count == 1;
+                                                    let stroke_width = (part.size * 0.5 * scale).max(1.0);
+                                                    painter.line_segment(
+                                                        [segment_start, screen_pos],
+                                                        egui::Stroke::new(stroke_width, part_color),
+                                                    );
+                                                    if !is_single && (is_first || is_last) {
+                                                        painter.circle_filled(screen_pos, stroke_width, part_color);
                                                     }
 
                                                     if flags.is_alpha_sensor || flags.is_beta_sensor || flags.is_energy_sensor {
@@ -4528,27 +4815,101 @@ fn main() {
                                                         paint_asterisk(&painter, screen_pos, asterisk_radius, egui::Color32::from_rgb(255, 255, 0));
                                                     }
 
+                                                    if flags.is_condenser {
+                                                        let signed_charge = agent_data.body[idx].pad[1];
+                                                        let charge = signed_charge.abs().clamp(0.0, 10.0);
+                                                        let charge_ratio = (charge / 10.0).clamp(0.0, 1.0);
+                                                        let is_discharging = signed_charge > 0.0;
+                                                        let fill_color = if is_discharging {
+                                                            egui::Color32::WHITE
+                                                        } else {
+                                                            let base_tint = if part.part_type == 19 {
+                                                                [0.0, 1.0, 0.0]
+                                                            } else {
+                                                                [1.0, 0.0, 0.0]
+                                                            };
+                                                            let dark = [0.15, 0.15, 0.15];
+                                                            let interp = [
+                                                                dark[0] + (base_tint[0] - dark[0]) * charge_ratio,
+                                                                dark[1] + (base_tint[1] - dark[1]) * charge_ratio,
+                                                                dark[2] + (base_tint[2] - dark[2]) * charge_ratio,
+                                                            ];
+                                                            rgb_to_color32(interp)
+                                                        };
+                                                        let radius_world = (part.size * 1.5).max(12.0);
+                                                        let radius = (radius_world * scale).max(4.0);
+                                                        painter.circle_filled(screen_pos, radius, fill_color);
+                                                        painter.circle_stroke(
+                                                            screen_pos,
+                                                            radius,
+                                                            egui::Stroke::new((radius * 0.12).clamp(0.6, 2.0), egui::Color32::WHITE),
+                                                        );
+                                                    }
+
                                                     if flags.is_inhibitor {
-                                                        // Enabler visualization: fixed world radius of 20 (half of the 40-unit amplification range)
-                                                        // Convert world radius to screen pixels using the same scale as parts
                                                         let outline_radius = 20.0 * scale;
-                                                        let color = egui::Color32::from_rgba_unmultiplied(120, 160, 120, 180); // stronger inspector highlight
+                                                        let color = egui::Color32::from_rgba_unmultiplied(120, 160, 120, 180);
                                                         painter.circle_stroke(
                                                             screen_pos,
                                                             outline_radius,
                                                             egui::Stroke::new(2.0, color),
                                                         );
-                                                        // Small white center marker to pinpoint enabler origin
                                                         painter.circle_filled(
                                                             screen_pos,
                                                             (2.5 * scale).clamp(2.0, 4.0),
-                                                            egui::Color32::from_rgba_unmultiplied(255,255,255,255)
+                                                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255),
                                                         );
                                                     }
 
-                                                    // Endpoint markers for terminals (only when multi-part)
+                                                    let neighbor_axis = || -> egui::Vec2 {
+                                                        if part_count == 1 {
+                                                            return egui::Vec2::new(1.0, 0.0);
+                                                        }
+                                                        if idx > 0 {
+                                                            return *local - local_positions[idx - 1];
+                                                        }
+                                                        if idx + 1 < part_count {
+                                                            return local_positions[idx + 1] - *local;
+                                                        }
+                                                        egui::Vec2::new(1.0, 0.0)
+                                                    };
+                                                    let axis_local = normalize_vec2(neighbor_axis());
+
+                                                    if part.part_type as usize == 9 {
+                                                        let perp = egui::Vec2::new(-axis_local.y, axis_local.x);
+                                                        let perp_screen = to_screen_vec(perp);
+                                                        let half_length = part.size * 0.8;
+                                                        let offset = perp_screen * half_length;
+                                                        painter.line_segment(
+                                                            [screen_pos + offset, screen_pos - offset],
+                                                            egui::Stroke::new((part.size * 0.3 * scale).max(0.8), part_color),
+                                                        );
+                                                    }
+
+                                                    if flags.is_propeller {
+                                                        let jet_dir_local = egui::Vec2::new(-axis_local.y, axis_local.x);
+                                                        let jet_screen_dir = normalize_vec2(to_screen_vec(jet_dir_local));
+                                                        let jet_length = (part.size * 3.0 * scale).max(6.0);
+                                                        let jet_vec = jet_screen_dir * jet_length;
+                                                        let plume_color = egui::Color32::from_rgba_unmultiplied(200, 220, 255, 220);
+                                                        let plume_width = (part.size * 0.2 * scale).clamp(1.0, 3.0);
+                                                        painter.line_segment(
+                                                            [screen_pos, screen_pos + jet_vec],
+                                                            egui::Stroke::new(plume_width, plume_color),
+                                                        );
+                                                        let wing_offset = egui::Vec2::new(-jet_vec.y, jet_vec.x) * 0.1;
+                                                        painter.line_segment(
+                                                            [screen_pos + wing_offset, screen_pos + jet_vec * 0.5],
+                                                            egui::Stroke::new(plume_width * 0.7, plume_color),
+                                                        );
+                                                        painter.line_segment(
+                                                            [screen_pos - wing_offset, screen_pos + jet_vec * 0.5],
+                                                            egui::Stroke::new(plume_width * 0.7, plume_color),
+                                                        );
+                                                    }
+
                                                     if part_count > 1 && (is_first || is_last) {
-                                                        let marker_radius = (part.size.max(0.5) * scale * 0.5).max(2.0);
+                                                        let marker_radius = (part.size.max(0.5) * scale * 0.4).max(2.0);
                                                         painter.circle_filled(screen_pos, marker_radius, part_color);
                                                         painter.circle_stroke(
                                                             screen_pos,
@@ -4556,8 +4917,6 @@ fn main() {
                                                             egui::Stroke::new(0.6, egui::Color32::from_black_alpha(100)),
                                                         );
                                                     }
-
-                                                    prev_point = Some(screen_pos);
                                                 }
                                             }
 
@@ -4905,6 +5264,26 @@ fn main() {
                                                         ..Default::default()
                                                     };
                                                     organ_job.append(name, 0.0, format);
+                                                    
+                                                    // Show charge level for condensers (Tyrosine=19, Glycine=5)
+                                                    if t == 19 || t == 5 {
+                                                        let signed_charge = agent_data.body[i].pad[1]; // Signed: negative=charging, positive=discharging
+                                                        let charge = signed_charge.abs(); // Absolute charge level (0.0 to 10.0)
+                                                        let is_discharging = signed_charge > 0.0;
+                                                        let charge_text = format!("[{:.1}]", charge);
+                                                        let charge_format = egui::text::TextFormat {
+                                                            font_id: egui::FontId::monospace(8.0),
+                                                            color: if is_discharging && charge >= 10.0 {
+                                                                egui::Color32::YELLOW // Full charge - discharging!
+                                                            } else if charge > 0.1 {
+                                                                egui::Color32::from_rgb(150, 150, 150) // Charging
+                                                            } else {
+                                                                egui::Color32::from_rgb(80, 80, 80) // Empty
+                                                            },
+                                                            ..Default::default()
+                                                        };
+                                                        organ_job.append(&charge_text, 0.0, charge_format);
+                                                    }
                                                     
                                                     if t == 8 { m_count += 1; }
                                                     if t == 18 { w_count += 1; }
