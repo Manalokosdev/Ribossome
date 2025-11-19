@@ -405,7 +405,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.alpha_right_mult = 0.4;
             props.beta_left_mult = 0.55;
             props.beta_right_mult = 0.45;
-            props.mass = 2.0; // Very heavy - slows agent down significantly
+            props.mass = 10.0; // Very heavy - slows agent down significantly
         }
         case 5u: { // G - Glycine - BETA CONDENSER
             props.segment_length = 4.0;
@@ -1622,8 +1622,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             current_pos.y += sin(current_angle) * props.segment_length;
             agents_out[agent_id].body[i].pos = current_pos;
             var rendered_size = props.thickness * 0.5;
+            let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor;
+            if (is_sensor) {
+                rendered_size *= 2.0; // Sensors render larger for readability
+            }
             if (props.is_condenser) {
-                rendered_size *= 0.5; // Condensers appear half-sized for clearer distinction
+                rendered_size *= 0.5; // Condensers render half-sized for contrast
             }
             agents_out[agent_id].body[i].size = rendered_size;
             agents_out[agent_id].body[i].part_type = amino_type;
