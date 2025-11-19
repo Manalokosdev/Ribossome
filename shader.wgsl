@@ -22,12 +22,12 @@ const PROPELLERS_ENABLED: bool = true;
 // Experimental: disable global agent orientation; body geometry defines facing.
 const DISABLE_GLOBAL_ROTATION: bool = false;
 // Smoothing factor for per-part signal-induced angle (0..1). Higher = faster response.
-const ANGLE_SMOOTH_FACTOR: f32 = 0.5;
+const ANGLE_SMOOTH_FACTOR: f32 = 0.4;
 // Physics stabilization (no delta time): blend factors and clamps
 const VELOCITY_BLEND: f32 = 0.5;      // 0..1, higher = quicker velocity changes
 const ANGULAR_BLEND: f32 = 0.5;       // 0..1, higher = quicker rotation changes
 const VEL_MAX: f32 = 12.0;             // Max linear speed per frame
-const ANGVEL_MAX: f32 = 1.0;         // Max angular change (radians) per frame
+const ANGVEL_MAX: f32 = 1.5;         // Max angular change (radians) per frame
 // Signal-to-angle shaping (no dt): cap amplitude and per-frame change
 const SIGNAL_GAIN: f32 =200;        // global scale for signal-driven angle (was 20.0)
 // Separate gains for alpha vs beta to restore original triple-contribution tunability
@@ -107,6 +107,7 @@ struct SimParams {
     mutation_rate: f32,
     food_power: f32,
     poison_power: f32,
+    pairing_cost: f32,
     max_agents: u32,
     cpu_spawn_count: u32,
     agent_count: u32,
@@ -208,6 +209,12 @@ var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGBA
 
 @group(0) @binding(15)
 var<uniform> environment_init: EnvironmentInitParams;
+
+@group(0) @binding(16)
+var<storage, read> alpha_rain_map: array<f32>;
+
+@group(0) @binding(17)
+var<storage, read> beta_rain_map: array<f32>;
 
 // ============================================================================
 // AMINO ACID PROPERTIES
@@ -1614,7 +1621,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             current_pos.x += cos(current_angle) * props.segment_length;
             current_pos.y += sin(current_angle) * props.segment_length;
             agents_out[agent_id].body[i].pos = current_pos;
-            agents_out[agent_id].body[i].size = props.thickness * 0.5;
+            var rendered_size = props.thickness * 0.5;
+            if (props.is_condenser) {
+                rendered_size *= 0.5; // Condensers appear half-sized for clearer distinction
+            }
+            agents_out[agent_id].body[i].size = rendered_size;
             agents_out[agent_id].body[i].part_type = amino_type;
             // Persist the smoothed angle contribution in _pad.x for next frame
             let keep_pad_y = agents_out[agent_id].body[i]._pad.y;
@@ -2011,15 +2022,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Stronger than prop wash
             let disp_strength = max(params.prop_wash_strength * amplification * 3.0, 0.0);
             if (disp_strength > 0.0) {
-                // Generate pseudo-random offset within radius 2 pixels
-                // Use part position and frame time as random seed
-                let seed = world_pos.x * 12.9898 + world_pos.y * 78.233 + f32(i) * 43.758;
-                let rand1 = fract(sin(seed) * 43758.5453);
-                let rand2 = fract(sin(seed + 1.0) * 43758.5453);
-                
+                // Generate pseudo-random offset within radius 2 pixels using integer hashing to avoid directional bias
+                let hashed_seed = hash(
+                    u32(gx) * 73856093u ^
+                    u32(gy) * 19349663u ^
+                    (i + 1u) * 83492791u ^
+                    params.random_seed
+                );
+                let rand1 = hash_f32(hashed_seed);
+                let rand2 = hash_f32(hashed_seed ^ 0x9e3779b9u);
+
                 // Random offset in range [-2, 2] for both x and y
-                let offset_x = i32(round((rand1 * 4.0) - 2.0));
-                let offset_y = i32(round((rand2 * 4.0) - 2.0));
+                let offset_x = i32(round(rand1 * 4.0 - 2.0));
+                let offset_y = i32(round(rand2 * 4.0 - 2.0));
                 
                 let target_gx = clamp(gx + offset_x, 0, i32(GRID_SIZE) - 1);
                 let target_gy = clamp(gy + offset_y, 0, i32(GRID_SIZE) - 1);
@@ -2163,11 +2178,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Speed-dependent absorption: slower agents absorb more efficiently
     // Bite size is now independent of speed; keep fixed capture per frame
     
-    // Count poison-resistant amino acids (F = Phenylalanine, ASCII 70)
+    // Count poison-resistant amino acids (F = Phenylalanine, amino index 4)
     // Each one halves poison damage: 1 F -> 0.5x, 2 F -> 0.25x, 3 F -> 0.125x
     var poison_resistant_count = 0u;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        if (agents_out[agent_id].body[i].part_type == 70u) { // 'F' = ASCII 70
+        if (agents_out[agent_id].body[i].part_type == 4u) { // Phenylalanine
             poison_resistant_count += 1u;
         }
     }
@@ -2323,10 +2338,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         
         // Probability to increment counter
         // Apply radiation_factor (beta acts as reproductive inhibitor)
-        let pair_p = clamp(params.spawn_probability * energy_for_pair * 0.1 * radiation_factor, 0.0, 1.0);
+        let pair_p = clamp(params.spawn_probability * (energy_for_pair + 1.0) * 0.1 * radiation_factor, 0.0, 1.0);
         if (rnd < pair_p) {
             // Pairing cost per increment
-            let pairing_cost = 0.1;
+            let pairing_cost = params.pairing_cost;
             if (agent.energy >= pairing_cost) {
                 pairing_counter += 1u;
                 agent.energy -= pairing_cost;
@@ -3340,7 +3355,8 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform alpha rain (food): remove spatial and beta-dependent gradients.
     // Each cell independently receives a saturated rain event with probability alpha_multiplier * 0.05.
     // (Scaling by 0.05 preserves prior expected value semantics.)
-    let alpha_probability_sat = params.alpha_multiplier * 0.05;
+    let alpha_rain_factor = clamp(alpha_rain_map[idx], 0.0, 1.0);
+    let alpha_probability_sat = params.alpha_multiplier * 0.05 * alpha_rain_factor;
     if (rain_chance < alpha_probability_sat) {
         final_alpha = 1.0;
     }
@@ -3348,7 +3364,8 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform beta rain (poison): also no vertical gradient. Probability = beta_multiplier * 0.05.
     let beta_seed = cell_seed * 1103515245u;
     let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
-    let beta_probability_sat = params.beta_multiplier * 0.05;
+    let beta_rain_factor = clamp(beta_rain_map[idx], 0.0, 1.0);
+    let beta_probability_sat = params.beta_multiplier * 0.05 * beta_rain_factor;
     if (beta_rain_chance < beta_probability_sat) {
         final_beta = 1.0;
     }

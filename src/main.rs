@@ -3,8 +3,10 @@
 // Licensed under MIT License
 
 use bytemuck::{Pod, Zeroable};
+use egui::{Color32, ColorImage, TextureHandle, TextureId, TextureOptions};
 use egui_wgpu::ScreenDescriptor;
 use image::imageops::FilterType;
+use image::GrayImage;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -31,6 +33,7 @@ const SLOPE_WG_SIZE_Y: u32 = 16;
 const TERRAIN_FORCE_SCALE: f32 = 250.0;
 const GAMMA_CORRECTION_EXPONENT: f32 = 2.2;
 const SETTINGS_FILE_NAME: &str = "simulation_settings.json";
+const RAIN_THUMB_SIZE: usize = 128;
 
 // Shared genome/body sizing (must stay in sync with shader constants)
 const MAX_BODY_PARTS: usize = 64;
@@ -327,6 +330,35 @@ fn rgb_to_color32_with_alpha(rgb: [f32; 3], alpha: f32) -> egui::Color32 {
         rgb_component(rgb[2]),
         rgb_component(alpha),
     )
+}
+
+struct RainThumbnail {
+    image: ColorImage,
+    texture: Option<TextureHandle>,
+    dirty: bool,
+}
+
+impl RainThumbnail {
+    fn new(image: ColorImage) -> Self {
+        Self {
+            image,
+            texture: None,
+            dirty: true,
+        }
+    }
+
+    fn ensure_texture(&mut self, ctx: &egui::Context, label: &str) -> TextureId {
+        if self.dirty || self.texture.is_none() {
+            let handle = ctx.load_texture(
+                label.to_string(),
+                self.image.clone(),
+                TextureOptions::LINEAR,
+            );
+            self.texture = Some(handle);
+            self.dirty = false;
+        }
+        self.texture.as_ref().unwrap().id()
+    }
 }
 
 // Genetic code table - converts RNA codon to amino acid index (matches shader)
@@ -653,6 +685,7 @@ struct SimParams {
     mutation_rate: f32,
     food_power: f32,
     poison_power: f32,
+    pairing_cost: f32,
     max_agents: u32,
     cpu_spawn_count: u32,
     agent_count: u32,
@@ -726,14 +759,18 @@ struct SimulationSettings {
     beta_slope_bias: f32,
     alpha_multiplier: f32,
     beta_multiplier: f32,
+    alpha_rain_map_path: Option<PathBuf>,
+    beta_rain_map_path: Option<PathBuf>,
     chemical_slope_scale_alpha: f32,
     chemical_slope_scale_beta: f32,
     food_power: f32,
     poison_power: f32,
     amino_maintenance_cost: f32,
+    pairing_cost: f32,
     prop_wash_strength: f32,
     repulsion_strength: f32,
     limit_fps: bool,
+    limit_fps_25: bool,
     render_interval: u32,
     gamma_debug_visual: bool,
     slope_debug_visual: bool,
@@ -771,14 +808,18 @@ impl Default for SimulationSettings {
             beta_slope_bias: 5.0,
             alpha_multiplier: 0.0001,
             beta_multiplier: 0.0,
+            alpha_rain_map_path: None,
+            beta_rain_map_path: None,
             chemical_slope_scale_alpha: 0.1,
             chemical_slope_scale_beta: 0.1,
             food_power: 3.0,
             poison_power: 1.0,
             amino_maintenance_cost: 0.001,
+            pairing_cost: 0.1,
             prop_wash_strength: 1.0,
             repulsion_strength: 10.0,
             limit_fps: true,
+            limit_fps_25: false,
             render_interval: 100, // Draw every 100 steps in fast mode
             gamma_debug_visual: false,
             slope_debug_visual: false,
@@ -794,9 +835,9 @@ impl Default for SimulationSettings {
             trail_decay: 0.995,
             trail_opacity: 0.5,
             trail_show: false,
-            interior_isotropic: false,  // Use asymmetric left/right multipliers from amino acids
-            ignore_stop_codons: false,  // Stop codons (UAA, UAG, UGA) terminate translation
-            require_start_codon: true,  // Translation starts at AUG (Methionine)
+            interior_isotropic: false, // Use asymmetric left/right multipliers from amino acids
+            ignore_stop_codons: false, // Stop codons (UAA, UAG, UGA) terminate translation
+            require_start_codon: true, // Translation starts at AUG (Methionine)
         }
     }
 }
@@ -845,6 +886,7 @@ impl SimulationSettings {
         self.food_power = self.food_power.clamp(0.0, 10.0);
         self.poison_power = self.poison_power.clamp(0.0, 10.0);
         self.amino_maintenance_cost = self.amino_maintenance_cost.clamp(0.0, 0.01);
+        self.pairing_cost = self.pairing_cost.clamp(0.0, 1.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         self.repulsion_strength = self.repulsion_strength.clamp(0.0, 100.0);
         self.render_interval = self.render_interval.clamp(1, 10_000);
@@ -872,6 +914,8 @@ struct GpuState {
     agents_buffer_b: wgpu::Buffer,
     alpha_grid: wgpu::Buffer,
     beta_grid: wgpu::Buffer,
+    alpha_rain_map_buffer: wgpu::Buffer,
+    beta_rain_map_buffer: wgpu::Buffer,
     gamma_grid: wgpu::Buffer,
     trail_grid: wgpu::Buffer,
     visual_grid_buffer: wgpu::Buffer,
@@ -940,11 +984,12 @@ struct GpuState {
     frame_count: u32,
     last_fps_update: std::time::Instant,
     limit_fps: bool,
+    limit_fps_25: bool,
     last_frame_time: std::time::Instant,
 
     // Simulation speed control
     render_interval: u32, // Draw every N steps in fast mode
-    current_mode: u32,    // 0=VSync, 1=Full Speed, 2=Fast Draw
+    current_mode: u32,    // 0=VSync 60 FPS, 1=Full Speed, 2=Fast Draw, 3=Slow 25 FPS
     epoch: u64,           // Total simulation steps elapsed
 
     // Epoch tracking for speed display
@@ -973,7 +1018,7 @@ struct GpuState {
     // GUI state
     window: Arc<Window>,
     egui_renderer: egui_wgpu::Renderer,
-    ui_tab: usize, // 0=Standard, 1=Advanced
+    ui_tab: usize, // 0=Simulation, 1=Agents, 2=Environment
     // Debug
     debug_per_segment: bool,
     is_paused: bool,
@@ -988,11 +1033,16 @@ struct GpuState {
     beta_slope_bias: f32,
     alpha_multiplier: f32,
     beta_multiplier: f32,
+    alpha_rain_map_path: Option<PathBuf>,
+    beta_rain_map_path: Option<PathBuf>,
+    alpha_rain_thumbnail: Option<RainThumbnail>,
+    beta_rain_thumbnail: Option<RainThumbnail>,
     chemical_slope_scale_alpha: f32,
     chemical_slope_scale_beta: f32,
     food_power: f32,
     poison_power: f32,
     amino_maintenance_cost: f32,
+    pairing_cost: f32,
     diffusion_interval: u32,
     diffusion_counter: u32,
     slope_interval: u32,
@@ -1082,7 +1132,7 @@ impl GpuState {
                     label: Some("GPU Device"),
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits {
-                        max_storage_buffers_per_shader_stage: 15,
+                        max_storage_buffers_per_shader_stage: 16,
                         ..wgpu::Limits::default()
                     },
                     memory_hints: Default::default(),
@@ -1108,11 +1158,11 @@ impl GpuState {
         };
 
         surface.configure(&device, &surface_config);
-    profiler.mark("Surface configured");
+        profiler.mark("Surface configured");
 
         // Create egui renderer before device gets moved
         let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
-    profiler.mark("egui renderer");
+        profiler.mark("egui renderer");
 
         // Simulation size constant (original)
         const SIM_SIZE: f32 = 30720.0;
@@ -1122,8 +1172,8 @@ impl GpuState {
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
-    let mut agents = Vec::with_capacity(max_agents);
-    agents.resize(initial_agents, Agent::zeroed());
+        let mut agents = Vec::with_capacity(max_agents);
+        agents.resize(initial_agents, Agent::zeroed());
 
         // Simple random seed for GPU
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -1152,10 +1202,10 @@ impl GpuState {
         });
         profiler.mark("Agent buffers");
 
-    let grid_size = GRID_CELL_COUNT;
+        let grid_size = GRID_CELL_COUNT;
 
-    // Proper Perlin noise implementation (kept for potential later use)
-    fn perlin_noise(x: f32, y: f32) -> f32 {
+        // Proper Perlin noise implementation (kept for potential later use)
+        fn perlin_noise(x: f32, y: f32) -> f32 {
             // Permutation table for Perlin noise
             const PERM: [u8; 256] = [
                 151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36,
@@ -1250,6 +1300,32 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
+        let rain_map_buffer_size = (grid_size * std::mem::size_of::<f32>()) as u64;
+        let alpha_rain_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Alpha Rain Map"),
+            size: rain_map_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let beta_rain_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Beta Rain Map"),
+            size: rain_map_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_rain = vec![1.0f32; GRID_CELL_COUNT];
+        queue.write_buffer(
+            &alpha_rain_map_buffer,
+            0,
+            bytemuck::cast_slice(&uniform_rain),
+        );
+        queue.write_buffer(
+            &beta_rain_map_buffer,
+            0,
+            bytemuck::cast_slice(&uniform_rain),
+        );
+        profiler.mark("Rain map buffers");
+
         // Gamma grid packs height + 2 slope components per cell (3 floats)
         let gamma_buffer_size = (grid_size * 3 * std::mem::size_of::<f32>()) as u64;
         let gamma_grid = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1339,6 +1415,7 @@ impl GpuState {
             mutation_rate: 0.005,
             food_power: 3.0,
             poison_power: 1.0,
+            pairing_cost: 0.1,
             max_agents: max_agents as u32,
             cpu_spawn_count: 0,
             agent_count: initial_agents as u32,
@@ -1703,10 +1780,29 @@ impl GpuState {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 16,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 17,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
-    profiler.mark("Compute bind layout");
-
+        profiler.mark("Compute bind layout");
 
         // Create compute bind groups (ping-pong)
         let compute_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1776,6 +1872,14 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 15,
                     resource: environment_init_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: alpha_rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: beta_rain_map_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1848,10 +1952,17 @@ impl GpuState {
                     binding: 15,
                     resource: environment_init_params_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: alpha_rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: beta_rain_map_buffer.as_entire_binding(),
+                },
             ],
         });
         profiler.mark("Compute bind groups");
-
 
         // Create compute pipelines
         let compute_pipeline_layout =
@@ -1861,7 +1972,6 @@ impl GpuState {
                 push_constant_ranges: &[],
             });
         profiler.mark("Compute pipeline layout");
-
 
         let process_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Process Agents Pipeline"),
@@ -2152,6 +2262,8 @@ impl GpuState {
             agents_buffer_b,
             alpha_grid,
             beta_grid,
+            alpha_rain_map_buffer,
+            beta_rain_map_buffer,
             gamma_grid,
             trail_grid,
             visual_grid_buffer,
@@ -2207,9 +2319,14 @@ impl GpuState {
             frame_count: 0,
             last_fps_update: std::time::Instant::now(),
             limit_fps: settings.limit_fps,
+            limit_fps_25: settings.limit_fps_25,
             last_frame_time: std::time::Instant::now(),
             render_interval: settings.render_interval,
-            current_mode: if settings.limit_fps { 0 } else { 1 }, // Default to VSync or Full Speed
+            current_mode: if settings.limit_fps {
+                if settings.limit_fps_25 { 3 } else { 0 }
+            } else {
+                1
+            },
             epoch: 0,
             last_epoch_update: std::time::Instant::now(),
             last_epoch_count: 0,
@@ -2229,7 +2346,7 @@ impl GpuState {
                 .as_nanos() as u64,
             window: window_clone,
             egui_renderer,
-            ui_tab: 0, // Start on Standard tab
+            ui_tab: 0, // Start on Simulation tab
             debug_per_segment: settings.debug_per_segment,
             is_paused: false,
             visual_stride_pixels,
@@ -2240,11 +2357,16 @@ impl GpuState {
             beta_slope_bias: settings.beta_slope_bias,
             alpha_multiplier: settings.alpha_multiplier,
             beta_multiplier: settings.beta_multiplier,
+            alpha_rain_map_path: None,
+            beta_rain_map_path: None,
+            alpha_rain_thumbnail: None,
+            beta_rain_thumbnail: None,
             chemical_slope_scale_alpha: settings.chemical_slope_scale_alpha,
             chemical_slope_scale_beta: settings.chemical_slope_scale_beta,
             food_power: settings.food_power,
             poison_power: settings.poison_power,
             amino_maintenance_cost: settings.amino_maintenance_cost,
+            pairing_cost: settings.pairing_cost,
             diffusion_interval: settings.diffusion_interval,
             diffusion_counter: 0,
             slope_interval: settings.slope_interval,
@@ -2273,9 +2395,20 @@ impl GpuState {
             destroyed: false,
         };
 
-    profiler.mark("GpuState constructed");
+        profiler.mark("GpuState constructed");
 
-    state.update_present_mode();
+        state.update_present_mode();
+
+        if let Some(path) = settings.alpha_rain_map_path.clone() {
+            if let Err(err) = state.load_alpha_rain_map(&path) {
+                eprintln!("Failed to load alpha rain map {}: {err:?}", path.display());
+            }
+        }
+        if let Some(path) = settings.beta_rain_map_path.clone() {
+            if let Err(err) = state.load_beta_rain_map(&path) {
+                eprintln!("Failed to load beta rain map {}: {err:?}", path.display());
+            }
+        }
 
         if needs_save || !settings_path.exists() {
             if let Err(err) = settings.save_to_disk(&settings_path) {
@@ -2376,6 +2509,113 @@ impl GpuState {
         );
 
         Ok(())
+    }
+
+    fn read_rain_map(path: &Path) -> anyhow::Result<(Vec<f32>, ColorImage)> {
+        let image = image::open(path)?;
+        let resized = image.resize_exact(GRID_DIM as u32, GRID_DIM as u32, FilterType::Lanczos3);
+        let gray = resized.to_luma8();
+        let width = gray.width() as usize;
+        let height = gray.height() as usize;
+        let raw = gray.as_raw();
+
+        let mut values = Vec::with_capacity(GRID_CELL_COUNT);
+        for row in (0..height).rev() {
+            let row_offset = row * width;
+            for col in 0..width {
+                let pix = raw[row_offset + col] as f32 / 255.0;
+                values.push(pix.clamp(0.0, 1.0));
+            }
+        }
+
+        debug_assert_eq!(values.len(), GRID_CELL_COUNT);
+        let thumbnail = Self::build_rain_thumbnail(&gray);
+        Ok((values, thumbnail))
+    }
+
+    fn build_rain_thumbnail(gray: &GrayImage) -> ColorImage {
+        let thumbnail = image::imageops::resize(
+            gray,
+            RAIN_THUMB_SIZE as u32,
+            RAIN_THUMB_SIZE as u32,
+            FilterType::Lanczos3,
+        );
+        let width = thumbnail.width() as usize;
+        let height = thumbnail.height() as usize;
+        let mut pixels = Vec::with_capacity(width * height);
+        let raw = thumbnail.as_raw();
+        for row in (0..height).rev() {
+            let row_offset = row * width;
+            for col in 0..width {
+                let intensity = raw[row_offset + col];
+                pixels.push(Color32::from_gray(intensity));
+            }
+        }
+        ColorImage {
+            size: [width, height],
+            pixels,
+        }
+    }
+
+    fn alpha_rain_texture_id(&mut self, ctx: &egui::Context) -> Option<TextureId> {
+        self.alpha_rain_thumbnail
+            .as_mut()
+            .map(|thumb| thumb.ensure_texture(ctx, "Alpha Rain Preview"))
+    }
+
+    fn beta_rain_texture_id(&mut self, ctx: &egui::Context) -> Option<TextureId> {
+        self.beta_rain_thumbnail
+            .as_mut()
+            .map(|thumb| thumb.ensure_texture(ctx, "Beta Rain Preview"))
+    }
+
+    fn load_alpha_rain_map<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        let (values, thumbnail) = Self::read_rain_map(path)?;
+        self.queue.write_buffer(
+            &self.alpha_rain_map_buffer,
+            0,
+            bytemuck::cast_slice(&values),
+        );
+        self.alpha_rain_map_path = Some(path.to_path_buf());
+        self.alpha_rain_thumbnail = Some(RainThumbnail::new(thumbnail));
+        println!("Loaded alpha rain map from {}", path.display());
+        Ok(())
+    }
+
+    fn load_beta_rain_map<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        let (values, thumbnail) = Self::read_rain_map(path)?;
+        self.queue
+            .write_buffer(&self.beta_rain_map_buffer, 0, bytemuck::cast_slice(&values));
+        self.beta_rain_map_path = Some(path.to_path_buf());
+        self.beta_rain_thumbnail = Some(RainThumbnail::new(thumbnail));
+        println!("Loaded beta rain map from {}", path.display());
+        Ok(())
+    }
+
+    fn clear_alpha_rain_map(&mut self) {
+        let uniform = vec![1.0f32; GRID_CELL_COUNT];
+        self.queue.write_buffer(
+            &self.alpha_rain_map_buffer,
+            0,
+            bytemuck::cast_slice(&uniform),
+        );
+        self.alpha_rain_map_path = None;
+        self.alpha_rain_thumbnail = None;
+        println!("Cleared alpha rain map (uniform probability)");
+    }
+
+    fn clear_beta_rain_map(&mut self) {
+        let uniform = vec![1.0f32; GRID_CELL_COUNT];
+        self.queue.write_buffer(
+            &self.beta_rain_map_buffer,
+            0,
+            bytemuck::cast_slice(&uniform),
+        );
+        self.beta_rain_map_path = None;
+        self.beta_rain_thumbnail = None;
+        println!("Cleared beta rain map (uniform probability)");
     }
 
     // Replenish population - spawns random agents when population is low
@@ -2544,9 +2784,15 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: self
-                        .environment_init_params_buffer
-                        .as_entire_binding(),
+                    resource: self.environment_init_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: self.alpha_rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: self.beta_rain_map_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -2616,9 +2862,15 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: self
-                        .environment_init_params_buffer
-                        .as_entire_binding(),
+                    resource: self.environment_init_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: self.alpha_rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: self.beta_rain_map_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -2655,6 +2907,42 @@ impl GpuState {
         self.surface.configure(&self.device, &self.surface_config);
     }
 
+    fn set_speed_mode(&mut self, mode: u32) {
+        let sanitized = match mode {
+            0 | 1 | 2 | 3 => mode,
+            _ => self.current_mode,
+        };
+        self.current_mode = sanitized;
+        match sanitized {
+            0 => {
+                self.limit_fps = true;
+                self.limit_fps_25 = false;
+            }
+            1 => {
+                self.limit_fps = false;
+                self.limit_fps_25 = false;
+            }
+            2 => {
+                self.limit_fps = false;
+                self.limit_fps_25 = false;
+            }
+            3 => {
+                self.limit_fps = true;
+                self.limit_fps_25 = true;
+            }
+            _ => {}
+        }
+        self.update_present_mode();
+    }
+
+    fn frame_time_cap(&self) -> Option<std::time::Duration> {
+        if !self.limit_fps {
+            return None;
+        }
+        let micros = if self.limit_fps_25 { 40_000 } else { 16_667 };
+        Some(std::time::Duration::from_micros(micros))
+    }
+
     fn current_settings(&self) -> SimulationSettings {
         SimulationSettings {
             camera_zoom: self.camera_zoom,
@@ -2671,14 +2959,18 @@ impl GpuState {
             beta_slope_bias: self.beta_slope_bias,
             alpha_multiplier: self.alpha_multiplier,
             beta_multiplier: self.beta_multiplier,
+            alpha_rain_map_path: self.alpha_rain_map_path.clone(),
+            beta_rain_map_path: self.beta_rain_map_path.clone(),
             chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
             chemical_slope_scale_beta: self.chemical_slope_scale_beta,
             food_power: self.food_power,
             poison_power: self.poison_power,
             amino_maintenance_cost: self.amino_maintenance_cost,
+            pairing_cost: self.pairing_cost,
             prop_wash_strength: self.prop_wash_strength,
             repulsion_strength: self.repulsion_strength,
             limit_fps: self.limit_fps,
+            limit_fps_25: self.limit_fps_25,
             render_interval: self.render_interval,
             gamma_debug_visual: self.gamma_debug_visual,
             slope_debug_visual: self.slope_debug_visual,
@@ -2752,11 +3044,13 @@ impl GpuState {
         self.agents_buffer_b.destroy();
         self.alpha_grid.destroy();
         self.beta_grid.destroy();
+        self.alpha_rain_map_buffer.destroy();
+        self.beta_rain_map_buffer.destroy();
         self.gamma_grid.destroy();
-    self.trail_grid.destroy();
+        self.trail_grid.destroy();
         self.visual_grid_buffer.destroy();
         self.params_buffer.destroy();
-    self.environment_init_params_buffer.destroy();
+        self.environment_init_params_buffer.destroy();
         self.alive_counter.destroy();
         self.debug_counter.destroy();
         for buffer in &self.alive_readbacks {
@@ -3080,6 +3374,7 @@ impl GpuState {
             mutation_rate: self.mutation_rate,
             food_power: self.food_power,
             poison_power: self.poison_power,
+            pairing_cost: self.pairing_cost,
             max_agents: self.agent_buffer_capacity as u32,
             cpu_spawn_count,
             agent_count: self.agent_count,
@@ -3275,7 +3570,7 @@ impl GpuState {
             // Poll for readback completion
             self.device.poll(wgpu::Maintain::Poll);
             self.process_completed_alive_readbacks();
-            println!("  → After spawn: {} agents alive", self.alive_count);
+            println!("  â†’ After spawn: {} agents alive", self.alive_count);
 
             // Clear the processed spawn requests from the queue
             let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue.len());
@@ -3429,10 +3724,10 @@ impl GpuState {
         let elapsed = now.duration_since(self.last_fps_update).as_secs_f32();
         if elapsed >= 1.0 {
             let fps = self.frame_count as f32 / elapsed;
-            let speed = if self.current_mode == 2 {
-                " (Fast Mode)".to_string()
-            } else {
-                String::new()
+            let speed = match self.current_mode {
+                2 => " (Fast Mode)".to_string(),
+                3 => " (25 FPS)".to_string(),
+                _ => String::new(),
             };
             self.window.set_title(&format!(
                 "Artificial Life Simulator{} - {:.1} FPS",
@@ -3836,9 +4131,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: self
-                        .environment_init_params_buffer
-                        .as_entire_binding(),
+                    resource: self.environment_init_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -3910,9 +4203,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: self
-                        .environment_init_params_buffer
-                        .as_entire_binding(),
+                    resource: self.environment_init_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -4049,7 +4340,7 @@ fn main() {
                                         }
                                         _ => {}
                                     }
-                                    
+
                                     if camera_changed {
                                         window.request_redraw();
                                     }
@@ -4097,7 +4388,7 @@ fn main() {
                                         // Clamp camera position to -0.25 to 1.25 of SIM_SIZE
                                         state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
                                         state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
-                                        
+
                                         window.request_redraw();
                                     }
                                 }
@@ -4121,8 +4412,7 @@ fn main() {
 
                             if let Some(state) = state.as_mut() {
                                 // Frame rate limiting
-                                if state.limit_fps {
-                                    let target_frame_time = std::time::Duration::from_micros(16667); // ~60 FPS
+                                if let Some(target_frame_time) = state.frame_time_cap() {
                                     let elapsed = state.last_frame_time.elapsed();
                                     if elapsed < target_frame_time {
                                         std::thread::sleep(target_frame_time - elapsed);
@@ -4143,9 +4433,9 @@ fn main() {
                                 };
                                 // Only run simulation when not paused AND there are living agents
                                 let should_run_simulation = !state.is_paused && state.alive_count > 0;
-                                
+
                                 state.update(should_draw);
-                                
+
                                 // Only increment epoch and update stats when simulation is running
                                 if should_run_simulation {
                                     state.epoch += 1;
@@ -4190,411 +4480,600 @@ fn main() {
                                                 if ui.button("Reset Simulation").clicked() {
                                                     reset_requested = true;
                                                 }
-                                                ui.checkbox(&mut state.limit_fps, "Limit to 60 FPS");
+                                                let mut fps_cap_enabled = matches!(state.current_mode, 0 | 3);
+                                                if ui.checkbox(&mut fps_cap_enabled, "Enable FPS Cap").changed() {
+                                                    if fps_cap_enabled {
+                                                        state.set_speed_mode(if state.current_mode == 3 { 3 } else { 0 });
+                                                    } else {
+                                                        state.set_speed_mode(1);
+                                                    }
+                                                }
                                             });
 
                                             // Tab selection
                                             ui.horizontal(|ui| {
-                                                ui.selectable_value(&mut state.ui_tab, 0, "Standard");
-                                                ui.selectable_value(&mut state.ui_tab, 1, "Advanced");
+                                                ui.selectable_value(&mut state.ui_tab, 0, "Simulation");
+                                                ui.selectable_value(&mut state.ui_tab, 1, "Agents");
+                                                ui.selectable_value(&mut state.ui_tab, 2, "Environment");
                                             });
                                             ui.separator();
 
-                                            if state.ui_tab == 0 {
-                                                // Standard tab content
-                                                egui::ScrollArea::vertical().show(ui, |ui| {
-                                        ui.heading("Camera");
-                                        ui.add(
-                                            egui::Slider::new(&mut state.camera_zoom, 0.1..=2000.0)
-                                                .text("Zoom").logarithmic(true),
-                                        );
-                                        if ui.button("Reset Camera (R)").clicked() {
-                                            state.camera_zoom = 1.0;
-                                            state.camera_pan = [2560.0, 2560.0];
-                                        }
-
-                                        ui.separator();
-                                        ui.heading("Population");
-                                        ui.label(format!("Total Agents: {}", state.agent_count));
-                                        ui.label(format!("Living Agents: {}", state.alive_count));
-                                        ui.label(format!(
-                                            "Capacity: {}",
-                                            state.agent_buffer_capacity
-                                        ));
-                                        ui.horizontal(|ui| {
-                                            if ui.button(if state.auto_replenish { "Auto Replenish: ON" } else { "Auto Replenish: OFF" }).clicked() {
-                                                state.auto_replenish = !state.auto_replenish;
-                                            }
-                                            if ui.button("Kill All").clicked() {
-                                                // Kill all agents immediately
-                                                state.agent_count = 0;
-                                                state.alive_count = 0;
-                                                state.selected_agent_index = None;
-                                                state.selected_agent_data = None;
-                                                state.cpu_spawn_queue.clear();
-                                                state.spawn_request_count = 0;
-                                                state.pending_spawn_upload = false;
-                                                // Clear pending alive readbacks to prevent GPU overwriting our 0 count
-                                                for i in 0..2 {
-                                                    state.alive_readback_inflight[i] = false;
-                                                    if let Ok(mut guard) = state.alive_readback_pending[i].lock() {
-                                                        *guard = None;
-                                                    }
-                                                }
-                                                // Clear alive counter buffer
-                                                let mut encoder = state.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("KillAll Encoder") });
-                                                encoder.clear_buffer(&state.alive_counter, 0, None);
-                                                state.queue.submit(Some(encoder.finish()));
-                                                state.window.request_redraw();
-                                            }
-                                        });
-                                        ui.horizontal(|ui| {
-                                            if ui.button("Save Selected Agent...").clicked() {
-                                                if let Some(agent) = state.selected_agent_data {
-                                                    if let Err(err) = save_agent_via_dialog(&agent) {
-                                                        eprintln!("Save canceled or failed: {err:?}");
-                                                    }
-                                                }
-                                            }
-                                            if ui.button("Load Agent & Spawn 100 Clones...").clicked() && !state.is_paused {
-                                                match load_agent_via_dialog() {
-                                                    Ok(genome) => {
-                                                        println!("Successfully loaded genome, spawning 100 clones...");
-                                                        const SIM_SIZE: f32 = 30720.0;
-                                                        
-                                                        for _ in 0..100 {
-                                                            state.rng_state = state
-                                                                .rng_state
-                                                                .wrapping_mul(6364136223846793005u64)
-                                                                .wrapping_add(1442695040888963407u64);
-                                                            let seed = (state.rng_state >> 32) as u32;
-
-                                                            state.rng_state = state
-                                                                .rng_state
-                                                                .wrapping_mul(6364136223846793005u64)
-                                                                .wrapping_add(1442695040888963407u64);
-                                                            let genome_seed = (state.rng_state >> 32) as u32;
-
-                                                            state.rng_state = state
-                                                                .rng_state
-                                                                .wrapping_mul(6364136223846793005u64)
-                                                                .wrapping_add(1442695040888963407u64);
-                                                            let rx = (state.rng_state >> 32) as f32 / u32::MAX as f32;
-
-                                                            state.rng_state = state
-                                                                .rng_state
-                                                                .wrapping_mul(6364136223846793005u64)
-                                                                .wrapping_add(1442695040888963407u64);
-                                                            let ry = (state.rng_state >> 32) as f32 / u32::MAX as f32;
-
-                                                            state.rng_state = state
-                                                                .rng_state
-                                                                .wrapping_mul(6364136223846793005u64)
-                                                                .wrapping_add(1442695040888963407u64);
-                                                            let rotation = ((state.rng_state >> 32) as f32 / u32::MAX as f32) * std::f32::consts::TAU;
-
-                                                            let request = SpawnRequest {
-                                                                seed,
-                                                                genome_seed,
-                                                                flags: 1, // Bit 0 = use genome_override
-                                                                _pad_seed: 0,
-                                                                position: [rx * SIM_SIZE, ry * SIM_SIZE],
-                                                                energy: 10.0,
-                                                                rotation,
-                                                                genome_override: genome,
-                                                            };
-
-                                                            state.cpu_spawn_queue.push(request);
+                                            match state.ui_tab {
+                                                0 => {
+                                                    // Simulation tab
+                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                                        ui.heading("Camera");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.camera_zoom, 0.1..=2000.0)
+                                                                .text("Zoom")
+                                                                .logarithmic(true),
+                                                        );
+                                                        if ui.button("Reset Camera (R)").clicked() {
+                                                            state.camera_zoom = 1.0;
+                                                            state.camera_pan = [2560.0, 2560.0];
                                                         }
-                                                        
-                                                        state.spawn_request_count = state.cpu_spawn_queue.len() as u32;
-                                                        state.pending_spawn_upload = true;
-                                                        state.window.request_redraw();
-                                                        println!("Enqueued 100 spawn requests");
-                                                    }
-                                                    Err(err) => {
-                                                        eprintln!("Failed to load agent: {err:?}");
-                                                    }
+
+                                                        ui.separator();
+                                                        ui.heading("Simulation Speed");
+                                                        let mut mode = state.current_mode;
+                                                        let old_mode = mode;
+                                                        ui.horizontal(|ui| {
+                                                            ui.selectable_value(&mut mode, 3, "Slow (25 FPS)");
+                                                            ui.selectable_value(&mut mode, 0, "VSync (60 FPS)");
+                                                            ui.selectable_value(&mut mode, 1, "Full Speed");
+                                                            ui.selectable_value(&mut mode, 2, "Fast Draw");
+                                                        });
+                                                        if mode != old_mode {
+                                                            state.set_speed_mode(mode);
+                                                        }
+                                                        if mode == 2 {
+                                                            ui.add(
+                                                                egui::Slider::new(&mut state.render_interval, 1..=10000)
+                                                                    .text("Draw every N steps")
+                                                                    .logarithmic(true),
+                                                            );
+                                                        }
+                                                        ui.label(format!("Epoch: {}", state.epoch));
+                                                        ui.label(format!(
+                                                            "Epochs/sec: {:.1}",
+                                                            state.epochs_per_second
+                                                        ));
+
+                                                        ui.separator();
+                                                        ui.heading("Population Overview");
+                                                        ui.label(format!("Total Agents: {}", state.agent_count));
+                                                        ui.label(format!("Living Agents: {}", state.alive_count));
+                                                        ui.label(format!(
+                                                            "Capacity: {}",
+                                                            state.agent_buffer_capacity
+                                                        ));
+
+                                                        ui.separator();
+                                                        ui.collapsing("Population History", |ui| {
+                                                            ui.label(format!(
+                                                                "Samples: {} (every {} epochs)",
+                                                                state.population_history.len(),
+                                                                state.epoch_sample_interval
+                                                            ));
+
+                                                            if !state.population_history.is_empty() {
+                                                                use egui_plot::{Line, Plot, PlotPoints};
+
+                                                                let points: PlotPoints = state
+                                                                    .population_history
+                                                                    .iter()
+                                                                    .enumerate()
+                                                                    .map(|(i, &pop)| [i as f64, pop as f64])
+                                                                    .collect();
+
+                                                                let line = Line::new(points)
+                                                                    .color(egui::Color32::from_rgb(100, 200, 100))
+                                                                    .name("Population");
+
+                                                                Plot::new("population_plot")
+                                                                    .height(150.0)
+                                                                    .show_axes(true)
+                                                                    .show_grid(true)
+                                                                    .allow_drag(false)
+                                                                    .allow_zoom(false)
+                                                                    .allow_scroll(false)
+                                                                    .show(ui, |plot_ui| {
+                                                                        plot_ui.line(line);
+                                                                    });
+                                                            } else {
+                                                                ui.label("No data yet (waiting for first sample)");
+                                                            }
+                                                        });
+
+                                                        ui.separator();
+                                                        ui.checkbox(
+                                                            &mut state.debug_per_segment,
+                                                            "Debug: Per-segment overlay",
+                                                        );
+                                                    });
                                                 }
-                                            }
-                                        });
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut state.spawn_probability,
-                                                0.0..=1.0,
-                                            )
-                                            .text("Pairing Probability"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut state.death_probability,
-                                                0.0..=0.1,
-                                            )
-                                            .text("Death Probability"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut state.mutation_rate, 0.0..=0.1)
-                                                .text("Mutation Rate (per base)")
-                                                .step_by(0.001),
-                                        );
-                                    ui.label(format!(
-                                        "Average mutations per offspring: {:.1}",
-                                        state.mutation_rate * 64.0
-                                    ));
-                                    ui.separator();
-                                    ui.heading("Genetic Code Settings");
-                                    ui.checkbox(&mut state.require_start_codon, "Require AUG start codon")
-                                        .on_hover_text("When enabled, genomes must contain AUG (Methionine) to begin translation");
-                                    ui.checkbox(&mut state.ignore_stop_codons, "Ignore stop codons (experimental)")
-                                        .on_hover_text("When enabled, genomes translate to full 64 amino acids regardless of stop codons");
-                                    ui.separator();
-                                    ui.heading("Signal Propagation");
-                                    ui.checkbox(&mut state.interior_isotropic, "Isotropic diffusion (simple averaging)")
-                                        .on_hover_text("When enabled, uses simple neighbor averaging. When disabled, uses asymmetric left/right multipliers from amino acid properties");
-                                    ui.separator();
-                                    if ui.button("Spawn 5000 Random Agents").clicked() && !state.is_paused {
-                                        state.queue_random_spawns(5000);
-                                    }                                        ui.separator();
-                                        ui.heading("Environment");
-                                        ui.add(
-                                            egui::Slider::new(&mut state.diffusion_interval, 1..=64)
-                                                .text("Diffuse every N steps"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut state.slope_interval, 1..=64)
-                                                .text("Rebuild slope every N steps"),
-                                        );
-                                        ui.label("Alpha (Food):");
-                                        ui.add(
-                                            egui::Slider::new(&mut state.alpha_blur, 0.0..=0.1)
-                                                .text("Blur"),
-                                        );
-                                        ui.label("Beta (Poison):");
-                                        ui.add(
-                                            egui::Slider::new(&mut state.beta_blur, 0.0..=0.1)
-                                                .text("Blur"),
-                                        );
+                                                1 => {
+                                                    // Agents tab
+                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                                        ui.heading("Population Controls");
+                                                        ui.label(format!(
+                                                            "Total Agents: {} ({} alive)",
+                                                            state.agent_count,
+                                                            state.alive_count
+                                                        ));
+                                                        ui.label(format!(
+                                                            "Capacity: {}",
+                                                            state.agent_buffer_capacity
+                                                        ));
+                                                        ui.horizontal(|ui| {
+                                                            if ui
+                                                                .button(if state.auto_replenish {
+                                                                    "Auto Replenish: ON"
+                                                                } else {
+                                                                    "Auto Replenish: OFF"
+                                                                })
+                                                                .clicked()
+                                                            {
+                                                                state.auto_replenish = !state.auto_replenish;
+                                                            }
+                                                            if ui.button("Kill All").clicked() {
+                                                                // Ensure no stale readbacks race in after we zero everything
+                                                                state.device.poll(wgpu::Maintain::Wait);
+                                                                state.process_completed_alive_readbacks();
 
-                                        ui.separator();
-                                        ui.heading("Energy");
-                                        ui.add(
-                                            egui::Slider::new(&mut state.food_power, 0.0..=10.0)
-                                                .text("Food Power"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut state.amino_maintenance_cost,
-                                                0.0..=0.01,
-                                            )
-                                            .text("Amino Maintenance Cost")
-                                            .logarithmic(true)
-                                            .step_by(0.0001),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut state.poison_power, 0.0..=10.0)
-                                                .text("Poison Power"),
-                                        );
+                                                                // Kill all agents immediately
+                                                                state.agent_count = 0;
+                                                                state.alive_count = 0;
+                                                                state.selected_agent_index = None;
+                                                                state.selected_agent_data = None;
+                                                                state.cpu_spawn_queue.clear();
+                                                                state.spawn_request_count = 0;
+                                                                state.pending_spawn_upload = false;
+                                                                // Clear pending alive readbacks to prevent GPU overwriting our 0 count
+                                                                for i in 0..2 {
+                                                                    state.alive_readback_inflight[i] = false;
+                                                                    if let Ok(mut guard) =
+                                                                        state.alive_readback_pending[i].lock()
+                                                                    {
+                                                                        *guard = None;
+                                                                    }
+                                                                }
 
-                                        ui.separator();
-                                        ui.heading("Physics");
-                                        ui.add(
-                                            egui::Slider::new(&mut state.repulsion_strength, 0.0..=100.0)
-                                                .text("Obstacle / Terrain Force"),
-                                        );
+                                                                // Clear GPU buffers so killed agents cannot be resurrected
+                                                                let mut encoder = state.device.create_command_encoder(
+                                                                    &wgpu::CommandEncoderDescriptor {
+                                                                        label: Some("KillAll Encoder"),
+                                                                    },
+                                                                );
+                                                                encoder.clear_buffer(&state.agents_buffer_a, 0, None);
+                                                                encoder.clear_buffer(&state.agents_buffer_b, 0, None);
+                                                                encoder.clear_buffer(&state.new_agents_buffer, 0, None);
+                                                                encoder.clear_buffer(&state.spawn_counter, 0, None);
+                                                                encoder.clear_buffer(&state.alive_counter, 0, None);
+                                                                encoder.clear_buffer(&state.debug_counter, 0, None);
+                                                                state.queue.submit(Some(encoder.finish()));
+                                                                state.window.request_redraw();
+                                                            }
+                                                        });
 
-                                        ui.separator();
-                                        ui.heading("Simulation Speed");
-                                        let mut mode = state.current_mode;
-                                        let old_mode = mode;
-                                        ui.horizontal(|ui| {
-                                            ui.selectable_value(&mut mode, 0, "VSync (60 FPS)");
-                                            ui.selectable_value(&mut mode, 1, "Full Speed");
-                                            ui.selectable_value(&mut mode, 2, "Fast Draw");
-                                        });
-                                        if mode != old_mode {
-                                            match mode {
-                                                0 => state.limit_fps = true,
-                                                1 => state.limit_fps = false,
-                                                2 => state.limit_fps = false,
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Save Selected Agent...").clicked() {
+                                                                if let Some(agent) = state.selected_agent_data {
+                                                                    if let Err(err) = save_agent_via_dialog(&agent) {
+                                                                        eprintln!(
+                                                                            "Save canceled or failed: {err:?}"
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                            if ui
+                                                                .button("Load Agent & Spawn 100 Clones...")
+                                                                .clicked()
+                                                                && !state.is_paused
+                                                            {
+                                                                match load_agent_via_dialog() {
+                                                                    Ok(genome) => {
+                                                                        println!(
+                                                                            "Successfully loaded genome, spawning 100 clones..."
+                                                                        );
+                                                                        const SIM_SIZE: f32 = 30720.0;
+
+                                                                        for _ in 0..100 {
+                                                                            state.rng_state = state
+                                                                                .rng_state
+                                                                                .wrapping_mul(6364136223846793005u64)
+                                                                                .wrapping_add(1442695040888963407u64);
+                                                                            let seed =
+                                                                                (state.rng_state >> 32) as u32;
+
+                                                                            state.rng_state = state
+                                                                                .rng_state
+                                                                                .wrapping_mul(6364136223846793005u64)
+                                                                                .wrapping_add(1442695040888963407u64);
+                                                                            let genome_seed =
+                                                                                (state.rng_state >> 32) as u32;
+
+                                                                            state.rng_state = state
+                                                                                .rng_state
+                                                                                .wrapping_mul(6364136223846793005u64)
+                                                                                .wrapping_add(1442695040888963407u64);
+                                                                            let rx = (state.rng_state >> 32) as f32
+                                                                                / u32::MAX as f32;
+
+                                                                            state.rng_state = state
+                                                                                .rng_state
+                                                                                .wrapping_mul(6364136223846793005u64)
+                                                                                .wrapping_add(1442695040888963407u64);
+                                                                            let ry = (state.rng_state >> 32) as f32
+                                                                                / u32::MAX as f32;
+
+                                                                            state.rng_state = state
+                                                                                .rng_state
+                                                                                .wrapping_mul(6364136223846793005u64)
+                                                                                .wrapping_add(1442695040888963407u64);
+                                                                            let rotation = ((state.rng_state >> 32) as f32
+                                                                                / u32::MAX as f32)
+                                                                                * std::f32::consts::TAU;
+
+                                                                            let request = SpawnRequest {
+                                                                                seed,
+                                                                                genome_seed,
+                                                                                flags: 1, // Bit 0 = use genome_override
+                                                                                _pad_seed: 0,
+                                                                                position: [
+                                                                                    rx * SIM_SIZE,
+                                                                                    ry * SIM_SIZE,
+                                                                                ],
+                                                                                energy: 10.0,
+                                                                                rotation,
+                                                                                genome_override: genome,
+                                                                            };
+
+                                                                            state.cpu_spawn_queue.push(request);
+                                                                        }
+
+                                                                        state.spawn_request_count =
+                                                                            state.cpu_spawn_queue.len() as u32;
+                                                                        state.pending_spawn_upload = true;
+                                                                        state.window.request_redraw();
+                                                                        println!("Enqueued 100 spawn requests");
+                                                                    }
+                                                                    Err(err) => {
+                                                                        eprintln!("Failed to load agent: {err:?}");
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
+
+                                                        ui.separator();
+                                                        ui.heading("Reproduction & Selection");
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.spawn_probability,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Pairing Probability"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.death_probability,
+                                                                0.0..=0.1,
+                                                            )
+                                                            .text("Death Probability"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.mutation_rate,
+                                                                0.0..=0.1,
+                                                            )
+                                                            .text("Mutation Rate (per base)")
+                                                            .step_by(0.001),
+                                                        );
+                                                        ui.label(format!(
+                                                            "Average mutations per offspring: {:.1}",
+                                                            state.mutation_rate * 64.0
+                                                        ));
+
+                                                        ui.separator();
+                                                        ui.heading("Genetics & Signals");
+                                                        ui.checkbox(
+                                                            &mut state.require_start_codon,
+                                                            "Require AUG start codon",
+                                                        )
+                                                        .on_hover_text(
+                                                            "When enabled, genomes must contain AUG (Methionine) to begin translation",
+                                                        );
+                                                        ui.checkbox(
+                                                            &mut state.ignore_stop_codons,
+                                                            "Ignore stop codons (experimental)",
+                                                        )
+                                                        .on_hover_text(
+                                                            "When enabled, genomes translate to full 64 amino acids regardless of stop codons",
+                                                        );
+                                                        ui.checkbox(
+                                                            &mut state.interior_isotropic,
+                                                            "Isotropic diffusion (simple averaging)",
+                                                        )
+                                                        .on_hover_text(
+                                                            "When enabled, uses simple neighbor averaging. When disabled, uses asymmetric left/right multipliers from amino acid properties",
+                                                        );
+
+                                                        ui.separator();
+                                                        if ui
+                                                            .button("Spawn 5000 Random Agents")
+                                                            .clicked()
+                                                            && !state.is_paused
+                                                        {
+                                                            state.queue_random_spawns(5000);
+                                                        }
+
+                                                        ui.separator();
+                                                        ui.heading("Energy & Costs");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.food_power, 0.0..=10.0)
+                                                                .text("Food Power"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.amino_maintenance_cost,
+                                                                0.0..=0.01,
+                                                            )
+                                                            .text("Amino Maintenance Cost")
+                                                            .logarithmic(true)
+                                                            .step_by(0.0001),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.pairing_cost, 0.0..=1.0)
+                                                                .text("Pairing Cost per Increment")
+                                                                .step_by(0.01),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.poison_power, 0.0..=10.0)
+                                                                .text("Poison Power"),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Physics");
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.repulsion_strength,
+                                                                0.0..=100.0,
+                                                            )
+                                                            .text("Obstacle / Terrain Force"),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Trail Layer Controls");
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.trail_diffusion,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Trail Diffusion"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.trail_decay,
+                                                                0.9..=1.0,
+                                                            )
+                                                            .text("Trail Fade Rate"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.trail_opacity,
+                                                                0.0..=2.0,
+                                                            )
+                                                            .text("Trail Opacity"),
+                                                        );
+                                                        ui.checkbox(&mut state.trail_show, "Show Trail Only");
+                                                    });
+                                                }
+                                                2 => {
+                                                    // Environment tab
+                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                                        ui.heading("Environment Scheduling");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.diffusion_interval, 1..=64)
+                                                                .text("Diffuse every N steps"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.slope_interval, 1..=64)
+                                                                .text("Rebuild slope every N steps"),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Alpha Controls");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.alpha_blur, 0.0..=0.1)
+                                                                .text("Distribution Blur"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.alpha_slope_bias, -10.0..=10.0)
+                                                                .text("Slope Bias"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.0..=0.001)
+                                                                .text("Rain Probability"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.chemical_slope_scale_alpha,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Alpha Slope Mix"),
+                                                        );
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Load Alpha Rain Map").clicked() {
+                                                                if let Some(path) = rfd::FileDialog::new()
+                                                                    .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
+                                                                    .pick_file()
+                                                                {
+                                                                    if let Err(err) =
+                                                                        state.load_alpha_rain_map(&path)
+                                                                    {
+                                                                        eprintln!(
+                                                                            "Failed to load alpha rain map {}: {err:?}",
+                                                                            path.display()
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                            if ui.button("Clear").clicked() {
+                                                                state.clear_alpha_rain_map();
+                                                            }
+                                                        });
+                                                        ui.label(match state.alpha_rain_map_path.as_ref() {
+                                                            Some(path) => {
+                                                                let name = path
+                                                                    .file_name()
+                                                                    .and_then(|n| n.to_str())
+                                                                    .map(|s| s.to_string())
+                                                                    .unwrap_or_else(|| path.display().to_string());
+                                                                format!("Alpha rain map: {}", name)
+                                                            }
+                                                            None => "Alpha rain map: uniform".to_string(),
+                                                        });
+                                                        if let Some(tex_id) = state.alpha_rain_texture_id(ui.ctx()) {
+                                                            ui.add(
+                                                                egui::Image::new((
+                                                                    tex_id,
+                                                                    egui::Vec2::splat(RAIN_THUMB_SIZE as f32),
+                                                                ))
+                                                                .bg_fill(egui::Color32::DARK_GRAY),
+                                                            )
+                                                            .on_hover_text(
+                                                                "Grayscale preview of alpha rain probability (white = more rain)",
+                                                            );
+                                                        }
+                                                        ui.checkbox(&mut state.alpha_show, "Show Alpha Overlay");
+
+                                                        ui.separator();
+                                                        ui.heading("Beta Controls");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.beta_blur, 0.0..=0.1)
+                                                                .text("Distribution Blur"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.beta_slope_bias, -10.0..=10.0)
+                                                                .text("Slope Bias"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.beta_multiplier, 0.0..=0.001)
+                                                                .text("Rain Probability"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.chemical_slope_scale_beta,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Beta Slope Mix"),
+                                                        );
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Load Beta Rain Map").clicked() {
+                                                                if let Some(path) = rfd::FileDialog::new()
+                                                                    .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
+                                                                    .pick_file()
+                                                                {
+                                                                    if let Err(err) = state.load_beta_rain_map(&path) {
+                                                                        eprintln!(
+                                                                            "Failed to load beta rain map {}: {err:?}",
+                                                                            path.display()
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                            if ui.button("Clear").clicked() {
+                                                                state.clear_beta_rain_map();
+                                                            }
+                                                        });
+                                                        ui.label(match state.beta_rain_map_path.as_ref() {
+                                                            Some(path) => {
+                                                                let name = path
+                                                                    .file_name()
+                                                                    .and_then(|n| n.to_str())
+                                                                    .map(|s| s.to_string())
+                                                                    .unwrap_or_else(|| path.display().to_string());
+                                                                format!("Beta rain map: {}", name)
+                                                            }
+                                                            None => "Beta rain map: uniform".to_string(),
+                                                        });
+                                                        if let Some(tex_id) = state.beta_rain_texture_id(ui.ctx()) {
+                                                            ui.add(
+                                                                egui::Image::new((
+                                                                    tex_id,
+                                                                    egui::Vec2::splat(RAIN_THUMB_SIZE as f32),
+                                                                ))
+                                                                .bg_fill(egui::Color32::DARK_GRAY),
+                                                            )
+                                                            .on_hover_text(
+                                                                "Grayscale preview of beta rain probability (white = more rain)",
+                                                            );
+                                                        }
+                                                        ui.checkbox(&mut state.beta_show, "Show Beta Overlay");
+
+                                                        ui.separator();
+                                                        ui.heading("Gamma Controls");
+                                                        if ui.button("Load Gamma Image").clicked() {
+                                                            if let Some(path) = rfd::FileDialog::new()
+                                                                .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
+                                                                .pick_file()
+                                                            {
+                                                                if let Err(err) = state.load_gamma_image(&path) {
+                                                                    eprintln!(
+                                                                        "Failed to load gamma image {}: {err:?}",
+                                                                        path.display()
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                        ui.checkbox(&mut state.gamma_show, "Show Gamma Overlay");
+                                                        ui.checkbox(&mut state.gamma_hidden, "Hide Gamma in Composite");
+                                                        ui.checkbox(&mut state.slope_lighting, "Slope Lighting");
+                                                        ui.checkbox(&mut state.slope_debug_visual, "Show Raw Slopes");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.gamma_blur, 0.0..=0.1)
+                                                                .text("Gamma Blur"),
+                                                        );
+                                                        let min_changed = ui
+                                                            .add(
+                                                                egui::Slider::new(
+                                                                    &mut state.gamma_vis_min,
+                                                                    -1000.0..=1000.0,
+                                                                )
+                                                                .text("Gamma Min"),
+                                                            )
+                                                            .changed();
+                                                        let max_changed = ui
+                                                            .add(
+                                                                egui::Slider::new(
+                                                                    &mut state.gamma_vis_max,
+                                                                    -1000.0..=1000.0,
+                                                                )
+                                                                .text("Gamma Max"),
+                                                            )
+                                                            .changed();
+                                                        if state.gamma_vis_min >= state.gamma_vis_max {
+                                                            state.gamma_vis_max =
+                                                                (state.gamma_vis_min + 0.001).min(1000.0);
+                                                            state.gamma_vis_min =
+                                                                (state.gamma_vis_max - 0.001).max(-1000.0);
+                                                        } else if min_changed || max_changed {
+                                                            state.gamma_vis_min =
+                                                                state.gamma_vis_min.clamp(-1000.0, 1000.0);
+                                                            state.gamma_vis_max =
+                                                                state.gamma_vis_max.clamp(-1000.0, 1000.0);
+                                                        }
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.prop_wash_strength, 0.0..=5.0)
+                                                                .text("Prop Wash Strength"),
+                                                        );
+                                                        ui.label(
+                                                            "Slope force scales with the Obstacle / Terrain Force slider.",
+                                                        );
+                                                    });
+                                                }
                                                 _ => {}
                                             }
-                                            state.current_mode = mode;
-                                            state.update_present_mode();
-                                        }
-                                        if mode == 2 {
-                                            ui.add(
-                                                egui::Slider::new(&mut state.render_interval, 1..=10000)
-                                                    .text("Draw every N steps")
-                                                    .logarithmic(true),
-                                            );
-                                        }
-                                        ui.label(format!("Epoch: {}", state.epoch));
-                                        ui.label(format!("Epochs/sec: {:.1}", state.epochs_per_second));
-                                    });
-                                } else {
-                                    // Advanced tab content
-                                    egui::ScrollArea::vertical().show(ui, |ui| {
-                                        ui.heading("Detailed Environment");
-                                        ui.label("Alpha (Food):");
-                                        ui.add(
-                                            egui::Slider::new(&mut state.alpha_slope_bias, -10.0..=10.0)
-                                                .text("Slope Bias"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut state.alpha_multiplier, 0.0..=0.001)
-                                                .text("Rain Probability"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut state.chemical_slope_scale_alpha,
-                                                0.0..=1.0,
-                                            )
-                                            .text("Alpha Slope Mix"),
-                                        );
-                                        ui.label("Beta (Poison):");
-                                        ui.add(
-                                            egui::Slider::new(&mut state.beta_slope_bias, -10.0..=10.0)
-                                                .text("Slope Bias"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut state.chemical_slope_scale_beta,
-                                                0.0..=1.0,
-                                            )
-                                            .text("Beta Slope Mix"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut state.beta_multiplier, 0.0..=0.001)
-                                                .text("Rain Probability"),
-                                        );
-
-                                        ui.label("Gamma (Terrain):");
-                                        if ui.button("Load Gamma Image").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new()
-                                                .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
-                                                .pick_file()
-                                            {
-                                                if let Err(err) = state.load_gamma_image(&path) {
-                                                    eprintln!(
-                                                        "Failed to load gamma image {}: {err:?}",
-                                                        path.display()
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        
-                                        ui.label("Display Channels:");
-                                        ui.horizontal(|ui| {
-                                            ui.checkbox(&mut state.alpha_show, "Alpha (Food)");
-                                            ui.checkbox(&mut state.beta_show, "Beta (Poison)");
-                                            ui.checkbox(&mut state.gamma_show, "Gamma (Terrain)");
-                                        });
-                                        
-                                        ui.checkbox(&mut state.slope_debug_visual, "Show Raw Slopes");
-                                        ui.checkbox(&mut state.slope_lighting, "Slope Lighting");
-                                        ui.checkbox(&mut state.gamma_hidden, "Hide Gamma");
-                                        
-                                        ui.separator();
-                                        ui.label("Trail Layer Controls:");
-                                        ui.add(
-                                            egui::Slider::new(&mut state.trail_diffusion, 0.0..=1.0)
-                                                .text("Trail Diffusion"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut state.trail_decay, 0.9..=1.0)
-                                                .text("Trail Fade Rate"),
-                                        );
-                                        ui.add(
-                                            egui::Slider::new(&mut state.trail_opacity, 0.0..=2.0)
-                                                .text("Trail Opacity"),
-                                        );
-                                        ui.checkbox(&mut state.trail_show, "Show Trail Only");
-                                        
-                                        ui.add(
-                                            egui::Slider::new(&mut state.gamma_blur, 0.0..=0.1)
-                                                .text("Gamma Blur"),
-                                        );
-                                        let min_changed = ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut state.gamma_vis_min,
-                                                    -1000.0..=1000.0,
-                                                )
-                                                .text("Gamma Min"),
-                                            )
-                                            .changed();
-                                        let max_changed = ui
-                                            .add(
-                                                egui::Slider::new(
-                                                    &mut state.gamma_vis_max,
-                                                    -1000.0..=1000.0,
-                                                )
-                                                .text("Gamma Max"),
-                                            )
-                                            .changed();
-                                        if state.gamma_vis_min >= state.gamma_vis_max {
-                                            state.gamma_vis_max =
-                                                (state.gamma_vis_min + 0.001).min(1000.0);
-                                            state.gamma_vis_min =
-                                                (state.gamma_vis_max - 0.001).max(-1000.0);
-                                        } else if min_changed || max_changed {
-                                            state.gamma_vis_min =
-                                                state.gamma_vis_min.clamp(-1000.0, 1000.0);
-                                            state.gamma_vis_max =
-                                                state.gamma_vis_max.clamp(-1000.0, 1000.0);
-                                        }
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut state.prop_wash_strength,
-                                                0.0..=5.0,
-                                            )
-                                            .text("Prop Wash Strength"),
-                                        );
-                                        ui.label("Slope force scales with the Obstacle / Terrain Force slider.");
-
-                                        ui.separator();
-
-                                        // Population Statistics Graph
-                                        ui.collapsing("Population History", |ui| {
-                                            ui.label(format!("Samples: {} (every {} epochs)", 
-                                                state.population_history.len(), 
-                                                state.epoch_sample_interval));
-                                            
-                                            if !state.population_history.is_empty() {
-                                                use egui_plot::{Line, Plot, PlotPoints};
-                                                
-                                                let points: PlotPoints = state.population_history
-                                                    .iter()
-                                                    .enumerate()
-                                                    .map(|(i, &pop)| [i as f64, pop as f64])
-                                                    .collect();
-                                                
-                                                let line = Line::new(points)
-                                                    .color(egui::Color32::from_rgb(100, 200, 100))
-                                                    .name("Population");
-                                                
-                                                Plot::new("population_plot")
-                                                    .height(150.0)
-                                                    .show_axes(true)
-                                                    .show_grid(true)
-                                                    .allow_drag(false)
-                                                    .allow_zoom(false)
-                                                    .allow_scroll(false)
-                                                    .show(ui, |plot_ui| {
-                                                        plot_ui.line(line);
-                                                    });
-                                            } else {
-                                                ui.label("No data yet (waiting for first sample)");
-                                            }
-                                        });
-
-                                        ui.separator();
-                                        ui.checkbox(
-                                            &mut state.debug_per_segment,
-                                            "Debug: Per-segment overlay",
-                                        );
-                                    });
-                                }
                             });
 
                                     // Right side panel for agent inspector
@@ -4924,7 +5403,7 @@ fn main() {
 
                                             ui.separator();
                                             ui.heading("Reproduction");
-                                            
+
                                             // Calculate gene length (number of non-X bases)
                                             let mut genome_bytes_temp = Vec::new();
                                             for &word in agent_data.genome.iter() {
@@ -4934,7 +5413,7 @@ fn main() {
                                                 }
                                             }
                                             let gene_length = genome_bytes_temp.iter().filter(|&&b| b != 88).count() as u32;
-                                            
+
                                             let rna_percent = if gene_length > 0 {
                                                 agent_data.pairing_counter as f32 / gene_length as f32
                                             } else {
@@ -4968,7 +5447,7 @@ fn main() {
                                                     last_non_x = Some(i);
                                                 }
                                             }
-                                            
+
                                             // Find translation start and stop positions
                                             // Respects require_start_codon and ignore_stop_codons settings
                                             let mut start_pos: Option<usize> = None;
@@ -5031,11 +5510,11 @@ fn main() {
                                                     scan_idx += 3;
                                                 }
                                             }
-                                            
+
                                             // Display RNA sequence by codons starting from the first coding position
                                             // Build styled segments for layouting
                                             let mut segments = Vec::new();
-                                            
+
                                             if let Some(start) = start_pos {
                                                 // Build inactive prefix before the first valid codon
                                                 // Separate padding ('X') from actual inactive bases
@@ -5063,7 +5542,7 @@ fn main() {
                                                 if !inactive_prefix.is_empty() {
                                                     segments.push((inactive_prefix, egui::Color32::DARK_GRAY, false));
                                                 }
-                                                
+
                                                 // Process codons from the first active base onwards
                                                 let mut codon_idx = start;
                                                 while codon_idx + 2 < genome_bytes.len() {
@@ -5072,28 +5551,28 @@ fn main() {
                                                     let b2 = genome_bytes[codon_idx + 2];
                                                     // Stop at padding boundary
                                                     if b0 == 88 || b1 == 88 || b2 == 88 { break; }
-                                                    
+
                                                     let base0 = match b0 { 65 => 'A', 85 => 'U', 71 => 'G', 67 => 'C', 88 => 'X', _ => '?' };
                                                     let base1 = match b1 { 65 => 'A', 85 => 'U', 71 => 'G', 67 => 'C', 88 => 'X', _ => '?' };
                                                     let base2 = match b2 { 65 => 'A', 85 => 'U', 71 => 'G', 67 => 'C', 88 => 'X', _ => '?' };
-                                                    
+
                                                     let codon_str = format!("{}{}{}", base0, base1, base2);
-                                                    
+
                                                     // Calculate amino acid type from codon using genetic code table
                                                     let aa_type = codon_to_amino_acid(b0, b1, b2);
-                                                    
+
                                                     // Check if we've reached the stop codon or are beyond it
                                                     let is_active = if let Some(stop) = stop_pos {
                                                         codon_idx <= stop
                                                     } else {
                                                         true // No stop codon found, all active
                                                     };
-                                                    
+
                                                     // Check for stop codons (UAA, UAG, UGA)
                                                     let is_stop_codon = (b0 == 85 && b1 == 65 && b2 == 65) ||  // UAA
                                                                         (b0 == 85 && b1 == 65 && b2 == 71) ||  // UAG
                                                                         (b0 == 85 && b1 == 71 && b2 == 65);    // UGA
-                                                    
+
                                                     // Determine color based on function
                                                     let color = if !is_active {
                                                         egui::Color32::DARK_GRAY // Inactive - dark grey
@@ -5114,7 +5593,7 @@ fn main() {
                                                             _ => egui::Color32::from_rgb(180, 180, 180), // Structural - light grey
                                                         }
                                                     };
-                                                    
+
                                                     segments.push((codon_str, color, is_active));
                                                     codon_idx += 3;
                                                 }
@@ -5182,7 +5661,7 @@ fn main() {
                                                     segments.push((padding_bases, egui::Color32::from_rgb(40, 40, 40), false));
                                                 }
                                             }
-                                            
+
                                             // Display header with status
                                             if let (Some(start), Some(end)) = (first_non_x, last_non_x) {
                                                 let active_len = end.saturating_sub(start) + 1;
@@ -5201,7 +5680,7 @@ fn main() {
                                             } else {
                                                 ui.label("RNA Sequence (all padding)");
                                             }
-                                            
+
                                             // Display all segments in one label using LayoutJob for no spacing
                                             use egui::text::{LayoutJob, TextFormat};
                                             let mut job = LayoutJob::default();
@@ -5217,54 +5696,54 @@ fn main() {
 
                                             // Show only active organs (built parts) with signal visualization
                                             ui.separator();
-                                            ui.heading("Active organs (colored by α/β signals)");
+                                            ui.heading("Active organs (colored by Î±/Î² signals)");
                                             let amino_names = [
                                                 "Ala", "Cys", "Asp", "Glu", "Phe", "Gly", "His", "Ile", "Lys(MOUTH)", "Leu",
                                                 "Met", "Asn", "Pro", "Gln", "Arg", "Ser", "Thr", "Val", "Trp(STORAGE)", "Tyr"
                                             ];
                                             let mut m_count: u32 = 0; // Lysine (Mouth) index 8
                                             let mut w_count: u32 = 0; // Tryptophan (Storage) index 18
-                                            
+
                                             // Build colored organ display using LayoutJob
                                             let mut organ_job = egui::text::LayoutJob::default();
                                             let mut has_parts = false;
-                                            
+
                                             if let Some((dbg_count, dbg_types)) = state.debug_parts_data.as_ref() {
                                                 for i in 0..(*dbg_count as usize).min(MAX_BODY_PARTS) {
                                                     has_parts = true;
                                                     let t = dbg_types[i] as usize;
                                                     let name = if t < amino_names.len() { amino_names[t] } else { "?" };
-                                                    
+
                                                     // Get signal values for this body part
                                                     let alpha = agent_data.body[i].alpha_signal;
                                                     let beta = agent_data.body[i].beta_signal;
-                                                    
+
                                                     // Match shader debug mode color scheme:
                                                     // r = max(beta, 0.0)
-                                                    // g = max(alpha, 0.0)  
+                                                    // g = max(alpha, 0.0)
                                                     // b = max(-alpha, -beta, 0.0)
                                                     let r = beta.max(0.0);
                                                     let g = alpha.max(0.0);
                                                     let bl = (-alpha).max(-beta).max(0.0);
-                                                    
+
                                                     // Apply sqrt for enhanced visibility
                                                     let r_enhanced = r.sqrt();
                                                     let g_enhanced = g.sqrt();
                                                     let bl_enhanced = bl.sqrt();
-                                                    
+
                                                     let color = egui::Color32::from_rgb(
                                                         (r_enhanced * 255.0) as u8,
                                                         (g_enhanced * 255.0) as u8,
                                                         (bl_enhanced * 255.0) as u8
                                                     );
-                                                    
+
                                                     let format = egui::text::TextFormat {
                                                         font_id: egui::FontId::monospace(10.0),
                                                         color,
                                                         ..Default::default()
                                                     };
                                                     organ_job.append(name, 0.0, format);
-                                                    
+
                                                     // Show charge level for condensers (Tyrosine=19, Glycine=5)
                                                     if t == 19 || t == 5 {
                                                         let signed_charge = agent_data.body[i].pad[1]; // Signed: negative=charging, positive=discharging
@@ -5284,7 +5763,7 @@ fn main() {
                                                         };
                                                         organ_job.append(&charge_text, 0.0, charge_format);
                                                     }
-                                                    
+
                                                     if t == 8 { m_count += 1; }
                                                     if t == 18 { w_count += 1; }
                                                     if i + 1 < *dbg_count as usize {
@@ -5302,11 +5781,11 @@ fn main() {
                                                     has_parts = true;
                                                     let t = agent_data.body[i].part_type as usize;
                                                     let name = if t < amino_names.len() { amino_names[t] } else { "?" };
-                                                    
+
                                                     // Get signal values for this body part
                                                     let alpha = agent_data.body[i].alpha_signal;
                                                     let beta = agent_data.body[i].beta_signal;
-                                                    
+
                                                     // Match shader debug mode color scheme
                                                     let r = beta.max(0.0);
                                                     let g = alpha.max(0.0);
@@ -5314,20 +5793,20 @@ fn main() {
                                                     let r_enhanced = r.sqrt();
                                                     let g_enhanced = g.sqrt();
                                                     let bl_enhanced = bl.sqrt();
-                                                    
+
                                                     let color = egui::Color32::from_rgb(
                                                         (r_enhanced * 255.0) as u8,
                                                         (g_enhanced * 255.0) as u8,
                                                         (bl_enhanced * 255.0) as u8
                                                     );
-                                                    
+
                                                     let format = egui::text::TextFormat {
                                                         font_id: egui::FontId::monospace(10.0),
                                                         color,
                                                         ..Default::default()
                                                     };
                                                     organ_job.append(name, 0.0, format);
-                                                    
+
                                                     if t == 8 { m_count += 1; }
                                                     if t == 18 { w_count += 1; }
                                                     if i + 1 < safe_body_count {
@@ -5340,12 +5819,12 @@ fn main() {
                                                     }
                                                 }
                                             }
-                                            
+
                                             if !has_parts {
                                                 ui.label("(none)");
                                             } else {
                                                 ui.label(organ_job);
-                                                ui.label(egui::RichText::new("α+→green  β+→red  α-/β-→blue")
+                                                ui.label(egui::RichText::new("Î±+â†’green  Î²+â†’red  Î±-/Î²-â†’blue")
                                                     .font(egui::FontId::monospace(8.0))
                                                     .color(egui::Color32::GRAY));
                                             }
@@ -5425,8 +5904,7 @@ fn main() {
 
                             if let Some(state) = state.as_mut() {
                                 // Frame rate limiting
-                                if state.limit_fps {
-                                    let target_frame_time = std::time::Duration::from_micros(16667); // ~60 FPS
+                                if let Some(target_frame_time) = state.frame_time_cap() {
                                     let elapsed = state.last_frame_time.elapsed();
                                     if elapsed < target_frame_time {
                                         std::thread::sleep(target_frame_time - elapsed);
@@ -5503,12 +5981,20 @@ fn main() {
 
                                             ui.separator();
                                             ui.heading("Performance");
-                                            let old_limit = state.limit_fps;
-                                            ui.checkbox(&mut state.limit_fps, "Limit to 60 FPS");
-                                            if old_limit != state.limit_fps {
-                                                state.update_present_mode();
+                                            let mut fps_cap_enabled = matches!(state.current_mode, 0 | 3);
+                                            if ui.checkbox(&mut fps_cap_enabled, "Enable FPS Cap").changed() {
+                                                if fps_cap_enabled {
+                                                    state.set_speed_mode(0);
+                                                } else {
+                                                    state.set_speed_mode(1);
+                                                }
                                             }
-                                            if !state.limit_fps {
+                                            if fps_cap_enabled {
+                                                let mut slow_mode = state.current_mode == 3;
+                                                if ui.checkbox(&mut slow_mode, "Slow (25 FPS)").changed() {
+                                                    state.set_speed_mode(if slow_mode { 3 } else { 0 });
+                                                }
+                                            } else {
                                                 ui.label("Running at maximum speed");
                                             }
 

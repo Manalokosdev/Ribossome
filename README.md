@@ -20,6 +20,7 @@ A minimal, high-performance GPU-accelerated artificial life simulator built with
 - **Beta grid**: 512×512 float grid - environment field B  
 - **Direct modification**: Agents can modify grid values directly by index
 - **Diffusion & decay**: Environment grids diffuse and decay each frame
+- **Rain maps**: Optionally load grayscale alpha/beta textures to locally scale stochastic rain probability, with 128×128 grayscale previews in the Advanced UI tab for quick verification
 
 ### Energy & Maintenance
 - **Tunable metabolism**: Adjust food/poison power and the per-amino maintenance cost slider in the UI to control how quickly complex organisms burn energy.
