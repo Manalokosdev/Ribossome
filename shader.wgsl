@@ -22,19 +22,20 @@ const PROPELLERS_ENABLED: bool = true;
 // Experimental: disable global agent orientation; body geometry defines facing.
 const DISABLE_GLOBAL_ROTATION: bool = false;
 // Smoothing factor for per-part signal-induced angle (0..1). Higher = faster response.
-const ANGLE_SMOOTH_FACTOR: f32 = 0.4;
+const ANGLE_SMOOTH_FACTOR: f32 = 0.2;
 // Physics stabilization (no delta time): blend factors and clamps
-const VELOCITY_BLEND: f32 = 0.5;      // 0..1, higher = quicker velocity changes
-const ANGULAR_BLEND: f32 = 0.5;       // 0..1, higher = quicker rotation changes
+const VELOCITY_BLEND: f32 = 0.4;      // 0..1, higher = quicker velocity changes
+const ANGULAR_BLEND: f32 = 0.4;       // 0..1, higher = quicker rotation changes
 const VEL_MAX: f32 = 12.0;             // Max linear speed per frame
 const ANGVEL_MAX: f32 = 1.5;         // Max angular change (radians) per frame
 // Signal-to-angle shaping (no dt): cap amplitude and per-frame change
-const SIGNAL_GAIN: f32 =200;        // global scale for signal-driven angle (was 20.0)
+const SIGNAL_GAIN: f32 =20;        // global scale for signal-driven angle (was 20.0)
 // Separate gains for alpha vs beta to restore original triple-contribution tunability
 const ANGLE_GAIN_ALPHA: f32 = 1.0;  // relative weighting for alpha term
 const ANGLE_GAIN_BETA: f32 = 1.0;   // relative weighting for beta term
 const MAX_SIGNAL_ANGLE: f32 = 2.4;    // hard cap on signal-induced angle (radians)
 const MAX_SIGNAL_STEP: f32 = 0.8;    // max per-frame change due to signals (radians)
+const PROP_TORQUE_COUPLING: f32 = 1; // 0=no spin from props, 1=full lever-arm torque
 
 // ============================================================================
 // STRUCTURES (std430 aligned)
@@ -55,7 +56,7 @@ struct Agent {
     rotation: f32,            // current rotation angle
     energy: f32,              // energy level
     energy_capacity: f32,     // maximum energy storage (sum of all mouths * 10)
-    _pad_energy: f32,         // padding for alignment
+    torque_debug: f32,        // accumulated torque this frame (for inspector)
     morphology_origin: vec2<f32>, // Where the chain origin is in local space after CoM centering
     alive: u32,               // 1 = alive, 0 = dead
     body_count: u32,          // number of body parts
@@ -1872,8 +1873,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     let drag_coefficient = total_mass * 0.5;
 
+    // Sample terrain slope once at the center of mass so non-prop agents do not accumulate torque from tiny per-part differences
+    let com_world = agent.position + apply_agent_rotation(center_of_mass, agent.rotation);
+    let slope_idx = grid_index(com_world);
+    let slope_gradient_global = read_gamma_slope(slope_idx);
+    let slope_force_global = -slope_gradient_global * params.gamma_strength;
+
     // Accumulate forces and torques (relative to CoM)
-    var force = vec2<f32>(0.0);
+    var force = slope_force_global;
     var torque = 0.0;
     
     // Now calculate forces using the updated morphology
@@ -1907,11 +1914,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         
         let part_mass = max(amino_props.mass, 0.01);
         let part_weight = part_mass / total_mass;
-        
-    // Sample slope using nearest grid cell (no bilinear) to avoid diagonal bias
-    let slope_gradient = read_gamma_slope(grid_index(world_pos));
-    // Option 1: Make slope-induced force independent of total mass so lighter agents move faster uphill.
-    let slope_force = -slope_gradient * params.gamma_strength * part_weight;
 
     // Propeller force - check if this amino acid provides thrust
     // Propellers only work if agent has enough energy to cover their consumption cost
@@ -2006,8 +2008,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let propeller_strength = amino_props.thrust_force * 3 * amplification; // 2x power
                 let thrust_force = thrust_dir_world * propeller_strength;
                 force += thrust_force;
-                // Torque from lever arm r_com cross thrust
-                torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * 6.0;
+                // Torque from lever arm r_com cross thrust (scaled down to reduce perpetual spinning)
+                torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
             }
         }
 
@@ -2093,10 +2095,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        // Apply terrain slope force per amino acid to capture morphology-driven torque
-        force += slope_force;
-        torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
     }
+    
+    // Persist torque for inspector debugging
+    agents_out[agent_id].torque_debug = torque;
     
     // Apply linear forces - overdamped regime (fluid dynamics at nanoscale)
     // In viscous fluids at low Reynolds number, velocity is directly proportional to force
@@ -2377,7 +2379,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 offspring.energy = 0.0;
                 
                 offspring.energy_capacity = 0.0; // Will be calculated when morphology builds
-                offspring._pad_energy = 0.0;
+                offspring.torque_debug = 0.0;
                 
                 // Initialize as alive, will build body on first frame
                 offspring.alive = 1u;
@@ -3744,7 +3746,7 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent.rotation = rotation;
     agent.energy = max(request.energy, 0.0);
     agent.energy_capacity = 0.0; // Will be calculated after morphology builds
-    agent._pad_energy = 0.0;
+    agent.torque_debug = 0.0;
     agent.alive = 1u;
     agent.body_count = 0u;
     agent.rna_progress = 0u;
