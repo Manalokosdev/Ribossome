@@ -2757,6 +2757,25 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     } // End of draw_enabled check
 
+    // Always write selected agent to readback buffer for inspector (even when drawing disabled)
+    if (agent.is_selected == 1u) {
+        // Dedicated debug buffer: write full built list (count + up to MAX_BODY_PARTS types)
+        debug_parts_buffer[0] = body_count;
+        // Zero out to be safe when body_count shrinks
+        for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+            debug_parts_buffer[1u + i] = 0u;
+        }
+        for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+            debug_parts_buffer[1u + i] = agents_out[agent_id].body[i].part_type;
+        }
+
+        // Publish an unrotated copy for inspector preview
+        var unrotated_agent = agents_out[agent_id];
+        unrotated_agent.rotation = 0.0;
+        // Copy generation/age/total_mass (already in agents_out) unchanged
+        selected_agent_buffer[0] = unrotated_agent;
+    }
+
     // Always write output state (simulation must continue even when not drawing)
     agents_out[agent_id].position = agent.position;
     agents_out[agent_id].velocity = agent.velocity;
