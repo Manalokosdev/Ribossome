@@ -877,45 +877,6 @@ fn read_gamma_slope(idx: u32) -> vec2<f32> {
     return vec2<f32>(sx, sy);
 }
 
-fn sample_gamma_slope_bilinear(pos: vec2<f32>) -> vec2<f32> {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    
-    // Convert to grid coordinates (fractional)
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-    
-    // Get integer coordinates of the four surrounding cells
-    let x0 = i32(floor(grid_x));
-    let y0 = i32(floor(grid_y));
-    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
-    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
-    
-    // Clamp to valid range
-    let x0_clamped = clamp(x0, 0, i32(GRID_SIZE) - 1);
-    let y0_clamped = clamp(y0, 0, i32(GRID_SIZE) - 1);
-    
-    // Get fractional parts for interpolation
-    let fx = fract(grid_x);
-    let fy = fract(grid_y);
-    
-    // Sample the four corners
-    let idx00 = u32(y0_clamped) * GRID_SIZE + u32(x0_clamped);
-    let idx10 = u32(y0_clamped) * GRID_SIZE + u32(x1);
-    let idx01 = u32(y1) * GRID_SIZE + u32(x0_clamped);
-    let idx11 = u32(y1) * GRID_SIZE + u32(x1);
-    
-    let v00 = read_gamma_slope(idx00);
-    let v10 = read_gamma_slope(idx10);
-    let v01 = read_gamma_slope(idx01);
-    let v11 = read_gamma_slope(idx11);
-    
-    // Bilinear interpolation
-    let v0 = mix(v00, v10, fx);
-    let v1 = mix(v01, v11, fx);
-    return mix(v0, v1, fy);
-}
-
 fn write_gamma_slope(idx: u32, slope: vec2<f32>) {
     gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = slope.x;
     gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET] = slope.y;
@@ -931,173 +892,6 @@ fn read_combined_height(ix: i32, iy: i32) -> f32 {
         height += beta_grid[idx] * params.chemical_slope_scale_beta;
     }
     return height;
-}
-
-// Bilinear interpolation sampling for alpha grid
-fn sample_alpha_grid_bilinear(pos: vec2<f32>) -> f32 {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    
-    // Convert to grid coordinates (fractional)
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-    
-    // Get integer coordinates of the four surrounding cells
-    let x0 = i32(floor(grid_x));
-    let y0 = i32(floor(grid_y));
-    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
-    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
-    
-    // Clamp to valid range
-    let x0_clamped = clamp(x0, 0, i32(GRID_SIZE) - 1);
-    let y0_clamped = clamp(y0, 0, i32(GRID_SIZE) - 1);
-    
-    // Get fractional parts for interpolation
-    let fx = fract(grid_x);
-    let fy = fract(grid_y);
-    
-    // Sample the four corners
-    let idx00 = u32(y0_clamped) * GRID_SIZE + u32(x0_clamped);
-    let idx10 = u32(y0_clamped) * GRID_SIZE + u32(x1);
-    let idx01 = u32(y1) * GRID_SIZE + u32(x0_clamped);
-    let idx11 = u32(y1) * GRID_SIZE + u32(x1);
-    
-    let v00 = alpha_grid[idx00];
-    let v10 = alpha_grid[idx10];
-    let v01 = alpha_grid[idx01];
-    let v11 = alpha_grid[idx11];
-    
-    // Bilinear interpolation
-    let v0 = v00 + (v10 - v00) * fx;
-    let v1 = v01 + (v11 - v01) * fx;
-    return v0 + (v1 - v0) * fy;
-}
-
-fn sample_gamma_slope_grid_bilinear(pos: vec2<f32>) -> vec2<f32> {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-
-    let x0 = i32(floor(grid_x));
-    let y0 = i32(floor(grid_y));
-    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
-    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
-
-    let x0_clamped = clamp(x0, 0, i32(GRID_SIZE) - 1);
-    let y0_clamped = clamp(y0, 0, i32(GRID_SIZE) - 1);
-
-    let fx = fract(grid_x);
-    let fy = fract(grid_y);
-
-    let idx00 = u32(y0_clamped) * GRID_SIZE + u32(x0_clamped);
-    let idx10 = u32(y0_clamped) * GRID_SIZE + u32(x1);
-    let idx01 = u32(y1) * GRID_SIZE + u32(x0_clamped);
-    let idx11 = u32(y1) * GRID_SIZE + u32(x1);
-
-    let v00 = read_gamma_slope(idx00);
-    let v10 = read_gamma_slope(idx10);
-    let v01 = read_gamma_slope(idx01);
-    let v11 = read_gamma_slope(idx11);
-
-    let v0 = mix(v00, v10, fx);
-    let v1 = mix(v01, v11, fx);
-    return mix(v0, v1, fy);
-}
-
-// Bilinear interpolation sampling for beta grid
-fn sample_beta_grid_bilinear(pos: vec2<f32>) -> f32 {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    
-    // Convert to grid coordinates (fractional)
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-    
-    // Get integer coordinates of the four surrounding cells
-    let x0 = i32(floor(grid_x));
-    let y0 = i32(floor(grid_y));
-    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
-    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
-    
-    // Clamp to valid range
-    let x0_clamped = clamp(x0, 0, i32(GRID_SIZE) - 1);
-    let y0_clamped = clamp(y0, 0, i32(GRID_SIZE) - 1);
-    
-    // Get fractional parts for interpolation
-    let fx = fract(grid_x);
-    let fy = fract(grid_y);
-    
-    // Sample the four corners
-    let idx00 = u32(y0_clamped) * GRID_SIZE + u32(x0_clamped);
-    let idx10 = u32(y0_clamped) * GRID_SIZE + u32(x1);
-    let idx01 = u32(y1) * GRID_SIZE + u32(x0_clamped);
-    let idx11 = u32(y1) * GRID_SIZE + u32(x1);
-    
-    let v00 = beta_grid[idx00];
-    let v10 = beta_grid[idx10];
-    let v01 = beta_grid[idx01];
-    let v11 = beta_grid[idx11];
-    
-    // Bilinear interpolation
-    let v0 = mix(v00, v10, fx);
-    let v1 = mix(v01, v11, fx);
-    return mix(v0, v1, fy);
-}
-
-// Bilinear interpolation sampling for gamma (terrain) grid
-fn sample_gamma_grid_bilinear(pos: vec2<f32>) -> f32 {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-    let x0 = i32(floor(grid_x));
-    let y0 = i32(floor(grid_y));
-    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
-    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
-    let x0_clamped = clamp(x0, 0, i32(GRID_SIZE) - 1);
-    let y0_clamped = clamp(y0, 0, i32(GRID_SIZE) - 1);
-    let fx = fract(grid_x);
-    let fy = fract(grid_y);
-    let idx00 = u32(y0_clamped) * GRID_SIZE + u32(x0_clamped);
-    let idx10 = u32(y0_clamped) * GRID_SIZE + u32(x1);
-    let idx01 = u32(y1) * GRID_SIZE + u32(x0_clamped);
-    let idx11 = u32(y1) * GRID_SIZE + u32(x1);
-    let v00 = read_gamma_height(idx00);
-    let v10 = read_gamma_height(idx10);
-    let v01 = read_gamma_height(idx01);
-    let v11 = read_gamma_height(idx11);
-    let v0 = v00 + (v10 - v00) * fx;
-    let v1 = v01 + (v11 - v01) * fx;
-    return v0 + (v1 - v0) * fy;
-}
-
-// Bilinear interpolation sampling for trail grid (vec3 RGB)
-fn sample_trail_bilinear(pos: vec2<f32>) -> vec3<f32> {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-    let x0 = i32(floor(grid_x));
-    let y0 = i32(floor(grid_y));
-    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
-    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
-    let x0_clamped = clamp(x0, 0, i32(GRID_SIZE) - 1);
-    let y0_clamped = clamp(y0, 0, i32(GRID_SIZE) - 1);
-    let fx = fract(grid_x);
-    let fy = fract(grid_y);
-    let idx00 = u32(y0_clamped) * GRID_SIZE + u32(x0_clamped);
-    let idx10 = u32(y0_clamped) * GRID_SIZE + u32(x1);
-    let idx01 = u32(y1) * GRID_SIZE + u32(x0_clamped);
-    let idx11 = u32(y1) * GRID_SIZE + u32(x1);
-    let v00 = trail_grid[idx00].xyz;
-    let v10 = trail_grid[idx10].xyz;
-    let v01 = trail_grid[idx01].xyz;
-    let v11 = trail_grid[idx11].xyz;
-    let v0 = v00 + (v10 - v00) * fx;
-    let v1 = v01 + (v11 - v01) * fx;
-    return v0 + (v1 - v0) * fy;
 }
 
 fn hash(v: u32) -> u32 {
@@ -1818,13 +1612,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (amino_props.is_alpha_sensor) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let world_pos = agent.position + rotated_pos;
-            let sensed_value = sample_alpha_grid_bilinear(world_pos);
+            let sensed_value = alpha_grid[grid_index(world_pos)];
             new_alpha = sensed_value;
         }
         if (amino_props.is_beta_sensor) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let world_pos = agent.position + rotated_pos;
-            let sensed_value = sample_beta_grid_bilinear(world_pos);
+            let sensed_value = beta_grid[grid_index(world_pos)];
             new_beta = sensed_value;
         }
 
@@ -1982,8 +1776,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part_mass = max(amino_props.mass, 0.01);
 
         // Slope force per amino acid
-        // Use bilinear interpolation for smoother forces
-        let slope_gradient = sample_gamma_slope_bilinear(world_pos);
+        let slope_gradient = read_gamma_slope(grid_index(world_pos));
         let slope_force = -slope_gradient * params.gamma_strength * part_mass;
         force += slope_force;
         torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
@@ -3568,10 +3361,10 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     
-    // Sample environment grids with bilinear interpolation for smooth visualization
-    let alpha = sample_alpha_grid_bilinear(world_pos);
-    let beta = sample_beta_grid_bilinear(world_pos);
-    let gamma = sample_gamma_grid_bilinear(world_pos);
+    // Sample environment grids with direct indexing
+    let alpha = alpha_grid[grid_index(world_pos)];
+    let beta = beta_grid[grid_index(world_pos)];
+    let gamma = read_gamma_height(grid_index(world_pos));
     
     // Hide gamma if requested (treat gamma exactly like alpha/beta, no normalization)
     var gamma_display = gamma;
@@ -3588,7 +3381,7 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Slope visualization with optional lighting
     if (params.slope_debug != 0u) {
-        let slope = sample_gamma_slope_grid_bilinear(world_pos);
+        let slope = read_gamma_slope(grid_index(world_pos));
         if (params.slope_lighting != 0u) {
             // Lighting mode: compute normal and shade with directional light
             let normal = normalize(vec3<f32>(-slope.x * 10.0, -slope.y * 10.0, 1.0));
@@ -3645,7 +3438,7 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     // ====== RGB TRAIL OVERLAY ======
     // Sample trail grid and blend onto the visual output
-    let trail_color = sample_trail_bilinear(world_pos);
+    let trail_color = trail_grid[grid_index(world_pos)].xyz;
     
     // Trail-only mode: show just the trail on black background
     if (params.trail_show != 0u) {
