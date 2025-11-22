@@ -406,7 +406,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.alpha_right_mult = 0.4;
             props.beta_left_mult = 0.55;
             props.beta_right_mult = 0.45;
-            props.mass = 10.0; // Very heavy - slows agent down significantly
+            props.mass = 30.0; // Very heavy - slows agent down significantly
         }
         case 5u: { // G - Glycine - BETA CONDENSER
             props.segment_length = 4.0;
@@ -1568,7 +1568,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Dynamic chain build - angles modulated by alpha/beta signals
     var current_pos = vec2<f32>(0.0);
     var current_angle = 0.0;
-        var chirality_flip = 1.0; // Track cumulative chirality: 1.0 or -1.0
+    var chirality_flip = 1.0; // Track cumulative chirality: 1.0 or -1.0
+    
+    // Accumulators for average angle calculation
+    var sum_angle_mass = 0.0;
+    var total_mass_angle = 0.0;
+
     // Build parts starting from the first valid codon
     var build_b = start_byte;
         var parts_built = 0u; // Track how many we actually build
@@ -1609,16 +1614,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             target_signal_angle = clamp(target_signal_angle, -MAX_SIGNAL_ANGLE, MAX_SIGNAL_ANGLE);
 
             // Progressive smoothing stored in _pad.x
-            let prev_smoothed = agents_out[agent_id].body[i]._pad.x;
-            var smoothed_signal = mix(prev_smoothed, target_signal_angle, ANGLE_SMOOTH_FACTOR);
-            // Limit per-frame change (step clamp)
-            let delta_signal = smoothed_signal - prev_smoothed;
-            if (delta_signal > MAX_SIGNAL_STEP) { smoothed_signal = prev_smoothed + MAX_SIGNAL_STEP; }
-            if (delta_signal < -MAX_SIGNAL_STEP) { smoothed_signal = prev_smoothed - MAX_SIGNAL_STEP; }
+            // No inertia: angle reacts instantly to signal
+            var smoothed_signal = target_signal_angle;
             
             // Apply chirality flip to all angles (base_angle and signal modulation)
             current_angle += (props.base_angle + smoothed_signal) * chirality_flip;
             
+            // Accumulate for average angle
+            let m = max(props.mass, 0.01);
+            sum_angle_mass += current_angle * m;
+            total_mass_angle += m;
+
             current_pos.x += cos(current_angle) * props.segment_length;
             current_pos.y += sin(current_angle) * props.segment_length;
             agents_out[agent_id].body[i].pos = current_pos;
@@ -1665,8 +1671,36 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Removed angular re-orientation to avoid unstable whole-body rotations from small internal changes.
             // Agent's world rotation is driven only by physics (torque integration) ensuring temporal stability.
-
-            agents_out[agent_id].morphology_origin = origin_local;
+            
+            // Calculate mass-weighted average angle of the body
+            let avg_angle = sum_angle_mass / max(total_mass_angle, 0.0001);
+            
+            // Counteract internal rotation:
+            // 1. Add average angle to global rotation (so the "visual average" stays put)
+            if (!DISABLE_GLOBAL_ROTATION) {
+                agents_out[agent_id].rotation += avg_angle;
+            }
+            
+            // 2. Subtract average angle from all body parts (so they are centered around 0 locally)
+            // We need to rotate the positions around the CoM (0,0) by -avg_angle
+            let c_inv = cos(-avg_angle);
+            let s_inv = sin(-avg_angle);
+            
+            for (var i = 0u; i < min(rec_n, MAX_BODY_PARTS); i++) {
+                let p = agents_out[agent_id].body[i].pos;
+                // Rotate p by -avg_angle
+                agents_out[agent_id].body[i].pos = vec2<f32>(
+                    p.x * c_inv - p.y * s_inv,
+                    p.x * s_inv + p.y * c_inv
+                );
+            }
+            
+            // Also rotate the morphology origin
+            let o = origin_local;
+            agents_out[agent_id].morphology_origin = vec2<f32>(
+                o.x * c_inv - o.y * s_inv,
+                o.x * s_inv + o.y * c_inv
+            );
         }
         
         // Energy capacity already calculated during build loop above
@@ -2107,9 +2141,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     // Apply linear forces - overdamped regime (fluid dynamics at nanoscale)
     // In viscous fluids at low Reynolds number, velocity is directly proportional to force
-    // Stabilized linear motion (no dt): blend towards desired velocity and clamp
-    let desired_velocity = force / drag_coefficient;
-    agent.velocity = mix(agent.velocity, desired_velocity, VELOCITY_BLEND);
+    // No inertia: velocity = force / drag
+    agent.velocity = force / drag_coefficient;
     let v_len = length(agent.velocity);
     if (v_len > VEL_MAX) {
         agent.velocity = agent.velocity * (VEL_MAX / v_len);
