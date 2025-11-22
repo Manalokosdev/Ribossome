@@ -3,6 +3,8 @@
 // Licensed under MIT License
 
 use bytemuck::{Pod, Zeroable};
+use std::collections::VecDeque;
+use egui_plot::{Line, Plot, PlotPoints};
 use egui::{Color32, ColorImage, TextureHandle, TextureId, TextureOptions};
 use egui_wgpu::ScreenDescriptor;
 use image::imageops::FilterType;
@@ -789,6 +791,12 @@ struct SimulationSettings {
     interior_isotropic: bool,
     ignore_stop_codons: bool,
     require_start_codon: bool,
+    alpha_rain_variation: f32,
+    beta_rain_variation: f32,
+    alpha_rain_phase: f32,
+    beta_rain_phase: f32,
+    alpha_rain_freq: f32,
+    beta_rain_freq: f32,
 }
 
 impl Default for SimulationSettings {
@@ -838,6 +846,12 @@ impl Default for SimulationSettings {
             interior_isotropic: false, // Use asymmetric left/right multipliers from amino acids
             ignore_stop_codons: false, // Stop codons (UAA, UAG, UGA) terminate translation
             require_start_codon: true, // Translation starts at AUG (Methionine)
+            alpha_rain_variation: 0.0,
+            beta_rain_variation: 0.0,
+            alpha_rain_phase: 0.0,
+            beta_rain_phase: 0.0,
+            alpha_rain_freq: 1.0,
+            beta_rain_freq: 1.0,
         }
     }
 }
@@ -896,6 +910,12 @@ impl SimulationSettings {
             self.gamma_vis_max = (self.gamma_vis_min + 0.001).clamp(-1000.0, 1000.0);
             self.gamma_vis_min = (self.gamma_vis_max - 0.001).clamp(-1000.0, 1000.0);
         }
+        self.alpha_rain_variation = self.alpha_rain_variation.clamp(0.0, 1.0);
+        self.beta_rain_variation = self.beta_rain_variation.clamp(0.0, 1.0);
+        self.alpha_rain_phase = self.alpha_rain_phase.clamp(0.0, std::f32::consts::PI * 2.0);
+        self.beta_rain_phase = self.beta_rain_phase.clamp(0.0, std::f32::consts::PI * 2.0);
+        self.alpha_rain_freq = self.alpha_rain_freq.clamp(0.0, 100.0);
+        self.beta_rain_freq = self.beta_rain_freq.clamp(0.0, 100.0);
     }
 }
 
@@ -999,6 +1019,8 @@ struct GpuState {
 
     // Population statistics tracking
     population_history: Vec<u32>, // Stores population at sample points
+    alpha_rain_history: VecDeque<f32>,
+    beta_rain_history: VecDeque<f32>,
     epoch_sample_interval: u64,   // Sample every N epochs (1000)
     last_sample_epoch: u64,       // Last epoch when we sampled
     max_history_points: usize,    // Maximum data points (5000)
@@ -1035,6 +1057,12 @@ struct GpuState {
     beta_multiplier: f32,
     alpha_rain_map_path: Option<PathBuf>,
     beta_rain_map_path: Option<PathBuf>,
+    alpha_rain_variation: f32,
+    beta_rain_variation: f32,
+    alpha_rain_phase: f32,
+    beta_rain_phase: f32,
+    alpha_rain_freq: f32,
+    beta_rain_freq: f32,
     alpha_rain_thumbnail: Option<RainThumbnail>,
     beta_rain_thumbnail: Option<RainThumbnail>,
     chemical_slope_scale_alpha: f32,
@@ -2332,6 +2360,8 @@ impl GpuState {
             last_epoch_count: 0,
             epochs_per_second: 0.0,
             population_history: Vec::new(),
+            alpha_rain_history: VecDeque::new(),
+            beta_rain_history: VecDeque::new(),
             epoch_sample_interval: 1000,
             last_sample_epoch: 0,
             max_history_points: 5000,
@@ -2357,6 +2387,12 @@ impl GpuState {
             beta_slope_bias: settings.beta_slope_bias,
             alpha_multiplier: settings.alpha_multiplier,
             beta_multiplier: settings.beta_multiplier,
+            alpha_rain_variation: settings.alpha_rain_variation,
+            beta_rain_variation: settings.beta_rain_variation,
+            alpha_rain_phase: settings.alpha_rain_phase,
+            beta_rain_phase: settings.beta_rain_phase,
+            alpha_rain_freq: settings.alpha_rain_freq,
+            beta_rain_freq: settings.beta_rain_freq,
             alpha_rain_map_path: None,
             beta_rain_map_path: None,
             alpha_rain_thumbnail: None,
@@ -2989,6 +3025,12 @@ impl GpuState {
             interior_isotropic: self.interior_isotropic,
             ignore_stop_codons: self.ignore_stop_codons,
             require_start_codon: self.require_start_codon,
+            alpha_rain_variation: self.alpha_rain_variation,
+            beta_rain_variation: self.beta_rain_variation,
+            alpha_rain_phase: self.alpha_rain_phase,
+            beta_rain_phase: self.beta_rain_phase,
+            alpha_rain_freq: self.alpha_rain_freq,
+            beta_rain_freq: self.beta_rain_freq,
         }
     }
 
@@ -3337,6 +3379,32 @@ impl GpuState {
         // When paused or no living agents, freeze simulation side-effects.
         // Approach: don't dispatch simulation kernels at all when paused or no agents alive.
         let should_run_simulation = !self.is_paused && has_living_agents;
+
+        // Calculate rain values with variation
+        let time = self.epoch as f32;
+        
+        let alpha_var = self.alpha_rain_variation;
+        let beta_var = self.beta_rain_variation;
+        
+        let alpha_freq = self.alpha_rain_freq / 1000.0;
+        let alpha_phase = self.alpha_rain_phase;
+        let alpha_sin = (time * alpha_freq * 2.0 * std::f32::consts::PI + alpha_phase).sin();
+        
+        let beta_freq = self.beta_rain_freq / 1000.0;
+        let beta_phase = self.beta_rain_phase;
+        let beta_sin = (time * beta_freq * 2.0 * std::f32::consts::PI + beta_phase).sin();
+        
+        let current_alpha = self.alpha_multiplier * (1.0 + alpha_sin * alpha_var).max(0.0);
+        let current_beta = self.beta_multiplier * (1.0 + beta_sin * beta_var).max(0.0);
+
+        // Update history
+        if self.alpha_rain_history.len() >= 500 {
+            self.alpha_rain_history.pop_front();
+            self.beta_rain_history.pop_front();
+        }
+        self.alpha_rain_history.push_back(current_alpha);
+        self.beta_rain_history.push_back(current_beta);
+
         let effective_dt = if should_run_simulation { 0.016 } else { 0.0 };
         let effective_spawn_p = if should_run_simulation {
             self.spawn_probability
@@ -3367,8 +3435,8 @@ impl GpuState {
             gamma_blur: self.gamma_blur,
             alpha_slope_bias: self.alpha_slope_bias,
             beta_slope_bias: self.beta_slope_bias,
-            alpha_multiplier: self.alpha_multiplier,
-            beta_multiplier: self.beta_multiplier,
+            alpha_multiplier: current_alpha,
+            beta_multiplier: current_beta,
             chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
             chemical_slope_scale_beta: self.chemical_slope_scale_beta,
             mutation_rate: self.mutation_rate,
@@ -4495,6 +4563,7 @@ fn main() {
                                                 ui.selectable_value(&mut state.ui_tab, 0, "Simulation");
                                                 ui.selectable_value(&mut state.ui_tab, 1, "Agents");
                                                 ui.selectable_value(&mut state.ui_tab, 2, "Environment");
+                                                ui.selectable_value(&mut state.ui_tab, 3, "Evolution");
                                             });
                                             ui.separator();
 
@@ -5070,6 +5139,64 @@ fn main() {
                                                         ui.label(
                                                             "Slope force scales with the Obstacle / Terrain Force slider.",
                                                         );
+                                                    });
+                                                }
+                                                3 => {
+                                                    // Evolution tab
+                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                                        ui.heading("Rain Cycling");
+                                                        
+                                                        let current_alpha = state.alpha_rain_history.back().copied().unwrap_or(state.alpha_multiplier);
+                                                        let current_beta = state.beta_rain_history.back().copied().unwrap_or(state.beta_multiplier);
+                                                        
+                                                        ui.separator();
+                                                        ui.heading("Alpha Rain");
+                                                        ui.label(egui::RichText::new(format!("Current Alpha Rain: {:.6}", current_alpha)).color(Color32::GREEN));
+                                                        let mut alpha_var_percent = state.alpha_rain_variation * 100.0;
+                                                        if ui.add(egui::Slider::new(&mut alpha_var_percent, 0.0..=100.0).text("Variation %")).changed() {
+                                                            state.alpha_rain_variation = alpha_var_percent / 100.0;
+                                                        }
+                                                        ui.add(egui::Slider::new(&mut state.alpha_rain_phase, 0.0..=std::f32::consts::PI * 2.0).text("Phase"));
+                                                        ui.add(egui::Slider::new(&mut state.alpha_rain_freq, 0.0..=10.0).text("Freq (cycles/1k)"));
+                                                        
+                                                        ui.separator();
+                                                        ui.heading("Beta Rain");
+                                                        ui.label(egui::RichText::new(format!("Current Beta Rain: {:.6}", current_beta)).color(Color32::RED));
+                                                        let mut beta_var_percent = state.beta_rain_variation * 100.0;
+                                                        if ui.add(egui::Slider::new(&mut beta_var_percent, 0.0..=100.0).text("Variation %")).changed() {
+                                                            state.beta_rain_variation = beta_var_percent / 100.0;
+                                                        }
+                                                        ui.add(egui::Slider::new(&mut state.beta_rain_phase, 0.0..=std::f32::consts::PI * 2.0).text("Phase"));
+                                                        ui.add(egui::Slider::new(&mut state.beta_rain_freq, 0.0..=10.0).text("Freq (cycles/1k)"));
+                                                        
+                                                        ui.separator();
+                                                        ui.heading("Rain Projection (Future)");
+                                                        let time = state.epoch as f64;
+                                                        let points = 500;
+                                                        let alpha_points: PlotPoints = (0..points).map(|i| {
+                                                            let t = time + i as f64;
+                                                            let freq = state.alpha_rain_freq as f64 / 1000.0;
+                                                            let phase = state.alpha_rain_phase as f64;
+                                                            let sin_val = (t * freq * 2.0 * std::f64::consts::PI + phase).sin();
+                                                            let val = state.alpha_multiplier as f64 * (1.0 + sin_val * state.alpha_rain_variation as f64).max(0.0);
+                                                            [i as f64, val]
+                                                        }).collect();
+                                                        
+                                                        let beta_points: PlotPoints = (0..points).map(|i| {
+                                                            let t = time + i as f64;
+                                                            let freq = state.beta_rain_freq as f64 / 1000.0;
+                                                            let phase = state.beta_rain_phase as f64;
+                                                            let sin_val = (t * freq * 2.0 * std::f64::consts::PI + phase).sin();
+                                                            let val = state.beta_multiplier as f64 * (1.0 + sin_val * state.beta_rain_variation as f64).max(0.0);
+                                                            [i as f64, val]
+                                                        }).collect();
+                                                        
+                                                        Plot::new("rain_plot_future")
+                                                            .view_aspect(2.0)
+                                                            .show(ui, |plot_ui| {
+                                                                plot_ui.line(Line::new(alpha_points).name("Alpha").color(Color32::GREEN));
+                                                                plot_ui.line(Line::new(beta_points).name("Beta").color(Color32::RED));
+                                                            });
                                                     });
                                                 }
                                                 _ => {}
@@ -5978,6 +6105,49 @@ fn main() {
                                                 state.gamma_vis_max =
                                                     state.gamma_vis_max.clamp(-1000.0, 1000.0);
                                             }
+
+                                            ui.separator();
+                                            ui.collapsing("Evolution", |ui| {
+                                                ui.label("Rain Cycling");
+                                                ui.add(egui::Slider::new(&mut state.alpha_rain_variation, 0.0..=1.0).text("Alpha Var %"));
+                                                ui.add(egui::Slider::new(&mut state.beta_rain_variation, 0.0..=1.0).text("Beta Var %"));
+                                                
+                                                ui.label("Alpha Cycle");
+                                                ui.add(egui::Slider::new(&mut state.alpha_rain_phase, 0.0..=std::f32::consts::PI * 2.0).text("Phase"));
+                                                ui.add(egui::Slider::new(&mut state.alpha_rain_freq, 0.0..=100.0).text("Freq (cycles/1k)"));
+                                                
+                                                ui.label("Beta Cycle");
+                                                ui.add(egui::Slider::new(&mut state.beta_rain_phase, 0.0..=std::f32::consts::PI * 2.0).text("Phase"));
+                                                ui.add(egui::Slider::new(&mut state.beta_rain_freq, 0.0..=100.0).text("Freq (cycles/1k)"));
+                                                
+                                                ui.label("Rain Projection (Future)");
+                                                let time = state.epoch as f64;
+                                                let points = 500;
+                                                let alpha_points: PlotPoints = (0..points).map(|i| {
+                                                    let t = time + i as f64;
+                                                    let freq = state.alpha_rain_freq as f64 / 1000.0;
+                                                    let phase = state.alpha_rain_phase as f64;
+                                                    let sin_val = (t * freq * 2.0 * std::f64::consts::PI + phase).sin();
+                                                    let val = state.alpha_multiplier as f64 * (1.0 + sin_val * state.alpha_rain_variation as f64).max(0.0);
+                                                    [i as f64, val]
+                                                }).collect();
+                                                
+                                                let beta_points: PlotPoints = (0..points).map(|i| {
+                                                    let t = time + i as f64;
+                                                    let freq = state.beta_rain_freq as f64 / 1000.0;
+                                                    let phase = state.beta_rain_phase as f64;
+                                                    let sin_val = (t * freq * 2.0 * std::f64::consts::PI + phase).sin();
+                                                    let val = state.beta_multiplier as f64 * (1.0 + sin_val * state.beta_rain_variation as f64).max(0.0);
+                                                    [i as f64, val]
+                                                }).collect();
+                                                
+                                                Plot::new("rain_plot")
+                                                    .view_aspect(2.0)
+                                                    .show(ui, |plot_ui| {
+                                                        plot_ui.line(Line::new(alpha_points).name("Alpha").color(Color32::GREEN));
+                                                        plot_ui.line(Line::new(beta_points).name("Beta").color(Color32::RED));
+                                                    });
+                                            });
 
                                             ui.separator();
                                             ui.heading("Performance");
