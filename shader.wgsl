@@ -1873,14 +1873,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     let drag_coefficient = total_mass * 0.5;
 
-    // Sample terrain slope once at the center of mass so non-prop agents do not accumulate torque from tiny per-part differences
-    let com_world = agent.position + apply_agent_rotation(center_of_mass, agent.rotation);
-    let slope_idx = grid_index(com_world);
-    let slope_gradient_global = read_gamma_slope(slope_idx);
-    let slope_force_global = -slope_gradient_global * params.gamma_strength;
-
     // Accumulate forces and torques (relative to CoM)
-    var force = slope_force_global;
+    var force = vec2<f32>(0.0);
     var torque = 0.0;
     
     // Now calculate forces using the updated morphology
@@ -1909,10 +1903,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let rotated_midpoint = apply_agent_rotation(segment_midpoint, agent.rotation);
         let world_pos = agent.position + rotated_midpoint;
         
+        let part_mass = max(amino_props.mass, 0.01);
+
+        // Slope force per amino acid
+        let slope_idx = grid_index(world_pos);
+        let slope_gradient = read_gamma_slope(slope_idx);
+        let slope_force = -slope_gradient * params.gamma_strength * part_mass;
+        force += slope_force;
+        torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
+        
         // Cached amplification for this part (organs will use it, others may ignore)
         let amplification = amplification_per_part[i];
         
-        let part_mass = max(amino_props.mass, 0.01);
         let part_weight = part_mass / total_mass;
 
     // Propeller force - check if this amino acid provides thrust

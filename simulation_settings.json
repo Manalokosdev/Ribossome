@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 7.340952,
+  "camera_zoom": 14.626746,
   "spawn_probability": 0.1,
   "death_probability": 0.001,
   "mutation_rate": 0.001,
@@ -17,12 +17,12 @@
   "beta_rain_map_path": null,
   "chemical_slope_scale_alpha": 0.1,
   "chemical_slope_scale_beta": 0.1,
-  "food_power": 3.0,
+  "food_power": 5.0,
   "poison_power": 10.0,
   "amino_maintenance_cost": 0.001,
   "pairing_cost": 0.01,
   "prop_wash_strength": 0.2,
-  "repulsion_strength": 10.0,
+  "repulsion_strength": 5.0,
   "limit_fps": false,
   "limit_fps_25": false,
   "render_interval": 50,
@@ -48,5 +48,5 @@
   "alpha_rain_phase": 0.3,
   "beta_rain_phase": 3.5,
   "alpha_rain_freq": 0.3,
-  "beta_rain_freq": 0.3
+  "beta_rain_freq": 0.15
 }
