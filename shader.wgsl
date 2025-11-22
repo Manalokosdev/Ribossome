@@ -1843,11 +1843,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         total_mass += mass;
         
         // Calculate segment midpoint for mass distribution
-        var segment_start = morphology_origin;
+        var segment_start_chain = vec2<f32>(0.0);
         if (i > 0u) {
-            segment_start = agents_out[agent_id].body[i - 1u].pos;
+            segment_start_chain = agents_out[agent_id].body[i - 1u].pos;
         }
-        let segment_midpoint = (segment_start + part.pos) * 0.5;
+        let segment_midpoint_chain = (segment_start_chain + part.pos) * 0.5;
+        let segment_midpoint = morphology_origin + segment_midpoint_chain;
+        
         center_of_mass += segment_midpoint * mass;
     }
     total_mass = max(total_mass, 0.05); // Prevent division by zero
@@ -1891,11 +1893,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         
         // Calculate segment midpoint for force application and torque
-        var segment_start = morphology_origin;
+        var segment_start_chain = vec2<f32>(0.0);
         if (i > 0u) {
-            segment_start = agents_out[agent_id].body[i - 1u].pos;
+            segment_start_chain = agents_out[agent_id].body[i - 1u].pos;
         }
-        let segment_midpoint = (segment_start + part.pos) * 0.5;
+        let segment_midpoint_chain = (segment_start_chain + part.pos) * 0.5;
+        let segment_midpoint = morphology_origin + segment_midpoint_chain;
         
         // Use midpoint for physics calculations
         let offset_from_com = segment_midpoint - center_of_mass;
@@ -2123,19 +2126,21 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mass = max(props.mass, 0.01);
         
         // Calculate segment midpoint
-        var segment_start = morphology_origin;
+        var segment_start_chain = vec2<f32>(0.0);
         if (i > 0u) {
-            segment_start = agents_out[agent_id].body[i - 1u].pos;
+            segment_start_chain = agents_out[agent_id].body[i - 1u].pos;
         }
-        let segment_midpoint = (segment_start + part.pos) * 0.5;
+        let segment_midpoint_chain = (segment_start_chain + part.pos) * 0.5;
+        let segment_midpoint = morphology_origin + segment_midpoint_chain;
         
-        let r_squared = dot(segment_midpoint, segment_midpoint);
+        let offset = segment_midpoint - center_of_mass;
+        let r_squared = dot(offset, offset);
         moment_of_inertia += mass * r_squared;
     }
     moment_of_inertia = max(moment_of_inertia, 0.01);
     
     // Overdamped rotation: angular_velocity = torque / rotational_drag
-    let rotational_drag = moment_of_inertia * 5.0; // Moderate rotational drag
+    let rotational_drag = moment_of_inertia * 20.0; // Increased rotational drag for stability
     var angular_velocity = torque / rotational_drag;
     angular_velocity = angular_velocity * ANGULAR_BLEND;
     angular_velocity = clamp(angular_velocity, -ANGVEL_MAX, ANGVEL_MAX);
