@@ -2408,8 +2408,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Create brand new offspring agent (don't copy parent)
                 var offspring: Agent;
                 
-                // Rotate 180 degrees from parent orientation (π radians)
-                offspring.rotation = agent.rotation + 3.14159265359;
+                // Random rotation
+                offspring.rotation = hash_f32(offspring_hash) * 6.28318530718;
                 
                 // Spawn at same location as parent
                 offspring.position = agent.position;
