@@ -383,7 +383,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = -0.3;
             props.mass = 0.01;
         }
-        case 4u: { // F - Phenylalanine - POISON RESISTANT - Very heavy pink blob (cumulative: each F halves poison damage)
+        case 4u: { // F - Phenylalanine - POISON RESISTANT - Very heavy pink blob (cumulative: each F reduces poison damage by 10%)
             props.segment_length = 30.0;
             props.thickness = 30.0; // Very fat blob
             // Old CSV: Seed Angle = -60°
@@ -406,7 +406,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.alpha_right_mult = 0.4;
             props.beta_left_mult = 0.55;
             props.beta_right_mult = 0.45;
-            props.mass = 30.0; // Very heavy - slows agent down significantly
+            props.mass = 10.0; // Very heavy - slows agent down significantly
         }
         case 5u: { // G - Glycine - BETA CONDENSER
             props.segment_length = 4.0;
@@ -875,6 +875,45 @@ fn read_gamma_slope(idx: u32) -> vec2<f32> {
     let sx = gamma_grid[idx + GAMMA_SLOPE_X_OFFSET];
     let sy = gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET];
     return vec2<f32>(sx, sy);
+}
+
+fn sample_gamma_slope_bilinear(pos: vec2<f32>) -> vec2<f32> {
+    let clamped = clamp_position(pos);
+    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+    
+    // Convert to grid coordinates (fractional)
+    let grid_x = clamped.x / scale;
+    let grid_y = clamped.y / scale;
+    
+    // Get integer coordinates of the four surrounding cells
+    let x0 = i32(floor(grid_x));
+    let y0 = i32(floor(grid_y));
+    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
+    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
+    
+    // Clamp to valid range
+    let x0_clamped = clamp(x0, 0, i32(GRID_SIZE) - 1);
+    let y0_clamped = clamp(y0, 0, i32(GRID_SIZE) - 1);
+    
+    // Get fractional parts for interpolation
+    let fx = fract(grid_x);
+    let fy = fract(grid_y);
+    
+    // Sample the four corners
+    let idx00 = u32(y0_clamped) * GRID_SIZE + u32(x0_clamped);
+    let idx10 = u32(y0_clamped) * GRID_SIZE + u32(x1);
+    let idx01 = u32(y1) * GRID_SIZE + u32(x0_clamped);
+    let idx11 = u32(y1) * GRID_SIZE + u32(x1);
+    
+    let v00 = read_gamma_slope(idx00);
+    let v10 = read_gamma_slope(idx10);
+    let v01 = read_gamma_slope(idx01);
+    let v11 = read_gamma_slope(idx11);
+    
+    // Bilinear interpolation
+    let v0 = mix(v00, v10, fx);
+    let v1 = mix(v01, v11, fx);
+    return mix(v0, v1, fy);
 }
 
 fn write_gamma_slope(idx: u32, slope: vec2<f32>) {
@@ -1943,8 +1982,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part_mass = max(amino_props.mass, 0.01);
 
         // Slope force per amino acid
-        let slope_idx = grid_index(world_pos);
-        let slope_gradient = read_gamma_slope(slope_idx);
+        // Use bilinear interpolation for smoother forces
+        let slope_gradient = sample_gamma_slope_bilinear(world_pos);
         let slope_force = -slope_gradient * params.gamma_strength * part_mass;
         force += slope_force;
         torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
@@ -2074,12 +2113,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     (i + 1u) * 83492791u ^
                     params.random_seed
                 );
-                let rand1 = hash_f32(hashed_seed);
-                let rand2 = hash_f32(hashed_seed ^ 0x9e3779b9u);
+                
+                // Use integer modulo for perfectly uniform distribution in [-2, 2]
+                // Previous round() method biased results towards -1, 0, 1
+                let h1 = hash(hashed_seed);
+                let h2 = hash(h1); // Chain hash for independence
 
-                // Random offset in range [-2, 2] for both x and y
-                let offset_x = i32(round(rand1 * 4.0 - 2.0));
-                let offset_y = i32(round(rand2 * 4.0 - 2.0));
+                let offset_x = i32(h1 % 5u) - 2;
+                let offset_y = i32(h2 % 5u) - 2;
                 
                 let target_gx = clamp(gx + offset_x, 0, i32(GRID_SIZE) - 1);
                 let target_gy = clamp(gy + offset_y, 0, i32(GRID_SIZE) - 1);
@@ -2225,15 +2266,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Bite size is now independent of speed; keep fixed capture per frame
     
     // Count poison-resistant amino acids (F = Phenylalanine, amino index 4)
-    // Each one halves poison damage: 1 F -> 0.5x, 2 F -> 0.25x, 3 F -> 0.125x
+    // Each one reduces poison damage by 10%: 1 F -> 0.9x, 2 F -> 0.81x
     var poison_resistant_count = 0u;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         if (agents_out[agent_id].body[i].part_type == 4u) { // Phenylalanine
             poison_resistant_count += 1u;
         }
     }
-    // Each F halves poison/radiation damage: 1 F -> 50%, 2 F -> 25%, 3 F -> 12.5%
-    let poison_multiplier = pow(0.5, f32(poison_resistant_count));
+    // Each F reduces poison/radiation damage by 10%
+    let poison_multiplier = pow(0.9, f32(poison_resistant_count));
     
     // Track total consumption for regurgitation
     var total_consumed_alpha = 0.0;

@@ -745,6 +745,41 @@ struct EnvironmentInitParams {
 const _: [(); 112] = [(); std::mem::size_of::<EnvironmentInitParams>()];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct AutoDifficultyParam {
+    enabled: bool,
+    min_threshold: f32, // e.g. min population
+    max_threshold: f32, // e.g. max population
+    adjustment_percent: f32, // e.g. 10%
+    cooldown_epochs: u64,
+    last_adjustment_epoch: u64,
+    difficulty_level: i32, // 0 is base, +1 is harder, -1 is easier
+}
+
+impl Default for AutoDifficultyParam {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_threshold: 1000.0,
+            max_threshold: 5000.0,
+            adjustment_percent: 10.0,
+            cooldown_epochs: 600, // 10 seconds at 60fps
+            last_adjustment_epoch: 0,
+            difficulty_level: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+struct DifficultySettings {
+    food_power: AutoDifficultyParam,
+    poison_power: AutoDifficultyParam,
+    spawn_prob: AutoDifficultyParam,
+    death_prob: AutoDifficultyParam,
+    alpha_rain: AutoDifficultyParam,
+    beta_rain: AutoDifficultyParam,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 struct SimulationSettings {
     camera_zoom: f32,
@@ -797,6 +832,7 @@ struct SimulationSettings {
     beta_rain_phase: f32,
     alpha_rain_freq: f32,
     beta_rain_freq: f32,
+    difficulty: DifficultySettings,
 }
 
 impl Default for SimulationSettings {
@@ -852,6 +888,7 @@ impl Default for SimulationSettings {
             beta_rain_phase: 0.0,
             alpha_rain_freq: 1.0,
             beta_rain_freq: 1.0,
+            difficulty: DifficultySettings::default(),
         }
     }
 }
@@ -999,6 +1036,7 @@ struct GpuState {
     spawn_probability: f32,
     death_probability: f32,
     auto_replenish: bool,
+    difficulty: DifficultySettings,
 
     // FPS tracking
     frame_count: u32,
@@ -1032,6 +1070,7 @@ struct GpuState {
     // Agent selection for debug panel
     selected_agent_index: Option<usize>,
     selected_agent_data: Option<Agent>,
+    follow_selected_agent: bool, // New field
     debug_parts_data: Option<(u32, [u32; MAX_BODY_PARTS])>,
 
     // RNG state for per-frame randomness
@@ -2274,6 +2313,21 @@ impl GpuState {
                     (SimulationSettings::default(), true)
                 }
             };
+
+        // Reset difficulty levels to 0 on startup
+        settings.difficulty.food_power.difficulty_level = 0;
+        settings.difficulty.food_power.last_adjustment_epoch = 0;
+        settings.difficulty.poison_power.difficulty_level = 0;
+        settings.difficulty.poison_power.last_adjustment_epoch = 0;
+        settings.difficulty.spawn_prob.difficulty_level = 0;
+        settings.difficulty.spawn_prob.last_adjustment_epoch = 0;
+        settings.difficulty.death_prob.difficulty_level = 0;
+        settings.difficulty.death_prob.last_adjustment_epoch = 0;
+        settings.difficulty.alpha_rain.difficulty_level = 0;
+        settings.difficulty.alpha_rain.last_adjustment_epoch = 0;
+        settings.difficulty.beta_rain.difficulty_level = 0;
+        settings.difficulty.beta_rain.last_adjustment_epoch = 0;
+
         let original_settings = settings.clone();
         settings.sanitize();
         if settings != original_settings {
@@ -2344,6 +2398,7 @@ impl GpuState {
             spawn_probability: settings.spawn_probability,
             death_probability: settings.death_probability,
             auto_replenish: settings.auto_replenish,
+            difficulty: settings.difficulty.clone(),
             frame_count: 0,
             last_fps_update: std::time::Instant::now(),
             limit_fps: settings.limit_fps,
@@ -2369,6 +2424,7 @@ impl GpuState {
             last_mouse_pos: None,
             selected_agent_index: None,
             selected_agent_data: None,
+            follow_selected_agent: false, // Initialize to false
             debug_parts_data: None,
             rng_state: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2580,7 +2636,7 @@ impl GpuState {
         let height = thumbnail.height() as usize;
         let mut pixels = Vec::with_capacity(width * height);
         let raw = thumbnail.as_raw();
-        for row in (0..height).rev() {
+        for row in 0..height {
             let row_offset = row * width;
             for col in 0..width {
                 let intensity = raw[row_offset + col];
@@ -3031,6 +3087,7 @@ impl GpuState {
             beta_rain_phase: self.beta_rain_phase,
             alpha_rain_freq: self.alpha_rain_freq,
             beta_rain_freq: self.beta_rain_freq,
+            difficulty: self.difficulty.clone(),
         }
     }
 
@@ -3335,6 +3392,54 @@ impl GpuState {
     }
 
     pub fn update(&mut self, should_draw: bool) {
+        // Auto Difficulty Logic
+        if !self.is_paused {
+            let pop = self.alive_count as f32;
+            let current_epoch = self.epoch;
+            
+            // Helper macro to avoid repetition
+            macro_rules! adjust_param {
+                ($param_struct:expr, $value:expr, $is_harder_increase:expr) => {
+                    if $param_struct.enabled {
+                        if current_epoch >= $param_struct.last_adjustment_epoch + $param_struct.cooldown_epochs {
+                            let factor = $param_struct.adjustment_percent / 100.0;
+                            let mut adjusted = false;
+                            if pop > $param_struct.max_threshold {
+                                // Make Harder (Population too high)
+                                if $is_harder_increase {
+                                    $value *= (1.0 + factor);
+                                } else {
+                                    $value *= (1.0 - factor);
+                                }
+                                $param_struct.difficulty_level += 1;
+                                adjusted = true;
+                            } else if pop < $param_struct.min_threshold {
+                                // Make Easier (Population too low)
+                                if $is_harder_increase {
+                                    $value *= (1.0 - factor);
+                                } else {
+                                    $value *= (1.0 + factor);
+                                }
+                                $param_struct.difficulty_level -= 1;
+                                adjusted = true;
+                            }
+                            
+                            if adjusted {
+                                $param_struct.last_adjustment_epoch = current_epoch;
+                            }
+                        }
+                    }
+                };
+            }
+
+            adjust_param!(self.difficulty.food_power, self.food_power, false); // Harder = Decrease
+            adjust_param!(self.difficulty.poison_power, self.poison_power, true); // Harder = Increase
+            adjust_param!(self.difficulty.spawn_prob, self.spawn_probability, false); // Harder = Decrease
+            adjust_param!(self.difficulty.death_prob, self.death_probability, true); // Harder = Increase
+            adjust_param!(self.difficulty.alpha_rain, self.alpha_multiplier, false); // Harder = Decrease
+            adjust_param!(self.difficulty.beta_rain, self.beta_multiplier, true); // Harder = Increase
+        }
+
         // Advance RNG & auto-replenish only when not paused AND there are living agents
         let has_living_agents = self.alive_count > 0;
         if !self.is_paused && has_living_agents {
@@ -4294,7 +4399,22 @@ fn reset_simulation_state(
         drop(existing);
     }
 
-    let new_state = pollster::block_on(GpuState::new(window.clone()));
+    let mut new_state = pollster::block_on(GpuState::new(window.clone()));
+
+    // Reset difficulty levels to 0 on simulation reset
+    new_state.difficulty.food_power.difficulty_level = 0;
+    new_state.difficulty.food_power.last_adjustment_epoch = 0;
+    new_state.difficulty.poison_power.difficulty_level = 0;
+    new_state.difficulty.poison_power.last_adjustment_epoch = 0;
+    new_state.difficulty.spawn_prob.difficulty_level = 0;
+    new_state.difficulty.spawn_prob.last_adjustment_epoch = 0;
+    new_state.difficulty.death_prob.difficulty_level = 0;
+    new_state.difficulty.death_prob.last_adjustment_epoch = 0;
+    new_state.difficulty.alpha_rain.difficulty_level = 0;
+    new_state.difficulty.alpha_rain.last_adjustment_epoch = 0;
+    new_state.difficulty.beta_rain.difficulty_level = 0;
+    new_state.difficulty.beta_rain.last_adjustment_epoch = 0;
+
     *state = Some(new_state);
 
     // Recreate egui_winit state to clear all internal texture tracking
@@ -4380,21 +4500,25 @@ fn main() {
                                         PhysicalKey::Code(KeyCode::KeyW) => {
                                             state.camera_pan[1] -= 200.0 / state.camera_zoom;
                                             state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * 30720.0, 1.25 * 30720.0);
+                                            state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyS) => {
                                             state.camera_pan[1] += 200.0 / state.camera_zoom;
                                             state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * 30720.0, 1.25 * 30720.0);
+                                            state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyA) => {
                                             state.camera_pan[0] -= 200.0 / state.camera_zoom;
                                             state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * 30720.0, 1.25 * 30720.0);
+                                            state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyD) => {
                                             state.camera_pan[0] += 200.0 / state.camera_zoom;
                                             state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * 30720.0, 1.25 * 30720.0);
+                                            state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyR) => {
@@ -4457,6 +4581,7 @@ fn main() {
                                         state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
                                         state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
 
+                                        state.follow_selected_agent = false;
                                         window.request_redraw();
                                     }
                                 }
@@ -4564,6 +4689,7 @@ fn main() {
                                                 ui.selectable_value(&mut state.ui_tab, 1, "Agents");
                                                 ui.selectable_value(&mut state.ui_tab, 2, "Environment");
                                                 ui.selectable_value(&mut state.ui_tab, 3, "Evolution");
+                                                ui.selectable_value(&mut state.ui_tab, 4, "Difficulty");
                                             });
                                             ui.separator();
 
@@ -5199,6 +5325,56 @@ fn main() {
                                                             });
                                                     });
                                                 }
+                                                4 => {
+                                                    // Difficulty tab
+                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                                        ui.heading("Auto Difficulty Settings");
+                                                        ui.label("Automatically adjust parameters based on population count.");
+                                                        ui.label(format!("Current Population: {}", state.alive_count));
+                                                        
+                                                        let current_epoch = state.epoch;
+                                                        let mut draw_param = |ui: &mut egui::Ui, param: &mut AutoDifficultyParam, name: &str, current_val: f32, current_epoch: u64| {
+                                                            ui.separator();
+                                                            ui.heading(name);
+                                                            ui.horizontal(|ui| {
+                                                                ui.checkbox(&mut param.enabled, "Enabled");
+                                                                ui.label(egui::RichText::new(format!("Level: {}", param.difficulty_level)).strong());
+                                                                ui.label(format!("Current Val: {:.5}", current_val));
+                                                            });
+                                                            
+                                                            if param.enabled {
+                                                                ui.horizontal(|ui| {
+                                                                    ui.label("Min Pop:");
+                                                                    ui.add(egui::DragValue::new(&mut param.min_threshold).speed(10.0));
+                                                                    ui.label("Max Pop:");
+                                                                    ui.add(egui::DragValue::new(&mut param.max_threshold).speed(10.0));
+                                                                });
+                                                                ui.horizontal(|ui| {
+                                                                    ui.label("Adjust %:");
+                                                                    ui.add(egui::Slider::new(&mut param.adjustment_percent, 0.0..=100.0));
+                                                                });
+                                                                ui.horizontal(|ui| {
+                                                                    ui.label("Cooldown (epochs):");
+                                                                    ui.add(egui::DragValue::new(&mut param.cooldown_epochs));
+                                                                });
+                                                                
+                                                                let epochs_passed = current_epoch.saturating_sub(param.last_adjustment_epoch);
+                                                                if epochs_passed < param.cooldown_epochs {
+                                                                    let remaining = param.cooldown_epochs - epochs_passed;
+                                                                    ui.label(format!("Cooldown: {} epochs", remaining));
+                                                                    ui.add(egui::ProgressBar::new(epochs_passed as f32 / param.cooldown_epochs as f32));
+                                                                }
+                                                            }
+                                                        };
+
+                                                        draw_param(ui, &mut state.difficulty.food_power, "Food Power (Harder = Less)", state.food_power, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.poison_power, "Poison Power (Harder = More)", state.poison_power, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.spawn_prob, "Spawn Prob (Harder = Less)", state.spawn_probability, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.death_prob, "Death Prob (Harder = More)", state.death_probability, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.alpha_rain, "Alpha Rain (Harder = Less)", state.alpha_multiplier, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.beta_rain, "Beta Rain (Harder = More)", state.beta_multiplier, current_epoch);
+                                                    });
+                                                }
                                                 _ => {}
                                             }
                             });
@@ -5215,6 +5391,8 @@ fn main() {
                                             if let Some(idx) = selected_idx {
                                                 ui.label(format!("Agent Index: {}", idx));
                                             }
+                                            
+                                            ui.checkbox(&mut state.follow_selected_agent, "Follow Agent");
 
                                             ui.separator();
                                             ui.heading("Identity");
