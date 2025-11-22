@@ -155,7 +155,7 @@ struct EnvironmentInitParams {
     gamma_height_range: vec2<f32>,
     trail_values: vec4<f32>,
     slope_pair: vec2<f32>,
-    _padding: vec4<f32>,
+    gen_params: vec4<u32>, // x=mode(0=all,1=a,2=b,3=g), y=type(0=flat,1=noise), z=value_bits, w=seed
 }
 
 // ============================================================================
@@ -2001,7 +2001,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (i > 0u) {
                 let prev = agents_out[agent_id].body[i-1u].pos;
                 segment_dir = part.pos - prev;
-            } else if (body_count > 1u) {
+            } else if (agents_out[agent_id].body_count > 1u) {
                 let next = agents_out[agent_id].body[1u].pos;
                 segment_dir = next - part.pos;
             } else {
@@ -2231,7 +2231,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent.position = clamp_position(agent.position + agent.velocity);
 
     // ====== TRAIL DEPOSITION ======
-    // Deposit agent color to RGB trail grid at each body part position
+    // Deposit agent color to RGB trail at each body part position
     let trail_deposit_strength = 0.08; // Strength of trail deposition (0-1)
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
@@ -2970,33 +2970,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agents_out[agent_id].rotation = agent.rotation;
     agents_out[agent_id].energy = agent.energy;
     agents_out[agent_id].alive = agent.alive;
-    // pairing_counter and rna_progress already written above
-
-    // Always write selected agent to readback buffer for inspector (even when drawing disabled)
-    if (agent.is_selected == 1u) {
-        // Dedicated debug buffer: write full built list (count + up to MAX_BODY_PARTS types)
-        debug_parts_buffer[0] = body_count;
-        // Zero out to be safe when body_count shrinks
-        for (var i = 0u; i < MAX_BODY_PARTS; i++) {
-            debug_parts_buffer[1u + i] = 0u;
-        }
-        for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-            debug_parts_buffer[1u + i] = agents_out[agent_id].body[i].part_type;
-        }
-
-        // Publish an unrotated copy for inspector preview
-        var unrotated_agent = agents_out[agent_id];
-        unrotated_agent.rotation = 0.0;
-        // Copy generation/age/total_mass (already in agents_out) unchanged
-        selected_agent_buffer[0] = unrotated_agent;
-    }
-    
-    // Update only the fields that changed during physics, preserve the body array unless first-time build
-    agents_out[agent_id].position = agent.position;
-    agents_out[agent_id].velocity = agent.velocity;
-    agents_out[agent_id].rotation = agent.rotation;
-    agents_out[agent_id].energy = agent.energy;
-    agents_out[agent_id].alive = agent.alive;
     // Increment age for living agents
     if (agents_out[agent_id].alive == 1u) {
         agents_out[agent_id].age = agents_out[agent_id].age + 1u;
@@ -3646,7 +3619,8 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else if (params.beta_show != 0u) {
                 base_color = vec3<f32>(beta, beta, beta);
             } else { // gamma_show
-                base_color = vec3<f32>(gamma_display, gamma_display, gamma_display);
+                // Use raw gamma value for consistency with alpha/beta single channel display
+                base_color = vec3<f32>(gamma, gamma, gamma);
             }
         } else {
             // Multi-channel mode: show as color mix
@@ -3932,4 +3906,43 @@ fn compact_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(1)
 fn reset_spawn_counter(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicStore(&spawn_counter, 0u);
+}
+
+// ============================================================================
+// MAP GENERATION
+// ============================================================================
+
+@compute @workgroup_size(16, 16)
+fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= GRID_SIZE || y >= GRID_SIZE) {
+        return;
+    }
+    let idx = y * GRID_SIZE + x;
+
+    let mode = environment_init.gen_params.x;
+    let gen_type = environment_init.gen_params.y;
+    let value = bitcast<f32>(environment_init.gen_params.z);
+    let seed = environment_init.gen_params.w;
+
+    var output_value = value;
+
+    if (gen_type == 1u) { // Noise
+        let scale = environment_init.noise_scale;
+        let contrast = environment_init.noise_contrast;
+        let octaves = environment_init.noise_octaves;
+        
+        let coord = vec2<f32>(f32(x), f32(y)) / f32(GRID_SIZE);
+        output_value = layered_noise(coord, seed, octaves, scale, contrast);
+        output_value = clamp(output_value, 0.0, 1.0);
+    }
+
+    if (mode == 1u) {
+        alpha_grid[idx] = output_value;
+    } else if (mode == 2u) {
+        beta_grid[idx] = output_value;
+    } else if (mode == 3u) {
+        gamma_grid[idx] = output_value;
+    }
 }

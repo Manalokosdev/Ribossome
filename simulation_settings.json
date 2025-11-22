@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.8865525,
+  "camera_zoom": 1.3544723,
   "spawn_probability": 0.1,
   "death_probability": 0.001,
   "mutation_rate": 0.001,
@@ -11,7 +11,7 @@
   "gamma_blur": 0.0001,
   "alpha_slope_bias": -1.0,
   "beta_slope_bias": 1.0,
-  "alpha_multiplier": 0.001,
+  "alpha_multiplier": 0.0008019,
   "beta_multiplier": 0.001,
   "alpha_rain_map_path": "C:\\Backup Desktops\\Desktop Novembro 2025\\Untitled-1.jpg",
   "beta_rain_map_path": null,
@@ -34,7 +34,7 @@
   "gamma_vis_max": 0.5,
   "alpha_show": true,
   "beta_show": true,
-  "gamma_show": false,
+  "gamma_show": true,
   "slope_lighting": false,
   "trail_diffusion": 0.1,
   "trail_decay": 0.999,
@@ -92,8 +92,8 @@
       "max_threshold": 5000.0,
       "adjustment_percent": 10.0,
       "cooldown_epochs": 3000,
-      "last_adjustment_epoch": 412831,
-      "difficulty_level": -4
+      "last_adjustment_epoch": 5697,
+      "difficulty_level": 1
     },
     "beta_rain": {
       "enabled": false,

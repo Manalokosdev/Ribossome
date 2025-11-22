@@ -738,7 +738,7 @@ struct EnvironmentInitParams {
     trail_values: [f32; 4],
     slope_pair: [f32; 2],
     _slope_alignment: [f32; 2],
-    _padding: [f32; 4],
+    gen_params: [u32; 4], // [mode, type, value_bits, seed]
 }
 
 // Keep host layout in sync with the WGSL uniform buffer (std140, 112 bytes total).
@@ -1012,6 +1012,7 @@ struct GpuState {
     cpu_spawn_pipeline: wgpu::ComputePipeline, // Materialize CPU spawn requests on GPU
     initialize_dead_pipeline: wgpu::ComputePipeline, // Sanitize unused agent slots
     environment_init_pipeline: wgpu::ComputePipeline, // Fill alpha/beta/gamma/trails on GPU
+    generate_map_pipeline: wgpu::ComputePipeline, // Generate specific map (flat/noise)
     render_pipeline: wgpu::RenderPipeline,
 
     // Bind groups
@@ -1143,6 +1144,178 @@ struct GpuState {
 }
 
 impl GpuState {
+    fn save_settings(&self, path: &Path) -> anyhow::Result<()> {
+        let settings = SimulationSettings {
+            camera_zoom: self.camera_zoom,
+            spawn_probability: self.spawn_probability,
+            death_probability: self.death_probability,
+            mutation_rate: self.mutation_rate,
+            auto_replenish: self.auto_replenish,
+            diffusion_interval: self.diffusion_interval,
+            slope_interval: self.slope_interval,
+            alpha_blur: self.alpha_blur,
+            beta_blur: self.beta_blur,
+            gamma_blur: self.gamma_blur,
+            alpha_slope_bias: self.alpha_slope_bias,
+            beta_slope_bias: self.beta_slope_bias,
+            alpha_multiplier: self.alpha_multiplier,
+            beta_multiplier: self.beta_multiplier,
+            alpha_rain_map_path: self.alpha_rain_map_path.clone(),
+            beta_rain_map_path: self.beta_rain_map_path.clone(),
+            chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
+            chemical_slope_scale_beta: self.chemical_slope_scale_beta,
+            food_power: self.food_power,
+            poison_power: self.poison_power,
+            amino_maintenance_cost: self.amino_maintenance_cost,
+            pairing_cost: self.pairing_cost,
+            prop_wash_strength: self.prop_wash_strength,
+            repulsion_strength: self.repulsion_strength,
+            limit_fps: self.limit_fps,
+            limit_fps_25: self.limit_fps_25,
+            render_interval: self.render_interval,
+            gamma_debug_visual: self.gamma_debug_visual,
+            slope_debug_visual: self.slope_debug_visual,
+            gamma_hidden: self.gamma_hidden,
+            debug_per_segment: self.debug_per_segment,
+            gamma_vis_min: self.gamma_vis_min,
+            gamma_vis_max: self.gamma_vis_max,
+            alpha_show: self.alpha_show,
+            beta_show: self.beta_show,
+            gamma_show: self.gamma_show,
+            slope_lighting: self.slope_lighting,
+            trail_diffusion: self.trail_diffusion,
+            trail_decay: self.trail_decay,
+            trail_opacity: self.trail_opacity,
+            trail_show: self.trail_show,
+            interior_isotropic: self.interior_isotropic,
+            ignore_stop_codons: self.ignore_stop_codons,
+            require_start_codon: self.require_start_codon,
+            alpha_rain_variation: self.alpha_rain_variation,
+            beta_rain_variation: self.beta_rain_variation,
+            alpha_rain_phase: self.alpha_rain_phase,
+            beta_rain_phase: self.beta_rain_phase,
+            alpha_rain_freq: self.alpha_rain_freq,
+            beta_rain_freq: self.beta_rain_freq,
+            difficulty: self.difficulty.clone(),
+        };
+        settings.save_to_disk(path)
+    }
+
+    fn load_settings(&mut self, path: &Path) -> anyhow::Result<()> {
+        let settings = SimulationSettings::load_from_disk(path)?;
+        self.camera_zoom = settings.camera_zoom;
+        self.spawn_probability = settings.spawn_probability;
+        self.death_probability = settings.death_probability;
+        self.mutation_rate = settings.mutation_rate;
+        self.auto_replenish = settings.auto_replenish;
+        self.diffusion_interval = settings.diffusion_interval;
+        self.slope_interval = settings.slope_interval;
+        self.alpha_blur = settings.alpha_blur;
+        self.beta_blur = settings.beta_blur;
+        self.gamma_blur = settings.gamma_blur;
+        self.alpha_slope_bias = settings.alpha_slope_bias;
+        self.beta_slope_bias = settings.beta_slope_bias;
+        self.alpha_multiplier = settings.alpha_multiplier;
+        self.beta_multiplier = settings.beta_multiplier;
+        self.alpha_rain_map_path = settings.alpha_rain_map_path;
+        self.beta_rain_map_path = settings.beta_rain_map_path;
+        self.chemical_slope_scale_alpha = settings.chemical_slope_scale_alpha;
+        self.chemical_slope_scale_beta = settings.chemical_slope_scale_beta;
+        self.food_power = settings.food_power;
+        self.poison_power = settings.poison_power;
+        self.amino_maintenance_cost = settings.amino_maintenance_cost;
+        self.pairing_cost = settings.pairing_cost;
+        self.prop_wash_strength = settings.prop_wash_strength;
+        self.repulsion_strength = settings.repulsion_strength;
+        self.limit_fps = settings.limit_fps;
+        self.limit_fps_25 = settings.limit_fps_25;
+        self.render_interval = settings.render_interval;
+        self.gamma_debug_visual = settings.gamma_debug_visual;
+        self.slope_debug_visual = settings.slope_debug_visual;
+        self.gamma_hidden = settings.gamma_hidden;
+        self.debug_per_segment = settings.debug_per_segment;
+        self.gamma_vis_min = settings.gamma_vis_min;
+        self.gamma_vis_max = settings.gamma_vis_max;
+        self.alpha_show = settings.alpha_show;
+        self.beta_show = settings.beta_show;
+        self.gamma_show = settings.gamma_show;
+        self.slope_lighting = settings.slope_lighting;
+        self.trail_diffusion = settings.trail_diffusion;
+        self.trail_decay = settings.trail_decay;
+        self.trail_opacity = settings.trail_opacity;
+        self.trail_show = settings.trail_show;
+        self.interior_isotropic = settings.interior_isotropic;
+        self.ignore_stop_codons = settings.ignore_stop_codons;
+        self.require_start_codon = settings.require_start_codon;
+        self.alpha_rain_variation = settings.alpha_rain_variation;
+        self.beta_rain_variation = settings.beta_rain_variation;
+        self.alpha_rain_phase = settings.alpha_rain_phase;
+        self.beta_rain_phase = settings.beta_rain_phase;
+        self.alpha_rain_freq = settings.alpha_rain_freq;
+        self.beta_rain_freq = settings.beta_rain_freq;
+        self.difficulty = settings.difficulty;
+        
+        if let Some(path) = &self.alpha_rain_map_path.clone() {
+             let _ = self.load_alpha_rain_map(path);
+        }
+        if let Some(path) = &self.beta_rain_map_path.clone() {
+             let _ = self.load_beta_rain_map(path);
+        }
+        
+        Ok(())
+    }
+
+    fn generate_map(&mut self, mode: u32, gen_type: u32, value: f32, seed: u32) {
+        let params = EnvironmentInitParams {
+            grid_resolution: GRID_DIM_U32,
+            seed,
+            noise_octaves: 4,
+            slope_octaves: 4,
+            noise_scale: 5.0,
+            noise_contrast: 1.0,
+            slope_scale: 1.0,
+            slope_contrast: 1.0,
+            alpha_range: [0.0, 1.0],
+            beta_range: [0.0, 1.0],
+            gamma_height_range: [0.0, 1.0],
+            _trail_alignment: [0.0; 2],
+            trail_values: [0.0; 4],
+            slope_pair: [0.0; 2],
+            _slope_alignment: [0.0; 2],
+            gen_params: [mode, gen_type, value.to_bits(), seed],
+        };
+        
+        self.queue.write_buffer(
+            &self.environment_init_params_buffer,
+            0,
+            bytemuck::bytes_of(&params),
+        );
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Generate Map Encoder"),
+            });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Generate Map Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.generate_map_pipeline);
+            if self.ping_pong {
+                pass.set_bind_group(0, &self.compute_bind_group_b, &[]);
+            } else {
+                pass.set_bind_group(0, &self.compute_bind_group_a, &[]);
+            }
+            
+            let workgroups = (GRID_DIM_U32 + 15) / 16;
+            pass.dispatch_workgroups(workgroups, workgroups, 1);
+        }
+        
+        self.queue.submit(Some(encoder.finish()));
+    }
+
     async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
         let mut profiler = StartupProfiler::new();
@@ -1432,7 +1605,7 @@ impl GpuState {
             trail_values: [0.0, 0.0, 0.0, 0.0],
             slope_pair: [0.0, 0.0],
             _slope_alignment: [0.0; 2],
-            _padding: [0.0, 0.0, 0.0, 0.0],
+            gen_params: [0, 0, 0, 0],
         };
 
         let environment_init_params_buffer =
@@ -2156,6 +2329,17 @@ impl GpuState {
             });
         profiler.mark("environment init pipeline");
 
+        let generate_map_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Generate Map Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "generate_map",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("generate map pipeline");
+
         // Create render bind group layout
         let render_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2381,6 +2565,7 @@ impl GpuState {
             cpu_spawn_pipeline,
             initialize_dead_pipeline,
             environment_init_pipeline,
+            generate_map_pipeline,
             render_pipeline,
             compute_bind_group_a,
             compute_bind_group_b,
@@ -4666,6 +4851,7 @@ fn main() {
                                         .default_width(350.0)
                                         .resizable(true)
                                         .show(ctx, |ui| {
+                                            // Top section (no tabs) - Always visible
                                             ui.horizontal(|ui| {
                                                 if ui.button(if state.is_paused { "Resume" } else { "Pause" }).clicked() {
                                                     state.is_paused = !state.is_paused;
@@ -4683,7 +4869,78 @@ fn main() {
                                                 }
                                             });
 
-                                            // Tab selection
+                                            ui.separator();
+                                            ui.heading("Simulation Speed");
+                                            let mut mode = state.current_mode;
+                                            let old_mode = mode;
+                                            ui.horizontal(|ui| {
+                                                ui.selectable_value(&mut mode, 3, "Slow (25 FPS)");
+                                                ui.selectable_value(&mut mode, 0, "VSync (60 FPS)");
+                                                ui.selectable_value(&mut mode, 1, "Full Speed");
+                                                ui.selectable_value(&mut mode, 2, "Fast Draw");
+                                            });
+                                            if mode != old_mode {
+                                                state.set_speed_mode(mode);
+                                            }
+                                            if mode == 2 {
+                                                ui.add(
+                                                    egui::Slider::new(&mut state.render_interval, 1..=10000)
+                                                        .text("Draw every N steps")
+                                                        .logarithmic(true),
+                                                );
+                                            }
+                                            ui.label(format!("Epoch: {}", state.epoch));
+                                            ui.label(format!(
+                                                "Epochs/sec: {:.1}",
+                                                state.epochs_per_second
+                                            ));
+
+                                            ui.separator();
+                                            ui.heading("Population Overview");
+                                            ui.label(format!("Total Agents: {}", state.agent_count));
+                                            ui.label(format!("Living Agents: {}", state.alive_count));
+                                            ui.label(format!(
+                                                "Capacity: {}",
+                                                state.agent_buffer_capacity
+                                            ));
+
+                                            ui.separator();
+                                            ui.collapsing("Population History", |ui| {
+                                                ui.label(format!(
+                                                    "Samples: {} (every {} epochs)",
+                                                    state.population_history.len(),
+                                                    state.epoch_sample_interval
+                                                ));
+
+                                                if !state.population_history.is_empty() {
+                                                    use egui_plot::{Line, Plot, PlotPoints};
+
+                                                    let points: PlotPoints = state
+                                                        .population_history
+                                                        .iter()
+                                                        .enumerate()
+                                                        .map(|(i, &pop)| [i as f64, pop as f64])
+                                                        .collect();
+
+                                                    let line = Line::new(points)
+                                                        .color(egui::Color32::from_rgb(100, 200, 100))
+                                                        .name("Population");
+
+                                                    Plot::new("population_plot")
+                                                        .height(150.0)
+                                                        .show_axes(true)
+                                                        .show_grid(true)
+                                                        .allow_drag(false)
+                                                        .allow_zoom(false)
+                                                        .allow_scroll(false)
+                                                        .show(ui, |plot_ui| {
+                                                            plot_ui.line(line);
+                                                        });
+                                                }
+                                            });
+
+                                            ui.separator();
+                                            // Tab selection for detailed controls
                                             ui.horizontal(|ui| {
                                                 ui.selectable_value(&mut state.ui_tab, 0, "Simulation");
                                                 ui.selectable_value(&mut state.ui_tab, 1, "Agents");
@@ -4707,6 +4964,144 @@ fn main() {
                                                             state.camera_zoom = 1.0;
                                                             state.camera_pan = [2560.0, 2560.0];
                                                         }
+
+                                                        ui.separator();
+                                                        ui.heading("Settings");
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Save Settings").clicked() {
+                                                                if let Some(path) = rfd::FileDialog::new()
+                                                                    .set_file_name("simulation_settings.json")
+                                                                    .add_filter("JSON", &["json"])
+                                                                    .save_file()
+                                                                {
+                                                                    let settings = SimulationSettings {
+                                                                        camera_zoom: state.camera_zoom,
+                                                                        spawn_probability: state.spawn_probability,
+                                                                        death_probability: state.death_probability,
+                                                                        mutation_rate: state.mutation_rate,
+                                                                        auto_replenish: state.auto_replenish,
+                                                                        diffusion_interval: state.diffusion_interval,
+                                                                        slope_interval: state.slope_interval,
+                                                                        alpha_blur: state.alpha_blur,
+                                                                        beta_blur: state.beta_blur,
+                                                                        gamma_blur: state.gamma_blur,
+                                                                        alpha_slope_bias: state.alpha_slope_bias,
+                                                                        beta_slope_bias: state.beta_slope_bias,
+                                                                        alpha_multiplier: state.alpha_multiplier,
+                                                                        beta_multiplier: state.beta_multiplier,
+                                                                        alpha_rain_map_path: state.alpha_rain_map_path.clone(),
+                                                                        beta_rain_map_path: state.beta_rain_map_path.clone(),
+                                                                        chemical_slope_scale_alpha: state.chemical_slope_scale_alpha,
+                                                                        chemical_slope_scale_beta: state.chemical_slope_scale_beta,
+                                                                        food_power: state.food_power,
+                                                                        poison_power: state.poison_power,
+                                                                        amino_maintenance_cost: state.amino_maintenance_cost,
+                                                                        pairing_cost: state.pairing_cost,
+                                                                        prop_wash_strength: state.prop_wash_strength,
+                                                                        repulsion_strength: state.repulsion_strength,
+                                                                        limit_fps: state.limit_fps,
+                                                                        limit_fps_25: state.limit_fps_25,
+                                                                        render_interval: state.render_interval,
+                                                                        gamma_debug_visual: state.gamma_debug_visual,
+                                                                        slope_debug_visual: state.slope_debug_visual,
+                                                                        gamma_hidden: state.gamma_hidden,
+                                                                        debug_per_segment: state.debug_per_segment,
+                                                                        gamma_vis_min: state.gamma_vis_min,
+                                                                        gamma_vis_max: state.gamma_vis_max,
+                                                                        alpha_show: state.alpha_show,
+                                                                        beta_show: state.beta_show,
+                                                                        gamma_show: state.gamma_show,
+                                                                        slope_lighting: state.slope_lighting,
+                                                                        trail_diffusion: state.trail_diffusion,
+                                                                        trail_decay: state.trail_decay,
+                                                                        trail_opacity: state.trail_opacity,
+                                                                        trail_show: state.trail_show,
+                                                                        interior_isotropic: state.interior_isotropic,
+                                                                        ignore_stop_codons: state.ignore_stop_codons,
+                                                                        require_start_codon: state.require_start_codon,
+                                                                        alpha_rain_variation: state.alpha_rain_variation,
+                                                                        beta_rain_variation: state.beta_rain_variation,
+                                                                        alpha_rain_phase: state.alpha_rain_phase,
+                                                                        beta_rain_phase: state.beta_rain_phase,
+                                                                        alpha_rain_freq: state.alpha_rain_freq,
+                                                                        beta_rain_freq: state.beta_rain_freq,
+                                                                        difficulty: state.difficulty.clone(),
+                                                                    };
+                                                                    if let Err(err) = settings.save_to_disk(&path) {
+                                                                        eprintln!("Failed to save settings: {err:?}");
+                                                                    }
+                                                                }
+                                                            }
+                                                            if ui.button("Load Settings").clicked() {
+                                                                if let Some(path) = rfd::FileDialog::new()
+                                                                    .add_filter("JSON", &["json"])
+                                                                    .pick_file()
+                                                                {
+                                                                    if let Ok(settings) = SimulationSettings::load_from_disk(&path) {
+                                                                        state.camera_zoom = settings.camera_zoom;
+                                                                        state.spawn_probability = settings.spawn_probability;
+                                                                        state.death_probability = settings.death_probability;
+                                                                        state.mutation_rate = settings.mutation_rate;
+                                                                        state.auto_replenish = settings.auto_replenish;
+                                                                        state.diffusion_interval = settings.diffusion_interval;
+                                                                        state.slope_interval = settings.slope_interval;
+                                                                        state.alpha_blur = settings.alpha_blur;
+                                                                        state.beta_blur = settings.beta_blur;
+                                                                        state.gamma_blur = settings.gamma_blur;
+                                                                        state.alpha_slope_bias = settings.alpha_slope_bias;
+                                                                        state.beta_slope_bias = settings.beta_slope_bias;
+                                                                        state.alpha_multiplier = settings.alpha_multiplier;
+                                                                        state.beta_multiplier = settings.beta_multiplier;
+                                                                        state.alpha_rain_map_path = settings.alpha_rain_map_path.clone();
+                                                                        state.beta_rain_map_path = settings.beta_rain_map_path.clone();
+                                                                        state.chemical_slope_scale_alpha = settings.chemical_slope_scale_alpha;
+                                                                        state.chemical_slope_scale_beta = settings.chemical_slope_scale_beta;
+                                                                        state.food_power = settings.food_power;
+                                                                        state.poison_power = settings.poison_power;
+                                                                        state.amino_maintenance_cost = settings.amino_maintenance_cost;
+                                                                        state.pairing_cost = settings.pairing_cost;
+                                                                        state.prop_wash_strength = settings.prop_wash_strength;
+                                                                        state.repulsion_strength = settings.repulsion_strength;
+                                                                        state.limit_fps = settings.limit_fps;
+                                                                        state.limit_fps_25 = settings.limit_fps_25;
+                                                                        state.render_interval = settings.render_interval;
+                                                                        state.gamma_debug_visual = settings.gamma_debug_visual;
+                                                                        state.slope_debug_visual = settings.slope_debug_visual;
+                                                                        state.gamma_hidden = settings.gamma_hidden;
+                                                                        state.debug_per_segment = settings.debug_per_segment;
+                                                                        state.gamma_vis_min = settings.gamma_vis_min;
+                                                                        state.gamma_vis_max = settings.gamma_vis_max;
+                                                                        state.alpha_show = settings.alpha_show;
+                                                                        state.beta_show = settings.beta_show;
+                                                                        state.gamma_show = settings.gamma_show;
+                                                                        state.slope_lighting = settings.slope_lighting;
+                                                                        state.trail_diffusion = settings.trail_diffusion;
+                                                                        state.trail_decay = settings.trail_decay;
+                                                                        state.trail_opacity = settings.trail_opacity;
+                                                                        state.trail_show = settings.trail_show;
+                                                                        state.interior_isotropic = settings.interior_isotropic;
+                                                                        state.ignore_stop_codons = settings.ignore_stop_codons;
+                                                                        state.require_start_codon = settings.require_start_codon;
+                                                                        state.alpha_rain_variation = settings.alpha_rain_variation;
+                                                                        state.beta_rain_variation = settings.beta_rain_variation;
+                                                                        state.alpha_rain_phase = settings.alpha_rain_phase;
+                                                                        state.beta_rain_phase = settings.beta_rain_phase;
+                                                                        state.alpha_rain_freq = settings.alpha_rain_freq;
+                                                                        state.beta_rain_freq = settings.beta_rain_freq;
+                                                                        state.difficulty = settings.difficulty;
+                                                                        
+                                                                        if let Some(path) = &settings.alpha_rain_map_path {
+                                                                            let _ = state.load_alpha_rain_map(path);
+                                                                        }
+                                                                        if let Some(path) = &settings.beta_rain_map_path {
+                                                                            let _ = state.load_beta_rain_map(path);
+                                                                        }
+                                                                    } else {
+                                                                        eprintln!("Failed to load settings from {}", path.display());
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
 
                                                         ui.separator();
                                                         ui.heading("Simulation Speed");
@@ -5078,6 +5473,18 @@ fn main() {
 
                                                         ui.separator();
                                                         ui.heading("Alpha Controls");
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Set Flat 0.0").clicked() {
+                                                                state.generate_map(1, 0, 0.0, 0);
+                                                            }
+                                                            if ui.button("Set Flat 0.5").clicked() {
+                                                                state.generate_map(1, 0, 0.5, 0);
+                                                            }
+                                                            if ui.button("Generate Noise").clicked() {
+                                                                let seed = rand::random::<u32>();
+                                                                state.generate_map(1, 1, 0.0, seed);
+                                                            }
+                                                        });
                                                         ui.add(
                                                             egui::Slider::new(&mut state.alpha_blur, 0.0..=0.1)
                                                                 .text("Distribution Blur"),
@@ -5144,6 +5551,18 @@ fn main() {
 
                                                         ui.separator();
                                                         ui.heading("Beta Controls");
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Set Flat 0.0").clicked() {
+                                                                state.generate_map(2, 0, 0.0, 0);
+                                                            }
+                                                            if ui.button("Set Flat 0.5").clicked() {
+                                                                state.generate_map(2, 0, 0.5, 0);
+                                                            }
+                                                            if ui.button("Generate Noise").clicked() {
+                                                                let seed = rand::random::<u32>();
+                                                                state.generate_map(2, 1, 0.0, seed);
+                                                            }
+                                                        });
                                                         ui.add(
                                                             egui::Slider::new(&mut state.beta_blur, 0.0..=0.1)
                                                                 .text("Distribution Blur"),
@@ -5208,6 +5627,18 @@ fn main() {
 
                                                         ui.separator();
                                                         ui.heading("Gamma Controls");
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Set Flat 0.0").clicked() {
+                                                                state.generate_map(3, 0, 0.0, 0);
+                                                            }
+                                                            if ui.button("Set Flat 0.5").clicked() {
+                                                                state.generate_map(3, 0, 0.5, 0);
+                                                            }
+                                                            if ui.button("Generate Noise").clicked() {
+                                                                let seed = rand::random::<u32>();
+                                                                state.generate_map(3, 1, 0.0, seed);
+                                                            }
+                                                        });
                                                         if ui.button("Load Gamma Image").clicked() {
                                                             if let Some(path) = rfd::FileDialog::new()
                                                                 .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
@@ -5333,7 +5764,7 @@ fn main() {
                                                         ui.label(format!("Current Population: {}", state.alive_count));
                                                         
                                                         let current_epoch = state.epoch;
-                                                        let mut draw_param = |ui: &mut egui::Ui, param: &mut AutoDifficultyParam, name: &str, current_val: f32, current_epoch: u64| {
+                                                        let draw_param = |ui: &mut egui::Ui, param: &mut AutoDifficultyParam, name: &str, current_val: f32, current_epoch: u64| {
                                                             ui.separator();
                                                             ui.heading(name);
                                                             ui.horizontal(|ui| {
@@ -5989,7 +6420,7 @@ fn main() {
                                             // Display all segments in one label using LayoutJob for no spacing
                                             use egui::text::{LayoutJob, TextFormat};
                                             let mut job = LayoutJob::default();
-                                            for (text, color, is_bold) in segments {
+                                            for (text, color, _is_bold) in segments {
                                                 let format = TextFormat {
                                                     font_id: egui::FontId::monospace(10.0),
                                                     color,

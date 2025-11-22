@@ -22,6 +22,10 @@
 - **Smoothed Slope Forces**:
     - Implemented `sample_gamma_slope_bilinear` in `shader.wgsl`.
     - Updated agent physics to use bilinear interpolation for slope forces, reducing jitter.
+- **Added Map Generation & Settings**:
+    - Implemented `generate_map` compute shader for procedural noise and flat map generation.
+    - Added UI buttons for "Set Flat 0.5" and "Generate Noise" for Alpha, Beta, and Gamma maps.
+    - Added "Save Settings" and "Load Settings" buttons to persist simulation parameters.
 
 ## Doing
 
