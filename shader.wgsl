@@ -139,6 +139,35 @@ struct SimParams {
     ignore_stop_codons: u32,
     // When 1, require AUG start codon before translation begins
     require_start_codon: u32,
+    // Visualization parameters
+    background_color_r: f32,
+    background_color_g: f32,
+    background_color_b: f32,
+    alpha_blend_mode: u32,
+    beta_blend_mode: u32,
+    gamma_blend_mode: u32,
+    slope_blend_mode: u32,  // 0=none, 1=hard light, 2=soft light
+    alpha_color_r: f32,
+    alpha_color_g: f32,
+    alpha_color_b: f32,
+    beta_color_r: f32,
+    beta_color_g: f32,
+    beta_color_b: f32,
+    gamma_color_r: f32,
+    gamma_color_g: f32,
+    gamma_color_b: f32,
+    grid_interpolation: u32,  // 0=nearest, 1=bilinear, 2=bicubic
+    alpha_gamma_adjust: f32,  // Gamma correction for alpha channel
+    beta_gamma_adjust: f32,   // Gamma correction for beta channel
+    gamma_gamma_adjust: f32,  // Gamma correction for gamma channel
+    light_dir_x: f32,         // Light direction for slope-based lighting
+    light_dir_y: f32,
+    light_dir_z: f32,
+    agent_blend_mode: u32,    // Agent visualization: 0=comp, 1=add, 2=subtract, 3=multiply
+    agent_color_r: f32,
+    agent_color_g: f32,
+    agent_color_b: f32,
+    _padding: f32,
 }
 
 struct EnvironmentInitParams {
@@ -845,6 +874,233 @@ fn grid_index(pos: vec2<f32>) -> u32 {
     x = clamp(x, 0, i32(GRID_SIZE) - 1);
     y = clamp(y, 0, i32(GRID_SIZE) - 1);
     return u32(y) * GRID_SIZE + u32(x);
+}
+
+// ============================================================================
+// GRID INTERPOLATION HELPERS (for smooth visualization)
+// ============================================================================
+
+// Bilinear interpolation for alpha grid
+fn sample_alpha_bilinear(pos: vec2<f32>) -> f32 {
+    let clamped = clamp_position(pos);
+    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+    let grid_x = clamped.x / scale;
+    let grid_y = clamped.y / scale;
+    
+    let x0 = i32(floor(grid_x));
+    let y0 = i32(floor(grid_y));
+    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
+    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
+    
+    let fx = fract(grid_x);
+    let fy = fract(grid_y);
+    
+    let idx00 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
+    let idx10 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
+    let idx01 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
+    let idx11 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
+    
+    let v00 = alpha_grid[idx00];
+    let v10 = alpha_grid[idx10];
+    let v01 = alpha_grid[idx01];
+    let v11 = alpha_grid[idx11];
+    
+    let v0 = mix(v00, v10, fx);
+    let v1 = mix(v01, v11, fx);
+    return mix(v0, v1, fy);
+}
+
+// Bilinear interpolation for beta grid
+fn sample_beta_bilinear(pos: vec2<f32>) -> f32 {
+    let clamped = clamp_position(pos);
+    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+    let grid_x = clamped.x / scale;
+    let grid_y = clamped.y / scale;
+    
+    let x0 = i32(floor(grid_x));
+    let y0 = i32(floor(grid_y));
+    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
+    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
+    
+    let fx = fract(grid_x);
+    let fy = fract(grid_y);
+    
+    let idx00 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
+    let idx10 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
+    let idx01 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
+    let idx11 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
+    
+    let v00 = beta_grid[idx00];
+    let v10 = beta_grid[idx10];
+    let v01 = beta_grid[idx01];
+    let v11 = beta_grid[idx11];
+    
+    let v0 = mix(v00, v10, fx);
+    let v1 = mix(v01, v11, fx);
+    return mix(v0, v1, fy);
+}
+
+// Bilinear interpolation for gamma grid
+fn sample_gamma_bilinear(pos: vec2<f32>) -> f32 {
+    let clamped = clamp_position(pos);
+    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+    let grid_x = clamped.x / scale;
+    let grid_y = clamped.y / scale;
+    
+    let x0 = i32(floor(grid_x));
+    let y0 = i32(floor(grid_y));
+    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
+    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
+    
+    let fx = fract(grid_x);
+    let fy = fract(grid_y);
+    
+    let idx00 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
+    let idx10 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
+    let idx01 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
+    let idx11 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
+    
+    let v00 = read_gamma_height(idx00);
+    let v10 = read_gamma_height(idx10);
+    let v01 = read_gamma_height(idx01);
+    let v11 = read_gamma_height(idx11);
+    
+    let v0 = mix(v00, v10, fx);
+    let v1 = mix(v01, v11, fx);
+    return mix(v0, v1, fy);
+}
+
+// Cubic hermite interpolation helper
+fn cubic_hermite(t: f32) -> vec4<f32> {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return vec4<f32>(
+        2.0 * t3 - 3.0 * t2 + 1.0,  // h00
+        t3 - 2.0 * t2 + t,           // h10
+        -2.0 * t3 + 3.0 * t2,        // h01
+        t3 - t2                      // h11
+    );
+}
+
+// Bicubic interpolation for alpha grid (smoother than bilinear)
+fn sample_alpha_bicubic(pos: vec2<f32>) -> f32 {
+    let clamped = clamp_position(pos);
+    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+    let grid_x = clamped.x / scale;
+    let grid_y = clamped.y / scale;
+    
+    let x_floor = floor(grid_x);
+    let y_floor = floor(grid_y);
+    let fx = grid_x - x_floor;
+    let fy = grid_y - y_floor;
+    
+    let x = i32(x_floor);
+    let y = i32(y_floor);
+    
+    // Sample 4x4 grid
+    var values: array<f32, 16>;
+    for (var j = -1; j <= 2; j++) {
+        for (var i = -1; i <= 2; i++) {
+            let sx = clamp(x + i, 0, i32(GRID_SIZE) - 1);
+            let sy = clamp(y + j, 0, i32(GRID_SIZE) - 1);
+            let idx = u32(sy) * GRID_SIZE + u32(sx);
+            values[(j + 1) * 4 + (i + 1)] = alpha_grid[idx];
+        }
+    }
+    
+    let wx = cubic_hermite(fx);
+    let wy = cubic_hermite(fy);
+    
+    var result = 0.0;
+    for (var j = 0; j < 4; j++) {
+        var row_sum = 0.0;
+        for (var i = 0; i < 4; i++) {
+            row_sum += values[j * 4 + i] * wx[i];
+        }
+        result += row_sum * wy[j];
+    }
+    
+    return clamp(result, 0.0, 1.0);
+}
+
+// Bicubic interpolation for beta grid
+fn sample_beta_bicubic(pos: vec2<f32>) -> f32 {
+    let clamped = clamp_position(pos);
+    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+    let grid_x = clamped.x / scale;
+    let grid_y = clamped.y / scale;
+    
+    let x_floor = floor(grid_x);
+    let y_floor = floor(grid_y);
+    let fx = grid_x - x_floor;
+    let fy = grid_y - y_floor;
+    
+    let x = i32(x_floor);
+    let y = i32(y_floor);
+    
+    var values: array<f32, 16>;
+    for (var j = -1; j <= 2; j++) {
+        for (var i = -1; i <= 2; i++) {
+            let sx = clamp(x + i, 0, i32(GRID_SIZE) - 1);
+            let sy = clamp(y + j, 0, i32(GRID_SIZE) - 1);
+            let idx = u32(sy) * GRID_SIZE + u32(sx);
+            values[(j + 1) * 4 + (i + 1)] = beta_grid[idx];
+        }
+    }
+    
+    let wx = cubic_hermite(fx);
+    let wy = cubic_hermite(fy);
+    
+    var result = 0.0;
+    for (var j = 0; j < 4; j++) {
+        var row_sum = 0.0;
+        for (var i = 0; i < 4; i++) {
+            row_sum += values[j * 4 + i] * wx[i];
+        }
+        result += row_sum * wy[j];
+    }
+    
+    return clamp(result, 0.0, 1.0);
+}
+
+// Bicubic interpolation for gamma grid
+fn sample_gamma_bicubic(pos: vec2<f32>) -> f32 {
+    let clamped = clamp_position(pos);
+    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+    let grid_x = clamped.x / scale;
+    let grid_y = clamped.y / scale;
+    
+    let x_floor = floor(grid_x);
+    let y_floor = floor(grid_y);
+    let fx = grid_x - x_floor;
+    let fy = grid_y - y_floor;
+    
+    let x = i32(x_floor);
+    let y = i32(y_floor);
+    
+    var values: array<f32, 16>;
+    for (var j = -1; j <= 2; j++) {
+        for (var i = -1; i <= 2; i++) {
+            let sx = clamp(x + i, 0, i32(GRID_SIZE) - 1);
+            let sy = clamp(y + j, 0, i32(GRID_SIZE) - 1);
+            let idx = u32(sy) * GRID_SIZE + u32(sx);
+            values[(j + 1) * 4 + (i + 1)] = read_gamma_height(idx);
+        }
+    }
+    
+    let wx = cubic_hermite(fx);
+    let wy = cubic_hermite(fy);
+    
+    var result = 0.0;
+    for (var j = 0; j < 4; j++) {
+        var row_sum = 0.0;
+        for (var i = 0; i < 4; i++) {
+            row_sum += values[j * 4 + i] * wx[i];
+        }
+        result += row_sum * wy[j];
+    }
+    
+    return clamp(result, 0.0, 1.0);
 }
 
 const GAMMA_LAYER_SIZE: u32 = GRID_SIZE * GRID_SIZE;
@@ -2793,8 +3049,36 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 // HELPER FUNCTIONS FOR DRAWING
 // ============================================================================
 
+// Apply agent visualization blend mode to color
+fn apply_agent_blend(base_color: vec3<f32>) -> vec3<f32> {
+    let agent_color = vec3<f32>(
+        clamp(params.agent_color_r, 0.0, 1.0),
+        clamp(params.agent_color_g, 0.0, 1.0),
+        clamp(params.agent_color_b, 0.0, 1.0)
+    );
+    
+    if (params.agent_blend_mode == 0u) {
+        // Comp (normal) - just return original color
+        return base_color;
+    } else if (params.agent_blend_mode == 1u) {
+        // Add - add agent color
+        return clamp(base_color + agent_color, vec3<f32>(0.0), vec3<f32>(1.0));
+    } else if (params.agent_blend_mode == 2u) {
+        // Subtract - subtract agent color
+        return clamp(base_color - agent_color, vec3<f32>(0.0), vec3<f32>(1.0));
+    } else {
+        // Multiply - multiply by agent color
+        return base_color * agent_color;
+    }
+}
+
+
 // Helper function to draw a thick line in screen space
 fn draw_thick_line(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32>) {
+    // Apply agent blend mode to color
+    let blended_rgb = apply_agent_blend(color.rgb);
+    let final_color = vec4<f32>(blended_rgb, color.a);
+    
     let screen_p0 = world_to_screen(p0);
     let screen_p1 = world_to_screen(p1);
     
@@ -2821,7 +3105,7 @@ fn draw_thick_line(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32
                         screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
                         
                         let idx = screen_to_grid_index(screen_pos);
-                        visual_grid[idx] = color;
+                        visual_grid[idx] = final_color;
                     }
                 }
             }
@@ -2831,6 +3115,10 @@ fn draw_thick_line(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32
 
 // Helper function to draw a clean circle outline in screen space
 fn draw_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
+    // Apply agent blend mode to color
+    let blended_rgb = apply_agent_blend(color.rgb);
+    let final_color = vec4<f32>(blended_rgb, color.a);
+    
     // Convert world position to screen coordinates
     let screen_center = world_to_screen(center);
     
@@ -2855,7 +3143,7 @@ fn draw_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
                     screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
                     
                     let idx = screen_to_grid_index(screen_pos);
-                    visual_grid[idx] = color;
+                    visual_grid[idx] = final_color;
                 }
             }
         }
@@ -2864,6 +3152,10 @@ fn draw_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
 
 // Helper: draw a filled circle in screen space
 fn draw_filled_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
+    // Apply agent blend mode to color
+    let blended_rgb = apply_agent_blend(color.rgb);
+    let final_color = vec4<f32>(blended_rgb, color.a);
+    
     // Convert world position to screen coordinates
     let screen_center = world_to_screen(center);
     
@@ -2892,6 +3184,10 @@ fn draw_filled_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
 
 // Helper: draw a 5-pointed star in screen space
 fn draw_star(center: vec2<f32>, radius: f32, color: vec4<f32>) {
+    // Apply agent blend mode to color
+    let blended_rgb = apply_agent_blend(color.rgb);
+    let final_color = vec4<f32>(blended_rgb, color.a);
+    
     // Convert world position to screen coordinates
     let screen_center = world_to_screen(center);
     
@@ -2918,9 +3214,13 @@ fn draw_star(center: vec2<f32>, radius: f32, color: vec4<f32>) {
         let next_outer_x = screen_center.x + i32(cos(angle_next_outer) * screen_radius);
         let next_outer_y = screen_center.y + i32(sin(angle_next_outer) * screen_radius);
         
+        // Apply agent blend mode
+        let blended_rgb = apply_agent_blend(color.rgb);
+        let final_color = vec4<f32>(blended_rgb, color.a);
+        
         // Draw lines: outer -> inner -> next_outer
-        draw_line_pixels(vec2<i32>(outer_x, outer_y), vec2<i32>(inner_x, inner_y), color);
-        draw_line_pixels(vec2<i32>(inner_x, inner_y), vec2<i32>(next_outer_x, next_outer_y), color);
+        draw_line_pixels(vec2<i32>(outer_x, outer_y), vec2<i32>(inner_x, inner_y), final_color);
+        draw_line_pixels(vec2<i32>(inner_x, inner_y), vec2<i32>(next_outer_x, next_outer_y), final_color);
     }
 }
 
@@ -3380,10 +3680,27 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     
-    // Sample environment grids with direct indexing
-    let alpha = alpha_grid[grid_index(world_pos)];
-    let beta = beta_grid[grid_index(world_pos)];
-    let gamma = read_gamma_height(grid_index(world_pos));
+    // Sample environment grids with selected interpolation mode
+    var alpha: f32;
+    var beta: f32;
+    var gamma: f32;
+    
+    if (params.grid_interpolation == 2u) {
+        // Bicubic (smoothest)
+        alpha = clamp(sample_alpha_bicubic(world_pos), 0.0, 1.0);
+        beta = clamp(sample_beta_bicubic(world_pos), 0.0, 1.0);
+        gamma = clamp(sample_gamma_bicubic(world_pos), 0.0, 1.0);
+    } else if (params.grid_interpolation == 1u) {
+        // Bilinear (smooth)
+        alpha = clamp(sample_alpha_bilinear(world_pos), 0.0, 1.0);
+        beta = clamp(sample_beta_bilinear(world_pos), 0.0, 1.0);
+        gamma = clamp(sample_gamma_bilinear(world_pos), 0.0, 1.0);
+    } else {
+        // Nearest neighbor (pixelated)
+        alpha = clamp(alpha_grid[grid_index(world_pos)], 0.0, 1.0);
+        beta = clamp(beta_grid[grid_index(world_pos)], 0.0, 1.0);
+        gamma = clamp(read_gamma_height(grid_index(world_pos)), 0.0, 1.0);
+    }
     
     // Hide gamma if requested (treat gamma exactly like alpha/beta, no normalization)
     var gamma_display = gamma;
@@ -3394,9 +3711,12 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         gamma_display = clamp((gamma - params.gamma_vis_min) / vis_range, 0.0, 1.0);
     }
 
-    // Compute base color for environment visualization without early returns,
-    // so we can always overlay the trail layer afterward.
-    var base_color = vec3<f32>(0.0);
+    // Start with background color (normalize to 0..1)
+    var base_color = vec3<f32>(
+        clamp(params.background_color_r, 0.0, 1.0),
+        clamp(params.background_color_g, 0.0, 1.0),
+        clamp(params.background_color_b, 0.0, 1.0)
+    );
 
     // Slope visualization with optional lighting
     if (params.slope_debug != 0u) {
@@ -3415,58 +3735,117 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             base_color = vec3<f32>(red, green, 0.0);
         }
     } else {
-        // Count how many channels are visible
-        var channel_count = 0u;
-        if (params.alpha_show != 0u) { channel_count += 1u; }
-        if (params.beta_show != 0u) { channel_count += 1u; }
-        if (params.gamma_show != 0u) { channel_count += 1u; }
-
-        if (channel_count == 0u) {
-            // If no channels selected, show all by default (consistent scaling across channels)
-            base_color = vec3<f32>(beta * 0.2, alpha * 0.2, gamma_display * 0.2);
-        } else if (channel_count == 1u) {
-            // Single channel mode: show as grayscale (use full 0..1 for all channels)
-            if (params.alpha_show != 0u) {
-                base_color = vec3<f32>(alpha, alpha, alpha);
-            } else if (params.beta_show != 0u) {
-                base_color = vec3<f32>(beta, beta, beta);
-            } else { // gamma_show
-                // Use raw gamma value for consistency with alpha/beta single channel display
-                base_color = vec3<f32>(gamma, gamma, gamma);
-            }
-        } else {
-            // Multi-channel mode: show as color mix
-            var red = 0.0;
-            var green = 0.0;
-            var blue = 0.0;
-            if (params.alpha_show != 0u) { green += alpha * 0.2; }
-            if (params.beta_show != 0u) { red += beta * 0.2; }
-            if (params.gamma_show != 0u) { blue += gamma_display * 0.2; }
-
-            // Legacy gamma_debug mode for backwards compatibility
-            if (params.gamma_debug != 0u) {
-                base_color = vec3<f32>(gamma_display, gamma_display, gamma_display);
+        // New visualization system: composite channels with blend modes
+        
+        // Alpha channel
+        if (params.alpha_show != 0u) {
+            let alpha_color = vec3<f32>(
+                clamp(params.alpha_color_r, 0.0, 1.0),
+                clamp(params.alpha_color_g, 0.0, 1.0),
+                clamp(params.alpha_color_b, 0.0, 1.0)
+            );
+            
+            // Apply gamma correction to alpha value
+            let alpha_corrected = pow(alpha, params.alpha_gamma_adjust);
+            
+            if (params.alpha_blend_mode == 0u) {
+                // Additive: add channel color scaled by intensity
+                base_color = base_color + alpha_color * alpha_corrected;
             } else {
-                base_color = vec3<f32>(red, green, blue);
+                // Multiply: darken with inverted channel color
+                base_color = base_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - alpha_color, alpha_corrected);
             }
         }
+        
+        // Beta channel
+        if (params.beta_show != 0u) {
+            let beta_color = vec3<f32>(
+                clamp(params.beta_color_r, 0.0, 1.0),
+                clamp(params.beta_color_g, 0.0, 1.0),
+                clamp(params.beta_color_b, 0.0, 1.0)
+            );
+            
+            // Apply gamma correction to beta value
+            let beta_corrected = pow(beta, params.beta_gamma_adjust);
+            
+            if (params.beta_blend_mode == 0u) {
+                // Additive
+                base_color = base_color + beta_color * beta_corrected;
+            } else {
+                // Multiply with inverted channel
+                base_color = base_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - beta_color, beta_corrected);
+            }
+        }
+        
+        // Gamma channel
+        if (params.gamma_show != 0u) {
+            let gamma_color = vec3<f32>(
+                clamp(params.gamma_color_r, 0.0, 1.0),
+                clamp(params.gamma_color_g, 0.0, 1.0),
+                clamp(params.gamma_color_b, 0.0, 1.0)
+            );
+            
+            // Apply gamma correction to gamma_display value
+            let gamma_corrected = pow(gamma_display, params.gamma_gamma_adjust);
+            
+            if (params.gamma_blend_mode == 0u) {
+                // Additive
+                base_color = base_color + gamma_color * gamma_corrected;
+            } else {
+                // Multiply with inverted channel
+                base_color = base_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - gamma_color, gamma_corrected);
+            }
+        }
+        
+        // Slope-based lighting effects (applied after all channels)
+        if (params.slope_blend_mode != 0u) {
+            let slope = read_gamma_slope(grid_index(world_pos));
+            let normal = normalize(vec3<f32>(-slope.x * 10.0, -slope.y * 10.0, 1.0));
+            let light_dir = normalize(vec3<f32>(params.light_dir_x, params.light_dir_y, params.light_dir_z));
+            let light_factor = max(dot(normal, light_dir), 0.0);
+            
+            if (params.slope_blend_mode == 1u) {
+                // Hard Light
+                let blend = vec3<f32>(light_factor);
+                base_color = select(
+                    2.0 * base_color * blend,
+                    vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - base_color) * (vec3<f32>(1.0) - blend),
+                    blend > vec3<f32>(0.5)
+                );
+            } else if (params.slope_blend_mode == 2u) {
+                // Soft Light
+                let blend = vec3<f32>(light_factor);
+                base_color = select(
+                    2.0 * base_color * blend + base_color * base_color * (vec3<f32>(1.0) - 2.0 * blend),
+                    sqrt(base_color) * (2.0 * blend - vec3<f32>(1.0)) + 2.0 * base_color * (vec3<f32>(1.0) - blend),
+                    blend > vec3<f32>(0.5)
+                );
+            }
+        }
+        
+        // Legacy gamma_debug mode for backwards compatibility
+        if (params.gamma_debug != 0u) {
+            base_color = vec3<f32>(gamma_display, gamma_display, gamma_display);
+        }
     }
+
+    // Clamp to valid range before writing
+    base_color = clamp(base_color, vec3<f32>(0.0), vec3<f32>(1.0));
 
     // Write base color before overlay
     visual_grid[visual_idx] = vec4<f32>(base_color, 1.0);
     
     // ====== RGB TRAIL OVERLAY ======
     // Sample trail grid and blend onto the visual output
-    let trail_color = trail_grid[grid_index(world_pos)].xyz;
+    let trail_color = clamp(trail_grid[grid_index(world_pos)].xyz, vec3<f32>(0.0), vec3<f32>(1.0));
     
     // Trail-only mode: show just the trail on black background
     if (params.trail_show != 0u) {
-        visual_grid[visual_idx] = vec4<f32>(trail_color * params.trail_opacity, 1.0);
+        visual_grid[visual_idx] = vec4<f32>(trail_color * clamp(params.trail_opacity, 0.0, 1.0), 1.0);
     } else {
         // Normal mode: additive blending with opacity control (controlled by trail_opacity parameter)
-        let base_color = visual_grid[visual_idx].rgb;
-        let blended_color = base_color + trail_color * params.trail_opacity;
-        visual_grid[visual_idx] = vec4<f32>(clamp(blended_color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+        let blended_color = clamp(base_color + trail_color * clamp(params.trail_opacity, 0.0, 1.0), vec3<f32>(0.0), vec3<f32>(1.0));
+        visual_grid[visual_idx] = vec4<f32>(blended_color, 1.0);
     }
 }
 

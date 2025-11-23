@@ -718,6 +718,35 @@ struct SimParams {
     ignore_stop_codons: u32,
     // When true (1), require AUG start codon before translation begins
     require_start_codon: u32,
+    // Visualization parameters
+    background_color_r: f32,
+    background_color_g: f32,
+    background_color_b: f32,
+    alpha_blend_mode: u32,
+    beta_blend_mode: u32,
+    gamma_blend_mode: u32,
+    slope_blend_mode: u32,
+    alpha_color_r: f32,
+    alpha_color_g: f32,
+    alpha_color_b: f32,
+    beta_color_r: f32,
+    beta_color_g: f32,
+    beta_color_b: f32,
+    gamma_color_r: f32,
+    gamma_color_g: f32,
+    gamma_color_b: f32,
+    grid_interpolation: u32,  // 0=nearest, 1=bilinear, 2=bicubic
+    alpha_gamma_adjust: f32,  // Gamma correction for alpha channel
+    beta_gamma_adjust: f32,   // Gamma correction for beta channel
+    gamma_gamma_adjust: f32,  // Gamma correction for gamma channel
+    light_dir_x: f32,         // Light direction for slope-based lighting
+    light_dir_y: f32,
+    light_dir_z: f32,
+    agent_blend_mode: u32,    // Agent visualization blend mode
+    agent_color_r: f32,
+    agent_color_g: f32,
+    agent_color_b: f32,
+    _padding: [f32; 1],  // Ensure 16-byte alignment
 }
 
 #[repr(C)]
@@ -833,6 +862,21 @@ struct SimulationSettings {
     alpha_rain_freq: f32,
     beta_rain_freq: f32,
     difficulty: DifficultySettings,
+    background_color: [f32; 3],
+    alpha_blend_mode: u32,
+    beta_blend_mode: u32,
+    gamma_blend_mode: u32,
+    slope_blend_mode: u32,
+    alpha_color: [f32; 3],
+    beta_color: [f32; 3],
+    gamma_color: [f32; 3],
+    grid_interpolation: u32,
+    alpha_gamma_adjust: f32,
+    beta_gamma_adjust: f32,
+    gamma_gamma_adjust: f32,
+    light_direction: [f32; 3],  // Light direction for slope-based lighting effects
+    agent_blend_mode: u32,  // Agent blend mode: 0=comp, 1=add, 2=subtract, 3=multiply
+    agent_color: [f32; 3],  // Agent color tint
 }
 
 impl Default for SimulationSettings {
@@ -889,6 +933,21 @@ impl Default for SimulationSettings {
             alpha_rain_freq: 1.0,
             beta_rain_freq: 1.0,
             difficulty: DifficultySettings::default(),
+            background_color: [0.0, 0.0, 0.0],
+            alpha_blend_mode: 0, // additive
+            beta_blend_mode: 0,
+            gamma_blend_mode: 0,
+            slope_blend_mode: 0,  // No slope lighting by default
+            alpha_color: [0.0, 1.0, 0.0], // green
+            beta_color: [1.0, 0.0, 0.0],  // red
+            gamma_color: [0.0, 0.0, 1.0], // blue
+            grid_interpolation: 1, // bilinear by default
+            alpha_gamma_adjust: 1.0,  // Linear (no adjustment)
+            beta_gamma_adjust: 1.0,   // Linear (no adjustment)
+            gamma_gamma_adjust: 1.0,  // Linear (no adjustment)
+            light_direction: [0.5, 0.5, 0.5],  // Default diagonal light
+            agent_blend_mode: 0,  // Comp by default
+            agent_color: [1.0, 1.0, 1.0],  // White
         }
     }
 }
@@ -1138,6 +1197,24 @@ struct GpuState {
     interior_isotropic: bool,
     ignore_stop_codons: bool,
     require_start_codon: bool,
+    
+    // Visualization controls
+    background_color: [f32; 3],
+    alpha_blend_mode: u32, // 0=additive, 1=multiply
+    beta_blend_mode: u32,
+    gamma_blend_mode: u32,
+    slope_blend_mode: u32, // 0=none, 1=hard light, 2=soft light
+    alpha_color: [f32; 3],
+    beta_color: [f32; 3],
+    gamma_color: [f32; 3],
+    grid_interpolation: u32, // 0=nearest, 1=bilinear, 2=bicubic
+    alpha_gamma_adjust: f32,
+    beta_gamma_adjust: f32,
+    gamma_gamma_adjust: f32,
+    light_direction: [f32; 3],
+    agent_blend_mode: u32, // 0=comp, 1=add, 2=subtract, 3=multiply
+    agent_color: [f32; 3],
+    
     settings_path: PathBuf,
     last_saved_settings: SimulationSettings,
     destroyed: bool,
@@ -1197,6 +1274,21 @@ impl GpuState {
             alpha_rain_freq: self.alpha_rain_freq,
             beta_rain_freq: self.beta_rain_freq,
             difficulty: self.difficulty.clone(),
+            background_color: self.background_color,
+            alpha_blend_mode: self.alpha_blend_mode,
+            beta_blend_mode: self.beta_blend_mode,
+            gamma_blend_mode: self.gamma_blend_mode,
+            slope_blend_mode: self.slope_blend_mode,
+            alpha_color: self.alpha_color,
+            beta_color: self.beta_color,
+            gamma_color: self.gamma_color,
+            grid_interpolation: self.grid_interpolation,
+            alpha_gamma_adjust: self.alpha_gamma_adjust,
+            beta_gamma_adjust: self.beta_gamma_adjust,
+            gamma_gamma_adjust: self.gamma_gamma_adjust,
+            light_direction: self.light_direction,
+            agent_blend_mode: self.agent_blend_mode,
+            agent_color: self.agent_color,
         };
         settings.save_to_disk(path)
     }
@@ -1254,6 +1346,21 @@ impl GpuState {
         self.alpha_rain_freq = settings.alpha_rain_freq;
         self.beta_rain_freq = settings.beta_rain_freq;
         self.difficulty = settings.difficulty;
+        self.background_color = settings.background_color;
+        self.alpha_blend_mode = settings.alpha_blend_mode;
+        self.beta_blend_mode = settings.beta_blend_mode;
+        self.gamma_blend_mode = settings.gamma_blend_mode;
+        self.slope_blend_mode = settings.slope_blend_mode;
+        self.alpha_color = settings.alpha_color;
+        self.beta_color = settings.beta_color;
+        self.gamma_color = settings.gamma_color;
+        self.grid_interpolation = settings.grid_interpolation;
+        self.alpha_gamma_adjust = settings.alpha_gamma_adjust;
+        self.beta_gamma_adjust = settings.beta_gamma_adjust;
+        self.gamma_gamma_adjust = settings.gamma_gamma_adjust;
+        self.light_direction = settings.light_direction;
+        self.agent_blend_mode = settings.agent_blend_mode;
+        self.agent_color = settings.agent_color;
         
         if let Some(path) = &self.alpha_rain_map_path.clone() {
              let _ = self.load_alpha_rain_map(path);
@@ -1684,6 +1791,34 @@ impl GpuState {
             interior_isotropic: 1,
             ignore_stop_codons: 0,
             require_start_codon: 1,
+            background_color_r: 0.0,
+            background_color_g: 0.0,
+            background_color_b: 0.0,
+            alpha_blend_mode: 0,
+            beta_blend_mode: 0,
+            gamma_blend_mode: 0,
+            slope_blend_mode: 0,
+            alpha_color_r: 0.0,
+            alpha_color_g: 1.0,
+            alpha_color_b: 0.0,
+            beta_color_r: 1.0,
+            beta_color_g: 0.0,
+            beta_color_b: 0.0,
+            gamma_color_r: 0.0,
+            gamma_color_g: 0.0,
+            gamma_color_b: 1.0,
+            grid_interpolation: 1,  // Default to bilinear
+            alpha_gamma_adjust: 1.0,
+            beta_gamma_adjust: 1.0,
+            gamma_gamma_adjust: 1.0,
+            light_dir_x: 0.5,
+            light_dir_y: 0.5,
+            light_dir_z: 0.5,
+            agent_blend_mode: 0,
+            agent_color_r: 1.0,
+            agent_color_g: 1.0,
+            agent_color_b: 1.0,
+            _padding: [0.0],
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2667,6 +2802,21 @@ impl GpuState {
             interior_isotropic: settings.interior_isotropic,
             ignore_stop_codons: settings.ignore_stop_codons,
             require_start_codon: settings.require_start_codon,
+            background_color: settings.background_color,
+            alpha_blend_mode: settings.alpha_blend_mode,
+            beta_blend_mode: settings.beta_blend_mode,
+            gamma_blend_mode: settings.gamma_blend_mode,
+            slope_blend_mode: settings.slope_blend_mode,
+            alpha_color: settings.alpha_color,
+            beta_color: settings.beta_color,
+            gamma_color: settings.gamma_color,
+            grid_interpolation: settings.grid_interpolation,
+            alpha_gamma_adjust: settings.alpha_gamma_adjust,
+            beta_gamma_adjust: settings.beta_gamma_adjust,
+            gamma_gamma_adjust: settings.gamma_gamma_adjust,
+            light_direction: settings.light_direction,
+            agent_blend_mode: settings.agent_blend_mode,
+            agent_color: settings.agent_color,
             settings_path: settings_path.clone(),
             last_saved_settings: settings.clone(),
             destroyed: false,
@@ -3273,6 +3423,21 @@ impl GpuState {
             alpha_rain_freq: self.alpha_rain_freq,
             beta_rain_freq: self.beta_rain_freq,
             difficulty: self.difficulty.clone(),
+            background_color: self.background_color,
+            alpha_blend_mode: self.alpha_blend_mode,
+            beta_blend_mode: self.beta_blend_mode,
+            gamma_blend_mode: self.gamma_blend_mode,
+            slope_blend_mode: self.slope_blend_mode,
+            alpha_color: self.alpha_color,
+            beta_color: self.beta_color,
+            gamma_color: self.gamma_color,
+            grid_interpolation: self.grid_interpolation,
+            alpha_gamma_adjust: self.alpha_gamma_adjust,
+            beta_gamma_adjust: self.beta_gamma_adjust,
+            gamma_gamma_adjust: self.gamma_gamma_adjust,
+            light_direction: self.light_direction,
+            agent_blend_mode: self.agent_blend_mode,
+            agent_color: self.agent_color,
         }
     }
 
@@ -3765,6 +3930,34 @@ impl GpuState {
             interior_isotropic: if self.interior_isotropic { 1 } else { 0 },
             ignore_stop_codons: if self.ignore_stop_codons { 1 } else { 0 },
             require_start_codon: if self.require_start_codon { 1 } else { 0 },
+            background_color_r: self.background_color[0],
+            background_color_g: self.background_color[1],
+            background_color_b: self.background_color[2],
+            alpha_blend_mode: self.alpha_blend_mode,
+            beta_blend_mode: self.beta_blend_mode,
+            gamma_blend_mode: self.gamma_blend_mode,
+            slope_blend_mode: self.slope_blend_mode,
+            alpha_color_r: self.alpha_color[0],
+            alpha_color_g: self.alpha_color[1],
+            alpha_color_b: self.alpha_color[2],
+            beta_color_r: self.beta_color[0],
+            beta_color_g: self.beta_color[1],
+            beta_color_b: self.beta_color[2],
+            gamma_color_r: self.gamma_color[0],
+            gamma_color_g: self.gamma_color[1],
+            gamma_color_b: self.gamma_color[2],
+            grid_interpolation: self.grid_interpolation,
+            alpha_gamma_adjust: self.alpha_gamma_adjust,
+            beta_gamma_adjust: self.beta_gamma_adjust,
+            gamma_gamma_adjust: self.gamma_gamma_adjust,
+            light_dir_x: self.light_direction[0],
+            light_dir_y: self.light_direction[1],
+            light_dir_z: self.light_direction[2],
+            agent_blend_mode: self.agent_blend_mode,
+            agent_color_r: self.agent_color[0],
+            agent_color_g: self.agent_color[1],
+            agent_color_b: self.agent_color[2],
+            _padding: [0.0],
         };
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
@@ -4947,6 +5140,7 @@ fn main() {
                                                 ui.selectable_value(&mut state.ui_tab, 2, "Environment");
                                                 ui.selectable_value(&mut state.ui_tab, 3, "Evolution");
                                                 ui.selectable_value(&mut state.ui_tab, 4, "Difficulty");
+                                                ui.selectable_value(&mut state.ui_tab, 5, "Visualization");
                                             });
                                             ui.separator();
 
@@ -5026,6 +5220,21 @@ fn main() {
                                                                         alpha_rain_freq: state.alpha_rain_freq,
                                                                         beta_rain_freq: state.beta_rain_freq,
                                                                         difficulty: state.difficulty.clone(),
+                                                                        background_color: state.background_color,
+                                                                        alpha_blend_mode: state.alpha_blend_mode,
+                                                                        beta_blend_mode: state.beta_blend_mode,
+                                                                        gamma_blend_mode: state.gamma_blend_mode,
+                                                                        slope_blend_mode: state.slope_blend_mode,
+                                                                        alpha_color: state.alpha_color,
+                                                                        beta_color: state.beta_color,
+                                                                        gamma_color: state.gamma_color,
+                                                                        grid_interpolation: state.grid_interpolation,
+                                                                        alpha_gamma_adjust: state.alpha_gamma_adjust,
+                                                                        beta_gamma_adjust: state.beta_gamma_adjust,
+                                                                        gamma_gamma_adjust: state.gamma_gamma_adjust,
+                                                                        light_direction: state.light_direction,
+                                                                        agent_blend_mode: state.agent_blend_mode,
+                                                                        agent_color: state.agent_color,
                                                                     };
                                                                     if let Err(err) = settings.save_to_disk(&path) {
                                                                         eprintln!("Failed to save settings: {err:?}");
@@ -5089,6 +5298,17 @@ fn main() {
                                                                         state.alpha_rain_freq = settings.alpha_rain_freq;
                                                                         state.beta_rain_freq = settings.beta_rain_freq;
                                                                         state.difficulty = settings.difficulty;
+                                                                        state.background_color = settings.background_color;
+                                                                        state.alpha_blend_mode = settings.alpha_blend_mode;
+                                                                        state.beta_blend_mode = settings.beta_blend_mode;
+                                                                        state.gamma_blend_mode = settings.gamma_blend_mode;
+                                                                        state.alpha_color = settings.alpha_color;
+                                                                        state.beta_color = settings.beta_color;
+                                                                        state.gamma_color = settings.gamma_color;
+                                                                        state.grid_interpolation = settings.grid_interpolation;
+                                                                        state.alpha_gamma_adjust = settings.alpha_gamma_adjust;
+                                                                        state.beta_gamma_adjust = settings.beta_gamma_adjust;
+                                                                        state.gamma_gamma_adjust = settings.gamma_gamma_adjust;
                                                                         
                                                                         if let Some(path) = &settings.alpha_rain_map_path {
                                                                             let _ = state.load_alpha_rain_map(path);
@@ -5547,7 +5767,6 @@ fn main() {
                                                                 "Grayscale preview of alpha rain probability (white = more rain)",
                                                             );
                                                         }
-                                                        ui.checkbox(&mut state.alpha_show, "Show Alpha Overlay");
 
                                                         ui.separator();
                                                         ui.heading("Beta Controls");
@@ -5623,7 +5842,6 @@ fn main() {
                                                                 "Grayscale preview of beta rain probability (white = more rain)",
                                                             );
                                                         }
-                                                        ui.checkbox(&mut state.beta_show, "Show Beta Overlay");
 
                                                         ui.separator();
                                                         ui.heading("Gamma Controls");
@@ -5652,7 +5870,6 @@ fn main() {
                                                                 }
                                                             }
                                                         }
-                                                        ui.checkbox(&mut state.gamma_show, "Show Gamma Overlay");
                                                         ui.checkbox(&mut state.gamma_hidden, "Hide Gamma in Composite");
                                                         ui.checkbox(&mut state.slope_lighting, "Slope Lighting");
                                                         ui.checkbox(&mut state.slope_debug_visual, "Show Raw Slopes");
@@ -5804,6 +6021,176 @@ fn main() {
                                                         draw_param(ui, &mut state.difficulty.death_prob, "Death Prob (Harder = More)", state.death_probability, current_epoch);
                                                         draw_param(ui, &mut state.difficulty.alpha_rain, "Alpha Rain (Harder = Less)", state.alpha_multiplier, current_epoch);
                                                         draw_param(ui, &mut state.difficulty.beta_rain, "Beta Rain (Harder = More)", state.beta_multiplier, current_epoch);
+                                                    });
+                                                }
+                                                5 => {
+                                                    // Visualization tab
+                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                                        ui.heading("Visualization Settings");
+                                                        
+                                                        ui.separator();
+                                                        ui.label("Grid Interpolation");
+                                                        ui.horizontal(|ui| {
+                                                            ui.radio_value(&mut state.grid_interpolation, 0, "Nearest (Pixelated)");
+                                                            ui.radio_value(&mut state.grid_interpolation, 1, "Bilinear (Smooth)");
+                                                            ui.radio_value(&mut state.grid_interpolation, 2, "Bicubic (Smoothest)");
+                                                        });
+                                                        
+                                                        ui.separator();
+                                                        ui.label("Background");
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Background Color:");
+                                                            let mut bg_color = [
+                                                                (state.background_color[0] * 255.0) as u8,
+                                                                (state.background_color[1] * 255.0) as u8,
+                                                                (state.background_color[2] * 255.0) as u8,
+                                                            ];
+                                                            if ui.color_edit_button_srgb(&mut bg_color).changed() {
+                                                                state.background_color = [
+                                                                    bg_color[0] as f32 / 255.0,
+                                                                    bg_color[1] as f32 / 255.0,
+                                                                    bg_color[2] as f32 / 255.0,
+                                                                ];
+                                                            }
+                                                        });
+                                                        
+                                                        ui.separator();
+                                                        ui.heading("Slope Lighting");
+                                                        ui.label("Light Effect:");
+                                                        ui.horizontal(|ui| {
+                                                            ui.radio_value(&mut state.slope_blend_mode, 0, "None");
+                                                            ui.radio_value(&mut state.slope_blend_mode, 1, "Hard Light");
+                                                            ui.radio_value(&mut state.slope_blend_mode, 2, "Soft Light");
+                                                        });
+                                                        if state.slope_blend_mode != 0 {
+                                                            ui.label("Light Direction:");
+                                                            ui.add(
+                                                                egui::Slider::new(&mut state.light_direction[0], -1.0..=1.0)
+                                                                    .text("Light X")
+                                                            );
+                                                            ui.add(
+                                                                egui::Slider::new(&mut state.light_direction[1], -1.0..=1.0)
+                                                                    .text("Light Y")
+                                                            );
+                                                            ui.add(
+                                                                egui::Slider::new(&mut state.light_direction[2], -1.0..=1.0)
+                                                                    .text("Light Z")
+                                                            );
+                                                        }
+                                                        
+                                                        ui.separator();
+                                                        ui.heading("Alpha Channel");
+                                                        ui.checkbox(&mut state.alpha_show, "Show Alpha");
+                                                        ui.label("Blend Mode:");
+                                                        ui.horizontal(|ui| {
+                                                            ui.radio_value(&mut state.alpha_blend_mode, 0, "Additive");
+                                                            ui.radio_value(&mut state.alpha_blend_mode, 1, "Multiply");
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Color:");
+                                                            let mut alpha_color = [
+                                                                (state.alpha_color[0] * 255.0) as u8,
+                                                                (state.alpha_color[1] * 255.0) as u8,
+                                                                (state.alpha_color[2] * 255.0) as u8,
+                                                            ];
+                                                            if ui.color_edit_button_srgb(&mut alpha_color).changed() {
+                                                                state.alpha_color = [
+                                                                    alpha_color[0] as f32 / 255.0,
+                                                                    alpha_color[1] as f32 / 255.0,
+                                                                    alpha_color[2] as f32 / 255.0,
+                                                                ];
+                                                            }
+                                                        });
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.alpha_gamma_adjust, 0.1..=5.0)
+                                                                .text("Gamma Adjustment")
+                                                                .logarithmic(true)
+                                                        );
+                                                        
+                                                        ui.separator();
+                                                        ui.heading("Beta Channel");
+                                                        ui.checkbox(&mut state.beta_show, "Show Beta");
+                                                        ui.label("Blend Mode:");
+                                                        ui.horizontal(|ui| {
+                                                            ui.radio_value(&mut state.beta_blend_mode, 0, "Additive");
+                                                            ui.radio_value(&mut state.beta_blend_mode, 1, "Multiply");
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Color:");
+                                                            let mut beta_color = [
+                                                                (state.beta_color[0] * 255.0) as u8,
+                                                                (state.beta_color[1] * 255.0) as u8,
+                                                                (state.beta_color[2] * 255.0) as u8,
+                                                            ];
+                                                            if ui.color_edit_button_srgb(&mut beta_color).changed() {
+                                                                state.beta_color = [
+                                                                    beta_color[0] as f32 / 255.0,
+                                                                    beta_color[1] as f32 / 255.0,
+                                                                    beta_color[2] as f32 / 255.0,
+                                                                ];
+                                                            }
+                                                        });
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.beta_gamma_adjust, 0.1..=5.0)
+                                                                .text("Gamma Adjustment")
+                                                                .logarithmic(true)
+                                                        );
+                                                        
+                                                        ui.separator();
+                                                        ui.heading("Gamma Channel");
+                                                        ui.checkbox(&mut state.gamma_show, "Show Gamma");
+                                                        ui.label("Blend Mode:");
+                                                        ui.horizontal(|ui| {
+                                                            ui.radio_value(&mut state.gamma_blend_mode, 0, "Additive");
+                                                            ui.radio_value(&mut state.gamma_blend_mode, 1, "Multiply");
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Color:");
+                                                            let mut gamma_color = [
+                                                                (state.gamma_color[0] * 255.0) as u8,
+                                                                (state.gamma_color[1] * 255.0) as u8,
+                                                                (state.gamma_color[2] * 255.0) as u8,
+                                                            ];
+                                                            if ui.color_edit_button_srgb(&mut gamma_color).changed() {
+                                                                state.gamma_color = [
+                                                                    gamma_color[0] as f32 / 255.0,
+                                                                    gamma_color[1] as f32 / 255.0,
+                                                                    gamma_color[2] as f32 / 255.0,
+                                                                ];
+                                                            }
+                                                        });
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.gamma_gamma_adjust, 0.1..=5.0)
+                                                                .text("Gamma Adjustment")
+                                                                .logarithmic(true)
+                                                        );
+                                                        
+                                                        ui.separator();
+                                                        ui.heading("Agents");
+                                                        ui.label("Blend Mode:");
+                                                        ui.horizontal(|ui| {
+                                                            ui.radio_value(&mut state.agent_blend_mode, 0, "Comp");
+                                                            ui.radio_value(&mut state.agent_blend_mode, 1, "Add");
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.radio_value(&mut state.agent_blend_mode, 2, "Subtract");
+                                                            ui.radio_value(&mut state.agent_blend_mode, 3, "Multiply");
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Color Tint:");
+                                                            let mut agent_color = [
+                                                                (state.agent_color[0] * 255.0) as u8,
+                                                                (state.agent_color[1] * 255.0) as u8,
+                                                                (state.agent_color[2] * 255.0) as u8,
+                                                            ];
+                                                            if ui.color_edit_button_srgb(&mut agent_color).changed() {
+                                                                state.agent_color = [
+                                                                    agent_color[0] as f32 / 255.0,
+                                                                    agent_color[1] as f32 / 255.0,
+                                                                    agent_color[2] as f32 / 255.0,
+                                                                ];
+                                                            }
+                                                        });
                                                     });
                                                 }
                                                 _ => {}
