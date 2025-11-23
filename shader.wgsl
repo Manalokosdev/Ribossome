@@ -207,44 +207,44 @@ var<storage, read_write> beta_grid: array<f32>;   // 512x512 environment grid
 var<storage, read_write> visual_grid: array<vec4<f32>>; // RGBA render target
 
 @group(0) @binding(5)
-var<uniform> params: SimParams;
+var<storage, read_write> agent_grid: array<vec4<f32>>; // Separate agent render buffer
 
 @group(0) @binding(6)
-var<storage, read_write> alive_counter: atomic<u32>;
+var<uniform> params: SimParams;
 
 @group(0) @binding(7)
-var<storage, read_write> debug_counter: atomic<u32>;
+var<storage, read_write> alive_counter: atomic<u32>;
 
 @group(0) @binding(8)
-var<storage, read_write> new_agents: array<Agent>;  // Buffer for spawned agents
+var<storage, read_write> debug_counter: atomic<u32>;
 
 @group(0) @binding(9)
-var<storage, read_write> spawn_counter: atomic<u32>;  // Count of spawned agents this frame
+var<storage, read_write> new_agents: array<Agent>;  // Buffer for spawned agents
 
 @group(0) @binding(10)
-var<storage, read> spawn_requests: array<SpawnRequest>;
+var<storage, read_write> spawn_counter: atomic<u32>;  // Count of spawned agents this frame
 
 @group(0) @binding(11)
-var<storage, read_write> selected_agent_buffer: array<Agent>;  // Buffer to hold the selected agent for CPU readback
+var<storage, read> spawn_requests: array<SpawnRequest>;
 
 @group(0) @binding(12)
-var<storage, read_write> debug_parts_buffer: array<u32>; // [0]=count, [1..MAX_BODY_PARTS]=part types (u32 each)
+var<storage, read_write> selected_agent_buffer: array<Agent>;  // Buffer to hold the selected agent for CPU readback
 
 @group(0) @binding(13)
-var<storage, read_write> gamma_grid: array<f32>; // Terrain height field + slope components
+var<storage, read_write> debug_parts_buffer: array<u32>; // [0]=count, [1..MAX_BODY_PARTS]=part types (u32 each)
 
 @group(0) @binding(14)
+var<storage, read_write> gamma_grid: array<f32>; // Terrain height field + slope components
+
+@group(0) @binding(15)
 // NOTE: Use vec4 for std430-friendly 16-byte stride to match host buffer layout
 var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGBA (A unused)
 
-@group(0) @binding(15)
+@group(0) @binding(16)
 var<uniform> environment_init: EnvironmentInitParams;
 
-@group(0) @binding(16)
-var<storage, read> alpha_rain_map: array<f32>;
-
 @group(0) @binding(17)
-var<storage, read> beta_rain_map: array<f32>;
+var<storage, read> rain_map: array<vec2<f32>>; // x=alpha, y=beta
 
 // ============================================================================
 // AMINO ACID PROPERTIES
@@ -3049,36 +3049,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 // HELPER FUNCTIONS FOR DRAWING
 // ============================================================================
 
-// Apply agent visualization blend mode to color
-fn apply_agent_blend(base_color: vec3<f32>) -> vec3<f32> {
-    let agent_color = vec3<f32>(
-        clamp(params.agent_color_r, 0.0, 1.0),
-        clamp(params.agent_color_g, 0.0, 1.0),
-        clamp(params.agent_color_b, 0.0, 1.0)
-    );
-    
-    if (params.agent_blend_mode == 0u) {
-        // Comp (normal) - just return original color
-        return base_color;
-    } else if (params.agent_blend_mode == 1u) {
-        // Add - add agent color
-        return clamp(base_color + agent_color, vec3<f32>(0.0), vec3<f32>(1.0));
-    } else if (params.agent_blend_mode == 2u) {
-        // Subtract - subtract agent color
-        return clamp(base_color - agent_color, vec3<f32>(0.0), vec3<f32>(1.0));
-    } else {
-        // Multiply - multiply by agent color
-        return base_color * agent_color;
-    }
-}
-
-
 // Helper function to draw a thick line in screen space
 fn draw_thick_line(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32>) {
-    // Apply agent blend mode to color
-    let blended_rgb = apply_agent_blend(color.rgb);
-    let final_color = vec4<f32>(blended_rgb, color.a);
-    
     let screen_p0 = world_to_screen(p0);
     let screen_p1 = world_to_screen(p1);
     
@@ -3105,7 +3077,7 @@ fn draw_thick_line(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32
                         screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
                         
                         let idx = screen_to_grid_index(screen_pos);
-                        visual_grid[idx] = final_color;
+                        agent_grid[idx] = color;
                     }
                 }
             }
@@ -3115,10 +3087,6 @@ fn draw_thick_line(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32
 
 // Helper function to draw a clean circle outline in screen space
 fn draw_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
-    // Apply agent blend mode to color
-    let blended_rgb = apply_agent_blend(color.rgb);
-    let final_color = vec4<f32>(blended_rgb, color.a);
-    
     // Convert world position to screen coordinates
     let screen_center = world_to_screen(center);
     
@@ -3143,7 +3111,7 @@ fn draw_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
                     screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
                     
                     let idx = screen_to_grid_index(screen_pos);
-                    visual_grid[idx] = final_color;
+                    agent_grid[idx] = color;
                 }
             }
         }
@@ -3152,10 +3120,6 @@ fn draw_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
 
 // Helper: draw a filled circle in screen space
 fn draw_filled_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
-    // Apply agent blend mode to color
-    let blended_rgb = apply_agent_blend(color.rgb);
-    let final_color = vec4<f32>(blended_rgb, color.a);
-    
     // Convert world position to screen coordinates
     let screen_center = world_to_screen(center);
     
@@ -3175,7 +3139,7 @@ fn draw_filled_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
                 if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) &&
                     screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
                     let idx = screen_to_grid_index(screen_pos);
-                    visual_grid[idx] = color;
+                    agent_grid[idx] = color;
                 }
             }
         }
@@ -3184,10 +3148,6 @@ fn draw_filled_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
 
 // Helper: draw a 5-pointed star in screen space
 fn draw_star(center: vec2<f32>, radius: f32, color: vec4<f32>) {
-    // Apply agent blend mode to color
-    let blended_rgb = apply_agent_blend(color.rgb);
-    let final_color = vec4<f32>(blended_rgb, color.a);
-    
     // Convert world position to screen coordinates
     let screen_center = world_to_screen(center);
     
@@ -3214,13 +3174,9 @@ fn draw_star(center: vec2<f32>, radius: f32, color: vec4<f32>) {
         let next_outer_x = screen_center.x + i32(cos(angle_next_outer) * screen_radius);
         let next_outer_y = screen_center.y + i32(sin(angle_next_outer) * screen_radius);
         
-        // Apply agent blend mode
-        let blended_rgb = apply_agent_blend(color.rgb);
-        let final_color = vec4<f32>(blended_rgb, color.a);
-        
         // Draw lines: outer -> inner -> next_outer
-        draw_line_pixels(vec2<i32>(outer_x, outer_y), vec2<i32>(inner_x, inner_y), final_color);
-        draw_line_pixels(vec2<i32>(inner_x, inner_y), vec2<i32>(next_outer_x, next_outer_y), final_color);
+        draw_line_pixels(vec2<i32>(outer_x, outer_y), vec2<i32>(inner_x, inner_y), color);
+        draw_line_pixels(vec2<i32>(inner_x, inner_y), vec2<i32>(next_outer_x, next_outer_y), color);
     }
 }
 
@@ -3321,7 +3277,7 @@ fn draw_line_pixels(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
         if (screen_x >= 0 && screen_x < i32(params.window_width) &&
             screen_y >= 0 && screen_y < i32(params.window_height)) {
             let idx = screen_to_grid_index(vec2<i32>(screen_x, screen_y));
-            visual_grid[idx] = color;
+            agent_grid[idx] = color;
         }
     }
 }
@@ -3346,7 +3302,7 @@ fn draw_line(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>) {
             screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
             
             let idx = screen_to_grid_index(screen_pos);
-            visual_grid[idx] = color;
+            agent_grid[idx] = color;
         }
     }
 }
@@ -3527,7 +3483,7 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform alpha rain (food): remove spatial and beta-dependent gradients.
     // Each cell independently receives a saturated rain event with probability alpha_multiplier * 0.05.
     // (Scaling by 0.05 preserves prior expected value semantics.)
-    let alpha_rain_factor = clamp(alpha_rain_map[idx], 0.0, 1.0);
+    let alpha_rain_factor = clamp(rain_map[idx].x, 0.0, 1.0);
     let alpha_probability_sat = params.alpha_multiplier * 0.05 * alpha_rain_factor;
     if (rain_chance < alpha_probability_sat) {
         final_alpha = 1.0;
@@ -3536,7 +3492,7 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform beta rain (poison): also no vertical gradient. Probability = beta_multiplier * 0.05.
     let beta_seed = cell_seed * 1103515245u;
     let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
-    let beta_rain_factor = clamp(beta_rain_map[idx], 0.0, 1.0);
+    let beta_rain_factor = clamp(rain_map[idx].y, 0.0, 1.0);
     let beta_probability_sat = params.beta_multiplier * 0.05 * beta_rain_factor;
     if (beta_rain_chance < beta_probability_sat) {
         final_beta = 1.0;
@@ -3847,6 +3803,82 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         let blended_color = clamp(base_color + trail_color * clamp(params.trail_opacity, 0.0, 1.0), vec3<f32>(0.0), vec3<f32>(1.0));
         visual_grid[visual_idx] = vec4<f32>(blended_color, 1.0);
     }
+}
+
+// ============================================================================
+// AGENT RENDER BUFFER MANAGEMENT
+// ============================================================================
+
+@compute @workgroup_size(16, 16)
+fn clear_agent_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (params.draw_enabled == 0u) { return; }
+    let x = gid.x;
+    let y = gid.y;
+    
+    let safe_width = max(params.window_width, 1.0);
+    let safe_height = max(params.window_height, 1.0);
+    let width = u32(safe_width);
+    let height = u32(safe_height);
+    
+    if (x >= width || y >= height) {
+        return;
+    }
+    
+    let agent_idx = y * params.visual_stride + x;
+    // Clear to transparent black
+    agent_grid[agent_idx] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+@compute @workgroup_size(16, 16)
+fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (params.draw_enabled == 0u) { return; }
+    let x = gid.x;
+    let y = gid.y;
+    
+    let safe_width = max(params.window_width, 1.0);
+    let safe_height = max(params.window_height, 1.0);
+    let width = u32(safe_width);
+    let height = u32(safe_height);
+    
+    if (x >= width || y >= height) {
+        return;
+    }
+    
+    let idx = y * params.visual_stride + x;
+    let agent_pixel = agent_grid[idx];
+    
+    // Skip if no agent drawn here (transparent)
+    if (agent_pixel.a == 0.0) {
+        return;
+    }
+    
+    let base_color = visual_grid[idx].rgb;
+    let agent_color_param = vec3<f32>(
+        clamp(params.agent_color_r, 0.0, 1.0),
+        clamp(params.agent_color_g, 0.0, 1.0),
+        clamp(params.agent_color_b, 0.0, 1.0)
+    );
+    
+    var result_color = vec3<f32>(0.0);
+    
+    if (params.agent_blend_mode == 0u) {
+        // Comp (normal) - alpha blend agent on top of base
+        result_color = mix(base_color, agent_pixel.rgb, agent_pixel.a);
+    } else if (params.agent_blend_mode == 1u) {
+        // Add - add agent color tint to agent pixel, then composite
+        let tinted_agent = clamp(agent_pixel.rgb + agent_color_param, vec3<f32>(0.0), vec3<f32>(1.0));
+        result_color = clamp(base_color + tinted_agent * agent_pixel.a, vec3<f32>(0.0), vec3<f32>(1.0));
+    } else if (params.agent_blend_mode == 2u) {
+        // Subtract - subtract agent color tint from agent pixel, then composite
+        let tinted_agent = clamp(agent_pixel.rgb - agent_color_param, vec3<f32>(0.0), vec3<f32>(1.0));
+        result_color = mix(base_color, tinted_agent, agent_pixel.a);
+    } else {
+        // Multiply - multiply agent by color tint, then composite
+        let tinted_agent = agent_pixel.rgb * agent_color_param;
+        result_color = mix(base_color, tinted_agent, agent_pixel.a);
+    }
+    
+    visual_grid[idx] = vec4<f32>(result_color, 1.0);
 }
 
 // ============================================================================

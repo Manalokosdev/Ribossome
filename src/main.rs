@@ -1030,11 +1030,11 @@ struct GpuState {
     agents_buffer_b: wgpu::Buffer,
     alpha_grid: wgpu::Buffer,
     beta_grid: wgpu::Buffer,
-    alpha_rain_map_buffer: wgpu::Buffer,
-    beta_rain_map_buffer: wgpu::Buffer,
+    rain_map_buffer: wgpu::Buffer,
     gamma_grid: wgpu::Buffer,
     trail_grid: wgpu::Buffer,
     visual_grid_buffer: wgpu::Buffer,
+    agent_grid_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
     environment_init_params_buffer: wgpu::Buffer,
     alive_counter: wgpu::Buffer,
@@ -1064,6 +1064,8 @@ struct GpuState {
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_trails_pipeline: wgpu::ComputePipeline,
     clear_visual_pipeline: wgpu::ComputePipeline,
+    clear_agent_grid_pipeline: wgpu::ComputePipeline,
+    composite_agents_pipeline: wgpu::ComputePipeline,
     gamma_slope_pipeline: wgpu::ComputePipeline,
     merge_pipeline: wgpu::ComputePipeline, // Merge spawned agents
     compact_pipeline: wgpu::ComputePipeline, // Remove dead agents
@@ -1096,6 +1098,8 @@ struct GpuState {
     spawn_probability: f32,
     death_probability: f32,
     auto_replenish: bool,
+    // CPU-side copy of rain map data (interleaved alpha/beta)
+    rain_map_data: Vec<f32>,
     difficulty: DifficultySettings,
 
     // FPS tracking
@@ -1647,31 +1651,22 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
-        let rain_map_buffer_size = (grid_size * std::mem::size_of::<f32>()) as u64;
-        let alpha_rain_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Alpha Rain Map"),
+        // Combined rain map buffer (vec2 per cell: x=alpha, y=beta)
+        let rain_map_buffer_size = (grid_size * 2 * std::mem::size_of::<f32>()) as u64;
+        let rain_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Rain Map"),
             size: rain_map_buffer_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let beta_rain_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Beta Rain Map"),
-            size: rain_map_buffer_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let uniform_rain = vec![1.0f32; GRID_CELL_COUNT];
+        // Initialize with uniform rain (1.0 for both alpha and beta)
+        let uniform_rain: Vec<f32> = (0..GRID_CELL_COUNT).flat_map(|_| [1.0f32, 1.0f32]).collect();
         queue.write_buffer(
-            &alpha_rain_map_buffer,
+            &rain_map_buffer,
             0,
             bytemuck::cast_slice(&uniform_rain),
         );
-        queue.write_buffer(
-            &beta_rain_map_buffer,
-            0,
-            bytemuck::cast_slice(&uniform_rain),
-        );
-        profiler.mark("Rain map buffers");
+        profiler.mark("Rain map buffer");
 
         // Gamma grid packs height + 2 slope components per cell (3 floats)
         let gamma_buffer_size = (grid_size * 3 * std::mem::size_of::<f32>()) as u64;
@@ -1736,6 +1731,16 @@ impl GpuState {
             mapped_at_creation: false,
         });
         profiler.mark("Visual grid buffer");
+
+        let agent_grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Agent Grid"),
+            size: (stride_bytes * surface_config.height) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        profiler.mark("Agent grid buffer");
 
         let params = SimParams {
             dt: 0.016,
@@ -2049,7 +2054,7 @@ impl GpuState {
                         binding: 5,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2059,7 +2064,7 @@ impl GpuState {
                         binding: 6,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2099,7 +2104,7 @@ impl GpuState {
                         binding: 10,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2109,7 +2114,7 @@ impl GpuState {
                         binding: 11,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2149,7 +2154,7 @@ impl GpuState {
                         binding: 15,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2159,7 +2164,7 @@ impl GpuState {
                         binding: 16,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2206,55 +2211,55 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: agent_grid_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: alive_counter.as_entire_binding(),
+                    resource: params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: debug_counter.as_entire_binding(),
+                    resource: alive_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: new_agents_buffer.as_entire_binding(),
+                    resource: debug_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
-                    resource: spawn_counter.as_entire_binding(),
+                    resource: new_agents_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: spawn_requests_buffer.as_entire_binding(),
+                    resource: spawn_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: selected_agent_buffer.as_entire_binding(),
+                    resource: spawn_requests_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: debug_parts_buffer.as_entire_binding(),
+                    resource: selected_agent_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: gamma_grid.as_entire_binding(),
+                    resource: debug_parts_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 14,
-                    resource: trail_grid.as_entire_binding(),
+                    resource: gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: environment_init_params_buffer.as_entire_binding(),
+                    resource: trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: alpha_rain_map_buffer.as_entire_binding(),
+                    resource: environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
-                    resource: beta_rain_map_buffer.as_entire_binding(),
+                    resource: rain_map_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -2285,55 +2290,55 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: params_buffer.as_entire_binding(),
+                    resource: agent_grid_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: alive_counter.as_entire_binding(),
+                    resource: params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: debug_counter.as_entire_binding(),
+                    resource: alive_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: new_agents_buffer.as_entire_binding(),
+                    resource: debug_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
-                    resource: spawn_counter.as_entire_binding(),
+                    resource: new_agents_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: spawn_requests_buffer.as_entire_binding(),
+                    resource: spawn_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: selected_agent_buffer.as_entire_binding(),
+                    resource: spawn_requests_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: debug_parts_buffer.as_entire_binding(),
+                    resource: selected_agent_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: gamma_grid.as_entire_binding(),
+                    resource: debug_parts_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 14,
-                    resource: trail_grid.as_entire_binding(),
+                    resource: gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: environment_init_params_buffer.as_entire_binding(),
+                    resource: trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: alpha_rain_map_buffer.as_entire_binding(),
+                    resource: environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
-                    resource: beta_rain_map_buffer.as_entire_binding(),
+                    resource: rain_map_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -2400,6 +2405,28 @@ impl GpuState {
                 cache: None,
             });
         profiler.mark("clear visual pipeline");
+
+        let clear_agent_grid_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Clear Agent Grid Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "clear_agent_grid",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("clear agent grid pipeline");
+
+        let composite_agents_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Composite Agents Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "composite_agents",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("composite agents pipeline");
 
         let merge_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Merge Agents Pipeline"),
@@ -2663,11 +2690,11 @@ impl GpuState {
             agents_buffer_b,
             alpha_grid,
             beta_grid,
-            alpha_rain_map_buffer,
-            beta_rain_map_buffer,
+            rain_map_buffer,
             gamma_grid,
             trail_grid,
             visual_grid_buffer,
+            agent_grid_buffer,
             params_buffer,
             environment_init_params_buffer,
             alive_counter,
@@ -2693,6 +2720,8 @@ impl GpuState {
             diffuse_pipeline,
             diffuse_trails_pipeline,
             clear_visual_pipeline,
+            clear_agent_grid_pipeline,
+            composite_agents_pipeline,
             gamma_slope_pipeline,
             merge_pipeline,
             compact_pipeline,
@@ -2718,6 +2747,7 @@ impl GpuState {
             spawn_probability: settings.spawn_probability,
             death_probability: settings.death_probability,
             auto_replenish: settings.auto_replenish,
+            rain_map_data: vec![1.0f32; GRID_CELL_COUNT * 2], // Initialize with uniform rain
             difficulty: settings.difficulty.clone(),
             frame_count: 0,
             last_fps_update: std::time::Instant::now(),
@@ -2998,11 +3028,18 @@ impl GpuState {
 
     fn load_alpha_rain_map<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let path = path.as_ref();
-        let (values, thumbnail) = Self::read_rain_map(path)?;
+        let (alpha_values, thumbnail) = Self::read_rain_map(path)?;
+        
+        // Update alpha values in CPU-side data (even indices)
+        for i in 0..GRID_CELL_COUNT {
+            self.rain_map_data[i * 2] = alpha_values[i];
+        }
+        
+        // Upload to GPU
         self.queue.write_buffer(
-            &self.alpha_rain_map_buffer,
+            &self.rain_map_buffer,
             0,
-            bytemuck::cast_slice(&values),
+            bytemuck::cast_slice(&self.rain_map_data),
         );
         self.alpha_rain_map_path = Some(path.to_path_buf());
         self.alpha_rain_thumbnail = Some(RainThumbnail::new(thumbnail));
@@ -3012,9 +3049,19 @@ impl GpuState {
 
     fn load_beta_rain_map<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let path = path.as_ref();
-        let (values, thumbnail) = Self::read_rain_map(path)?;
-        self.queue
-            .write_buffer(&self.beta_rain_map_buffer, 0, bytemuck::cast_slice(&values));
+        let (beta_values, thumbnail) = Self::read_rain_map(path)?;
+        
+        // Update beta values in CPU-side data (odd indices)
+        for i in 0..GRID_CELL_COUNT {
+            self.rain_map_data[i * 2 + 1] = beta_values[i];
+        }
+        
+        // Upload to GPU
+        self.queue.write_buffer(
+            &self.rain_map_buffer,
+            0,
+            bytemuck::cast_slice(&self.rain_map_data),
+        );
         self.beta_rain_map_path = Some(path.to_path_buf());
         self.beta_rain_thumbnail = Some(RainThumbnail::new(thumbnail));
         println!("Loaded beta rain map from {}", path.display());
@@ -3022,11 +3069,16 @@ impl GpuState {
     }
 
     fn clear_alpha_rain_map(&mut self) {
-        let uniform = vec![1.0f32; GRID_CELL_COUNT];
+        // Set alpha to uniform 1.0 in CPU-side data (even indices)
+        for i in 0..GRID_CELL_COUNT {
+            self.rain_map_data[i * 2] = 1.0;
+        }
+        
+        // Upload to GPU
         self.queue.write_buffer(
-            &self.alpha_rain_map_buffer,
+            &self.rain_map_buffer,
             0,
-            bytemuck::cast_slice(&uniform),
+            bytemuck::cast_slice(&self.rain_map_data),
         );
         self.alpha_rain_map_path = None;
         self.alpha_rain_thumbnail = None;
@@ -3034,11 +3086,16 @@ impl GpuState {
     }
 
     fn clear_beta_rain_map(&mut self) {
-        let uniform = vec![1.0f32; GRID_CELL_COUNT];
+        // Set beta to uniform 1.0 in CPU-side data (odd indices)
+        for i in 0..GRID_CELL_COUNT {
+            self.rain_map_data[i * 2 + 1] = 1.0;
+        }
+        
+        // Upload to GPU
         self.queue.write_buffer(
-            &self.beta_rain_map_buffer,
+            &self.rain_map_buffer,
             0,
-            bytemuck::cast_slice(&uniform),
+            bytemuck::cast_slice(&self.rain_map_data),
         );
         self.beta_rain_map_path = None;
         self.beta_rain_thumbnail = None;
@@ -3142,6 +3199,13 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
+        self.agent_grid_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Agent Grid"),
+            size: (stride_bytes * self.surface_config.height) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
         // Recreate bind groups referencing updated resources
         // Compute bind groups
         let layout0 = self.process_pipeline.get_bind_group_layout(0);
@@ -3171,55 +3235,55 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: self.params_buffer.as_entire_binding(),
+                    resource: self.agent_grid_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: self.alive_counter.as_entire_binding(),
+                    resource: self.params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: self.debug_counter.as_entire_binding(),
+                    resource: self.alive_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.new_agents_buffer.as_entire_binding(),
+                    resource: self.debug_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
-                    resource: self.spawn_counter.as_entire_binding(),
+                    resource: self.new_agents_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: self.spawn_requests_buffer.as_entire_binding(),
+                    resource: self.spawn_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: self.selected_agent_buffer.as_entire_binding(),
+                    resource: self.spawn_requests_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: self.debug_parts_buffer.as_entire_binding(),
+                    resource: self.selected_agent_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: self.gamma_grid.as_entire_binding(),
+                    resource: self.debug_parts_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 14,
-                    resource: self.trail_grid.as_entire_binding(),
+                    resource: self.gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: self.environment_init_params_buffer.as_entire_binding(),
+                    resource: self.trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: self.alpha_rain_map_buffer.as_entire_binding(),
+                    resource: self.environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
-                    resource: self.beta_rain_map_buffer.as_entire_binding(),
+                    resource: self.rain_map_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -3249,55 +3313,55 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: self.params_buffer.as_entire_binding(),
+                    resource: self.agent_grid_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: self.alive_counter.as_entire_binding(),
+                    resource: self.params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: self.debug_counter.as_entire_binding(),
+                    resource: self.alive_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.new_agents_buffer.as_entire_binding(),
+                    resource: self.debug_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
-                    resource: self.spawn_counter.as_entire_binding(),
+                    resource: self.new_agents_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: self.spawn_requests_buffer.as_entire_binding(),
+                    resource: self.spawn_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: self.selected_agent_buffer.as_entire_binding(),
+                    resource: self.spawn_requests_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: self.debug_parts_buffer.as_entire_binding(),
+                    resource: self.selected_agent_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: self.gamma_grid.as_entire_binding(),
+                    resource: self.debug_parts_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 14,
-                    resource: self.trail_grid.as_entire_binding(),
+                    resource: self.gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: self.environment_init_params_buffer.as_entire_binding(),
+                    resource: self.trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: self.alpha_rain_map_buffer.as_entire_binding(),
+                    resource: self.environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
-                    resource: self.beta_rain_map_buffer.as_entire_binding(),
+                    resource: self.rain_map_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -3493,8 +3557,7 @@ impl GpuState {
         self.agents_buffer_b.destroy();
         self.alpha_grid.destroy();
         self.beta_grid.destroy();
-        self.alpha_rain_map_buffer.destroy();
-        self.beta_rain_map_buffer.destroy();
+        self.rain_map_buffer.destroy();
         self.gamma_grid.destroy();
         self.trail_grid.destroy();
         self.visual_grid_buffer.destroy();
@@ -4038,6 +4101,11 @@ impl GpuState {
                 let height_workgroups =
                     (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+
+                // Clear agent grid for agent rendering
+                cpass.set_pipeline(&self.clear_agent_grid_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
             }
 
             // Run simulation compute passes, but skip everything when paused or no living agents
@@ -4080,6 +4148,17 @@ impl GpuState {
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+            }
+
+            // Composite agents onto visual grid when drawing
+            if should_draw {
+                cpass.set_pipeline(&self.composite_agents_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                let width_workgroups =
+                    (self.surface_config.width + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
+                let height_workgroups =
+                    (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
+                cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
             }
         }
 
