@@ -1835,16 +1835,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Uses _pad.y to store charge level with sign indicating mode:
         // NEGATIVE = charging mode (e.g., -5.0 = has 5.0 charge, still absorbing)
         // POSITIVE = discharging mode (e.g., +5.0 = has 5.0 charge, releasing)
-        // Tyrosine (19u) = alpha condenser, Glycine (5u) = beta condenser
+        // Both Tyrosine (19u) and Glycine (5u) condensers now work with BOTH alpha and beta in parallel
         if (amino_props.is_condenser) {
             let signed_charge = agents_out[agent_id].body[i]._pad.y; // Signed charge level
-            let absorption_amount = 0.1; // Absorb 0.1 units per frame
+            let absorption_amount = 0.1; // Absorb 0.1 units per frame (split between alpha and beta)
             let max_charge = 10.0;
-            let discharge_rate = 0.2; // Discharge 0.2 per frame
-            
-            let amino_type = agents_out[agent_id].body[i].part_type;
-            let is_alpha_condenser = (amino_type == 19u); // Tyrosine
-            let is_beta_condenser = (amino_type == 5u);   // Glycine
+            let discharge_rate = 0.2; // Discharge 0.2 per frame (split between alpha and beta)
             
             if (signed_charge <= 0.0) {
                 // CHARGING MODE (negative value)
@@ -1854,17 +1850,25 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Reached full charge - switch to discharge mode (make positive)
                     agents_out[agent_id].body[i]._pad.y = max_charge;
                 } else {
-                    // Continue charging - absorb from signal
-                    var absorbed = 0.0;
-                    if (is_alpha_condenser && new_alpha > 0.0) {
-                        absorbed = min(min(new_alpha, absorption_amount), max_charge - charge);
-                        new_alpha -= absorbed;
-                    } else if (is_beta_condenser && new_beta > 0.0) {
-                        absorbed = min(min(new_beta, absorption_amount), max_charge - charge);
-                        new_beta -= absorbed;
+                    // Continue charging - absorb from BOTH alpha and beta signals
+                    var total_absorbed = 0.0;
+                    
+                    // Absorb from alpha if available
+                    if (new_alpha > 0.0) {
+                        let alpha_absorbed = min(min(new_alpha, absorption_amount * 0.5), (max_charge - charge) * 0.5);
+                        new_alpha -= alpha_absorbed;
+                        total_absorbed += alpha_absorbed;
                     }
+                    
+                    // Absorb from beta if available
+                    if (new_beta > 0.0) {
+                        let beta_absorbed = min(min(new_beta, absorption_amount * 0.5), (max_charge - charge) * 0.5);
+                        new_beta -= beta_absorbed;
+                        total_absorbed += beta_absorbed;
+                    }
+                    
                     // Store as negative (charging mode)
-                    agents_out[agent_id].body[i]._pad.y = -(charge + absorbed);
+                    agents_out[agent_id].body[i]._pad.y = -(charge + total_absorbed);
                 }
             } else {
                 // DISCHARGING MODE (positive value) or empty (0.0)
@@ -1874,12 +1878,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Empty - restart charging with negative value
                     agents_out[agent_id].body[i]._pad.y = -1e-6;
                 } else {
-                    // Continue discharging
-                    if (is_alpha_condenser) {
-                        new_alpha += discharge_rate;
-                    } else if (is_beta_condenser) {
-                        new_beta += discharge_rate;
-                    }
+                    // Continue discharging - release to BOTH alpha and beta
+                    new_alpha += discharge_rate * 0.5;
+                    new_beta += discharge_rate * 0.5;
                     agents_out[agent_id].body[i]._pad.y = max(charge - discharge_rate, 0.0);
                 }
             }
@@ -2796,20 +2797,21 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let segments = 24u;
                 
                 let amino_type = part.part_type;
-                let is_alpha_condenser = (amino_type == 19u); // Tyrosine - green
-                let is_beta_condenser = (amino_type == 5u);   // Glycine - red
+                let is_alpha_condenser = (amino_type == 19u); // Tyrosine - originally green
+                let is_beta_condenser = (amino_type == 5u);   // Glycine - originally red
                 
                 // Fill color based on charge level: dark -> bright as it charges
-                // FLASH WHITE when discharging. Both condensers share the exact same shading; only tint differs.
+                // FLASH WHITE when discharging. Both condensers now work with alpha+beta in parallel
                 var fill_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
                 if (is_discharging) {
                     // Flash white when discharging
                     fill_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
                 } else {
-                    // Base tint per condenser type
-                    var base_tint = vec3<f32>(0.0, 1.0, 0.0); // Alpha condenser = green
+                    // Both condensers now blend alpha (green) and beta (red) to show dual functionality
+                    // Tyrosine leans green, Glycine leans red, but both show yellow when fully charged
+                    var base_tint = vec3<f32>(0.5, 1.0, 0.0); // Tyrosine = yellow-green (more green)
                     if (is_beta_condenser) {
-                        base_tint = vec3<f32>(1.0, 0.0, 0.0); // Beta condenser = red
+                        base_tint = vec3<f32>(1.0, 0.5, 0.0); // Glycine = yellow-red (more red)
                     }
                     let low_tint = base_tint * 0.25; // Keep color identity even when uncharged
                     let fill_rgb = mix(low_tint, base_tint, charge_ratio);
@@ -2954,7 +2956,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 draw_selection_circle(agent.position, agent_id, body_count);
             }
         }
-    } // End of draw_enabled check
+    } // End of drw_en
 
     // Always write selected agent to readback buffer for inspector (even when drawing disabled)
     if (agent.is_selected == 1u) {

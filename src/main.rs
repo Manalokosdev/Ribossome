@@ -6671,13 +6671,14 @@ fn main() {
                                                         let fill_color = if is_discharging {
                                                             egui::Color32::WHITE
                                                         } else {
-                                                            // Base tint per condenser type
+                                                            // Both condensers now blend alpha (green) and beta (red) to show dual functionality
+                                                            // Tyrosine leans green, Glycine leans red, but both show yellow when charged
                                                             let base_tint = if part.part_type == 19 {
-                                                                [0.0, 1.0, 0.0] // Tyrosine = green
+                                                                [0.5, 1.0, 0.0] // Tyrosine = yellow-green (more green)
                                                             } else {
-                                                                [1.0, 0.0, 0.0] // Glycine = red
+                                                                [1.0, 0.5, 0.0] // Glycine = yellow-red (more red)
                                                             };
-                                                            // GPU uses 0.25 multiplier for low_tint, not 0.15
+                                                            // GPU uses 0.25 multiplier for low_tint
                                                             let low_tint = [base_tint[0] * 0.25, base_tint[1] * 0.25, base_tint[2] * 0.25];
                                                             let interp = [
                                                                 low_tint[0] + (base_tint[0] - low_tint[0]) * charge_ratio,

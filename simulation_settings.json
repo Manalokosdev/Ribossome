@@ -1,6 +1,6 @@
 {
-  "camera_zoom": 1.2668288,
-  "spawn_probability": 0.001,
+  "camera_zoom": 0.70724297,
+  "spawn_probability": 0.1,
   "death_probability": 0.001,
   "mutation_rate": 0.01,
   "auto_replenish": true,
@@ -9,14 +9,14 @@
   "alpha_blur": 0.0003,
   "beta_blur": 0.0003,
   "gamma_blur": 0.0,
-  "alpha_slope_bias": 0.0,
-  "beta_slope_bias": 0.0,
+  "alpha_slope_bias": -5.0,
+  "beta_slope_bias": 5.0,
   "alpha_multiplier": 0.0002,
   "beta_multiplier": 0.0001,
   "alpha_rain_map_path": null,
   "beta_rain_map_path": "C:\\Backup Desktops\\Desktop Novembro 2025\\d9abe06cf01b553df43759771d1d543feed928e0 copy.jpg",
-  "chemical_slope_scale_alpha": 0.01,
-  "chemical_slope_scale_beta": 0.01,
+  "chemical_slope_scale_alpha": 0.1,
+  "chemical_slope_scale_beta": 0.1,
   "food_power": 10.0,
   "poison_power": 5.0,
   "amino_maintenance_cost": 0.001,
@@ -57,7 +57,7 @@
       "max_threshold": 3000.0,
       "adjustment_percent": 3.0,
       "cooldown_epochs": 3000,
-      "last_adjustment_epoch": 3000,
+      "last_adjustment_epoch": 45000,
       "difficulty_level": -1
     },
     "poison_power": {
@@ -66,7 +66,7 @@
       "max_threshold": 3000.0,
       "adjustment_percent": 3.0,
       "cooldown_epochs": 3000,
-      "last_adjustment_epoch": 3000,
+      "last_adjustment_epoch": 45000,
       "difficulty_level": -1
     },
     "spawn_prob": {
