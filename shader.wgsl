@@ -438,7 +438,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.45;
             props.mass = 10.0; // Very heavy - slows agent down significantly
         }
-        case 5u: { // G - Glycine - BETA CONDENSER
+        case 5u: { // G - Glycine - Structural (smallest amino acid, flexible)
             props.segment_length = 4.0;
             props.thickness = 0.75;
             // Old CSV: Seed Angle = -20°
@@ -450,7 +450,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.color = vec3<f32>(0.4, 0.0, 0.0); // Dark red
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
-            props.beta_absorption_rate = 0.2;
+            props.beta_absorption_rate = 0.0; // No longer absorbs
             props.beta_damage = 0.88; // Color value
             props.energy_storage = 0.0;
             props.energy_consumption = 0.001;
@@ -462,7 +462,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 0.5;
             props.beta_right_mult = 0.5;
             props.mass = 0.02;
-            props.is_condenser = true;
+            props.is_condenser = false; // Now just structural
         }
         case 6u: { // H - Histidine - Aromatic, charged (real: imidazole ring, pH-sensitive)
             props.segment_length = 9.0;
@@ -2803,8 +2803,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             
             // Special rendering for CONDENSER - filled circle with charge level
-            // Tyrosine (alpha) = green fill, Glycine (beta) = red fill, white outline
-            // FLASH: White when discharging (positive charge value)
+            // Only Tyrosine (Y) is a dual-channel condenser
+            // FLASH: White when discharging either channel (positive charge value)
             if (amino_props.is_condenser) {
                 let signed_charge = part._pad.y; // Signed charge: negative=charging, positive=discharging
                 let charge = abs(signed_charge); // Absolute charge level (0.0 to 10.0)
@@ -2817,8 +2817,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let segments = 24u;
                 
                 let amino_type = part.part_type;
-                let is_alpha_condenser = (amino_type == 19u); // Tyrosine - green
-                let is_beta_condenser = (amino_type == 5u);   // Glycine - red
+                // Only Tyrosine (19) is a condenser now - Glycine (5) is structural
                 
                 // Read both alpha and beta charges independently
                 let signed_alpha_charge = part._pad.x;

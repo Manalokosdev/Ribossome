@@ -186,9 +186,9 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_energy_sensor: false,
         is_inhibitor: false,
         is_propeller: false,
-        is_condenser: true,
+        is_condenser: false, // Now structural
         is_displacer: false,
-    }, // G (beta condenser)
+    }, // G (structural - was beta condenser)
     AminoVisualFlags {
         is_mouth: false,
         is_alpha_sensor: false,
