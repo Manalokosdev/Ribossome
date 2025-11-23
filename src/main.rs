@@ -1209,6 +1209,8 @@ struct GpuState {
     selected_agent_index: Option<usize>,
     selected_agent_data: Option<Agent>,
     follow_selected_agent: bool, // New field
+    camera_target: [f32; 2], // Target position for smooth camera following
+    camera_velocity: [f32; 2], // Current camera velocity for smooth interpolation
     debug_parts_data: Option<(u32, [u32; MAX_BODY_PARTS])>,
 
     // RNG state for per-frame randomness
@@ -2850,6 +2852,8 @@ impl GpuState {
             selected_agent_index: None,
             selected_agent_data: None,
             follow_selected_agent: false, // Initialize to false
+            camera_target: [SIM_SIZE / 2.0, SIM_SIZE / 2.0], // Initialize to center
+            camera_velocity: [0.0, 0.0], // Initialize velocity to zero
             debug_parts_data: None,
             rng_state: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3757,6 +3761,11 @@ impl GpuState {
                     let agent_bytes = &selected_data[..std::mem::size_of::<Agent>()];
                     let agent: Agent = bytemuck::pod_read_unaligned(agent_bytes);
                     self.selected_agent_data = Some(agent);
+                    
+                    // Update camera target if following this agent
+                    if self.follow_selected_agent {
+                        self.camera_target = agent.position;
+                    }
                 }
             }
             self.selected_agent_readback.unmap();
@@ -3881,6 +3890,33 @@ impl GpuState {
     }
 
     pub fn update(&mut self, should_draw: bool) {
+        // Smooth camera following with spring-damper interpolation
+        if self.follow_selected_agent {
+            // Spring-damper system parameters
+            let spring_stiffness = 8.0; // How quickly camera accelerates toward target
+            let damping = 0.85; // How much velocity is reduced each frame (0-1, higher = more damping)
+            
+            // Calculate spring force toward target
+            let dx = self.camera_target[0] - self.camera_pan[0];
+            let dy = self.camera_target[1] - self.camera_pan[1];
+            
+            // Apply spring acceleration
+            self.camera_velocity[0] += dx * spring_stiffness * 0.016; // Assume ~60fps
+            self.camera_velocity[1] += dy * spring_stiffness * 0.016;
+            
+            // Apply damping
+            self.camera_velocity[0] *= damping;
+            self.camera_velocity[1] *= damping;
+            
+            // Update camera position
+            self.camera_pan[0] += self.camera_velocity[0];
+            self.camera_pan[1] += self.camera_velocity[1];
+            
+            // Clamp to world bounds
+            self.camera_pan[0] = self.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
+            self.camera_pan[1] = self.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
+        }
+        
         // Auto Difficulty Logic
         if !self.is_paused {
             let pop = self.alive_count as f32;
@@ -5057,6 +5093,17 @@ fn main() {
                                         }
                                         PhysicalKey::Code(KeyCode::Space) => {
                                             state.is_paused = !state.is_paused;
+                                        }
+                                        PhysicalKey::Code(KeyCode::KeyF) => {
+                                            // Toggle follow mode
+                                            if state.selected_agent_index.is_some() {
+                                                state.follow_selected_agent = !state.follow_selected_agent;
+                                                if state.follow_selected_agent {
+                                                    // Initialize target to current camera position for smooth start
+                                                    state.camera_target = state.camera_pan;
+                                                    state.camera_velocity = [0.0, 0.0];
+                                                }
+                                            }
                                         }
                                         _ => {}
                                     }
