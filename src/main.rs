@@ -26,6 +26,7 @@ use winit::{
 const GRID_DIM: usize = 2048; // Original resolution
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
+const SIM_SIZE: f32 = 61440.0; // World size (must match shader SIM_SIZE)
 const DIFFUSE_WG_SIZE_X: u32 = 16;
 const DIFFUSE_WG_SIZE_Y: u32 = 16;
 const CLEAR_WG_SIZE_X: u32 = 16;
@@ -78,6 +79,7 @@ struct AminoVisualFlags {
     is_inhibitor: bool,
     is_propeller: bool,
     is_condenser: bool,
+    is_displacer: bool,
 }
 
 const DEFAULT_AMINO_FLAGS: AminoVisualFlags = AminoVisualFlags {
@@ -88,6 +90,7 @@ const DEFAULT_AMINO_FLAGS: AminoVisualFlags = AminoVisualFlags {
     is_inhibitor: false,
     is_propeller: false,
     is_condenser: false,
+    is_displacer: false,
 };
 
 struct StartupProfiler {
@@ -134,6 +137,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // A
     AminoVisualFlags {
         is_mouth: false,
@@ -143,6 +147,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // C (beta sensor)
     AminoVisualFlags {
         is_mouth: false,
@@ -152,6 +157,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // D
     AminoVisualFlags {
         is_mouth: false,
@@ -161,6 +167,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // E
     AminoVisualFlags {
         is_mouth: false,
@@ -170,6 +177,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // F
     AminoVisualFlags {
         is_mouth: false,
@@ -179,6 +187,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: true,
+        is_displacer: false,
     }, // G (beta condenser)
     AminoVisualFlags {
         is_mouth: false,
@@ -188,6 +197,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // H
     AminoVisualFlags {
         is_mouth: false,
@@ -197,6 +207,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // I
     AminoVisualFlags {
         is_mouth: true,
@@ -206,6 +217,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // K (mouth)
     AminoVisualFlags {
         is_mouth: false,
@@ -215,6 +227,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // L
     AminoVisualFlags {
         is_mouth: false,
@@ -224,6 +237,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // M
     AminoVisualFlags {
         is_mouth: false,
@@ -233,6 +247,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: true,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // N - INHIBITOR (replaces Asparagine)
     AminoVisualFlags {
         is_mouth: false,
@@ -242,6 +257,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: true,
         is_condenser: false,
+        is_displacer: false,
     }, // P (propeller)
     AminoVisualFlags {
         is_mouth: false,
@@ -251,6 +267,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // Q
     AminoVisualFlags {
         is_mouth: false,
@@ -260,6 +277,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // R
     AminoVisualFlags {
         is_mouth: false,
@@ -269,6 +287,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // S (alpha sensor)
     AminoVisualFlags {
         is_mouth: false,
@@ -278,6 +297,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // T (energy sensor)
     AminoVisualFlags {
         is_mouth: false,
@@ -287,7 +307,8 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
-    }, // V
+        is_displacer: true,
+    }, // V (displacer)
     AminoVisualFlags {
         is_mouth: false,
         is_alpha_sensor: false,
@@ -296,6 +317,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: false,
+        is_displacer: false,
     }, // W (storage)
     AminoVisualFlags {
         is_mouth: false,
@@ -305,6 +327,7 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_inhibitor: false,
         is_propeller: false,
         is_condenser: true,
+        is_displacer: false,
     }, // Y (alpha condenser)
 ];
 
@@ -464,43 +487,71 @@ fn codon_to_amino_acid(b0: u8, b1: u8, b2: u8) -> usize {
     0 // Ala
 }
 
+fn paint_cloud(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: egui::Color32, seed: u64) {
+    // Draw multiple overlapping circles to create a fluffy cloud appearance - matching GPU shader
+    // GPU draws 8 puffs + 1 central circle
+    let num_puffs = 8;
+    
+    // Helper to generate a pseudo-random float from seed
+    let hash_f32 = |s: u64| -> f32 {
+        let h = s.wrapping_mul(2654435761u64);
+        ((h ^ (h >> 32)) & 0xFFFFFFFF) as f32 / 4294967295.0
+    };
+    
+    // Draw outer puffs
+    for i in 0..num_puffs {
+        let angle = (i as f32) * std::f32::consts::TAU / (num_puffs as f32);
+        let hash_val = hash_f32(seed.wrapping_mul((i as u64 + 1).wrapping_mul(2654435761)));
+        let offset_dist = radius * 0.4 * hash_val;
+        let puff_center = egui::pos2(
+            center.x + angle.cos() * offset_dist,
+            center.y + angle.sin() * offset_dist,
+        );
+        let puff_radius = radius * (0.5 + 0.3 * hash_val);
+        painter.circle_filled(puff_center, puff_radius, color);
+    }
+    // Draw larger central circle
+    painter.circle_filled(center, radius * 0.7, color);
+}
+
 fn paint_asterisk(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: egui::Color32) {
-    // Draw 4 lines: vertical, horizontal, and two diagonals for an asterisk (*)
-    let stroke = egui::Stroke::new(
-        (radius * 0.15).max(1.0),
-        egui::Color32::from_black_alpha(40),
-    );
+    // Draw 4 lines: vertical, horizontal, and two diagonals - matching GPU shader exactly
+    // GPU uses fixed thickness of 1.0 world units, we'll use 1.0 screen pixels for consistency
+    let line_thickness = 1.0;
+    let d = radius * 0.70710678; // radius / sqrt(2)
+    
+    // Vertical line
     painter.line_segment(
         [
             egui::pos2(center.x, center.y - radius),
             egui::pos2(center.x, center.y + radius),
         ],
-        egui::Stroke::new((radius * 0.10).max(1.0), color),
+        egui::Stroke::new(line_thickness, color),
     );
+    // Horizontal line
     painter.line_segment(
         [
             egui::pos2(center.x - radius, center.y),
             egui::pos2(center.x + radius, center.y),
         ],
-        egui::Stroke::new((radius * 0.10).max(1.0), color),
+        egui::Stroke::new(line_thickness, color),
     );
-    let d = radius * 0.70710678; // radius / sqrt(2)
+    // Diagonal 1 (top-left to bottom-right)
     painter.line_segment(
         [
             egui::pos2(center.x - d, center.y - d),
             egui::pos2(center.x + d, center.y + d),
         ],
-        egui::Stroke::new((radius * 0.10).max(1.0), color),
+        egui::Stroke::new(line_thickness, color),
     );
+    // Diagonal 2 (top-right to bottom-left)
     painter.line_segment(
         [
             egui::pos2(center.x + d, center.y - d),
             egui::pos2(center.x - d, center.y + d),
         ],
-        egui::Stroke::new((radius * 0.10).max(1.0), color),
+        egui::Stroke::new(line_thickness, color),
     );
-    // Optional subtle outline circle for visual weight
-    painter.circle_stroke(center, radius * 0.25, stroke);
 }
 
 // ============================================================================
@@ -708,6 +759,7 @@ struct SimParams {
     beta_show: u32,
     gamma_show: u32,
     slope_lighting: u32,
+    slope_lighting_strength: f32,
     trail_diffusion: f32,
     trail_decay: f32,
     trail_opacity: f32,
@@ -784,6 +836,26 @@ struct AutoDifficultyParam {
     difficulty_level: i32, // 0 is base, +1 is harder, -1 is easier
 }
 
+impl AutoDifficultyParam {
+    // Calculate the effective value with difficulty multiplier applied
+    fn apply_to(&self, base_value: f32, harder_increases: bool) -> f32 {
+        if !self.enabled || self.difficulty_level == 0 {
+            return base_value;
+        }
+        
+        let factor = self.adjustment_percent / 100.0;
+        let multiplier = if harder_increases {
+            // Positive difficulty makes value higher
+            1.0 + (self.difficulty_level as f32 * factor)
+        } else {
+            // Positive difficulty makes value lower
+            1.0 - (self.difficulty_level as f32 * factor)
+        };
+        
+        base_value * multiplier.max(0.01) // Prevent going to zero or negative
+    }
+}
+
 impl Default for AutoDifficultyParam {
     fn default() -> Self {
         Self {
@@ -848,6 +920,7 @@ struct SimulationSettings {
     beta_show: bool,
     gamma_show: bool,
     slope_lighting: bool,
+    slope_lighting_strength: f32,
     trail_diffusion: f32,
     trail_decay: f32,
     trail_opacity: f32,
@@ -919,6 +992,7 @@ impl Default for SimulationSettings {
             beta_show: true,
             gamma_show: true,
             slope_lighting: false,
+            slope_lighting_strength: 1.0,
             trail_diffusion: 0.15,
             trail_decay: 0.995,
             trail_opacity: 0.5,
@@ -1194,6 +1268,7 @@ struct GpuState {
     beta_show: bool,
     gamma_show: bool,
     slope_lighting: bool,
+    slope_lighting_strength: f32,
     trail_diffusion: f32,
     trail_decay: f32,
     trail_opacity: f32,
@@ -1264,6 +1339,7 @@ impl GpuState {
             beta_show: self.beta_show,
             gamma_show: self.gamma_show,
             slope_lighting: self.slope_lighting,
+            slope_lighting_strength: self.slope_lighting_strength,
             trail_diffusion: self.trail_diffusion,
             trail_decay: self.trail_decay,
             trail_opacity: self.trail_opacity,
@@ -1336,6 +1412,7 @@ impl GpuState {
         self.beta_show = settings.beta_show;
         self.gamma_show = settings.gamma_show;
         self.slope_lighting = settings.slope_lighting;
+        self.slope_lighting_strength = settings.slope_lighting_strength;
         self.trail_diffusion = settings.trail_diffusion;
         self.trail_decay = settings.trail_decay;
         self.trail_opacity = settings.trail_opacity;
@@ -1514,9 +1591,6 @@ impl GpuState {
         // Create egui renderer before device gets moved
         let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
         profiler.mark("egui renderer");
-
-        // Simulation size constant (original)
-        const SIM_SIZE: f32 = 30720.0;
 
         // Initialize agents with minimal data - GPU will generate genome and build body
         let max_agents = 50_000usize; // Limited by 128MB WebGPU buffer size (~2.2 KB/agent)
@@ -1788,6 +1862,7 @@ impl GpuState {
             beta_show: 1,
             gamma_show: 1,
             slope_lighting: 0,
+            slope_lighting_strength: 1.0,
             trail_diffusion: 0.15,
             trail_decay: 0.995,
             trail_opacity: 0.5,
@@ -2825,6 +2900,7 @@ impl GpuState {
             beta_show: settings.beta_show,
             gamma_show: settings.gamma_show,
             slope_lighting: settings.slope_lighting,
+            slope_lighting_strength: settings.slope_lighting_strength,
             trail_diffusion: settings.trail_diffusion,
             trail_decay: settings.trail_decay,
             trail_opacity: settings.trail_opacity,
@@ -2881,7 +2957,6 @@ impl GpuState {
 
     // Queue N random agents to be spawned next frame via the GPU merge pass
     fn queue_random_spawns(&mut self, count: usize) {
-        const SIM_SIZE: f32 = 30720.0;
         for _ in 0..count {
             // Advance RNG using same method as update()
             self.rng_state ^= self.rng_state << 13;
@@ -3473,6 +3548,7 @@ impl GpuState {
             beta_show: self.beta_show,
             gamma_show: self.gamma_show,
             slope_lighting: self.slope_lighting,
+            slope_lighting_strength: self.slope_lighting_strength,
             trail_diffusion: self.trail_diffusion,
             trail_decay: self.trail_decay,
             trail_opacity: self.trail_opacity,
@@ -3812,27 +3888,16 @@ impl GpuState {
             
             // Helper macro to avoid repetition
             macro_rules! adjust_param {
-                ($param_struct:expr, $value:expr, $is_harder_increase:expr) => {
+                ($param_struct:expr, $is_harder_increase:expr) => {
                     if $param_struct.enabled {
                         if current_epoch >= $param_struct.last_adjustment_epoch + $param_struct.cooldown_epochs {
-                            let factor = $param_struct.adjustment_percent / 100.0;
                             let mut adjusted = false;
                             if pop > $param_struct.max_threshold {
                                 // Make Harder (Population too high)
-                                if $is_harder_increase {
-                                    $value *= (1.0 + factor);
-                                } else {
-                                    $value *= (1.0 - factor);
-                                }
                                 $param_struct.difficulty_level += 1;
                                 adjusted = true;
                             } else if pop < $param_struct.min_threshold {
                                 // Make Easier (Population too low)
-                                if $is_harder_increase {
-                                    $value *= (1.0 - factor);
-                                } else {
-                                    $value *= (1.0 + factor);
-                                }
                                 $param_struct.difficulty_level -= 1;
                                 adjusted = true;
                             }
@@ -3845,12 +3910,12 @@ impl GpuState {
                 };
             }
 
-            adjust_param!(self.difficulty.food_power, self.food_power, false); // Harder = Decrease
-            adjust_param!(self.difficulty.poison_power, self.poison_power, true); // Harder = Increase
-            adjust_param!(self.difficulty.spawn_prob, self.spawn_probability, false); // Harder = Decrease
-            adjust_param!(self.difficulty.death_prob, self.death_probability, true); // Harder = Increase
-            adjust_param!(self.difficulty.alpha_rain, self.alpha_multiplier, false); // Harder = Decrease
-            adjust_param!(self.difficulty.beta_rain, self.beta_multiplier, true); // Harder = Increase
+            adjust_param!(self.difficulty.food_power, false); // Harder = Decrease
+            adjust_param!(self.difficulty.poison_power, true); // Harder = Increase
+            adjust_param!(self.difficulty.spawn_prob, false); // Harder = Decrease
+            adjust_param!(self.difficulty.death_prob, true); // Harder = Increase
+            adjust_param!(self.difficulty.alpha_rain, false); // Harder = Decrease
+            adjust_param!(self.difficulty.beta_rain, true); // Harder = Increase
         }
 
         // Advance RNG & auto-replenish only when not paused AND there are living agents
@@ -3912,8 +3977,12 @@ impl GpuState {
         let beta_phase = self.beta_rain_phase;
         let beta_sin = (time * beta_freq * 2.0 * std::f32::consts::PI + beta_phase).sin();
         
-        let current_alpha = self.alpha_multiplier * (1.0 + alpha_sin * alpha_var).max(0.0);
-        let current_beta = self.beta_multiplier * (1.0 + beta_sin * beta_var).max(0.0);
+        // Apply difficulty adjustments to base values, then apply rain variation
+        let base_alpha = self.difficulty.alpha_rain.apply_to(self.alpha_multiplier, false);
+        let base_beta = self.difficulty.beta_rain.apply_to(self.beta_multiplier, true);
+        
+        let current_alpha = base_alpha * (1.0 + alpha_sin * alpha_var).max(0.0);
+        let current_beta = base_beta * (1.0 + beta_sin * beta_var).max(0.0);
 
         // Update history
         if self.alpha_rain_history.len() >= 500 {
@@ -3925,15 +3994,19 @@ impl GpuState {
 
         let effective_dt = if should_run_simulation { 0.016 } else { 0.0 };
         let effective_spawn_p = if should_run_simulation {
-            self.spawn_probability
+            self.difficulty.spawn_prob.apply_to(self.spawn_probability, false)
         } else {
             0.0
         };
         let effective_death_p = if should_run_simulation {
-            self.death_probability
+            self.difficulty.death_prob.apply_to(self.death_probability, true)
         } else {
             0.0
         };
+
+        // Apply difficulty adjustments to parameters
+        let effective_food_power = self.difficulty.food_power.apply_to(self.food_power, false);
+        let effective_poison_power = self.difficulty.poison_power.apply_to(self.poison_power, true);
 
         let params = SimParams {
             dt: effective_dt,
@@ -3942,7 +4015,7 @@ impl GpuState {
             amino_maintenance_cost: self.amino_maintenance_cost,
             spawn_probability: effective_spawn_p,
             death_probability: effective_death_p,
-            grid_size: 30720.0,
+            grid_size: SIM_SIZE,
             camera_zoom: self.camera_zoom,
             camera_pan_x: self.camera_pan[0],
             camera_pan_y: self.camera_pan[1],
@@ -3958,8 +4031,8 @@ impl GpuState {
             chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
             chemical_slope_scale_beta: self.chemical_slope_scale_beta,
             mutation_rate: self.mutation_rate,
-            food_power: self.food_power,
-            poison_power: self.poison_power,
+            food_power: effective_food_power,
+            poison_power: effective_poison_power,
             pairing_cost: self.pairing_cost,
             max_agents: self.agent_buffer_capacity as u32,
             cpu_spawn_count,
@@ -3986,6 +4059,7 @@ impl GpuState {
             beta_show: if self.beta_show { 1 } else { 0 },
             gamma_show: if self.gamma_show { 1 } else { 0 },
             slope_lighting: if self.slope_lighting { 1 } else { 0 },
+            slope_lighting_strength: self.slope_lighting_strength,
             trail_diffusion: self.trail_diffusion,
             trail_decay: self.trail_decay,
             trail_opacity: self.trail_opacity,
@@ -4468,8 +4542,6 @@ impl GpuState {
 
     fn select_agent_at_screen_pos(&mut self, screen_pos: [f32; 2]) {
         // Convert screen coordinates to world coordinates
-        const SIM_SIZE: f32 = 30720.0;
-
         // Screen coords to normalized coords (0..1)
         let norm_x = screen_pos[0] / self.surface_config.width as f32;
         let norm_y = screen_pos[1] / self.surface_config.height as f32;
@@ -4622,7 +4694,6 @@ impl GpuState {
         ];
 
         // Wrap to world bounds
-        const SIM_SIZE: f32 = 30720.0;
         new_agent.position[0] = new_agent.position[0].rem_euclid(SIM_SIZE);
         new_agent.position[1] = new_agent.position[1].rem_euclid(SIM_SIZE);
 
@@ -4956,32 +5027,32 @@ fn main() {
                                         }
                                         PhysicalKey::Code(KeyCode::KeyW) => {
                                             state.camera_pan[1] -= 200.0 / state.camera_zoom;
-                                            state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * 30720.0, 1.25 * 30720.0);
+                                            state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
                                             state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyS) => {
                                             state.camera_pan[1] += 200.0 / state.camera_zoom;
-                                            state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * 30720.0, 1.25 * 30720.0);
+                                            state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
                                             state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyA) => {
                                             state.camera_pan[0] -= 200.0 / state.camera_zoom;
-                                            state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * 30720.0, 1.25 * 30720.0);
+                                            state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
                                             state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyD) => {
                                             state.camera_pan[0] += 200.0 / state.camera_zoom;
-                                            state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * 30720.0, 1.25 * 30720.0);
+                                            state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
                                             state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyR) => {
                                             // Reset camera
                                             state.camera_zoom = 1.0;
-                                            state.camera_pan = [2560.0, 2560.0];
+                                            state.camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::Space) => {
@@ -5027,7 +5098,6 @@ fn main() {
                                         let delta_y = current_pos[1] - last_pos[1];
 
                                         // Convert screen space delta to world space delta (Y inverted)
-                                        const SIM_SIZE: f32 = 30720.0;
                                         let world_scale = (state.surface_config.width as f32
                                             / SIM_SIZE)
                                             * state.camera_zoom;
@@ -5202,8 +5272,8 @@ fn main() {
                                                         .height(150.0)
                                                         .show_axes(true)
                                                         .show_grid(true)
-                                                        .allow_drag(false)
-                                                        .allow_zoom(false)
+                                                        .allow_drag(true)
+                                                        .allow_zoom([true, false])
                                                         .allow_scroll(false)
                                                         .show(ui, |plot_ui| {
                                                             plot_ui.line(line);
@@ -5233,12 +5303,10 @@ fn main() {
                                                                 .text("Zoom")
                                                                 .logarithmic(true),
                                                         );
-                                                        if ui.button("Reset Camera (R)").clicked() {
-                                                            state.camera_zoom = 1.0;
-                                                            state.camera_pan = [2560.0, 2560.0];
-                                                        }
-
-                                                        ui.separator();
+                                            if ui.button("Reset Camera (R)").clicked() {
+                                                state.camera_zoom = 1.0;
+                                                state.camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
+                                            }                                                        ui.separator();
                                                         ui.heading("Settings");
                                                         ui.horizontal(|ui| {
                                                             if ui.button("Save Settings").clicked() {
@@ -5285,6 +5353,7 @@ fn main() {
                                                                         beta_show: state.beta_show,
                                                                         gamma_show: state.gamma_show,
                                                                         slope_lighting: state.slope_lighting,
+                                                                        slope_lighting_strength: state.slope_lighting_strength,
                                                                         trail_diffusion: state.trail_diffusion,
                                                                         trail_decay: state.trail_decay,
                                                                         trail_opacity: state.trail_opacity,
@@ -5363,6 +5432,7 @@ fn main() {
                                                                         state.beta_show = settings.beta_show;
                                                                         state.gamma_show = settings.gamma_show;
                                                                         state.slope_lighting = settings.slope_lighting;
+                                                                        state.slope_lighting_strength = settings.slope_lighting_strength;
                                                                         state.trail_diffusion = settings.trail_diffusion;
                                                                         state.trail_decay = settings.trail_decay;
                                                                         state.trail_opacity = settings.trail_opacity;
@@ -5463,8 +5533,8 @@ fn main() {
                                                                     .height(150.0)
                                                                     .show_axes(true)
                                                                     .show_grid(true)
-                                                                    .allow_drag(false)
-                                                                    .allow_zoom(false)
+                                                                    .allow_drag(true)
+                                                                    .allow_zoom([true, false])
                                                                     .allow_scroll(false)
                                                                     .show(ui, |plot_ui| {
                                                                         plot_ui.line(line);
@@ -5565,7 +5635,6 @@ fn main() {
                                                                         println!(
                                                                             "Successfully loaded genome, spawning 100 clones..."
                                                                         );
-                                                                        const SIM_SIZE: f32 = 30720.0;
 
                                                                         for _ in 0..100 {
                                                                             state.rng_state = state
@@ -5950,7 +6019,6 @@ fn main() {
                                                             }
                                                         }
                                                         ui.checkbox(&mut state.gamma_hidden, "Hide Gamma in Composite");
-                                                        ui.checkbox(&mut state.slope_lighting, "Slope Lighting");
                                                         ui.checkbox(&mut state.slope_debug_visual, "Show Raw Slopes");
                                                         ui.add(
                                                             egui::Slider::new(&mut state.gamma_blur, 0.0..=0.1)
@@ -6024,6 +6092,11 @@ fn main() {
                                                         
                                                         ui.separator();
                                                         ui.heading("Rain Projection (Future)");
+                                                        
+                                                        // Apply difficulty to base values for accurate projection
+                                                        let base_alpha = state.difficulty.alpha_rain.apply_to(state.alpha_multiplier, false);
+                                                        let base_beta = state.difficulty.beta_rain.apply_to(state.beta_multiplier, true);
+                                                        
                                                         let time = state.epoch as f64;
                                                         let points = 500;
                                                         let alpha_points: PlotPoints = (0..points).map(|i| {
@@ -6031,7 +6104,7 @@ fn main() {
                                                             let freq = state.alpha_rain_freq as f64 / 1000.0;
                                                             let phase = state.alpha_rain_phase as f64;
                                                             let sin_val = (t * freq * 2.0 * std::f64::consts::PI + phase).sin();
-                                                            let val = state.alpha_multiplier as f64 * (1.0 + sin_val * state.alpha_rain_variation as f64).max(0.0);
+                                                            let val = base_alpha as f64 * (1.0 + sin_val * state.alpha_rain_variation as f64).max(0.0);
                                                             [i as f64, val]
                                                         }).collect();
                                                         
@@ -6040,12 +6113,13 @@ fn main() {
                                                             let freq = state.beta_rain_freq as f64 / 1000.0;
                                                             let phase = state.beta_rain_phase as f64;
                                                             let sin_val = (t * freq * 2.0 * std::f64::consts::PI + phase).sin();
-                                                            let val = state.beta_multiplier as f64 * (1.0 + sin_val * state.beta_rain_variation as f64).max(0.0);
+                                                            let val = base_beta as f64 * (1.0 + sin_val * state.beta_rain_variation as f64).max(0.0);
                                                             [i as f64, val]
                                                         }).collect();
                                                         
                                                         Plot::new("rain_plot_future")
                                                             .view_aspect(2.0)
+                                                            .auto_bounds([false, true].into())
                                                             .show(ui, |plot_ui| {
                                                                 plot_ui.line(Line::new(alpha_points).name("Alpha").color(Color32::GREEN));
                                                                 plot_ui.line(Line::new(beta_points).name("Beta").color(Color32::RED));
@@ -6058,6 +6132,21 @@ fn main() {
                                                         ui.heading("Auto Difficulty Settings");
                                                         ui.label("Automatically adjust parameters based on population count.");
                                                         ui.label(format!("Current Population: {}", state.alive_count));
+                                                        
+                                                        if ui.button("Reset All Difficulty Levels").clicked() {
+                                                            state.difficulty.food_power.difficulty_level = 0;
+                                                            state.difficulty.food_power.last_adjustment_epoch = 0;
+                                                            state.difficulty.poison_power.difficulty_level = 0;
+                                                            state.difficulty.poison_power.last_adjustment_epoch = 0;
+                                                            state.difficulty.spawn_prob.difficulty_level = 0;
+                                                            state.difficulty.spawn_prob.last_adjustment_epoch = 0;
+                                                            state.difficulty.death_prob.difficulty_level = 0;
+                                                            state.difficulty.death_prob.last_adjustment_epoch = 0;
+                                                            state.difficulty.alpha_rain.difficulty_level = 0;
+                                                            state.difficulty.alpha_rain.last_adjustment_epoch = 0;
+                                                            state.difficulty.beta_rain.difficulty_level = 0;
+                                                            state.difficulty.beta_rain.last_adjustment_epoch = 0;
+                                                        }
                                                         
                                                         let current_epoch = state.epoch;
                                                         let draw_param = |ui: &mut egui::Ui, param: &mut AutoDifficultyParam, name: &str, current_val: f32, current_epoch: u64| {
@@ -6094,12 +6183,20 @@ fn main() {
                                                             }
                                                         };
 
-                                                        draw_param(ui, &mut state.difficulty.food_power, "Food Power (Harder = Less)", state.food_power, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.poison_power, "Poison Power (Harder = More)", state.poison_power, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.spawn_prob, "Spawn Prob (Harder = Less)", state.spawn_probability, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.death_prob, "Death Prob (Harder = More)", state.death_probability, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.alpha_rain, "Alpha Rain (Harder = Less)", state.alpha_multiplier, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.beta_rain, "Beta Rain (Harder = More)", state.beta_multiplier, current_epoch);
+                                                        // Calculate effective values with difficulty applied
+                                                        let effective_food_power = state.difficulty.food_power.apply_to(state.food_power, false);
+                                                        let effective_poison_power = state.difficulty.poison_power.apply_to(state.poison_power, true);
+                                                        let effective_spawn_prob = state.difficulty.spawn_prob.apply_to(state.spawn_probability, false);
+                                                        let effective_death_prob = state.difficulty.death_prob.apply_to(state.death_probability, true);
+                                                        let effective_alpha_rain = state.difficulty.alpha_rain.apply_to(state.alpha_multiplier, false);
+                                                        let effective_beta_rain = state.difficulty.beta_rain.apply_to(state.beta_multiplier, true);
+
+                                                        draw_param(ui, &mut state.difficulty.food_power, "Food Power (Harder = Less)", effective_food_power, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.poison_power, "Poison Power (Harder = More)", effective_poison_power, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.spawn_prob, "Spawn Prob (Harder = Less)", effective_spawn_prob, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.death_prob, "Death Prob (Harder = More)", effective_death_prob, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.alpha_rain, "Alpha Rain (Harder = Less)", effective_alpha_rain, current_epoch);
+                                                        draw_param(ui, &mut state.difficulty.beta_rain, "Beta Rain (Harder = More)", effective_beta_rain, current_epoch);
                                                     });
                                                 }
                                                 5 => {
@@ -6135,6 +6232,13 @@ fn main() {
                                                         
                                                         ui.separator();
                                                         ui.heading("Slope Lighting");
+                                                        ui.checkbox(&mut state.slope_lighting, "Enable Slope Lighting");
+                                                        if state.slope_lighting {
+                                                            ui.add(
+                                                                egui::Slider::new(&mut state.slope_lighting_strength, 0.0..=5.0)
+                                                                    .text("Lighting Strength")
+                                                            );
+                                                        }
                                                         ui.label("Light Effect:");
                                                         ui.horizontal(|ui| {
                                                             ui.radio_value(&mut state.slope_blend_mode, 0, "None");
@@ -6305,6 +6409,13 @@ fn main() {
                                                 agent_data.velocity[0], agent_data.velocity[1]));
                                             ui.label(format!("Rot: {:.2} rad", agent_data.rotation));
                                             ui.label(format!("Alive: {}", if agent_data.alive != 0 { "Yes" } else { "No" }));
+                                            // Debug: speed and absorption multiplier (encoded in _pad_energy/torque_debug)
+                                            // Decode: speed * 1000.0 + multiplier
+                                            let encoded = agent_data._pad_energy;
+                                            let agent_speed = (encoded / 1000.0).floor();
+                                            let speed_mult = encoded - (agent_speed * 1000.0);
+                                            ui.label(format!("Speed: {:.2}", agent_speed));
+                                            ui.label(format!("Absorption mult: {:.4}", speed_mult));
 
                                             ui.separator();
                                             ui.heading("Energy");
@@ -6481,18 +6592,25 @@ fn main() {
                                                     }
 
                                                     if flags.is_alpha_sensor || flags.is_beta_sensor || flags.is_energy_sensor {
-                                                        let sensor_radius = (part.size * 2.0 * scale).max(4.0);
+                                                        // Match GPU: sensor_radius = part.size * 2.0 (no scaling by scale factor for world size)
+                                                        let sensor_radius_world = part.size * 2.0;
+                                                        let sensor_radius = (sensor_radius_world * scale).max(4.0);
+                                                        // Match GPU: color * 0.6 with 0.5 alpha
                                                         let sensor_rgb = [
                                                             raw_color[0] * 0.6,
                                                             raw_color[1] * 0.6,
                                                             raw_color[2] * 0.6,
                                                         ];
                                                         let sensor_color = rgb_to_color32_with_alpha(sensor_rgb, 0.5);
-                                                        painter.circle_filled(screen_pos, sensor_radius, sensor_color);
+                                                        // Use cloud rendering to match GPU (seed based on agent index + part index)
+                                                        let sensor_seed = (agent_data.generation as u64) * 500 + (idx as u64) * 13;
+                                                        paint_cloud(&painter, screen_pos, sensor_radius, sensor_color, sensor_seed);
                                                     }
 
                                                     if flags.is_mouth {
-                                                        let asterisk_radius = (part.size * 2.5 * scale).max(6.0);
+                                                        // Match GPU: part.size * 4.0
+                                                        let asterisk_radius_world = part.size * 4.0;
+                                                        let asterisk_radius = (asterisk_radius_world * scale).max(6.0);
                                                         paint_asterisk(&painter, screen_pos, asterisk_radius, egui::Color32::from_rgb(255, 255, 0));
                                                     }
 
@@ -6501,29 +6619,37 @@ fn main() {
                                                         let charge = signed_charge.abs().clamp(0.0, 10.0);
                                                         let charge_ratio = (charge / 10.0).clamp(0.0, 1.0);
                                                         let is_discharging = signed_charge > 0.0;
+                                                        
+                                                        // Match GPU color logic exactly
                                                         let fill_color = if is_discharging {
                                                             egui::Color32::WHITE
                                                         } else {
+                                                            // Base tint per condenser type
                                                             let base_tint = if part.part_type == 19 {
-                                                                [0.0, 1.0, 0.0]
+                                                                [0.0, 1.0, 0.0] // Tyrosine = green
                                                             } else {
-                                                                [1.0, 0.0, 0.0]
+                                                                [1.0, 0.0, 0.0] // Glycine = red
                                                             };
-                                                            let dark = [0.15, 0.15, 0.15];
+                                                            // GPU uses 0.25 multiplier for low_tint, not 0.15
+                                                            let low_tint = [base_tint[0] * 0.25, base_tint[1] * 0.25, base_tint[2] * 0.25];
                                                             let interp = [
-                                                                dark[0] + (base_tint[0] - dark[0]) * charge_ratio,
-                                                                dark[1] + (base_tint[1] - dark[1]) * charge_ratio,
-                                                                dark[2] + (base_tint[2] - dark[2]) * charge_ratio,
+                                                                low_tint[0] + (base_tint[0] - low_tint[0]) * charge_ratio,
+                                                                low_tint[1] + (base_tint[1] - low_tint[1]) * charge_ratio,
+                                                                low_tint[2] + (base_tint[2] - low_tint[2]) * charge_ratio,
                                                             ];
                                                             rgb_to_color32(interp)
                                                         };
-                                                        let radius_world = (part.size * 1.5).max(12.0);
+                                                        
+                                                        // Match GPU: radius = max(part.size * 0.5, 3.0) not part.size * 1.5
+                                                        let radius_world = (part.size * 0.5).max(3.0);
                                                         let radius = (radius_world * scale).max(4.0);
                                                         painter.circle_filled(screen_pos, radius, fill_color);
+                                                        
+                                                        // Match GPU: white outline with fixed thickness 0.5
                                                         painter.circle_stroke(
                                                             screen_pos,
                                                             radius,
-                                                            egui::Stroke::new((radius * 0.12).clamp(0.6, 2.0), egui::Color32::WHITE),
+                                                            egui::Stroke::new(0.5, egui::Color32::WHITE),
                                                         );
                                                     }
 
@@ -6587,6 +6713,21 @@ fn main() {
                                                             [screen_pos - wing_offset, screen_pos + jet_vec * 0.5],
                                                             egui::Stroke::new(plume_width * 0.7, plume_color),
                                                         );
+                                                    }
+                                                    
+                                                    // Draw small diamond for displacers (averaging indicator)
+                                                    if flags.is_displacer {
+                                                        let square_size_world = part.size * 2.0;
+                                                        let square_size = (square_size_world * scale).max(4.0);
+                                                        // Draw diamond shape (rotated square)
+                                                        let top = screen_pos + egui::vec2(0.0, -square_size);
+                                                        let right = screen_pos + egui::vec2(square_size, 0.0);
+                                                        let bottom = screen_pos + egui::vec2(0.0, square_size);
+                                                        let left = screen_pos + egui::vec2(-square_size, 0.0);
+                                                        painter.line_segment([top, right], egui::Stroke::new(1.0, part_color));
+                                                        painter.line_segment([right, bottom], egui::Stroke::new(1.0, part_color));
+                                                        painter.line_segment([bottom, left], egui::Stroke::new(1.0, part_color));
+                                                        painter.line_segment([left, top], egui::Stroke::new(1.0, part_color));
                                                     }
 
                                                     if part_count > 1 && (is_first || is_last) {
@@ -7130,7 +7271,7 @@ fn main() {
                                             );
                                             if ui.button("Reset Camera (R)").clicked() {
                                                 state.camera_zoom = 1.0;
-                                                state.camera_pan = [2560.0, 2560.0];
+                                                state.camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
                                             }
 
                                             ui.separator();
@@ -7143,7 +7284,7 @@ fn main() {
                                             if ui.button("Spawn 5000 Random Agents").clicked() && !state.is_paused {
                                                 state.queue_random_spawns(5000);
                                             }
-                                            ui.label("World: 30720x30720");
+                                            ui.label(format!("World: {}x{}", SIM_SIZE as u32, SIM_SIZE as u32));
                                             ui.label("Grid: 2048x2048");
                                             ui.label(
                                                 "Morphology responds to\nalpha field in environment",

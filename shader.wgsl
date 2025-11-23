@@ -10,7 +10,7 @@
 // ============================================================================
 
 const GRID_SIZE: u32 = 2048u;          // Environment grid resolution (original)
-const SIM_SIZE: u32 = 30720u;          // Simulation world size (original)
+const SIM_SIZE: u32 = 61440u;          // Simulation world size (2x original: 30720 * 2)
 const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 128u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
@@ -24,9 +24,9 @@ const DISABLE_GLOBAL_ROTATION: bool = false;
 // Smoothing factor for per-part signal-induced angle (0..1). Higher = faster response.
 const ANGLE_SMOOTH_FACTOR: f32 = 0.2;
 // Physics stabilization (no delta time): blend factors and clamps
-const VELOCITY_BLEND: f32 = 0.4;      // 0..1, higher = quicker velocity changes
-const ANGULAR_BLEND: f32 = 0.4;       // 0..1, higher = quicker rotation changes
-const VEL_MAX: f32 = 12.0;             // Max linear speed per frame
+const VELOCITY_BLEND: f32 = 0.6;      // 0..1, higher = quicker velocity changes
+const ANGULAR_BLEND: f32 = 0.6;       // 0..1, higher = quicker rotation changes
+const VEL_MAX: f32 = 24.0;             // Max linear speed per frame
 const ANGVEL_MAX: f32 = 1.5;         // Max angular change (radians) per frame
 // Signal-to-angle shaping (no dt): cap amplitude and per-frame change
 const SIGNAL_GAIN: f32 =20;        // global scale for signal-driven angle (was 20.0)
@@ -129,6 +129,7 @@ struct SimParams {
     beta_show: u32,
     gamma_show: u32,
     slope_lighting: u32,
+    slope_lighting_strength: f32,
     trail_diffusion: f32,
     trail_decay: f32,
     trail_opacity: f32,
@@ -880,12 +881,14 @@ fn grid_index(pos: vec2<f32>) -> u32 {
 // GRID INTERPOLATION HELPERS (for smooth visualization)
 // ============================================================================
 
-// Bilinear interpolation for alpha grid
-fn sample_alpha_bilinear(pos: vec2<f32>) -> f32 {
+// Unified bilinear interpolation for any grid
+// grid_type: 0=alpha, 1=beta, 2=gamma
+fn sample_grid_bilinear(pos: vec2<f32>, grid_type: u32) -> f32 {
     let clamped = clamp_position(pos);
     let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
+    // Subtract 0.5 to align with grid cell centers
+    let grid_x = (clamped.x / scale) - 0.5;
+    let grid_y = (clamped.y / scale) - 0.5;
     
     let x0 = i32(floor(grid_x));
     let y0 = i32(floor(grid_y));
@@ -900,70 +903,27 @@ fn sample_alpha_bilinear(pos: vec2<f32>) -> f32 {
     let idx01 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
     let idx11 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
     
-    let v00 = alpha_grid[idx00];
-    let v10 = alpha_grid[idx10];
-    let v01 = alpha_grid[idx01];
-    let v11 = alpha_grid[idx11];
+    var v00: f32;
+    var v10: f32;
+    var v01: f32;
+    var v11: f32;
     
-    let v0 = mix(v00, v10, fx);
-    let v1 = mix(v01, v11, fx);
-    return mix(v0, v1, fy);
-}
-
-// Bilinear interpolation for beta grid
-fn sample_beta_bilinear(pos: vec2<f32>) -> f32 {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-    
-    let x0 = i32(floor(grid_x));
-    let y0 = i32(floor(grid_y));
-    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
-    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
-    
-    let fx = fract(grid_x);
-    let fy = fract(grid_y);
-    
-    let idx00 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
-    let idx10 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
-    let idx01 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
-    let idx11 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
-    
-    let v00 = beta_grid[idx00];
-    let v10 = beta_grid[idx10];
-    let v01 = beta_grid[idx01];
-    let v11 = beta_grid[idx11];
-    
-    let v0 = mix(v00, v10, fx);
-    let v1 = mix(v01, v11, fx);
-    return mix(v0, v1, fy);
-}
-
-// Bilinear interpolation for gamma grid
-fn sample_gamma_bilinear(pos: vec2<f32>) -> f32 {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-    
-    let x0 = i32(floor(grid_x));
-    let y0 = i32(floor(grid_y));
-    let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
-    let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
-    
-    let fx = fract(grid_x);
-    let fy = fract(grid_y);
-    
-    let idx00 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
-    let idx10 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
-    let idx01 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
-    let idx11 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
-    
-    let v00 = read_gamma_height(idx00);
-    let v10 = read_gamma_height(idx10);
-    let v01 = read_gamma_height(idx01);
-    let v11 = read_gamma_height(idx11);
+    if (grid_type == 0u) { // alpha
+        v00 = alpha_grid[idx00];
+        v10 = alpha_grid[idx10];
+        v01 = alpha_grid[idx01];
+        v11 = alpha_grid[idx11];
+    } else if (grid_type == 1u) { // beta
+        v00 = beta_grid[idx00];
+        v10 = beta_grid[idx10];
+        v01 = beta_grid[idx01];
+        v11 = beta_grid[idx11];
+    } else { // gamma
+        v00 = read_gamma_height(idx00);
+        v10 = read_gamma_height(idx10);
+        v01 = read_gamma_height(idx01);
+        v11 = read_gamma_height(idx11);
+    }
     
     let v0 = mix(v00, v10, fx);
     let v1 = mix(v01, v11, fx);
@@ -971,23 +931,26 @@ fn sample_gamma_bilinear(pos: vec2<f32>) -> f32 {
 }
 
 // Cubic hermite interpolation helper
+// B-spline cubic interpolation weights for 4-point stencil (smoother, no overshoot)
 fn cubic_hermite(t: f32) -> vec4<f32> {
     let t2 = t * t;
     let t3 = t2 * t;
     return vec4<f32>(
-        2.0 * t3 - 3.0 * t2 + 1.0,  // h00
-        t3 - 2.0 * t2 + t,           // h10
-        -2.0 * t3 + 3.0 * t2,        // h01
-        t3 - t2                      // h11
+        (-t3 + 3.0 * t2 - 3.0 * t + 1.0) / 6.0,   // weight for point at -1
+        (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0,        // weight for point at 0
+        (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0, // weight for point at 1
+        t3 / 6.0                                   // weight for point at 2
     );
 }
 
-// Bicubic interpolation for alpha grid (smoother than bilinear)
-fn sample_alpha_bicubic(pos: vec2<f32>) -> f32 {
+// Unified bicubic interpolation for any grid
+// grid_type: 0=alpha, 1=beta, 2=gamma
+fn sample_grid_bicubic(pos: vec2<f32>, grid_type: u32) -> f32 {
     let clamped = clamp_position(pos);
     let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
+    // Subtract 0.5 to align with grid cell centers
+    let grid_x = (clamped.x / scale) - 0.5;
+    let grid_y = (clamped.y / scale) - 0.5;
     
     let x_floor = floor(grid_x);
     let y_floor = floor(grid_y);
@@ -1004,87 +967,14 @@ fn sample_alpha_bicubic(pos: vec2<f32>) -> f32 {
             let sx = clamp(x + i, 0, i32(GRID_SIZE) - 1);
             let sy = clamp(y + j, 0, i32(GRID_SIZE) - 1);
             let idx = u32(sy) * GRID_SIZE + u32(sx);
-            values[(j + 1) * 4 + (i + 1)] = alpha_grid[idx];
-        }
-    }
-    
-    let wx = cubic_hermite(fx);
-    let wy = cubic_hermite(fy);
-    
-    var result = 0.0;
-    for (var j = 0; j < 4; j++) {
-        var row_sum = 0.0;
-        for (var i = 0; i < 4; i++) {
-            row_sum += values[j * 4 + i] * wx[i];
-        }
-        result += row_sum * wy[j];
-    }
-    
-    return clamp(result, 0.0, 1.0);
-}
-
-// Bicubic interpolation for beta grid
-fn sample_beta_bicubic(pos: vec2<f32>) -> f32 {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-    
-    let x_floor = floor(grid_x);
-    let y_floor = floor(grid_y);
-    let fx = grid_x - x_floor;
-    let fy = grid_y - y_floor;
-    
-    let x = i32(x_floor);
-    let y = i32(y_floor);
-    
-    var values: array<f32, 16>;
-    for (var j = -1; j <= 2; j++) {
-        for (var i = -1; i <= 2; i++) {
-            let sx = clamp(x + i, 0, i32(GRID_SIZE) - 1);
-            let sy = clamp(y + j, 0, i32(GRID_SIZE) - 1);
-            let idx = u32(sy) * GRID_SIZE + u32(sx);
-            values[(j + 1) * 4 + (i + 1)] = beta_grid[idx];
-        }
-    }
-    
-    let wx = cubic_hermite(fx);
-    let wy = cubic_hermite(fy);
-    
-    var result = 0.0;
-    for (var j = 0; j < 4; j++) {
-        var row_sum = 0.0;
-        for (var i = 0; i < 4; i++) {
-            row_sum += values[j * 4 + i] * wx[i];
-        }
-        result += row_sum * wy[j];
-    }
-    
-    return clamp(result, 0.0, 1.0);
-}
-
-// Bicubic interpolation for gamma grid
-fn sample_gamma_bicubic(pos: vec2<f32>) -> f32 {
-    let clamped = clamp_position(pos);
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-    let grid_x = clamped.x / scale;
-    let grid_y = clamped.y / scale;
-    
-    let x_floor = floor(grid_x);
-    let y_floor = floor(grid_y);
-    let fx = grid_x - x_floor;
-    let fy = grid_y - y_floor;
-    
-    let x = i32(x_floor);
-    let y = i32(y_floor);
-    
-    var values: array<f32, 16>;
-    for (var j = -1; j <= 2; j++) {
-        for (var i = -1; i <= 2; i++) {
-            let sx = clamp(x + i, 0, i32(GRID_SIZE) - 1);
-            let sy = clamp(y + j, 0, i32(GRID_SIZE) - 1);
-            let idx = u32(sy) * GRID_SIZE + u32(sx);
-            values[(j + 1) * 4 + (i + 1)] = read_gamma_height(idx);
+            
+            if (grid_type == 0u) { // alpha
+                values[(j + 1) * 4 + (i + 1)] = alpha_grid[idx];
+            } else if (grid_type == 1u) { // beta
+                values[(j + 1) * 4 + (i + 1)] = beta_grid[idx];
+            } else { // gamma
+                values[(j + 1) * 4 + (i + 1)] = read_gamma_height(idx);
+            }
         }
     }
     
@@ -1162,6 +1052,51 @@ fn hash(v: u32) -> u32 {
 
 fn hash_f32(v: u32) -> f32 {
     return f32(hash(v)) / 4294967295.0;
+}
+
+// Stochastic gaussian field sampling for sensors
+// Takes N samples around center position with distance-weighted averaging
+fn sample_stochastic_gaussian(center: vec2<f32>, radius: f32, seed: u32, grid_type: u32, debug_mode: bool) -> f32 {
+    let sample_count = 7u;
+    var weighted_sum = 0.0;
+    var weight_total = 0.0;
+    
+    for (var i = 0u; i < sample_count; i++) {
+        // Generate random offset using hash
+        let h1 = hash_f32(seed * 1000u + i * 17u);
+        let h2 = hash_f32(seed * 1000u + i * 23u + 13u);
+        
+        // Random angle and distance (square root for uniform disk sampling)
+        let angle = h1 * 6.28318530718; // 2*PI
+        let dist = sqrt(h2) * radius;
+        
+        let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
+        let sample_pos = center + offset;
+        let idx = grid_index(sample_pos);
+        
+        // Distance-based gaussian weight: exp(-d^2 / (2*sigma^2))
+        // Using sigma = radius/2 for nice falloff
+        let sigma = radius * 0.5;
+        let weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
+        
+        // Sample from appropriate grid
+        var sample_value = 0.0;
+        if (grid_type == 0u) { // alpha
+            sample_value = alpha_grid[idx];
+        } else if (grid_type == 1u) { // beta
+            sample_value = beta_grid[idx];
+        }
+        
+        // Debug visualization: draw white pixels at sample locations
+        if (debug_mode) {
+            draw_filled_circle(sample_pos, 1.0, vec4<f32>(1.0, 1.0, 1.0, 1.0));
+        }
+        
+        weighted_sum += sample_value * weight;
+        weight_total += weight;
+    }
+    
+    return select(0.0, weighted_sum / weight_total, weight_total > 0.0);
 }
 
 // Perlin-like noise function
@@ -1864,18 +1799,25 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             new_beta = beta_from_left + beta_from_right;
         }
 
-        // Sensors: direct sampling with no accumulation or decay
+        // Sensors: stochastic gaussian sampling with 50% smoothing
+        // Sample radius based on part size (larger radius for better field integration)
+        let sensor_radius = 100.0;
+        
         if (amino_props.is_alpha_sensor) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let world_pos = agent.position + rotated_pos;
-            let sensed_value = alpha_grid[grid_index(world_pos)];
-            new_alpha = sensed_value;
+            let sensor_seed = agent_id * 1000u + i * 13u;
+            let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u);
+            // 50% contribution: blend with current value for smoothing
+            new_alpha = mix(new_alpha, sensed_value, 0.5);
         }
         if (amino_props.is_beta_sensor) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let world_pos = agent.position + rotated_pos;
-            let sensed_value = beta_grid[grid_index(world_pos)];
-            new_beta = sensed_value;
+            let sensor_seed = agent_id * 1000u + i * 13u;
+            let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u);
+            // 50% contribution: blend with current value for smoothing
+            new_beta = mix(new_beta, sensed_value, 0.5);
         }
 
     // Energy sensor contribution rate (now 1.0 as requested)
@@ -2152,75 +2094,44 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             gy = clamp(gy, 0, i32(GRID_SIZE) - 1);
             let center_idx = u32(gy) * GRID_SIZE + u32(gx);
 
-            // Stronger than prop wash
-            let disp_strength = max(params.prop_wash_strength * amplification * 3.0, 0.0);
-            if (disp_strength > 0.0) {
-                // Generate pseudo-random offset within radius 2 pixels using integer hashing to avoid directional bias
-                let hashed_seed = hash(
-                    u32(gx) * 73856093u ^
-                    u32(gy) * 19349663u ^
-                    (i + 1u) * 83492791u ^
-                    params.random_seed
-                );
+            // Averaging strength at 10% of prop wash strength, scaled by amplification
+            let avg_strength = max(params.prop_wash_strength * amplification * 0.1, 0.0);
+            if (avg_strength > 0.0) {
+                // Sample 3x3 neighborhood to compute averages
+                var alpha_sum = 0.0;
+                var beta_sum = 0.0;
+                var gamma_sum = 0.0;
+                var count = 0.0;
                 
-                // Use integer modulo for perfectly uniform distribution in [-2, 2]
-                // Previous round() method biased results towards -1, 0, 1
-                let h1 = hash(hashed_seed);
-                let h2 = hash(h1); // Chain hash for independence
-
-                let offset_x = i32(h1 % 5u) - 2;
-                let offset_y = i32(h2 % 5u) - 2;
-                
-                let target_gx = clamp(gx + offset_x, 0, i32(GRID_SIZE) - 1);
-                let target_gy = clamp(gy + offset_y, 0, i32(GRID_SIZE) - 1);
-                let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
-
-                if (target_idx != center_idx) {
-                    var center_gamma = read_gamma_height(center_idx);
-                    var target_gamma = read_gamma_height(target_idx);
-                    var center_alpha = alpha_grid[center_idx];
-                    var target_alpha = alpha_grid[target_idx];
-                    var center_beta = beta_grid[center_idx];
-                    var target_beta = beta_grid[target_idx];
-
-                    // Displacer transfer: move a proportional fraction of each layer present at the source.
-                    // This makes the effect consistent across channels regardless of absolute quantities.
-                    // Fraction scales with disp_strength and part mass share, capped for stability.
-                    let transfer_fraction = clamp(disp_strength * 1 , 0.0, 0.5);
-
-                    if (transfer_fraction > 0.0) {
-                        // Capacities adjusted for 0..1 range
-                        let alpha_capacity = max(0.0, 1.0 - target_alpha);
-                        let beta_capacity = max(0.0, 1.0 - target_beta);
-                        let gamma_capacity = max(0.0, 1.0 - target_gamma);
-
-                        // Proportional transfer per channel
-                        let gamma_transfer = min(center_gamma * transfer_fraction, gamma_capacity);
-                        let alpha_transfer = min(center_alpha * transfer_fraction, alpha_capacity);
-                        let beta_transfer = min(center_beta * transfer_fraction, beta_capacity);
-
-                        if (gamma_transfer > 0.0) {
-                            center_gamma = center_gamma - gamma_transfer;
-                            target_gamma = target_gamma + gamma_transfer;
-                            write_gamma_height(center_idx, center_gamma);
-                            write_gamma_height(target_idx, target_gamma);
-                        }
-
-                        if (alpha_transfer > 0.0) {
-                            center_alpha = clamp(center_alpha - alpha_transfer, 0.0, 1.0);
-                            target_alpha = clamp(target_alpha + alpha_transfer, 0.0, 1.0);
-                            alpha_grid[center_idx] = center_alpha;
-                            alpha_grid[target_idx] = target_alpha;
-                        }
-
-                        if (beta_transfer > 0.0) {
-                            center_beta = clamp(center_beta - beta_transfer, 0.0, 1.0);
-                            target_beta = clamp(target_beta + beta_transfer, 0.0, 1.0);
-                            beta_grid[center_idx] = center_beta;
-                            beta_grid[target_idx] = target_beta;
-                        }
+                for (var dy = -1; dy <= 1; dy++) {
+                    for (var dx = -1; dx <= 1; dx++) {
+                        let nx = clamp(gx + dx, 0, i32(GRID_SIZE) - 1);
+                        let ny = clamp(gy + dy, 0, i32(GRID_SIZE) - 1);
+                        let nidx = u32(ny) * GRID_SIZE + u32(nx);
+                        
+                        alpha_sum += alpha_grid[nidx];
+                        beta_sum += beta_grid[nidx];
+                        gamma_sum += read_gamma_height(nidx);
+                        count += 1.0;
                     }
                 }
+                
+                let alpha_avg = alpha_sum / count;
+                let beta_avg = beta_sum / count;
+                let gamma_avg = gamma_sum / count;
+                
+                // Blend current center values toward neighborhood average
+                let center_alpha = alpha_grid[center_idx];
+                let center_beta = beta_grid[center_idx];
+                let center_gamma = read_gamma_height(center_idx);
+                
+                let new_alpha = mix(center_alpha, alpha_avg, avg_strength);
+                let new_beta = mix(center_beta, beta_avg, avg_strength);
+                let new_gamma = mix(center_gamma, gamma_avg, avg_strength);
+                
+                alpha_grid[center_idx] = clamp(new_alpha, 0.0, 1.0);
+                beta_grid[center_idx] = clamp(new_beta, 0.0, 1.0);
+                write_gamma_height(center_idx, new_gamma);
             }
         }
 
@@ -2302,11 +2213,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
         let props = get_amino_acid_properties(part.part_type);
-        let amp = select(0.0, amplification_per_part[i], (props.is_propeller || props.is_mouth || props.is_displacer));
+        // Mouths no longer use amplification, only propellers and displacers
+        let amp = select(0.0, amplification_per_part[i], (props.is_propeller || props.is_displacer));
         // Minimum baseline cost per amino acid (always paid)
         let baseline = params.amino_maintenance_cost;
         // Amplified organ extra cost (if organ); keep previous scaling
-        let organ_extra = props.energy_consumption * amp * 1.5;
+        // Mouths now have fixed energy cost (no amplification bonus)
+        let organ_extra = select(props.energy_consumption * amp * 1.5, props.energy_consumption, props.is_mouth);
         energy_consumption += baseline + organ_extra;
     }
 
@@ -2329,11 +2242,25 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var total_consumed_alpha = 0.0;
     var total_consumed_beta = 0.0;
     
+    // Calculate speed-dependent absorption multiplier for mouths
+    // Exponential decay: 1.0x at rest, sharp falloff exp(-8)
+    let agent_speed = length(agent.velocity);
+    let normalized_speed = agent_speed / VEL_MAX; // 0.0 to 1.0 (max speed = 24)
+    // Very strong penalty: at half max speed (12) -> exp(-4) = 0.018 (1.8%)
+    let speed_absorption_multiplier = exp(-8.0 * normalized_speed);
+    
+    // Debug output for first agent only
+    if (agent_id == 0u && params.debug_mode != 0u) {
+        // Store debug info in unused body part slot (will show in inspector)
+        agents_out[agent_id].body[63].pos.x = agent_speed;
+        agents_out[agent_id].body[63].pos.y = speed_absorption_multiplier;
+    }
+    
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
         let amino_props = get_amino_acid_properties(part.part_type);
         if (amino_props.is_mouth) {
-            // Use cached amplification for mouth
+            // Mouths benefit from enabler amplification (same as other organs)
             let amplification_mouth = amplification_per_part[i];
             
             let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
@@ -2341,18 +2268,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let idx = grid_index(world_pos);
             
             // Consume alpha and beta based on per-amino absorption rates
-            // and local availability, scaled by amplification and speed
+            // and local availability, scaled by speed (slower = more absorption)
             let available_alpha = alpha_grid[idx];
             let available_beta = beta_grid[idx];
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
-            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0);
-            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0);
+            // Apply speed and enabler effects to the rates themselves
+            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier * amplification_mouth;
+            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier*amplification_mouth;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
             if (rate_total > 0.0 && (available_alpha > 0.0 || available_beta > 0.0)) {
-                let max_total = rate_total * amplification_mouth;
+                let max_total = rate_total;
 
                 // Weight consumption toward whichever is present and allowed by its rate
                 let weighted_alpha = available_alpha * alpha_rate;
@@ -2364,14 +2292,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let consumed_alpha = min(available_alpha, max_total * alpha_weight);
                 let consumed_beta  = min(available_beta,  max_total * beta_weight);
 
-                // Apply alpha consumption
+                // Apply alpha consumption - energy gain now uses base food_power (speed already in consumption)
                 if (consumed_alpha > 0.0) {
                     alpha_grid[idx] = clamp(available_alpha - consumed_alpha, 0.0, available_alpha);
                     agent.energy += consumed_alpha * params.food_power;
                     total_consumed_alpha += consumed_alpha;
                 }
 
-                // Apply beta consumption
+                // Apply beta consumption - damage also uses base poison_power (speed already in consumption)
                 if (consumed_beta > 0.0) {
                     beta_grid[idx] = clamp(available_beta - consumed_beta, 0.0, available_beta);
                     agent.energy -= consumed_beta * params.poison_power * poison_multiplier;
@@ -2863,8 +2791,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let is_discharging = (signed_charge > 0.0); // Positive = discharging
                 let charge_ratio = clamp(charge / max_charge, 0.0, 1.0); // 0.0 to 1.0
                 
-                let min_radius = 6.0;
-                let radius = max(part.size * 0.75, min_radius);
+                let min_radius = 3.0;
+                let radius = max(part.size * 0.5, min_radius);
                 let segments = 24u;
                 
                 let amino_type = part.part_type;
@@ -2982,7 +2910,22 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             
             // Draw yellow asterisk (*) on mouth parts (larger for visibility)
             if (amino_props.is_mouth && !in_debug_mode) {
-                draw_asterisk(world_pos, part.size * 2.5, vec4<f32>(1.0, 1.0, 0.0, 1.0));
+                draw_asterisk(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0));
+            }
+            
+            // Draw small rotated square for displacers (averaging indicator)
+            if (amino_props.is_displacer && !in_debug_mode) {
+                let square_size = part.size * 2.0;
+                let d = square_size * 0.70710678; // diagonal distance
+                // Draw diamond shape (rotated square)
+                let top = world_pos + vec2<f32>(0.0, -square_size);
+                let right = world_pos + vec2<f32>(square_size, 0.0);
+                let bottom = world_pos + vec2<f32>(0.0, square_size);
+                let left = world_pos + vec2<f32>(-square_size, 0.0);
+                draw_thick_line(top, right, 1.0, vec4<f32>(amino_props.color, 1.0));
+                draw_thick_line(right, bottom, 1.0, vec4<f32>(amino_props.color, 1.0));
+                draw_thick_line(bottom, left, 1.0, vec4<f32>(amino_props.color, 1.0));
+                draw_thick_line(left, top, 1.0, vec4<f32>(amino_props.color, 1.0));
             }
         }
 
@@ -3028,6 +2971,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Publish an unrotated copy for inspector preview
         var unrotated_agent = agents_out[agent_id];
         unrotated_agent.rotation = 0.0;
+        // Store speed in torque_debug (x component) for inspector display
+        // Store speed_absorption_multiplier by encoding both into torque_debug as: speed * 1000.0 + multiplier
+        // This way inspector can decode: speed = floor(torque_debug / 1000.0), mult = torque_debug % 1000.0
+        unrotated_agent.torque_debug = agent_speed * 1000.0 + speed_absorption_multiplier;
         // Copy generation/age/total_mass (already in agents_out) unchanged
         selected_agent_buffer[0] = unrotated_agent;
     }
@@ -3182,25 +3129,28 @@ fn draw_star(center: vec2<f32>, radius: f32, color: vec4<f32>) {
 
 // Helper: draw an asterisk (*) with 6 crossing lines (vertical, horizontal, 2 diagonals)
 fn draw_asterisk(center: vec2<f32>, radius: f32, color: vec4<f32>) {
-    let screen_center = world_to_screen(center);
-    let world_to_screen_scale = params.window_width / (params.grid_size / params.camera_zoom);
-    let r = radius * world_to_screen_scale;
-    let rx = i32(r);
-    let ry = i32(r);
-    // Endpoints for lines
-    let up    = vec2<i32>(screen_center.x, screen_center.y - ry);
-    let down  = vec2<i32>(screen_center.x, screen_center.y + ry);
-    let left  = vec2<i32>(screen_center.x - rx, screen_center.y);
-    let right = vec2<i32>(screen_center.x + rx, screen_center.y);
-    let diag = r * 0.70710678; // r / sqrt(2)
-    let tl = vec2<i32>(screen_center.x - i32(diag), screen_center.y - i32(diag));
-    let br = vec2<i32>(screen_center.x + i32(diag), screen_center.y + i32(diag));
-    let tr = vec2<i32>(screen_center.x + i32(diag), screen_center.y - i32(diag));
-    let bl = vec2<i32>(screen_center.x - i32(diag), screen_center.y + i32(diag));
-    draw_line_pixels(up, down, color);
-    draw_line_pixels(left, right, color);
-    draw_line_pixels(tl, br, color);
-    draw_line_pixels(tr, bl, color);
+    // Draw 4 lines: vertical, horizontal, and two diagonals
+    let diag_offset = radius * 0.70710678; // radius / sqrt(2)
+    
+    // Vertical line
+    let up = center + vec2<f32>(0.0, -radius);
+    let down = center + vec2<f32>(0.0, radius);
+    draw_thick_line(up, down, 1.0, color);
+    
+    // Horizontal line
+    let left = center + vec2<f32>(-radius, 0.0);
+    let right = center + vec2<f32>(radius, 0.0);
+    draw_thick_line(left, right, 1.0, color);
+    
+    // Diagonal 1 (top-left to bottom-right)
+    let tl = center + vec2<f32>(-diag_offset, -diag_offset);
+    let br = center + vec2<f32>(diag_offset, diag_offset);
+    draw_thick_line(tl, br, 1.0, color);
+    
+    // Diagonal 2 (top-right to bottom-left)
+    let tr = center + vec2<f32>(diag_offset, -diag_offset);
+    let bl = center + vec2<f32>(-diag_offset, diag_offset);
+    draw_thick_line(tr, bl, 1.0, color);
 }
 
 // Helper: draw a cloud-like shape (fuzzy circle with some random bumps)
@@ -3643,14 +3593,14 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     if (params.grid_interpolation == 2u) {
         // Bicubic (smoothest)
-        alpha = clamp(sample_alpha_bicubic(world_pos), 0.0, 1.0);
-        beta = clamp(sample_beta_bicubic(world_pos), 0.0, 1.0);
-        gamma = clamp(sample_gamma_bicubic(world_pos), 0.0, 1.0);
+        alpha = clamp(sample_grid_bicubic(world_pos, 0u), 0.0, 1.0);
+        beta = clamp(sample_grid_bicubic(world_pos, 1u), 0.0, 1.0);
+        gamma = clamp(sample_grid_bicubic(world_pos, 2u), 0.0, 1.0);
     } else if (params.grid_interpolation == 1u) {
         // Bilinear (smooth)
-        alpha = clamp(sample_alpha_bilinear(world_pos), 0.0, 1.0);
-        beta = clamp(sample_beta_bilinear(world_pos), 0.0, 1.0);
-        gamma = clamp(sample_gamma_bilinear(world_pos), 0.0, 1.0);
+        alpha = clamp(sample_grid_bilinear(world_pos, 0u), 0.0, 1.0);
+        beta = clamp(sample_grid_bilinear(world_pos, 1u), 0.0, 1.0);
+        gamma = clamp(sample_grid_bilinear(world_pos, 2u), 0.0, 1.0);
     } else {
         // Nearest neighbor (pixelated)
         alpha = clamp(alpha_grid[grid_index(world_pos)], 0.0, 1.0);
@@ -3682,7 +3632,7 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             let normal = normalize(vec3<f32>(-slope.x * 10.0, -slope.y * 10.0, 1.0));
             let light_dir = normalize(vec3<f32>(0.5, 0.5, 0.5));
             let diffuse = max(dot(normal, light_dir), 0.0);
-            let brightness = (diffuse - 0.5) * 2.0;
+            let brightness = (diffuse - 0.5) * 2.0 * params.slope_lighting_strength;
             base_color = vec3<f32>(brightness, brightness, brightness);
         } else {
             // Raw slope mode: red=X, green=Y
@@ -3754,6 +3704,18 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         
         // Slope-based lighting effects (applied after all channels)
+        if (params.slope_lighting != 0u) {
+            let slope = read_gamma_slope(grid_index(world_pos));
+            let normal = normalize(vec3<f32>(-slope.x * 10.0, -slope.y * 10.0, 1.0));
+            let light_dir = normalize(vec3<f32>(0.5, 0.5, 0.5));
+            let diffuse = max(dot(normal, light_dir), 0.0);
+            // Center brightness at 0.5 (neutral), scale by strength
+            let brightness = 0.5 + (diffuse - 0.5) * params.slope_lighting_strength;
+            // Multiply base color by brightness
+            base_color = base_color * brightness;
+        }
+        
+        // Legacy slope blend modes for backwards compatibility
         if (params.slope_blend_mode != 0u) {
             let slope = read_gamma_slope(grid_index(world_pos));
             let normal = normalize(vec3<f32>(-slope.x * 10.0, -slope.y * 10.0, 1.0));
