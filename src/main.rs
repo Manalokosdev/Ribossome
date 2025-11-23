@@ -6662,28 +6662,30 @@ fn main() {
                                                     }
 
                                                     if flags.is_condenser {
-                                                        let signed_charge = agent_data.body[idx].pad[1];
-                                                        let charge = signed_charge.abs().clamp(0.0, 10.0);
-                                                        let charge_ratio = (charge / 10.0).clamp(0.0, 1.0);
-                                                        let is_discharging = signed_charge > 0.0;
+                                                        // Read both alpha and beta charges independently
+                                                        let signed_alpha_charge = agent_data.body[idx].pad[0];
+                                                        let signed_beta_charge = agent_data.body[idx].pad[1];
+                                                        let alpha_charge = signed_alpha_charge.abs().clamp(0.0, 10.0);
+                                                        let beta_charge = signed_beta_charge.abs().clamp(0.0, 10.0);
+                                                        let alpha_ratio = (alpha_charge / 10.0).clamp(0.0, 1.0);
+                                                        let beta_ratio = (beta_charge / 10.0).clamp(0.0, 1.0);
+                                                        let is_alpha_discharging = signed_alpha_charge > 0.0;
+                                                        let is_beta_discharging = signed_beta_charge > 0.0;
                                                         
-                                                        // Match GPU color logic exactly
-                                                        let fill_color = if is_discharging {
+                                                        // Fill color blends alpha (green) and beta (red) based on their independent charge levels
+                                                        let fill_color = if is_alpha_discharging || is_beta_discharging {
+                                                            // Flash white when either channel is discharging
                                                             egui::Color32::WHITE
                                                         } else {
-                                                            // Both condensers now blend alpha (green) and beta (red) to show dual functionality
-                                                            // Tyrosine leans green, Glycine leans red, but both show yellow when charged
-                                                            let base_tint = if part.part_type == 19 {
-                                                                [0.5, 1.0, 0.0] // Tyrosine = yellow-green (more green)
-                                                            } else {
-                                                                [1.0, 0.5, 0.0] // Glycine = yellow-red (more red)
-                                                            };
-                                                            // GPU uses 0.25 multiplier for low_tint
-                                                            let low_tint = [base_tint[0] * 0.25, base_tint[1] * 0.25, base_tint[2] * 0.25];
+                                                            // Mix red (beta) and green (alpha) based on their charge ratios
+                                                            let red_component = beta_ratio; // More beta = more red
+                                                            let green_component = alpha_ratio; // More alpha = more green
+                                                            let low_tint = [red_component * 0.25, green_component * 0.25, 0.0];
+                                                            let base_tint = [red_component, green_component, 0.0];
                                                             let interp = [
-                                                                low_tint[0] + (base_tint[0] - low_tint[0]) * charge_ratio,
-                                                                low_tint[1] + (base_tint[1] - low_tint[1]) * charge_ratio,
-                                                                low_tint[2] + (base_tint[2] - low_tint[2]) * charge_ratio,
+                                                                low_tint[0] + (base_tint[0] - low_tint[0]) * ((alpha_ratio + beta_ratio) * 0.5).clamp(0.0, 1.0),
+                                                                low_tint[1] + (base_tint[1] - low_tint[1]) * ((alpha_ratio + beta_ratio) * 0.5).clamp(0.0, 1.0),
+                                                                low_tint[2] + (base_tint[2] - low_tint[2]) * ((alpha_ratio + beta_ratio) * 0.5).clamp(0.0, 1.0),
                                                             ];
                                                             rgb_to_color32(interp)
                                                         };

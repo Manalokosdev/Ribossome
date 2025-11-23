@@ -1832,55 +1832,75 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         
         // CONDENSER: Absorbs signal into storage, then discharges at controlled rate
-        // Uses _pad.y to store charge level with sign indicating mode:
+        // Uses _pad.x for ALPHA charge and _pad.y for BETA charge (independent parallel storage)
         // NEGATIVE = charging mode (e.g., -5.0 = has 5.0 charge, still absorbing)
         // POSITIVE = discharging mode (e.g., +5.0 = has 5.0 charge, releasing)
-        // Both Tyrosine (19u) and Glycine (5u) condensers now work with BOTH alpha and beta in parallel
+        // Both Tyrosine (19u) and Glycine (5u) condensers work with both alpha and beta independently
         if (amino_props.is_condenser) {
-            let signed_charge = agents_out[agent_id].body[i]._pad.y; // Signed charge level
-            let absorption_amount = 0.1; // Absorb 0.1 units per frame (split between alpha and beta)
+            let absorption_amount = 0.1; // Absorb 0.1 units per frame per channel
             let max_charge = 10.0;
-            let discharge_rate = 0.2; // Discharge 0.2 per frame (split between alpha and beta)
+            let discharge_rate = 0.2; // Discharge 0.2 per frame per channel
             
-            if (signed_charge <= 0.0) {
+            // ALPHA CHANNEL (stored in _pad.x)
+            let signed_alpha_charge = agents_out[agent_id].body[i]._pad.x;
+            if (signed_alpha_charge <= 0.0) {
                 // CHARGING MODE (negative value)
-                let charge = -signed_charge; // Get absolute charge value
+                let charge = -signed_alpha_charge;
                 
                 if (charge >= max_charge) {
-                    // Reached full charge - switch to discharge mode (make positive)
-                    agents_out[agent_id].body[i]._pad.y = max_charge;
+                    // Reached full charge - switch to discharge mode
+                    agents_out[agent_id].body[i]._pad.x = max_charge;
                 } else {
-                    // Continue charging - absorb from BOTH alpha and beta signals
-                    var total_absorbed = 0.0;
-                    
-                    // Absorb from alpha if available
+                    // Continue charging - absorb from alpha signal
+                    var absorbed = 0.0;
                     if (new_alpha > 0.0) {
-                        let alpha_absorbed = min(min(new_alpha, absorption_amount * 0.5), (max_charge - charge) * 0.5);
-                        new_alpha -= alpha_absorbed;
-                        total_absorbed += alpha_absorbed;
+                        absorbed = min(min(new_alpha, absorption_amount), max_charge - charge);
+                        new_alpha -= absorbed;
                     }
-                    
-                    // Absorb from beta if available
-                    if (new_beta > 0.0) {
-                        let beta_absorbed = min(min(new_beta, absorption_amount * 0.5), (max_charge - charge) * 0.5);
-                        new_beta -= beta_absorbed;
-                        total_absorbed += beta_absorbed;
-                    }
-                    
-                    // Store as negative (charging mode)
-                    agents_out[agent_id].body[i]._pad.y = -(charge + total_absorbed);
+                    agents_out[agent_id].body[i]._pad.x = -(charge + absorbed);
                 }
             } else {
                 // DISCHARGING MODE (positive value) or empty (0.0)
-                let charge = signed_charge;
+                let charge = signed_alpha_charge;
                 
                 if (charge <= 0.0) {
-                    // Empty - restart charging with negative value
+                    // Empty - restart charging
+                    agents_out[agent_id].body[i]._pad.x = -1e-6;
+                } else {
+                    // Continue discharging
+                    new_alpha += discharge_rate;
+                    agents_out[agent_id].body[i]._pad.x = max(charge - discharge_rate, 0.0);
+                }
+            }
+            
+            // BETA CHANNEL (stored in _pad.y)
+            let signed_beta_charge = agents_out[agent_id].body[i]._pad.y;
+            if (signed_beta_charge <= 0.0) {
+                // CHARGING MODE (negative value)
+                let charge = -signed_beta_charge;
+                
+                if (charge >= max_charge) {
+                    // Reached full charge - switch to discharge mode
+                    agents_out[agent_id].body[i]._pad.y = max_charge;
+                } else {
+                    // Continue charging - absorb from beta signal
+                    var absorbed = 0.0;
+                    if (new_beta > 0.0) {
+                        absorbed = min(min(new_beta, absorption_amount), max_charge - charge);
+                        new_beta -= absorbed;
+                    }
+                    agents_out[agent_id].body[i]._pad.y = -(charge + absorbed);
+                }
+            } else {
+                // DISCHARGING MODE (positive value) or empty (0.0)
+                let charge = signed_beta_charge;
+                
+                if (charge <= 0.0) {
+                    // Empty - restart charging
                     agents_out[agent_id].body[i]._pad.y = -1e-6;
                 } else {
-                    // Continue discharging - release to BOTH alpha and beta
-                    new_alpha += discharge_rate * 0.5;
-                    new_beta += discharge_rate * 0.5;
+                    // Continue discharging
+                    new_beta += discharge_rate;
                     agents_out[agent_id].body[i]._pad.y = max(charge - discharge_rate, 0.0);
                 }
             }
@@ -2797,23 +2817,30 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let segments = 24u;
                 
                 let amino_type = part.part_type;
-                let is_alpha_condenser = (amino_type == 19u); // Tyrosine - originally green
-                let is_beta_condenser = (amino_type == 5u);   // Glycine - originally red
+                let is_alpha_condenser = (amino_type == 19u); // Tyrosine - green
+                let is_beta_condenser = (amino_type == 5u);   // Glycine - red
                 
-                // Fill color based on charge level: dark -> bright as it charges
-                // FLASH WHITE when discharging. Both condensers now work with alpha+beta in parallel
+                // Read both alpha and beta charges independently
+                let signed_alpha_charge = part._pad.x;
+                let signed_beta_charge = part._pad.y;
+                let alpha_charge = signed_alpha_charge.abs().clamp(0.0, 10.0);
+                let beta_charge = signed_beta_charge.abs().clamp(0.0, 10.0);
+                let alpha_ratio = (alpha_charge / 10.0).clamp(0.0, 1.0);
+                let beta_ratio = (beta_charge / 10.0).clamp(0.0, 1.0);
+                let is_alpha_discharging = (signed_alpha_charge > 0.0);
+                let is_beta_discharging = (signed_beta_charge > 0.0);
+                
+                // Fill color blends alpha (green) and beta (red) based on their independent charge levels
                 var fill_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-                if (is_discharging) {
-                    // Flash white when discharging
+                if (is_alpha_discharging || is_beta_discharging) {
+                    // Flash white when either channel is discharging
                     fill_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
                 } else {
-                    // Both condensers now blend alpha (green) and beta (red) to show dual functionality
-                    // Tyrosine leans green, Glycine leans red, but both show yellow when fully charged
-                    var base_tint = vec3<f32>(0.5, 1.0, 0.0); // Tyrosine = yellow-green (more green)
-                    if (is_beta_condenser) {
-                        base_tint = vec3<f32>(1.0, 0.5, 0.0); // Glycine = yellow-red (more red)
-                    }
-                    let low_tint = base_tint * 0.25; // Keep color identity even when uncharged
+                    // Mix red (beta) and green (alpha) based on their charge ratios
+                    let red_component = beta_ratio; // More beta = more red
+                    let green_component = alpha_ratio; // More alpha = more green
+                    let low_tint = vec3<f32>(red_component, green_component, 0.0) * 0.25;
+                    let base_tint = vec3<f32>(red_component, green_component, 0.0);
                     let fill_rgb = mix(low_tint, base_tint, charge_ratio);
                     fill_color = vec4<f32>(fill_rgb, 1.0);
                 }
