@@ -114,7 +114,7 @@
       "is_mouth": false,
       "energy_absorption_rate": 0.0,
       "beta_absorption_rate": 0.3,
-      "beta_damage": 0.5,
+      "beta_damage": 0.15,
       "energy_storage": 0.0,
       "energy_consumption": 0.001,
       "is_alpha_sensor": false,
