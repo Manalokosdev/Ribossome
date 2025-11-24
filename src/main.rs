@@ -1194,6 +1194,10 @@ struct GpuState {
     limit_fps: bool,
     limit_fps_25: bool,
     last_frame_time: std::time::Instant,
+    
+    // UI update throttling
+    last_ui_update: std::time::Instant,
+    ui_update_interval: std::time::Duration,
 
     // Simulation speed control
     render_interval: u32, // Draw every N steps in fast mode
@@ -2873,6 +2877,8 @@ impl GpuState {
             limit_fps: settings.limit_fps,
             limit_fps_25: settings.limit_fps_25,
             last_frame_time: std::time::Instant::now(),
+            last_ui_update: std::time::Instant::now(),
+            ui_update_interval: std::time::Duration::from_millis(40), // 25 FPS = 40ms
             render_interval: settings.render_interval,
             current_mode: if settings.limit_fps {
                 if settings.limit_fps_25 { 3 } else { 0 }
@@ -5570,14 +5576,101 @@ fn main() {
                                     state.last_epoch_count = state.epoch;
                                 }
 
-                                // Build egui UI
+                                // Build egui UI (throttled to 25 FPS to reduce CPU overhead in fast mode)
+                                // Only rebuild UI layout if enough time has passed
+                                let should_update_ui = state.last_ui_update.elapsed() >= state.ui_update_interval;
+                                
+                                if should_update_ui {
+                                    state.last_ui_update = std::time::Instant::now();
+                                }
+                                
                                 let raw_input = egui_state.take_egui_input(&window);
                                 let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
+                                    // Skip UI updates if we're throttling and time hasn't elapsed
+                                    if !should_update_ui {
+                                        return; // Skip UI rebuild, reuse previous frame
+                                    }
                                     // Left side panel for simulation controls
                                     egui::SidePanel::left("simulation_controls")
                                         .default_width(350.0)
                                         .resizable(true)
+                                        .frame(egui::Frame::none()
+                                            .fill(egui::Color32::from_rgb(70, 70, 70))
+                                            .inner_margin(egui::Margin::same(10.0)))
                                         .show(ctx, |ui| {
+                                            // Action buttons at the top with lighter background
+                                            egui::Frame::none()
+                                                .fill(egui::Color32::from_rgb(85, 85, 85))
+                                                .inner_margin(egui::Margin::same(8.0))
+                                                .show(ui, |ui| {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        if ui.button("Spawn 20000 Agents").clicked() && !state.is_paused {
+                                                            state.queue_random_spawns(20000);
+                                                        }
+                                                        
+                                                        if ui.button("Load Agent & Spawn 100...").clicked() && !state.is_paused {
+                                                            match load_agent_via_dialog() {
+                                                                Ok(genome) => {
+                                                                    println!("Successfully loaded genome, spawning 100 clones...");
+                                                                    
+                                                                    for _ in 0..100 {
+                                                                        state.rng_state = state.rng_state
+                                                                            .wrapping_mul(6364136223846793005u64)
+                                                                            .wrapping_add(1442695040888963407u64);
+                                                                        let seed = (state.rng_state >> 32) as u32;
+                                                                        
+                                                                        state.rng_state = state.rng_state
+                                                                            .wrapping_mul(6364136223846793005u64)
+                                                                            .wrapping_add(1442695040888963407u64);
+                                                                        let genome_seed = (state.rng_state >> 32) as u32;
+                                                                        
+                                                                        state.rng_state = state.rng_state
+                                                                            .wrapping_mul(6364136223846793005u64)
+                                                                            .wrapping_add(1442695040888963407u64);
+                                                                        let rx = (state.rng_state >> 32) as f32 / u32::MAX as f32;
+                                                                        
+                                                                        state.rng_state = state.rng_state
+                                                                            .wrapping_mul(6364136223846793005u64)
+                                                                            .wrapping_add(1442695040888963407u64);
+                                                                        let ry = (state.rng_state >> 32) as f32 / u32::MAX as f32;
+                                                                        
+                                                                        state.rng_state = state.rng_state
+                                                                            .wrapping_mul(6364136223846793005u64)
+                                                                            .wrapping_add(1442695040888963407u64);
+                                                                        let rotation = ((state.rng_state >> 32) as f32 / u32::MAX as f32)
+                                                                            * std::f32::consts::TAU;
+                                                                        
+                                                                        let request = SpawnRequest {
+                                                                            seed,
+                                                                            genome_seed,
+                                                                            flags: 1,
+                                                                            _pad_seed: 0,
+                                                                            position: [rx * SIM_SIZE, ry * SIM_SIZE],
+                                                                            energy: 10.0,
+                                                                            rotation,
+                                                                            genome_override: genome,
+                                                                        };
+                                                                        
+                                                                        state.cpu_spawn_queue.push(request);
+                                                                    }
+                                                                    println!("Queued 100 clones for spawning.");
+                                                                }
+                                                                Err(err) => eprintln!("Load canceled or failed: {err:?}"),
+                                                            }
+                                                        }
+                                                        
+                                                        if ui.button("Save Selected Agent").clicked() {
+                                                            if let Some(agent) = state.selected_agent_data {
+                                                                if let Err(err) = save_agent_via_dialog(&agent) {
+                                                                    eprintln!("Save canceled or failed: {err:?}");
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                });
+
+                                            ui.add_space(4.0);
+
                                             // Top section (no tabs) - Always visible
                                             ui.horizontal(|ui| {
                                                 if ui.button(if state.is_paused { "Resume" } else { "Pause" }).clicked() {
@@ -5667,16 +5760,44 @@ fn main() {
                                             });
 
                                             ui.separator();
-                                            // Tab selection for detailed controls
+                                            // Tab selection for detailed controls with colored buttons
                                             ui.horizontal(|ui| {
-                                                ui.selectable_value(&mut state.ui_tab, 0, "Simulation");
-                                                ui.selectable_value(&mut state.ui_tab, 1, "Agents");
-                                                ui.selectable_value(&mut state.ui_tab, 2, "Environment");
-                                                ui.selectable_value(&mut state.ui_tab, 3, "Evolution");
-                                                ui.selectable_value(&mut state.ui_tab, 4, "Difficulty");
-                                                ui.selectable_value(&mut state.ui_tab, 5, "Visualization");
+                                                let tab_colors = [
+                                                    ("Simulation", egui::Color32::from_rgb(50, 55, 60)),
+                                                    ("Agents", egui::Color32::from_rgb(55, 50, 60)),
+                                                    ("Environment", egui::Color32::from_rgb(50, 60, 55)),
+                                                    ("Evolution", egui::Color32::from_rgb(60, 55, 50)),
+                                                    ("Difficulty", egui::Color32::from_rgb(60, 50, 50)),
+                                                    ("Visualization", egui::Color32::from_rgb(55, 55, 55)),
+                                                ];
+
+                                                for (idx, (name, color)) in tab_colors.iter().enumerate() {
+                                                    let is_selected = state.ui_tab == idx;
+                                                    let button = egui::Button::new(*name)
+                                                        .fill(if is_selected { *color } else { egui::Color32::from_rgb(40, 40, 40) })
+                                                        .stroke(egui::Stroke::new(1.0, if is_selected { egui::Color32::WHITE } else { *color }));
+                                                    
+                                                    if ui.add(button).clicked() {
+                                                        state.ui_tab = idx;
+                                                    }
+                                                }
                                             });
                                             ui.separator();
+
+                                            // Tab content with colored backgrounds
+                                            let tab_color = match state.ui_tab {
+                                                0 => egui::Color32::from_rgb(50, 55, 60),  // Simulation - blue-gray
+                                                1 => egui::Color32::from_rgb(55, 50, 60),  // Agents - purple-gray
+                                                2 => egui::Color32::from_rgb(50, 60, 55),  // Environment - green-gray
+                                                3 => egui::Color32::from_rgb(60, 55, 50),  // Evolution - orange-gray
+                                                4 => egui::Color32::from_rgb(60, 50, 50),  // Difficulty - red-gray
+                                                5 => egui::Color32::from_rgb(55, 55, 55),  // Visualization - neutral gray
+                                                _ => egui::Color32::from_rgb(50, 50, 50),
+                                            };
+
+                                            // Fill the background of the remaining space
+                                            let remaining_rect = ui.available_rect_before_wrap();
+                                            ui.painter().rect_filled(remaining_rect, 0.0, tab_color);
 
                                             match state.ui_tab {
                                                 0 => {
