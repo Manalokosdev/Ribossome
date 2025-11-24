@@ -1194,10 +1194,6 @@ struct GpuState {
     limit_fps: bool,
     limit_fps_25: bool,
     last_frame_time: std::time::Instant,
-    
-    // UI update throttling
-    last_ui_update: std::time::Instant,
-    ui_update_interval: std::time::Duration,
 
     // Simulation speed control
     render_interval: u32, // Draw every N steps in fast mode
@@ -2877,8 +2873,6 @@ impl GpuState {
             limit_fps: settings.limit_fps,
             limit_fps_25: settings.limit_fps_25,
             last_frame_time: std::time::Instant::now(),
-            last_ui_update: std::time::Instant::now(),
-            ui_update_interval: std::time::Duration::from_millis(40), // 25 FPS = 40ms
             render_interval: settings.render_interval,
             current_mode: if settings.limit_fps {
                 if settings.limit_fps_25 { 3 } else { 0 }
@@ -5576,20 +5570,9 @@ fn main() {
                                     state.last_epoch_count = state.epoch;
                                 }
 
-                                // Build egui UI (throttled to 25 FPS to reduce CPU overhead in fast mode)
-                                // Only rebuild UI layout if enough time has passed
-                                let should_update_ui = state.last_ui_update.elapsed() >= state.ui_update_interval;
-                                
-                                if should_update_ui {
-                                    state.last_ui_update = std::time::Instant::now();
-                                }
-                                
+                                // Build egui UI
                                 let raw_input = egui_state.take_egui_input(&window);
                                 let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
-                                    // Skip UI updates if we're throttling and time hasn't elapsed
-                                    if !should_update_ui {
-                                        return; // Skip UI rebuild, reuse previous frame
-                                    }
                                     // Left side panel for simulation controls
                                     egui::SidePanel::left("simulation_controls")
                                         .default_width(350.0)
