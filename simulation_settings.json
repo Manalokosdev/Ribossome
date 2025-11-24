@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 6.231206,
+  "camera_zoom": 1.3211105,
   "spawn_probability": 0.1,
   "death_probability": 0.001,
   "mutation_rate": 0.001,
@@ -66,8 +66,8 @@
       "max_threshold": 4000.0,
       "adjustment_percent": 1.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 1146857,
-      "difficulty_level": 37
+      "last_adjustment_epoch": 0,
+      "difficulty_level": 0
     },
     "spawn_prob": {
       "enabled": false,
@@ -93,8 +93,8 @@
       "max_threshold": 5000.0,
       "adjustment_percent": 5.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 96086,
-      "difficulty_level": 12
+      "last_adjustment_epoch": 0,
+      "difficulty_level": 0
     },
     "beta_rain": {
       "enabled": false,

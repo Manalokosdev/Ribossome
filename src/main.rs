@@ -1536,8 +1536,54 @@ impl GpuState {
 
     async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
+        
+        // Create instance and adapter
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..Default::default()
+        });
+
+        let surface = instance.create_surface(window.clone()).unwrap();
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .unwrap();
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("GPU Device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits {
+                        max_storage_buffers_per_shader_stage: 16,
+                        ..wgpu::Limits::default()
+                    },
+                    memory_hints: Default::default(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        Self::new_with_resources(window, instance, surface, adapter, device, queue).await
+    }
+
+    async fn new_with_resources(
+        window: Arc<Window>,
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Self {
+        let size = window.inner_size();
         let mut profiler = StartupProfiler::new();
-        profiler.mark("GpuState::new begin");
+        profiler.mark("GpuState::new_with_resources begin");
 
         debug_assert_eq!(std::mem::size_of::<BodyPart>(), 32);
         debug_assert_eq!(std::mem::align_of::<BodyPart>(), 16);
@@ -1562,44 +1608,8 @@ impl GpuState {
         );
         debug_assert_eq!(std::mem::align_of::<SpawnRequest>(), 16);
 
-        // Create instance and adapter
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
-        });
-        profiler.mark("Instance created");
-
-        // Clone window Arc before surface consumes it
         let window_clone = window.clone();
-        let surface = instance.create_surface(window).unwrap();
-        profiler.mark("Surface created");
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .unwrap();
-        profiler.mark("Adapter acquired");
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("GPU Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits {
-                        max_storage_buffers_per_shader_stage: 16,
-                        ..wgpu::Limits::default()
-                    },
-                    memory_hints: Default::default(),
-                },
-                None,
-            )
-            .await
-            .unwrap();
-        profiler.mark("Device and queue");
+        profiler.mark("Resources received");
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps.formats[0];
@@ -5031,6 +5041,240 @@ fn reset_simulation_state(
 // MAIN
 // ============================================================================
 
+fn render_splash_screen(
+    window: &Window,
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) {
+    // Load splash image
+    let splash_img = match image::open("maps/ribossome_splash_screen.png") {
+        Ok(img) => img.to_rgba8(),
+        Err(_) => {
+            // If image not found, just return
+            return;
+        }
+    };
+
+    let splash_dimensions = splash_img.dimensions();
+    let splash_size = wgpu::Extent3d {
+        width: splash_dimensions.0,
+        height: splash_dimensions.1,
+        depth_or_array_layers: 1,
+    };
+
+    let splash_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Splash Texture"),
+        size: splash_size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &splash_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &splash_img,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * splash_dimensions.0),
+            rows_per_image: Some(splash_dimensions.1),
+        },
+        splash_size,
+    );
+
+    let splash_view = splash_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let splash_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+
+    // Create simple shader for rendering textured quad
+    let splash_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Splash Shader"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+            r#"
+            struct VertexOutput {
+                @builtin(position) position: vec4<f32>,
+                @location(0) tex_coords: vec2<f32>,
+            }
+
+            @vertex
+            fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+                var out: VertexOutput;
+                // Generate a quad using two triangles (6 vertices)
+                var pos = array<vec2<f32>, 6>(
+                    vec2<f32>(-1.0, -1.0),  // Bottom-left
+                    vec2<f32>(1.0, -1.0),   // Bottom-right
+                    vec2<f32>(-1.0, 1.0),   // Top-left
+                    vec2<f32>(-1.0, 1.0),   // Top-left
+                    vec2<f32>(1.0, -1.0),   // Bottom-right
+                    vec2<f32>(1.0, 1.0)     // Top-right
+                );
+                
+                var uv = array<vec2<f32>, 6>(
+                    vec2<f32>(0.0, 1.0),
+                    vec2<f32>(1.0, 1.0),
+                    vec2<f32>(0.0, 0.0),
+                    vec2<f32>(0.0, 0.0),
+                    vec2<f32>(1.0, 1.0),
+                    vec2<f32>(1.0, 0.0)
+                );
+                
+                out.position = vec4<f32>(pos[vertex_index], 0.0, 1.0);
+                out.tex_coords = uv[vertex_index];
+                return out;
+            }
+
+            @group(0) @binding(0) var splash_texture: texture_2d<f32>;
+            @group(0) @binding(1) var splash_sampler: sampler;
+
+            @fragment
+            fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+                return textureSample(splash_texture, splash_sampler, in.tex_coords);
+            }
+            "#,
+        )),
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Splash Bind Group Layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Splash Bind Group"),
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&splash_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&splash_sampler),
+            },
+        ],
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Splash Pipeline Layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let swapchain_capabilities = surface.get_capabilities(adapter);
+    let swapchain_format = swapchain_capabilities.formats[0];
+
+    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Splash Render Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &splash_shader,
+            entry_point: "vs_main",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &splash_shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: swapchain_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    // Configure surface
+    let size = window.inner_size();
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: swapchain_format,
+        width: size.width,
+        height: size.height,
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: swapchain_capabilities.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(device, &config);
+
+    // Render the splash screen
+    let frame = surface
+        .get_current_texture()
+        .expect("Failed to acquire next swap chain texture");
+    let view = frame
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Splash Render Encoder"),
+    });
+
+    {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Splash Render Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_pipeline(&render_pipeline);
+        render_pass.set_bind_group(0, &bind_group, &[]);
+        render_pass.draw(0..6, 0..1); // Draw 6 vertices (2 triangles = 1 quad)
+    }
+
+    queue.submit(Some(encoder.finish()));
+    frame.present();
+    device.poll(wgpu::Maintain::Wait);
+}
+
 fn main() {
     env_logger::init();
 
@@ -5039,13 +5283,58 @@ fn main() {
         event_loop
             .create_window(
                 winit::window::WindowAttributes::default()
-                    .with_title("GPU Artificial Life Simulator")
-                    .with_inner_size(winit::dpi::LogicalSize::new(1600, 800)),
+                    .with_title("Loading Ribossome...")
+                    .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
             )
             .unwrap(),
     );
 
-    let mut state = Some(pollster::block_on(GpuState::new(window.clone())));
+    // Create WGPU resources once
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    });
+    let surface = instance.create_surface(window.clone()).unwrap();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+    }))
+    .unwrap();
+
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("GPU Device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits {
+                max_storage_buffers_per_shader_stage: 16,
+                ..wgpu::Limits::default()
+            },
+            memory_hints: Default::default(),
+        },
+        None,
+    ))
+    .unwrap();
+
+    // Render splash screen
+    render_splash_screen(&window, &instance, &surface, &adapter, &device, &queue);
+
+    // Load GPU state in background using channel
+    let (tx, rx) = std::sync::mpsc::channel();
+    let window_clone = window.clone();
+    std::thread::spawn(move || {
+        let state = pollster::block_on(GpuState::new_with_resources(
+            window_clone,
+            instance,
+            surface,
+            adapter,
+            device,
+            queue,
+        ));
+        tx.send(state).unwrap();
+    });
+
+    let mut state: Option<GpuState> = None;
 
     // Create egui context and winit state
     let mut egui_state = egui_winit::State::new(
@@ -5058,6 +5347,15 @@ fn main() {
     );
 
     let _ = event_loop.run(move |event, target| {
+        // Check if loading finished
+        if state.is_none() {
+            if let Ok(loaded_state) = rx.try_recv() {
+                state = Some(loaded_state);
+                window.set_title("GPU Artificial Life Simulator");
+                let _ = window.request_inner_size(winit::dpi::LogicalSize::new(1600, 800));
+            }
+        }
+
         match event {
             Event::WindowEvent { event, window_id } if window_id == window.id() => {
                 // Let egui handle the event first
