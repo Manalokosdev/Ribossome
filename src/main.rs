@@ -26,7 +26,7 @@ use winit::{
 const GRID_DIM: usize = 2048; // Original resolution
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
-const SIM_SIZE: f32 = 61440.0; // World size (must match shader SIM_SIZE)
+const SIM_SIZE: f32 = 30720.0; // World size (must match shader SIM_SIZE)
 const DIFFUSE_WG_SIZE_X: u32 = 16;
 const DIFFUSE_WG_SIZE_Y: u32 = 16;
 const CLEAR_WG_SIZE_X: u32 = 16;
@@ -53,7 +53,7 @@ const AMINO_COLORS: [[f32; 3]; 20] = [
     [0.35, 0.35, 0.35], // D
     [0.4, 0.4, 0.4],    // E
     [1.0, 0.4, 0.7],    // F (poison resistant) - pink, very fat
-    [0.4, 0.0, 0.0],    // G (structural - was beta condenser)
+    [0.4, 0.4, 0.4],    // G (structural - smallest amino acid)
     [0.28, 0.28, 0.28], // H
     [0.38, 0.38, 0.38], // I
     [1.0, 1.0, 0.0],    // K (mouth)
@@ -186,9 +186,9 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_energy_sensor: false,
         is_inhibitor: false,
         is_propeller: false,
-        is_condenser: false, // Now structural
+        is_condenser: false,
         is_displacer: false,
-    }, // G (structural - was beta condenser)
+    }, // G (structural - smallest amino acid)
     AminoVisualFlags {
         is_mouth: false,
         is_alpha_sensor: false,

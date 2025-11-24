@@ -10,7 +10,7 @@
 // ============================================================================
 
 const GRID_SIZE: u32 = 2048u;          // Environment grid resolution (original)
-const SIM_SIZE: u32 = 61440u;          // Simulation world size (2x original: 30720 * 2)
+const SIM_SIZE: u32 = 30720u;          // Simulation world size
 const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 128u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
@@ -417,7 +417,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = -0.3;
             props.mass = 0.01;
         }
-        case 4u: { // F - Phenylalanine - POISON RESISTANT - Very heavy pink blob (cumulative: each F reduces poison damage by 10%)
+        case 4u: { // F - Phenylalanine - POISON RESISTANT - Very heavy pink blob (cumulative: each F reduces poison damage by 50%)
             props.segment_length = 30.0;
             props.thickness = 30.0; // Very fat blob
             // Old CSV: Seed Angle = -60°
@@ -432,7 +432,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_absorption_rate = 0.3;
             props.beta_damage = -0.58; // Color value
             props.energy_storage = 0.0;
-            props.energy_consumption = 0.001;
+            props.energy_consumption = 0.003;
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
             props.signal_decay = 0.2;
@@ -451,10 +451,10 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_sensitivity = 0.1;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.4, 0.0, 0.0); // Dark red
+            props.color = vec3<f32>(0.4, 0.4, 0.4); // Grey (structural)
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
-            props.beta_absorption_rate = 0.0; // No longer absorbs
+            props.beta_absorption_rate = 0.0;
             props.beta_damage = 0.88; // Color value
             props.energy_storage = 0.0;
             props.energy_consumption = 0.001;
@@ -466,7 +466,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 0.5;
             props.beta_right_mult = 0.5;
             props.mass = 0.02;
-            props.is_condenser = false; // Now just structural
+            props.is_condenser = false;
         }
         case 6u: { // H - Histidine - Aromatic, charged (real: imidazole ring, pH-sensitive)
             props.segment_length = 9.0;
@@ -636,7 +636,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_absorption_rate = 0.3;
             props.beta_damage = -0.77; // Color value
             props.energy_storage = 0.0;
-            props.energy_consumption = 0.002; // Reduced 10x (was 0.05)
+            props.energy_consumption = 0.01; // Reduced 10x (was 0.05)
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
             props.signal_decay = 0.2;
@@ -1835,89 +1835,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             new_beta += energy_beta * accumulation_rate;
         }
         
-        // CONDENSER: Absorbs signal into storage, then discharges at controlled rate
-        // Uses _pad.x for ALPHA charge and _pad.y for BETA charge (independent parallel storage)
-        // NEGATIVE = charging mode (e.g., -5.0 = has 5.0 charge, still absorbing)
-        // POSITIVE = discharging mode (e.g., +5.0 = has 5.0 charge, releasing)
-        // Both Tyrosine (19u) and Glycine (5u) condensers work with both alpha and beta independently
-        if (amino_props.is_condenser) {
-            let absorption_amount = 0.1; // Absorb 0.1 units per frame per channel
-            let max_charge = 10.0;
-            let discharge_rate = 0.2; // Discharge 0.2 per frame per channel
-            
-            // ALPHA CHANNEL (stored in _pad.x)
-            let signed_alpha_charge = agents_out[agent_id].body[i]._pad.x;
-            if (signed_alpha_charge <= 0.0) {
-                // CHARGING MODE (negative value)
-                let charge = -signed_alpha_charge;
-                
-                if (charge >= max_charge) {
-                    // Reached full charge - switch to discharge mode
-                    agents_out[agent_id].body[i]._pad.x = max_charge;
-                } else {
-                    // Continue charging - absorb from alpha signal
-                    // Don't subtract from new_alpha - just store internally to avoid oscillations
-                    var absorbed = 0.0;
-                    if (new_alpha > 0.0) {
-                        absorbed = min(min(new_alpha, absorption_amount), max_charge - charge);
-                    }
-                    agents_out[agent_id].body[i]._pad.x = -(charge + absorbed);
-                }
-            } else {
-                // DISCHARGING MODE (positive value) or empty (0.0)
-                let charge = signed_alpha_charge;
-                
-                if (charge <= 0.0) {
-                    // Empty - restart charging
-                    agents_out[agent_id].body[i]._pad.x = -1e-6;
-                } else {
-                    // Discharge continuously regardless of neighbors
-                    new_alpha += discharge_rate;
-                    agents_out[agent_id].body[i]._pad.x = max(charge - discharge_rate, 0.0);
-                }
-            }
-            
-            // BETA CHANNEL (stored in _pad.y)
-            let signed_beta_charge = agents_out[agent_id].body[i]._pad.y;
-            if (signed_beta_charge <= 0.0) {
-                // CHARGING MODE (negative value)
-                let charge = -signed_beta_charge;
-                
-                if (charge >= max_charge) {
-                    // Reached full charge - switch to discharge mode
-                    agents_out[agent_id].body[i]._pad.y = max_charge;
-                } else {
-                    // Continue charging - absorb from beta signal
-                    // Don't subtract from new_beta - just store internally to avoid oscillations
-                    var absorbed = 0.0;
-                    if (new_beta > 0.0) {
-                        absorbed = min(min(new_beta, absorption_amount), max_charge - charge);
-                    }
-                    agents_out[agent_id].body[i]._pad.y = -(charge + absorbed);
-                }
-            } else {
-                // DISCHARGING MODE (positive value) or empty (0.0)
-                let charge = signed_beta_charge;
-                
-                if (charge <= 0.0) {
-                    // Empty - restart charging
-                    agents_out[agent_id].body[i]._pad.y = -1e-6;
-                } else {
-                    // Discharge continuously regardless of neighbors
-                    new_beta += discharge_rate;
-                    agents_out[agent_id].body[i]._pad.y = max(charge - discharge_rate, 0.0);
-                }
-            }
-        }
-        
         // Apply decay to non-sensor signals
         // Sensors are direct sources, condensers output directly without accumulation
-        if (!amino_props.is_alpha_sensor) { new_alpha *= 0.85; }
-        if (!amino_props.is_beta_sensor) { new_beta *= 0.85; }
+        if (!amino_props.is_alpha_sensor) { new_alpha *= 0.99; }
+        if (!amino_props.is_beta_sensor) { new_beta *= 0.99; }
+        
+        // Smooth internal signal changes to prevent sudden oscillations (75% new, 25% old)
+        let update_rate = 0.75;
+        let smoothed_alpha = mix(old_alpha[i], new_alpha, update_rate);
+        let smoothed_beta = mix(old_beta[i], new_beta, update_rate);
         
         // Clamp to -1.0 to 1.0 (allows inhibitory and excitatory signals)
-        agents_out[agent_id].body[i].alpha_signal = clamp(new_alpha, -1.0, 1.0);
-        agents_out[agent_id].body[i].beta_signal = clamp(new_beta, -1.0, 1.0);
+        agents_out[agent_id].body[i].alpha_signal = clamp(smoothed_alpha, -1.0, 1.0);
+        agents_out[agent_id].body[i].beta_signal = clamp(smoothed_beta, -1.0, 1.0);
     }
     
     // ====== PHYSICS CALCULATIONS ======
@@ -2253,15 +2183,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Bite size is now independent of speed; keep fixed capture per frame
     
     // Count poison-resistant amino acids (F = Phenylalanine, amino index 4)
-    // Each one reduces poison damage by 10%: 1 F -> 0.9x, 2 F -> 0.81x
+    // Each one reduces poison damage by 50%: 1 F -> 0.5x, 2 F -> 0.25x
     var poison_resistant_count = 0u;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         if (agents_out[agent_id].body[i].part_type == 4u) { // Phenylalanine
             poison_resistant_count += 1u;
         }
     }
-    // Each F reduces poison/radiation damage by 10%
-    let poison_multiplier = pow(0.9, f32(poison_resistant_count));
+    // Each F reduces poison/radiation damage by 50%
+    let poison_multiplier = pow(0.5, f32(poison_resistant_count));
     
     // Track total consumption for regurgitation
     var total_consumed_alpha = 0.0;
@@ -2299,8 +2229,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed and enabler effects to the rates themselves
-            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier * amplification_mouth;
-            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier*amplification_mouth;
+            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier;// * amplification_mouth;
+            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier;//*amplification_mouth;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
