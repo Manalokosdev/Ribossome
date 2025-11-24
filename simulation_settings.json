@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.70724297,
+  "camera_zoom": 3.5758648,
   "spawn_probability": 0.1,
   "death_probability": 0.001,
   "mutation_rate": 0.01,
@@ -14,15 +14,15 @@
   "alpha_multiplier": 0.0002,
   "beta_multiplier": 0.0001,
   "alpha_rain_map_path": null,
-  "beta_rain_map_path": "C:\\Backup Desktops\\Desktop Novembro 2025\\d9abe06cf01b553df43759771d1d543feed928e0 copy.jpg",
+  "beta_rain_map_path": null,
   "chemical_slope_scale_alpha": 0.1,
   "chemical_slope_scale_beta": 0.1,
   "food_power": 10.0,
   "poison_power": 5.0,
-  "amino_maintenance_cost": 0.001,
+  "amino_maintenance_cost": 0.0001,
   "pairing_cost": 0.1,
   "prop_wash_strength": 0.01,
-  "repulsion_strength": 0.0,
+  "repulsion_strength": 50.0,
   "limit_fps": false,
   "limit_fps_25": false,
   "render_interval": 100,
@@ -37,8 +37,8 @@
   "gamma_show": true,
   "slope_lighting": false,
   "slope_lighting_strength": 5.0,
-  "trail_diffusion": 0.1,
-  "trail_decay": 0.999,
+  "trail_diffusion": 0.0,
+  "trail_decay": 1.0,
   "trail_opacity": 0.0,
   "trail_show": false,
   "interior_isotropic": false,
@@ -57,8 +57,8 @@
       "max_threshold": 3000.0,
       "adjustment_percent": 3.0,
       "cooldown_epochs": 3000,
-      "last_adjustment_epoch": 45000,
-      "difficulty_level": -1
+      "last_adjustment_epoch": 142624,
+      "difficulty_level": 18
     },
     "poison_power": {
       "enabled": true,
@@ -66,8 +66,8 @@
       "max_threshold": 3000.0,
       "adjustment_percent": 3.0,
       "cooldown_epochs": 3000,
-      "last_adjustment_epoch": 45000,
-      "difficulty_level": -1
+      "last_adjustment_epoch": 142624,
+      "difficulty_level": 18
     },
     "spawn_prob": {
       "enabled": false,
@@ -130,7 +130,7 @@
     0.14509805,
     0.81960785
   ],
-  "grid_interpolation": 0,
+  "grid_interpolation": 2,
   "alpha_gamma_adjust": 1.0,
   "beta_gamma_adjust": 1.0,
   "gamma_gamma_adjust": 1.6,
@@ -144,5 +144,9 @@
     0.85882354,
     0.49803922,
     0.49803922
-  ]
+  ],
+  "alpha_noise_scale": 10.0,
+  "beta_noise_scale": 1.0,
+  "gamma_noise_scale": 1.0,
+  "noise_power": 1.0
 }

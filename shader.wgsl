@@ -186,6 +186,10 @@ struct EnvironmentInitParams {
     trail_values: vec4<f32>,
     slope_pair: vec2<f32>,
     gen_params: vec4<u32>, // x=mode(0=all,1=a,2=b,3=g), y=type(0=flat,1=noise), z=value_bits, w=seed
+    alpha_noise_scale: f32,
+    beta_noise_scale: f32,
+    gamma_noise_scale: f32,
+    noise_power: f32,
 }
 
 // ============================================================================
@@ -515,7 +519,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.02;
         }
         case 8u: { // K - Lysine - MOUTH - Long, positively charged (real: long aliphatic + NH3+)
-            props.segment_length = 1.0;
+            props.segment_length = 5.0;
             props.thickness = 3.5;
             // Old CSV: Seed Angle = 5°
             props.base_angle = 0.0872665;
@@ -594,8 +598,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.thickness = 6.0;
             // Old CSV: Seed Angle = 45°
             props.base_angle = 0.785398;
-            props.alpha_sensitivity = 0.0;
-            props.beta_sensitivity = 0.0;
+            props.alpha_sensitivity = 0.2;
+            props.beta_sensitivity = 0.3;
             props.is_propeller = false;
             props.thrust_force = 0.0;
             props.color = vec3<f32>(1.0, 1.0, 1.0); // White
@@ -622,8 +626,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.thickness = 8.0;
             // Old CSV: Seed Angle = -30°
             props.base_angle = -0.523599;
-            props.alpha_sensitivity = 0.0;
-            props.beta_sensitivity = 0.0;
+            props.alpha_sensitivity = 0.5;
+            props.beta_sensitivity = -0.1;
             props.is_propeller = true;
             props.thrust_force = 2.5; // Reduced by 4x (was 10.0)
             props.color = vec3<f32>(0.0, 0.0, 1); // Deep blue (PROPELLER)
@@ -1852,10 +1856,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     agents_out[agent_id].body[i]._pad.x = max_charge;
                 } else {
                     // Continue charging - absorb from alpha signal
+                    // Don't subtract from new_alpha - just store internally to avoid oscillations
                     var absorbed = 0.0;
                     if (new_alpha > 0.0) {
                         absorbed = min(min(new_alpha, absorption_amount), max_charge - charge);
-                        new_alpha -= absorbed;
                     }
                     agents_out[agent_id].body[i]._pad.x = -(charge + absorbed);
                 }
@@ -1867,7 +1871,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Empty - restart charging
                     agents_out[agent_id].body[i]._pad.x = -1e-6;
                 } else {
-                    // Continue discharging
+                    // Discharge continuously regardless of neighbors
                     new_alpha += discharge_rate;
                     agents_out[agent_id].body[i]._pad.x = max(charge - discharge_rate, 0.0);
                 }
@@ -1884,10 +1888,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     agents_out[agent_id].body[i]._pad.y = max_charge;
                 } else {
                     // Continue charging - absorb from beta signal
+                    // Don't subtract from new_beta - just store internally to avoid oscillations
                     var absorbed = 0.0;
                     if (new_beta > 0.0) {
                         absorbed = min(min(new_beta, absorption_amount), max_charge - charge);
-                        new_beta -= absorbed;
                     }
                     agents_out[agent_id].body[i]._pad.y = -(charge + absorbed);
                 }
@@ -1899,17 +1903,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Empty - restart charging
                     agents_out[agent_id].body[i]._pad.y = -1e-6;
                 } else {
-                    // Continue discharging
+                    // Discharge continuously regardless of neighbors
                     new_beta += discharge_rate;
                     agents_out[agent_id].body[i]._pad.y = max(charge - discharge_rate, 0.0);
                 }
             }
         }
         
-        // Apply decay to non-sensor/non-condenser signals
-        // Sensors are direct sources, condensers store independently
-        if (!amino_props.is_alpha_sensor && !amino_props.is_condenser) { new_alpha *= 0.85; }
-        if (!amino_props.is_beta_sensor && !amino_props.is_condenser) { new_beta *= 0.85; }
+        // Apply decay to non-sensor signals
+        // Sensors are direct sources, condensers output directly without accumulation
+        if (!amino_props.is_alpha_sensor) { new_alpha *= 0.85; }
+        if (!amino_props.is_beta_sensor) { new_beta *= 0.85; }
         
         // Clamp to -1.0 to 1.0 (allows inhibitory and excitatory signals)
         agents_out[agent_id].body[i].alpha_signal = clamp(new_alpha, -1.0, 1.0);
@@ -2822,10 +2826,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Read both alpha and beta charges independently
                 let signed_alpha_charge = part._pad.x;
                 let signed_beta_charge = part._pad.y;
-                let alpha_charge = signed_alpha_charge.abs().clamp(0.0, 10.0);
-                let beta_charge = signed_beta_charge.abs().clamp(0.0, 10.0);
-                let alpha_ratio = (alpha_charge / 10.0).clamp(0.0, 1.0);
-                let beta_ratio = (beta_charge / 10.0).clamp(0.0, 1.0);
+                let alpha_charge = clamp(abs(signed_alpha_charge), 0.0, 10.0);
+                let beta_charge = clamp(abs(signed_beta_charge), 0.0, 10.0);
+                let alpha_ratio = clamp(alpha_charge / 10.0, 0.0, 1.0);
+                let beta_ratio = clamp(beta_charge / 10.0, 0.0, 1.0);
                 let is_alpha_discharging = (signed_alpha_charge > 0.0);
                 let is_beta_discharging = (signed_beta_charge > 0.0);
                 
@@ -4142,13 +4146,19 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
     var output_value = value;
 
     if (gen_type == 1u) { // Noise
-        let scale = environment_init.noise_scale;
+        // Choose scale based on which channel we're generating
+        var scale = environment_init.noise_scale;
+        if (mode == 1u) { scale = environment_init.alpha_noise_scale; } // Alpha
+        else if (mode == 2u) { scale = environment_init.beta_noise_scale; } // Beta
+        else if (mode == 3u) { scale = environment_init.gamma_noise_scale; } // Gamma
+        
         let contrast = environment_init.noise_contrast;
         let octaves = environment_init.noise_octaves;
+        let power = environment_init.noise_power;
         
         let coord = vec2<f32>(f32(x), f32(y)) / f32(GRID_SIZE);
         output_value = layered_noise(coord, seed, octaves, scale, contrast);
-        output_value = clamp(output_value, 0.0, 1.0);
+        output_value = pow(clamp(output_value, 0.0, 1.0), power);
     }
 
     if (mode == 1u) {

@@ -53,21 +53,21 @@ const AMINO_COLORS: [[f32; 3]; 20] = [
     [0.35, 0.35, 0.35], // D
     [0.4, 0.4, 0.4],    // E
     [1.0, 0.4, 0.7],    // F (poison resistant) - pink, very fat
-    [0.4, 0.0, 0.0],    // G (beta condenser)
+    [0.4, 0.0, 0.0],    // G (structural - was beta condenser)
     [0.28, 0.28, 0.28], // H
     [0.38, 0.38, 0.38], // I
     [1.0, 1.0, 0.0],    // K (mouth)
-    [0.36, 0.36, 0.36], // L (chiral flipper)
+    [0.0, 1.0, 1.0],    // L (chiral flipper) - cyan
     [0.8, 0.8, 0.2],    // M
-    [0.27, 0.27, 0.27], // N (enabler)
-    [0.0, 0.0, 0.5],    // P (propeller)
+    [0.47, 0.63, 0.47], // N (enabler) - light green
+    [0.0, 0.39, 1.0],   // P (propeller) - blue
     [0.34, 0.34, 0.34], // Q
     [0.29, 0.29, 0.29], // R
     [0.0, 1.0, 0.0],    // S (alpha sensor)
-    [0.31, 0.31, 0.31], // T (energy sensor)
-    [0.37, 0.37, 0.37], // V (displacer)
-    [1.0, 0.5, 0.0],    // W (storage)
-    [0.26, 0.26, 0.26], // Y (alpha condenser)
+    [0.6, 0.2, 0.8],    // T (energy sensor) - purple
+    [0.0, 1.0, 1.0],    // V (displacer) - cyan
+    [1.0, 0.65, 0.0],   // W (storage) - orange
+    [0.26, 0.26, 0.26], // Y (dual-channel condenser)
 ];
 
 #[derive(Clone, Copy)]
@@ -820,10 +820,14 @@ struct EnvironmentInitParams {
     slope_pair: [f32; 2],
     _slope_alignment: [f32; 2],
     gen_params: [u32; 4], // [mode, type, value_bits, seed]
+    alpha_noise_scale: f32,
+    beta_noise_scale: f32,
+    gamma_noise_scale: f32,
+    noise_power: f32,
 }
 
-// Keep host layout in sync with the WGSL uniform buffer (std140, 112 bytes total).
-const _: [(); 112] = [(); std::mem::size_of::<EnvironmentInitParams>()];
+// Keep host layout in sync with the WGSL uniform buffer (std140, 128 bytes total).
+const _: [(); 128] = [(); std::mem::size_of::<EnvironmentInitParams>()];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AutoDifficultyParam {
@@ -950,6 +954,10 @@ struct SimulationSettings {
     light_direction: [f32; 3],  // Light direction for slope-based lighting effects
     agent_blend_mode: u32,  // Agent blend mode: 0=comp, 1=add, 2=subtract, 3=multiply
     agent_color: [f32; 3],  // Agent color tint
+    alpha_noise_scale: f32,
+    beta_noise_scale: f32,
+    gamma_noise_scale: f32,
+    noise_power: f32,
 }
 
 impl Default for SimulationSettings {
@@ -1022,6 +1030,10 @@ impl Default for SimulationSettings {
             light_direction: [0.5, 0.5, 0.5],  // Default diagonal light
             agent_blend_mode: 0,  // Comp by default
             agent_color: [1.0, 1.0, 1.0],  // White
+            alpha_noise_scale: 1.0,
+            beta_noise_scale: 1.0,
+            gamma_noise_scale: 1.0,
+            noise_power: 1.0,
         }
     }
 }
@@ -1246,6 +1258,10 @@ struct GpuState {
     beta_rain_thumbnail: Option<RainThumbnail>,
     chemical_slope_scale_alpha: f32,
     chemical_slope_scale_beta: f32,
+    alpha_noise_scale: f32,
+    beta_noise_scale: f32,
+    gamma_noise_scale: f32,
+    noise_power: f32,
     food_power: f32,
     poison_power: f32,
     amino_maintenance_cost: f32,
@@ -1322,6 +1338,10 @@ impl GpuState {
             beta_rain_map_path: self.beta_rain_map_path.clone(),
             chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
             chemical_slope_scale_beta: self.chemical_slope_scale_beta,
+            alpha_noise_scale: self.alpha_noise_scale,
+            beta_noise_scale: self.beta_noise_scale,
+            gamma_noise_scale: self.gamma_noise_scale,
+            noise_power: self.noise_power,
             food_power: self.food_power,
             poison_power: self.poison_power,
             amino_maintenance_cost: self.amino_maintenance_cost,
@@ -1395,6 +1415,10 @@ impl GpuState {
         self.beta_rain_map_path = settings.beta_rain_map_path;
         self.chemical_slope_scale_alpha = settings.chemical_slope_scale_alpha;
         self.chemical_slope_scale_beta = settings.chemical_slope_scale_beta;
+        self.alpha_noise_scale = settings.alpha_noise_scale;
+        self.beta_noise_scale = settings.beta_noise_scale;
+        self.gamma_noise_scale = settings.gamma_noise_scale;
+        self.noise_power = settings.noise_power;
         self.food_power = settings.food_power;
         self.poison_power = settings.poison_power;
         self.amino_maintenance_cost = settings.amino_maintenance_cost;
@@ -1473,6 +1497,10 @@ impl GpuState {
             slope_pair: [0.0; 2],
             _slope_alignment: [0.0; 2],
             gen_params: [mode, gen_type, value.to_bits(), seed],
+            alpha_noise_scale: self.alpha_noise_scale,
+            beta_noise_scale: self.beta_noise_scale,
+            gamma_noise_scale: self.gamma_noise_scale,
+            noise_power: self.noise_power,
         };
         
         self.queue.write_buffer(
@@ -1784,6 +1812,10 @@ impl GpuState {
             slope_pair: [0.0, 0.0],
             _slope_alignment: [0.0; 2],
             gen_params: [0, 0, 0, 0],
+            alpha_noise_scale: 1.0,
+            beta_noise_scale: 1.0,
+            gamma_noise_scale: 1.0,
+            noise_power: 1.0,
         };
 
         let environment_init_params_buffer =
@@ -2884,6 +2916,10 @@ impl GpuState {
             beta_rain_thumbnail: None,
             chemical_slope_scale_alpha: settings.chemical_slope_scale_alpha,
             chemical_slope_scale_beta: settings.chemical_slope_scale_beta,
+            alpha_noise_scale: settings.alpha_noise_scale,
+            beta_noise_scale: settings.beta_noise_scale,
+            gamma_noise_scale: settings.gamma_noise_scale,
+            noise_power: settings.noise_power,
             food_power: settings.food_power,
             poison_power: settings.poison_power,
             amino_maintenance_cost: settings.amino_maintenance_cost,
@@ -3533,6 +3569,10 @@ impl GpuState {
             beta_rain_map_path: self.beta_rain_map_path.clone(),
             chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
             chemical_slope_scale_beta: self.chemical_slope_scale_beta,
+            alpha_noise_scale: self.alpha_noise_scale,
+            beta_noise_scale: self.beta_noise_scale,
+            gamma_noise_scale: self.gamma_noise_scale,
+            noise_power: self.noise_power,
             food_power: self.food_power,
             poison_power: self.poison_power,
             amino_maintenance_cost: self.amino_maintenance_cost,
@@ -5381,6 +5421,10 @@ fn main() {
                                                                         beta_rain_map_path: state.beta_rain_map_path.clone(),
                                                                         chemical_slope_scale_alpha: state.chemical_slope_scale_alpha,
                                                                         chemical_slope_scale_beta: state.chemical_slope_scale_beta,
+                                                                        alpha_noise_scale: state.alpha_noise_scale,
+                                                                        beta_noise_scale: state.beta_noise_scale,
+                                                                        gamma_noise_scale: state.gamma_noise_scale,
+                                                                        noise_power: state.noise_power,
                                                                         food_power: state.food_power,
                                                                         poison_power: state.poison_power,
                                                                         amino_maintenance_cost: state.amino_maintenance_cost,
@@ -5901,6 +5945,15 @@ fn main() {
                                                             }
                                                         });
                                                         ui.add(
+                                                            egui::Slider::new(&mut state.alpha_noise_scale, 0.1..=10.0)
+                                                                .logarithmic(true)
+                                                                .text("Alpha Noise Scale"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.noise_power, 0.1..=5.0)
+                                                                .text("Noise Power (Contrast)"),
+                                                        );
+                                                        ui.add(
                                                             egui::Slider::new(&mut state.alpha_blur, 0.0..=0.1)
                                                                 .text("Distribution Blur"),
                                                         );
@@ -5978,6 +6031,11 @@ fn main() {
                                                             }
                                                         });
                                                         ui.add(
+                                                            egui::Slider::new(&mut state.beta_noise_scale, 0.1..=10.0)
+                                                                .logarithmic(true)
+                                                                .text("Beta Noise Scale"),
+                                                        );
+                                                        ui.add(
                                                             egui::Slider::new(&mut state.beta_blur, 0.0..=0.1)
                                                                 .text("Distribution Blur"),
                                                         );
@@ -6052,6 +6110,11 @@ fn main() {
                                                                 state.generate_map(3, 1, 0.0, seed);
                                                             }
                                                         });
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.gamma_noise_scale, 0.1..=10.0)
+                                                                .logarithmic(true)
+                                                                .text("Gamma Noise Scale"),
+                                                        );
                                                         if ui.button("Load Gamma Image").clicked() {
                                                             if let Some(path) = rfd::FileDialog::new()
                                                                 .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
