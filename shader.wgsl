@@ -2069,56 +2069,92 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-    // Displacer organ - throws environment to random neighboring pixel within radius 2
+    // Displacer organ - sweeps material from one side to the other (directional transfer)
         // Only works if agent has enough energy to cover the displacer's consumption cost
         if (amino_props.is_displacer && agent.energy >= amino_props.energy_consumption) {
-            let clamped_pos = clamp_position(world_pos);
-            let grid_scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+            // Determine local segment axis using neighbour part
+            var segment_dir = vec2<f32>(0.0);
+            if (i > 0u) {
+                let prev = agents_out[agent_id].body[i-1u].pos;
+                segment_dir = part.pos - prev;
+            } else if (agents_out[agent_id].body_count > 1u) {
+                let next = agents_out[agent_id].body[1u].pos;
+                segment_dir = next - part.pos;
+            } else {
+                // Single-part body fallback
+                segment_dir = vec2<f32>(1.0, 0.0);
+            }
+            let seg_len = length(segment_dir);
+            let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
+            // Perpendicular (right-hand) to the segment axis is our sweep direction in local space
+            // Apply chirality flip to sweep direction
+            let sweep_local = normalize(vec2<f32>(-axis_local.y, axis_local.x)) * chirality_flip_physics;
+            // Rotate to world space
+            let sweep_dir_world = apply_agent_rotation(sweep_local, agent.rotation);
 
-            var gx = i32(clamped_pos.x / grid_scale);
-            var gy = i32(clamped_pos.y / grid_scale);
-            gx = clamp(gx, 0, i32(GRID_SIZE) - 1);
-            gy = clamp(gy, 0, i32(GRID_SIZE) - 1);
-            let center_idx = u32(gy) * GRID_SIZE + u32(gx);
+            // Material transfer displacement: move from one side to the other
+            let sweep_dir_len = length(sweep_dir_world);
+            if (sweep_dir_len > 1e-5) {
+                let sweep_dir = sweep_dir_world / sweep_dir_len;
+                // Scale sweep by amplification
+                let sweep_strength = max(params.prop_wash_strength * amplification, 0.0);
 
-            // Averaging strength at 10% of prop wash strength, scaled by amplification
-            let avg_strength = max(params.prop_wash_strength * amplification * 0.1, 0.0);
-            if (avg_strength > 0.0) {
-                // Sample 3x3 neighborhood to compute averages
-                var alpha_sum = 0.0;
-                var beta_sum = 0.0;
-                var gamma_sum = 0.0;
-                var count = 0.0;
-                
-                for (var dy = -1; dy <= 1; dy++) {
-                    for (var dx = -1; dx <= 1; dx++) {
-                        let nx = clamp(gx + dx, 0, i32(GRID_SIZE) - 1);
-                        let ny = clamp(gy + dy, 0, i32(GRID_SIZE) - 1);
-                        let nidx = u32(ny) * GRID_SIZE + u32(nx);
-                        
-                        alpha_sum += alpha_grid[nidx];
-                        beta_sum += beta_grid[nidx];
-                        gamma_sum += read_gamma_height(nidx);
-                        count += 1.0;
+                if (sweep_strength > 0.0) {
+                    let clamped_pos = clamp_position(world_pos);
+                    let grid_scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+                    var gx = i32(clamped_pos.x / grid_scale);
+                    var gy = i32(clamped_pos.y / grid_scale);
+                    gx = clamp(gx, 0, i32(GRID_SIZE) - 1);
+                    gy = clamp(gy, 0, i32(GRID_SIZE) - 1);
+
+                    let center_idx = u32(gy) * GRID_SIZE + u32(gx);
+                    let distance = clamp(sweep_strength * 2.0, 1.0, 5.0);
+                    let target_world = clamped_pos + sweep_dir * distance * grid_scale;
+                    let target_gx = clamp(i32(round(target_world.x / grid_scale)), 0, i32(GRID_SIZE) - 1);
+                    let target_gy = clamp(i32(round(target_world.y / grid_scale)), 0, i32(GRID_SIZE) - 1);
+                    let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
+
+                    if (target_idx != center_idx) {
+                        var center_gamma = read_gamma_height(center_idx);
+                        var target_gamma = read_gamma_height(target_idx);
+                        var center_alpha = alpha_grid[center_idx];
+                        var target_alpha = alpha_grid[target_idx];
+                        var center_beta = beta_grid[center_idx];
+                        var target_beta = beta_grid[target_idx];
+
+                        let transfer_amount = sweep_strength * 0.05 * part_weight;
+                        if (transfer_amount > 0.0) {
+                            // Capacities adjusted for 0..1 range
+                            let alpha_capacity = max(0.0, 1.0 - target_alpha);
+                            let beta_capacity = max(0.0, 1.0 - target_beta);
+
+                            let gamma_transfer = min(center_gamma, transfer_amount);
+                            let alpha_transfer = min(min(center_alpha, transfer_amount), alpha_capacity);
+                            let beta_transfer = min(min(center_beta, transfer_amount), beta_capacity);
+
+                            if (gamma_transfer > 0.0) {
+                                center_gamma = center_gamma - gamma_transfer;
+                                target_gamma = target_gamma + gamma_transfer;
+                                write_gamma_height(center_idx, center_gamma);
+                                write_gamma_height(target_idx, target_gamma);
+                            }
+
+                            if (alpha_transfer > 0.0) {
+                                center_alpha = clamp(center_alpha - alpha_transfer, 0.0, 1.0);
+                                target_alpha = clamp(target_alpha + alpha_transfer, 0.0, 1.0);
+                                alpha_grid[center_idx] = center_alpha;
+                                alpha_grid[target_idx] = target_alpha;
+                            }
+
+                            if (beta_transfer > 0.0) {
+                                center_beta = clamp(center_beta - beta_transfer, 0.0, 1.0);
+                                target_beta = clamp(target_beta + beta_transfer, 0.0, 1.0);
+                                beta_grid[center_idx] = center_beta;
+                                beta_grid[target_idx] = target_beta;
+                            }
+                        }
                     }
                 }
-                
-                let alpha_avg = alpha_sum / count;
-                let beta_avg = beta_sum / count;
-                let gamma_avg = gamma_sum / count;
-                
-                // Blend current center values toward neighborhood average
-                let center_alpha = alpha_grid[center_idx];
-                let center_beta = beta_grid[center_idx];
-                let center_gamma = read_gamma_height(center_idx);
-                
-                let new_alpha = mix(center_alpha, alpha_avg, avg_strength);
-                let new_beta = mix(center_beta, beta_avg, avg_strength);
-                let new_gamma = mix(center_gamma, gamma_avg, avg_strength);
-                
-                alpha_grid[center_idx] = clamp(new_alpha, 0.0, 1.0);
-                beta_grid[center_idx] = clamp(new_beta, 0.0, 1.0);
-                write_gamma_height(center_idx, new_gamma);
             }
         }
 
@@ -2222,8 +2258,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             poison_resistant_count += 1u;
         }
     }
-    // Each F reduces poison/radiation damage by 50% - DISABLED (always 1.0 = no protection)
-    let poison_multiplier = 1.0; // pow(0.5, f32(poison_resistant_count));
+    // Each F reduces poison/radiation damage by 50%
+    let poison_multiplier = pow(0.5, f32(poison_resistant_count));
     
     // Track total consumption for regurgitation
     var total_consumed_alpha = 0.0;
@@ -2389,7 +2425,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         
         // Probability to increment counter
         // Apply radiation_factor (beta acts as reproductive inhibitor)
-        let pair_p = clamp(params.spawn_probability * (energy_for_pair + 1.0) * 0.1 * radiation_factor, 0.0, 1.0);
+        // Poison protection also slows pairing by the same amount
+        let pair_p = clamp(params.spawn_probability * (energy_for_pair + 1.0) * 0.1 * radiation_factor * poison_multiplier, 0.0, 1.0);
         if (rnd < pair_p) {
             // Pairing cost per increment
             let pairing_cost = params.pairing_cost;
