@@ -1060,7 +1060,7 @@ fn hash_f32(v: u32) -> f32 {
 
 // Stochastic gaussian field sampling for sensors
 // Takes N samples around center position with distance-weighted averaging
-fn sample_stochastic_gaussian(center: vec2<f32>, radius: f32, seed: u32, grid_type: u32, debug_mode: bool) -> f32 {
+fn sample_stochastic_gaussian(center: vec2<f32>, radius: f32, seed: u32, grid_type: u32, debug_mode: bool, sensor_perpendicular: vec2<f32>) -> f32 {
     let sample_count = 7u;
     var weighted_sum = 0.0;
     var weight_total = 0.0;
@@ -1081,7 +1081,15 @@ fn sample_stochastic_gaussian(center: vec2<f32>, radius: f32, seed: u32, grid_ty
         // Distance-based gaussian weight: exp(-d^2 / (2*sigma^2))
         // Using sigma = radius/2 for nice falloff
         let sigma = radius * 0.5;
-        let weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
+        let distance_weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
+        
+        // Directional weight: dot product of sensor perpendicular and sample direction
+        // Normalize offset to get direction (only if non-zero distance)
+        let direction = select(vec2<f32>(0.0), normalize(offset), dist > 1e-5);
+        let directional_weight = dot(sensor_perpendicular, direction); // Keep negative values for backward samples
+        
+        // Combined weight: distance falloff * directional alignment
+        let weight = distance_weight * directional_weight;
         
         // Sample from appropriate grid
         var sample_value = 0.0;
@@ -1091,9 +1099,14 @@ fn sample_stochastic_gaussian(center: vec2<f32>, radius: f32, seed: u32, grid_ty
             sample_value = beta_grid[idx];
         }
         
-        // Debug visualization: draw white pixels at sample locations
+        // Debug visualization: color samples by directional dot product
+        // Red = positive (forward), Blue = negative (backward)
         if (debug_mode) {
-            draw_filled_circle(sample_pos, 1.0, vec4<f32>(1.0, 1.0, 1.0, 1.0));
+            let dot_val = directional_weight; // -1.0 to 1.0
+            let red_intensity = clamp(dot_val, 0.0, 1.0);
+            let blue_intensity = clamp(-dot_val, 0.0, 1.0);
+            let debug_color = vec4<f32>(red_intensity, 0.0, blue_intensity, 1.0);
+            draw_filled_circle(sample_pos, 1.5, debug_color);
         }
         
         weighted_sum += sample_value * weight;
@@ -1807,11 +1820,30 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Sample radius based on part size (larger radius for better field integration)
         let sensor_radius = 100.0;
         
+        // Calculate sensor perpendicular orientation (pointing direction)
+        var segment_dir = vec2<f32>(0.0);
+        if (i > 0u) {
+            let prev = agents_out[agent_id].body[i-1u].pos;
+            segment_dir = agents_out[agent_id].body[i].pos - prev;
+        } else if (body_count > 1u) {
+            let next = agents_out[agent_id].body[1u].pos;
+            segment_dir = next - agents_out[agent_id].body[i].pos;
+        } else {
+            // Single-part body: use forward direction
+            segment_dir = vec2<f32>(1.0, 0.0);
+        }
+        let seg_len = length(segment_dir);
+        let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
+        // Perpendicular (right-hand) to segment axis
+        let perpendicular_local = normalize(vec2<f32>(-axis_local.y, axis_local.x));
+        // Rotate to world space
+        let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
+        
         if (amino_props.is_alpha_sensor) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let world_pos = agent.position + rotated_pos;
             let sensor_seed = agent_id * 1000u + i * 13u;
-            let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u);
+            let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, perpendicular_world);
             // 50% contribution: blend with current value for smoothing
             new_alpha = mix(new_alpha, sensed_value, 0.5);
         }
@@ -1819,7 +1851,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let world_pos = agent.position + rotated_pos;
             let sensor_seed = agent_id * 1000u + i * 13u;
-            let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u);
+            let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, perpendicular_world);
             // 50% contribution: blend with current value for smoothing
             new_beta = mix(new_beta, sensed_value, 0.5);
         }
@@ -2190,8 +2222,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             poison_resistant_count += 1u;
         }
     }
-    // Each F reduces poison/radiation damage by 50%
-    let poison_multiplier = pow(0.5, f32(poison_resistant_count));
+    // Each F reduces poison/radiation damage by 50% - DISABLED (always 1.0 = no protection)
+    let poison_multiplier = 1.0; // pow(0.5, f32(poison_resistant_count));
     
     // Track total consumption for regurgitation
     var total_consumed_alpha = 0.0;
