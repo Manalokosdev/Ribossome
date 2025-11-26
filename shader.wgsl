@@ -341,7 +341,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.015;
         }
     case 1u: { // C - Cysteine - BETA SENSOR - Small, polar (real: can form disulfide bonds)
-            props.segment_length = 7.0;
+            props.segment_length = 10.0;
             props.thickness = 2.5;
             // Old CSV: Seed Angle = 30°
             props.base_angle = 0.523599; // 30 deg in radians
@@ -392,7 +392,32 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 1.3;
             props.mass = 0.018;
         }
-        case 3u: { // E - Glutamic acid - Medium, charged (real: acidic, longer than D)
+        case 3u: { // E - Glutamic acid - POISON RESISTANT - Very heavy pink blob (cumulative: each F reduces poison damage by 50%)
+            props.segment_length = 30.0;
+            props.thickness = 30.0; // Very fat blob
+            // Old CSV: Seed Angle = -60°
+            props.base_angle = -1.047198;
+            props.alpha_sensitivity = 0.1;
+            props.beta_sensitivity = 0.12;
+            props.is_propeller = false;
+            props.thrust_force = 0.0;
+            props.color = vec3<f32>(1.0, 0.4, 0.7); // Pink color
+            props.is_mouth = false;
+            props.energy_absorption_rate = 0.0;
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = -0.58; // Color value
+            props.energy_storage = 0.0;
+            props.energy_consumption = 0.003;
+            props.is_alpha_sensor = false;
+            props.is_beta_sensor = false;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.6;
+            props.alpha_right_mult = 0.4;
+            props.beta_left_mult = 0.55;
+            props.beta_right_mult = 0.45;
+            props.mass = 10.0; // Very heavy - slows agent down significantly
+        }
+        case 4u: { // F - Phenylalanine - )
             props.segment_length = 18.5;
             props.thickness = 3.0;
             // Old CSV: Seed Angle = 30°
@@ -416,31 +441,6 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 1.3;
             props.beta_right_mult = -0.3;
             props.mass = 0.01;
-        }
-        case 4u: { // F - Phenylalanine - POISON RESISTANT - Very heavy pink blob (cumulative: each F reduces poison damage by 50%)
-            props.segment_length = 30.0;
-            props.thickness = 30.0; // Very fat blob
-            // Old CSV: Seed Angle = -60°
-            props.base_angle = -1.047198;
-            props.alpha_sensitivity = -0.5;
-            props.beta_sensitivity = 0.12;
-            props.is_propeller = false;
-            props.thrust_force = 0.0;
-            props.color = vec3<f32>(1.0, 0.4, 0.7); // Pink color
-            props.is_mouth = false;
-            props.energy_absorption_rate = 0.0;
-            props.beta_absorption_rate = 0.3;
-            props.beta_damage = -0.58; // Color value
-            props.energy_storage = 0.0;
-            props.energy_consumption = 0.003;
-            props.is_alpha_sensor = false;
-            props.is_beta_sensor = false;
-            props.signal_decay = 0.2;
-            props.alpha_left_mult = 0.6;
-            props.alpha_right_mult = 0.4;
-            props.beta_left_mult = 0.55;
-            props.beta_right_mult = 0.45;
-            props.mass = 10.0; // Very heavy - slows agent down significantly
         }
         case 5u: { // G - Glycine - Structural (smallest amino acid, flexible)
             props.segment_length = 4.0;
@@ -697,7 +697,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.04;
         }
     case 15u: { // S - Serine - ALPHA SENSOR - Small, polar (real: hydroxyl group, similar to T)
-            props.segment_length = 5.5;
+            props.segment_length = 10.5;
             props.thickness = 2.5;
             // Old CSV: Seed Angle = -20°
             props.base_angle = -0.349066;
@@ -724,7 +724,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.1;
         }
         case 16u: { // T - Threonine - ENERGY SENSOR - Small, polar (real: beta-branched hydroxyl)
-            props.segment_length = 6.5;
+            props.segment_length = 10.5;
             props.thickness = 3.5;
             // Old CSV: Seed Angle = 90°
             props.base_angle = 1.570796;
@@ -750,7 +750,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.1;
         }
         case 17u: { // V - Valine - DISPLACER - Cyan, short and fat, displaces environment
-            props.segment_length = 6.0;
+            props.segment_length = 12.0;
             props.thickness = 8.0;
             // Old CSV: Seed Angle = 0°
             props.base_angle = 0.0;
@@ -1606,6 +1606,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ALWAYS rebuild body positions (enables dynamic shape changes from signals)
     if (body_count_val > 0u) {
 
+        // Count poison-resistant amino acids (E = Glutamic Acid, amino index 3) for angle modulation
+        var poison_resistant_count = 0u;
+        for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+            if (agents_out[agent_id].body[i].part_type == 3u) { // Glutamic Acid
+                poison_resistant_count += 1u;
+            }
+        }
+        // Each E reduces signal-based angle changes by 50%
+        let signal_angle_multiplier = pow(0.5, f32(poison_resistant_count));
+
         // Dynamic chain build - angles modulated by alpha/beta signals
     var current_pos = vec2<f32>(0.0);
     var current_angle = 0.0;
@@ -1651,6 +1661,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let alpha_effect = alpha * props.alpha_sensitivity * SIGNAL_GAIN * ANGLE_GAIN_ALPHA;
             let beta_effect = beta * props.beta_sensitivity * SIGNAL_GAIN * ANGLE_GAIN_BETA;
             var target_signal_angle = alpha_effect + beta_effect;
+            // Apply poison protection: reduce signal-based angle changes
+            target_signal_angle = target_signal_angle * signal_angle_multiplier;
             // Hard cap total contribution
             target_signal_angle = clamp(target_signal_angle, -MAX_SIGNAL_ANGLE, MAX_SIGNAL_ANGLE);
 
@@ -1773,6 +1785,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ====== SIGNAL PROPAGATION ======
     // Propagate alpha and beta signals through the amino acid chain
     // Based on reference: propagate from previous frame's signals, sensors ADD environment
+    
+    // Count poison-resistant amino acids (E = Glutamic Acid, amino index 3) for metabolism effects
+    var poison_resistant_count = 0u;
+    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+        if (agents_out[agent_id].body[i].part_type == 3u) { // Glutamic Acid
+            poison_resistant_count += 1u;
+        }
+    }
     
     // Store old signals for propagation (from previous frame)
     var old_alpha: array<f32, MAX_BODY_PARTS>;
@@ -2122,7 +2142,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         var center_beta = beta_grid[center_idx];
                         var target_beta = beta_grid[target_idx];
 
-                        let transfer_amount = sweep_strength * 0.05 * part_weight;
+                        let transfer_amount = sweep_strength * 1.0 * part_weight;
                         if (transfer_amount > 0.0) {
                             // Capacities adjusted for 0..1 range
                             let alpha_capacity = max(0.0, 1.0 - target_alpha);
@@ -2250,14 +2270,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Speed-dependent absorption: slower agents absorb more efficiently
     // Bite size is now independent of speed; keep fixed capture per frame
     
-    // Count poison-resistant amino acids (F = Phenylalanine, amino index 4)
-    // Each one reduces poison damage by 50%: 1 F -> 0.5x, 2 F -> 0.25x
-    var poison_resistant_count = 0u;
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        if (agents_out[agent_id].body[i].part_type == 4u) { // Phenylalanine
-            poison_resistant_count += 1u;
-        }
-    }
+    // poison_resistant_count and poison_multiplier already calculated in signal propagation section
     // Each F reduces poison/radiation damage by 50%
     let poison_multiplier = pow(0.5, f32(poison_resistant_count));
     
@@ -2297,8 +2310,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed and enabler effects to the rates themselves
-            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier;// * amplification_mouth;
-            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier;//*amplification_mouth;
+            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier * amplification_mouth;
+            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier*amplification_mouth;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
@@ -2325,7 +2338,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Apply beta consumption - damage also uses base poison_power (speed already in consumption)
                 if (consumed_beta > 0.0) {
                     beta_grid[idx] = clamp(available_beta - consumed_beta, 0.0, available_beta);
-                    agent.energy -= consumed_beta * params.poison_power * poison_multiplier;
+                    agent.energy -= consumed_beta * params.poison_power;
                     total_consumed_beta += consumed_beta;
                 }
             }
@@ -2337,7 +2350,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent.energy = clamp(agent.energy, 0.0, max(capacity, 0.0));
 
     // 3) Maintenance: subtract consumption after feeding
-    agent.energy -= energy_consumption;
+    // Poison protection also reduces maintenance costs (survival advantage)
+    agent.energy -= energy_consumption * poison_multiplier;
 
     // 4) Energy-based death check - death probability inversely proportional to energy
     // High energy = low death chance, low energy = high death chance
@@ -2416,9 +2430,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Try to increment the counter based on conditions
         let pos_idx = grid_index(agent.position);
         let beta_concentration = beta_grid[pos_idx];
-        // Poison resistance also protects against beta's pairing inhibition
-        let effective_beta = beta_concentration * poison_multiplier;
-        let radiation_factor = 1.0 / max(1.0 + effective_beta, 1.0);
+        // Beta acts as pairing inhibitor
+        let radiation_factor = 1.0 / max(1.0 + beta_concentration, 1.0);
         let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_counter * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;
         let rnd = f32(hash(seed)) / 4294967295.0;
         let energy_for_pair = max(agent.energy, 0.0);
@@ -2496,9 +2509,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // This creates clear ecological zones: safe (beta 0-4), moderate (4-7), extreme (7-10)
                 // At beta=0: 1x mutations, beta=5: ~2x, beta=7: ~6x, beta=10: ~11x
                 // Beta grid is now in 0..1 range; normalize directly
-                // Poison resistance also protects against beta's mutagenic effects
-                let effective_beta_mutation = beta_concentration * poison_multiplier;
-                let beta_normalized = clamp(effective_beta_mutation, 0.0, 1.0);
+                let beta_normalized = clamp(beta_concentration, 0.0, 1.0);
                 // Gentler mutation amplification to reduce genome erosion in high-beta zones
                 let mutation_multiplier = 1.0 + pow(beta_normalized, 3.0) * 4.0;
                 var effective_mutation_rate = params.mutation_rate * mutation_multiplier;
