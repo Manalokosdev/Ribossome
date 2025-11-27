@@ -1108,12 +1108,24 @@ impl SimulationSnapshot {
     fn new(epoch: u64, agents: &[Agent]) -> Self {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         
-        // Save up to 500 living agents
-        let agent_snapshots: Vec<AgentSnapshot> = agents
+        // Collect all living agents
+        let living_agents: Vec<&Agent> = agents
             .iter()
             .filter(|a| a.alive != 0)
-            .take(500)
-            .map(AgentSnapshot::from)
+            .collect();
+        
+        // Randomly sample up to 5000 agents
+        use rand::seq::SliceRandom;
+        let mut rng = rand::thread_rng();
+        let sampled: Vec<&Agent> = if living_agents.len() <= 5000 {
+            living_agents
+        } else {
+            living_agents.choose_multiple(&mut rng, 5000).copied().collect()
+        };
+        
+        let agent_snapshots: Vec<AgentSnapshot> = sampled
+            .iter()
+            .map(|a| AgentSnapshot::from(*a))
             .collect();
         
         Self {
@@ -1226,6 +1238,11 @@ struct GpuState {
     spawn_counter: wgpu::Buffer,   // Count of spawned agents
     spawn_readback: wgpu::Buffer,  // Readback for spawn count
     spawn_requests_buffer: wgpu::Buffer, // CPU spawn requests seeds
+    
+    // Grid readback buffers for snapshot save
+    alpha_grid_readback: wgpu::Buffer,
+    beta_grid_readback: wgpu::Buffer,
+    gamma_grid_readback: wgpu::Buffer,
 
     // Texture for visualization
     visual_texture: wgpu::Texture,
@@ -1322,6 +1339,9 @@ struct GpuState {
     // Debug
     debug_per_segment: bool,
     is_paused: bool,
+    // Snapshot save state
+    snapshot_save_requested: bool,
+    snapshot_load_requested: bool,
     // Visual buffer stride (pixels per row)
     visual_stride_pixels: u32,
 
@@ -2163,6 +2183,31 @@ impl GpuState {
         // Initialize spawn_counter to 0 to avoid undefined first-frame content
         queue.write_buffer(&spawn_counter, 0, bytemuck::bytes_of(&0u32));
         profiler.mark("Counters and readbacks");
+        
+        // Grid readback buffers for snapshot save
+        let grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
+        
+        let alpha_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Alpha Grid Readback"),
+            size: grid_size_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let beta_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Beta Grid Readback"),
+            size: grid_size_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let gamma_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Gamma Grid Readback"),
+            size: grid_size_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        profiler.mark("Grid readback buffers");
 
         // Create visual texture at window resolution for crisp rendering
         let visual_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -2922,6 +2967,9 @@ impl GpuState {
             spawn_counter,
             spawn_readback,
             spawn_requests_buffer,
+            alpha_grid_readback,
+            beta_grid_readback,
+            gamma_grid_readback,
             visual_texture,
             visual_texture_view,
             sampler,
@@ -2996,6 +3044,8 @@ impl GpuState {
             ui_tab: 0, // Start on Simulation tab
             debug_per_segment: settings.debug_per_segment,
             is_paused: false,
+            snapshot_save_requested: false,
+            snapshot_load_requested: false,
             visual_stride_pixels,
             alpha_blur: settings.alpha_blur,
             beta_blur: settings.beta_blur,
@@ -4827,20 +4877,114 @@ impl GpuState {
             drop(data);
             self.agents_readback.unmap();
 
-            // Write back the updated selection flags to GPU
+            // Update GPU buffer with new selection flags
             let current_buffer = if self.ping_pong {
                 &self.agents_buffer_b
             } else {
                 &self.agents_buffer_a
             };
-
-            let write_len = (self.agent_count as usize).min(agents_vec.len());
             self.queue.write_buffer(
                 current_buffer,
                 0,
-                bytemuck::cast_slice(&agents_vec[..write_len]),
+                bytemuck::cast_slice(&agents_vec[..take_len]),
             );
         }
+    }
+
+    fn save_snapshot_to_file(&mut self, path: &Path) -> anyhow::Result<()> {
+        // Copy grids and agents from GPU to readback buffers
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Snapshot Readback Encoder"),
+        });
+
+        let grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
+
+        encoder.copy_buffer_to_buffer(&self.alpha_grid, 0, &self.alpha_grid_readback, 0, grid_size_bytes);
+        encoder.copy_buffer_to_buffer(&self.beta_grid, 0, &self.beta_grid_readback, 0, grid_size_bytes);
+        encoder.copy_buffer_to_buffer(&self.gamma_grid, 0, &self.gamma_grid_readback, 0, grid_size_bytes);
+        
+        // Copy agents from GPU (use current buffer based on ping-pong)
+        let agents_size_bytes = (std::mem::size_of::<Agent>() * self.agent_buffer_capacity) as u64;
+        let source_buffer = if self.ping_pong { &self.agents_buffer_b } else { &self.agents_buffer_a };
+        encoder.copy_buffer_to_buffer(source_buffer, 0, &self.agents_readback, 0, agents_size_bytes);
+
+        self.queue.submit(Some(encoder.finish()));
+
+        // Map and read grids
+        let alpha_slice = self.alpha_grid_readback.slice(..);
+        let beta_slice = self.beta_grid_readback.slice(..);
+        let gamma_slice = self.gamma_grid_readback.slice(..);
+        let agents_slice = self.agents_readback.slice(..);
+
+        alpha_slice.map_async(wgpu::MapMode::Read, |_| {});
+        beta_slice.map_async(wgpu::MapMode::Read, |_| {});
+        gamma_slice.map_async(wgpu::MapMode::Read, |_| {});
+        agents_slice.map_async(wgpu::MapMode::Read, |_| {});
+
+        self.device.poll(wgpu::Maintain::Wait);
+
+        let (alpha_grid, beta_grid, gamma_grid, agents_gpu) = {
+            let alpha_data = alpha_slice.get_mapped_range();
+            let beta_data = beta_slice.get_mapped_range();
+            let gamma_data = gamma_slice.get_mapped_range();
+            let agents_data = agents_slice.get_mapped_range();
+
+            let alpha: Vec<f32> = bytemuck::cast_slice(&alpha_data).to_vec();
+            let beta: Vec<f32> = bytemuck::cast_slice(&beta_data).to_vec();
+            let gamma: Vec<f32> = bytemuck::cast_slice(&gamma_data).to_vec();
+            let agents: Vec<Agent> = bytemuck::cast_slice(&agents_data).to_vec();
+
+            (alpha, beta, gamma, agents)
+        };
+
+        self.alpha_grid_readback.unmap();
+        self.beta_grid_readback.unmap();
+        self.gamma_grid_readback.unmap();
+        self.agents_readback.unmap();
+
+        // Create snapshot from GPU agents
+        let snapshot = SimulationSnapshot::new(self.epoch, &agents_gpu);
+
+        // Save to PNG
+        save_simulation_snapshot(path, &alpha_grid, &beta_grid, &gamma_grid, &snapshot)?;
+
+        Ok(())
+    }
+
+    fn load_snapshot_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
+        // Load snapshot from PNG file
+        let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
+        
+        // Upload grids to GPU
+        self.queue.write_buffer(&self.alpha_grid, 0, bytemuck::cast_slice(&alpha_grid));
+        self.queue.write_buffer(&self.beta_grid, 0, bytemuck::cast_slice(&beta_grid));
+        self.queue.write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_grid));
+        
+        // Mark all existing agents as dead by zeroing the alive counter
+        // This will effectively clear the simulation
+        self.queue.write_buffer(&self.alive_counter, 0, bytemuck::bytes_of(&0u32));
+        
+        // Clear CPU-side state
+        self.agents_cpu.clear();
+        self.cpu_spawn_queue.clear();
+        self.agent_count = 0;
+        self.alive_count = 0;
+        
+        // Queue agents from snapshot for spawning
+        for agent_snap in snapshot.agents.iter() {
+            let spawn_req = agent_snap.to_spawn_request();
+            self.cpu_spawn_queue.push(spawn_req);
+        }
+        
+        // Update spawn request count so they get processed
+        self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
+        
+        // Update epoch from snapshot
+        self.epoch = snapshot.epoch;
+        
+        println!("✓ Queued {} agents for spawning from snapshot", self.cpu_spawn_queue.len());
+        
+        Ok(())
     }
 
     fn spawn_agent(&mut self, parent_agent: &Agent) {
@@ -5384,8 +5528,8 @@ fn save_simulation_snapshot(
     // 1. Create RGB image from grids
     let mut img_data = vec![0u8; GRID_CELL_COUNT * 3];
     for i in 0..GRID_CELL_COUNT {
-        img_data[i * 3 + 0] = (alpha_grid[i].clamp(0.0, 1.0) * 255.0) as u8;  // R = alpha (food)
-        img_data[i * 3 + 1] = (beta_grid[i].clamp(0.0, 1.0) * 255.0) as u8;   // G = beta (poison)
+        img_data[i * 3 + 0] = (beta_grid[i].clamp(0.0, 1.0) * 255.0) as u8;   // R = beta (poison)
+        img_data[i * 3 + 1] = (alpha_grid[i].clamp(0.0, 1.0) * 255.0) as u8;  // G = alpha (food)
         img_data[i * 3 + 2] = ((gamma_grid[i] + 100.0) / 200.0 * 255.0).clamp(0.0, 255.0) as u8; // B = gamma (terrain, remapped)
     }
     
@@ -5436,8 +5580,8 @@ fn load_simulation_snapshot(
     let mut gamma_grid = vec![0.0f32; GRID_CELL_COUNT];
     
     for i in 0..GRID_CELL_COUNT {
-        alpha_grid[i] = buf[i * 3 + 0] as f32 / 255.0;
-        beta_grid[i] = buf[i * 3 + 1] as f32 / 255.0;
+        beta_grid[i] = buf[i * 3 + 0] as f32 / 255.0;  // R = beta (poison)
+        alpha_grid[i] = buf[i * 3 + 1] as f32 / 255.0; // G = alpha (food)
         gamma_grid[i] = (buf[i * 3 + 2] as f32 / 255.0) * 200.0 - 100.0; // Unmap gamma
     }
     
@@ -5854,6 +5998,14 @@ fn main() {
                                                     } else {
                                                         state.set_speed_mode(1);
                                                     }
+                                                }
+                                                
+                                                ui.separator();
+                                                if ui.button("💾 Save Snapshot").clicked() {
+                                                    state.snapshot_save_requested = true;
+                                                }
+                                                if ui.button("📂 Load Snapshot").clicked() {
+                                                    state.snapshot_load_requested = true;
                                                 }
                                             });
 
@@ -7933,6 +8085,39 @@ fn main() {
                                 reset_simulation_state(&mut state, &window, &mut egui_state);
                                 window.request_redraw();
                             }
+                            
+                            if let Some(gpu_state) = &mut state {
+                                if gpu_state.snapshot_save_requested {
+                                    gpu_state.snapshot_save_requested = false;
+                                    
+                                    // Open file dialog
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("PNG Image", &["png"])
+                                        .set_file_name(&format!("ribossome_epoch_{}.png", gpu_state.epoch))
+                                        .save_file()
+                                    {
+                                        match gpu_state.save_snapshot_to_file(&path) {
+                                            Ok(_) => println!("✓ Snapshot saved to: {}", path.display()),
+                                            Err(e) => eprintln!("✗ Failed to save snapshot: {}", e),
+                                        }
+                                    }
+                                }
+                                
+                                if gpu_state.snapshot_load_requested {
+                                    gpu_state.snapshot_load_requested = false;
+                                    
+                                    // Open file dialog
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("PNG Image", &["png"])
+                                        .pick_file()
+                                    {
+                                        match gpu_state.load_snapshot_from_file(&path) {
+                                            Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
+                                            Err(e) => eprintln!("✗ Failed to load snapshot: {}", e),
+                                        }
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -7948,6 +8133,19 @@ fn main() {
                         WindowEvent::Resized(physical_size) => {
                             if let Some(state) = state.as_mut() {
                                 state.resize(physical_size);
+                            }
+                        }
+                        WindowEvent::DroppedFile(path) => {
+                            // Handle drag-and-drop file loading
+                            if let Some(ext) = path.extension() {
+                                if ext == "png" {
+                                    if let Some(gpu_state) = state.as_mut() {
+                                        match gpu_state.load_snapshot_from_file(&path) {
+                                            Ok(_) => println!("✓ Snapshot loaded from dropped file: {}", path.display()),
+                                            Err(e) => eprintln!("✗ Failed to load dropped snapshot: {}", e),
+                                        }
+                                    }
+                                }
                             }
                         }
                         WindowEvent::RedrawRequested => {
@@ -7995,15 +8193,10 @@ fn main() {
                                             
                                             ui.separator();
                                             ui.heading("Snapshot");
-                                            ui.label("⚠ Snapshot save requires GPU readback");
-                                            ui.label("(Feature in progress)");
-                                            
-                                            // TODO: Implement grid readback from GPU
-                                            // Need to:
-                                            // 1. Create readback buffers for alpha/beta/gamma
-                                            // 2. Copy from GPU buffers to readback
-                                            // 3. Map and read data
-                                            // 4. Create snapshot and save PNG
+                                            if ui.button("💾 Save Snapshot (PNG)").clicked() {
+                                                state.snapshot_save_requested = true;
+                                            }
+                                            ui.label("Saves environment + up to 5000 agents (random sample)");
                                             
                                             ui.label(format!("World: {}x{}", SIM_SIZE as u32, SIM_SIZE as u32));
                                             ui.label("Grid: 2048x2048");
