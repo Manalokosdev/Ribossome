@@ -140,6 +140,8 @@ struct SimParams {
     ignore_stop_codons: u32,
     // When 1, require AUG start codon before translation begins
     require_start_codon: u32,
+    // When 1, offspring are direct mutated copies (asexual); when 0, offspring are reverse-complemented (sexual)
+    asexual_reproduction: u32,
     // Visualization parameters
     background_color_r: f32,
     background_color_g: f32,
@@ -2335,10 +2337,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     total_consumed_alpha += consumed_alpha;
                 }
 
-                // Apply beta consumption - damage also uses base poison_power (speed already in consumption)
+                // Apply beta consumption - damage uses poison_power, reduced by poison protection
                 if (consumed_beta > 0.0) {
                     beta_grid[idx] = clamp(available_beta - consumed_beta, 0.0, available_beta);
-                    agent.energy -= consumed_beta * params.poison_power;
+                    agent.energy -= consumed_beta * params.poison_power * poison_multiplier;
                     total_consumed_beta += consumed_beta;
                 }
             }
@@ -2487,10 +2489,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 offspring.age = 0u;
                 offspring.total_mass = 0.0; // Will be computed after morphology build
 
-                // Child genome: ALWAYS reverse complementary of parent (no generation condition)
-                for (var w = 0u; w < GENOME_WORDS; w++) {
-                    let rev_word = genome_revcomp_word(agents_out[agent_id].genome, w);
-                    offspring.genome[w] = rev_word;
+                // Child genome: reverse complement (sexual) or direct copy (asexual)
+                if (params.asexual_reproduction == 1u) {
+                    // Asexual reproduction: direct genome copy (mutations applied later)
+                    for (var w = 0u; w < GENOME_WORDS; w++) {
+                        offspring.genome[w] = agents_out[agent_id].genome[w];
+                    }
+                } else {
+                    // Sexual reproduction: reverse complementary of parent
+                    for (var w = 0u; w < GENOME_WORDS; w++) {
+                        let rev_word = genome_revcomp_word(agents_out[agent_id].genome, w);
+                        offspring.genome[w] = rev_word;
+                    }
                 }
                 // Pack initial rev-comp genome
                 {
@@ -2539,7 +2549,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let insert_seed = offspring_hash ^ 0xB5297A4Du;
                     let insert_roll = hash_f32(insert_seed);
                     let can_insert = (last_non_x != 0xFFFFFFFFu);
-                    if (can_insert && insert_roll < (effective_mutation_rate * 0.2)) {
+                    if (can_insert && insert_roll < (effective_mutation_rate * 0.20)) {
                         // Extract current active sequence into a local array
                         var seq: array<u32, GENOME_LENGTH>;
                         var L: u32 = 0u;
@@ -2600,7 +2610,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let delete_seed = offspring_hash ^ 0xE7037ED1u;
                     let delete_roll = hash_f32(delete_seed);
                     let has_active = (active_end != 0xFFFFFFFFu);
-                    if (has_active && delete_roll < (effective_mutation_rate * 0.2)) {
+                    if (has_active && delete_roll < (effective_mutation_rate * 0.35)) {
                         // Extract current active sequence into a local array
                         var seq: array<u32, GENOME_LENGTH>;
                         var L: u32 = 0u;

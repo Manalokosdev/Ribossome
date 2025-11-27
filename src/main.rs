@@ -770,6 +770,8 @@ struct SimParams {
     ignore_stop_codons: u32,
     // When true (1), require AUG start codon before translation begins
     require_start_codon: u32,
+    // When true (1), offspring are direct mutated copies (asexual); when false (0), offspring are reverse-complemented (sexual)
+    asexual_reproduction: u32,
     // Visualization parameters
     background_color_r: f32,
     background_color_g: f32,
@@ -932,6 +934,7 @@ struct SimulationSettings {
     interior_isotropic: bool,
     ignore_stop_codons: bool,
     require_start_codon: bool,
+    asexual_reproduction: bool,
     alpha_rain_variation: f32,
     beta_rain_variation: f32,
     alpha_rain_phase: f32,
@@ -1008,6 +1011,7 @@ impl Default for SimulationSettings {
             interior_isotropic: false, // Use asymmetric left/right multipliers from amino acids
             ignore_stop_codons: false, // Stop codons (UAA, UAG, UGA) terminate translation
             require_start_codon: true, // Translation starts at AUG (Methionine)
+            asexual_reproduction: false, // Offspring are reverse-complemented (sexual reproduction)
             alpha_rain_variation: 0.0,
             beta_rain_variation: 0.0,
             alpha_rain_phase: 0.0,
@@ -1294,6 +1298,7 @@ struct GpuState {
     interior_isotropic: bool,
     ignore_stop_codons: bool,
     require_start_codon: bool,
+    asexual_reproduction: bool,
     
     // Visualization controls
     background_color: [f32; 3],
@@ -1369,6 +1374,7 @@ impl GpuState {
             interior_isotropic: self.interior_isotropic,
             ignore_stop_codons: self.ignore_stop_codons,
             require_start_codon: self.require_start_codon,
+            asexual_reproduction: self.asexual_reproduction,
             alpha_rain_variation: self.alpha_rain_variation,
             beta_rain_variation: self.beta_rain_variation,
             alpha_rain_phase: self.alpha_rain_phase,
@@ -1915,6 +1921,7 @@ impl GpuState {
             interior_isotropic: 1,
             ignore_stop_codons: 0,
             require_start_codon: 1,
+            asexual_reproduction: 0,
             background_color_r: 0.0,
             background_color_g: 0.0,
             background_color_b: 0.0,
@@ -2958,6 +2965,7 @@ impl GpuState {
             interior_isotropic: settings.interior_isotropic,
             ignore_stop_codons: settings.ignore_stop_codons,
             require_start_codon: settings.require_start_codon,
+            asexual_reproduction: settings.asexual_reproduction,
             background_color: settings.background_color,
             alpha_blend_mode: settings.alpha_blend_mode,
             beta_blend_mode: settings.beta_blend_mode,
@@ -3610,6 +3618,7 @@ impl GpuState {
             interior_isotropic: self.interior_isotropic,
             ignore_stop_codons: self.ignore_stop_codons,
             require_start_codon: self.require_start_codon,
+            asexual_reproduction: self.asexual_reproduction,
             alpha_rain_variation: self.alpha_rain_variation,
             beta_rain_variation: self.beta_rain_variation,
             alpha_rain_phase: self.alpha_rain_phase,
@@ -4153,6 +4162,7 @@ impl GpuState {
             interior_isotropic: if self.interior_isotropic { 1 } else { 0 },
             ignore_stop_codons: if self.ignore_stop_codons { 1 } else { 0 },
             require_start_codon: if self.require_start_codon { 1 } else { 0 },
+            asexual_reproduction: if self.asexual_reproduction { 1 } else { 0 },
             background_color_r: self.background_color[0],
             background_color_g: self.background_color[1],
             background_color_b: self.background_color[2],
@@ -5854,6 +5864,7 @@ fn main() {
                                                                         interior_isotropic: state.interior_isotropic,
                                                                         ignore_stop_codons: state.ignore_stop_codons,
                                                                         require_start_codon: state.require_start_codon,
+                                                                        asexual_reproduction: state.asexual_reproduction,
                                                                         alpha_rain_variation: state.alpha_rain_variation,
                                                                         beta_rain_variation: state.beta_rain_variation,
                                                                         alpha_rain_phase: state.alpha_rain_phase,
@@ -6240,6 +6251,13 @@ fn main() {
                                                         )
                                                         .on_hover_text(
                                                             "When enabled, genomes translate to full 64 amino acids regardless of stop codons",
+                                                        );
+                                                        ui.checkbox(
+                                                            &mut state.asexual_reproduction,
+                                                            "Asexual reproduction (direct copy)",
+                                                        )
+                                                        .on_hover_text(
+                                                            "When enabled, offspring are direct mutated copies of parent genome. When disabled, offspring are reverse-complemented (sexual reproduction with complementary pairing)",
                                                         );
                                                         ui.checkbox(
                                                             &mut state.interior_isotropic,
