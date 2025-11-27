@@ -1042,6 +1042,89 @@ impl Default for SimulationSettings {
     }
 }
 
+// ============================================================================
+// SNAPSHOT SAVE/LOAD STRUCTURES
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentSnapshot {
+    position: [f32; 2],
+    rotation: f32,
+    energy: f32,
+    generation: u32,
+    genome: Vec<u8>, // Store as bytes for compression
+}
+
+impl From<&Agent> for AgentSnapshot {
+    fn from(agent: &Agent) -> Self {
+        // Extract genome as bytes
+        let mut genome_bytes = Vec::with_capacity(GENOME_BYTES);
+        for word in &agent.genome {
+            genome_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        
+        Self {
+            position: agent.position,
+            rotation: agent.rotation,
+            energy: agent.energy,
+            generation: agent.generation,
+            genome: genome_bytes,
+        }
+    }
+}
+
+impl AgentSnapshot {
+    fn to_spawn_request(&self) -> SpawnRequest {
+        let mut genome_override = [0u32; GENOME_WORDS];
+        for (i, chunk) in self.genome.chunks_exact(4).enumerate() {
+            if i < GENOME_WORDS {
+                genome_override[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+        }
+        
+        SpawnRequest {
+            seed: 0,
+            genome_seed: 0,
+            flags: 1, // Use genome override
+            _pad_seed: 0,
+            position: self.position,
+            energy: self.energy,
+            rotation: self.rotation,
+            genome_override,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SimulationSnapshot {
+    version: String,
+    timestamp: String,
+    epoch: u64,
+    // params: SimulationSettings, // TODO: Reconstruct from GpuState fields
+    agents: Vec<AgentSnapshot>,
+}
+
+impl SimulationSnapshot {
+    fn new(epoch: u64, agents: &[Agent]) -> Self {
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        
+        // Save up to 500 living agents
+        let agent_snapshots: Vec<AgentSnapshot> = agents
+            .iter()
+            .filter(|a| a.alive != 0)
+            .take(500)
+            .map(AgentSnapshot::from)
+            .collect();
+        
+        Self {
+            version: "1.0".to_string(),
+            timestamp,
+            epoch,
+            agents: agent_snapshots,
+        }
+    }
+}
+
 impl SimulationSettings {
     fn default_path() -> PathBuf {
         std::env::current_dir()
@@ -5285,6 +5368,98 @@ fn render_splash_screen(
     device.poll(wgpu::Maintain::Wait);
 }
 
+// ============================================================================
+// SNAPSHOT SAVE/LOAD FUNCTIONS
+// ============================================================================
+
+fn save_simulation_snapshot(
+    path: &Path,
+    alpha_grid: &[f32],
+    beta_grid: &[f32],
+    gamma_grid: &[f32],
+    snapshot: &SimulationSnapshot,
+) -> anyhow::Result<()> {
+    use std::io::BufWriter;
+    
+    // 1. Create RGB image from grids
+    let mut img_data = vec![0u8; GRID_CELL_COUNT * 3];
+    for i in 0..GRID_CELL_COUNT {
+        img_data[i * 3 + 0] = (alpha_grid[i].clamp(0.0, 1.0) * 255.0) as u8;  // R = alpha (food)
+        img_data[i * 3 + 1] = (beta_grid[i].clamp(0.0, 1.0) * 255.0) as u8;   // G = beta (poison)
+        img_data[i * 3 + 2] = ((gamma_grid[i] + 100.0) / 200.0 * 255.0).clamp(0.0, 255.0) as u8; // B = gamma (terrain, remapped)
+    }
+    
+    // 2. Serialize and compress metadata
+    let json = serde_json::to_string(snapshot)?;
+    let compressed = zstd::encode_all(json.as_bytes(), 3)?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&compressed);
+    
+    // 3. Write PNG with custom text chunk
+    let file = std::fs::File::create(path)?;
+    let w = BufWriter::new(file);
+    let mut encoder = png::Encoder::new(w, GRID_DIM_U32, GRID_DIM_U32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    
+    // Add metadata as uncompressed text chunk
+    encoder.add_text_chunk("RibossomeSnapshot".to_string(), encoded)?;
+    
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&img_data)?;
+    
+    println!("✓ Saved snapshot: {} agents, epoch {}", snapshot.agents.len(), snapshot.epoch);
+    Ok(())
+}
+
+fn load_simulation_snapshot(
+    path: &Path,
+) -> anyhow::Result<(Vec<f32>, Vec<f32>, Vec<f32>, SimulationSnapshot)> {
+    use std::io::BufReader;
+    
+    let file = std::fs::File::open(path)?;
+    let decoder = png::Decoder::new(BufReader::new(file));
+    let mut reader = decoder.read_info()?;
+    
+    // Read image data
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf)?;
+    
+    if info.width != GRID_DIM_U32 || info.height != GRID_DIM_U32 {
+        anyhow::bail!("Invalid snapshot size: {}x{}, expected {}x{}", 
+            info.width, info.height, GRID_DIM_U32, GRID_DIM_U32);
+    }
+    
+    // Extract grids from RGB channels
+    let mut alpha_grid = vec![0.0f32; GRID_CELL_COUNT];
+    let mut beta_grid = vec![0.0f32; GRID_CELL_COUNT];
+    let mut gamma_grid = vec![0.0f32; GRID_CELL_COUNT];
+    
+    for i in 0..GRID_CELL_COUNT {
+        alpha_grid[i] = buf[i * 3 + 0] as f32 / 255.0;
+        beta_grid[i] = buf[i * 3 + 1] as f32 / 255.0;
+        gamma_grid[i] = (buf[i * 3 + 2] as f32 / 255.0) * 200.0 - 100.0; // Unmap gamma
+    }
+    
+    // Extract metadata from text chunks
+    let text_chunks = reader.info().uncompressed_latin1_text.clone();
+    for chunk in text_chunks.iter() {
+        if chunk.keyword == "RibossomeSnapshot" {
+            use base64::Engine;
+            let compressed = base64::engine::general_purpose::STANDARD.decode(&chunk.text)?;
+            let json = zstd::decode_all(&compressed[..])?;
+            let snapshot: SimulationSnapshot = serde_json::from_slice(&json)?;
+            
+            println!("✓ Loaded snapshot: {} agents, epoch {}, saved {}", 
+                snapshot.agents.len(), snapshot.epoch, snapshot.timestamp);
+            
+            return Ok((alpha_grid, beta_grid, gamma_grid, snapshot));
+        }
+    }
+    
+    anyhow::bail!("No RibossomeSnapshot metadata found in PNG")
+}
+
 fn main() {
     env_logger::init();
 
@@ -7817,6 +7992,19 @@ fn main() {
                                             if ui.button("Spawn 5000 Random Agents").clicked() && !state.is_paused {
                                                 state.queue_random_spawns(5000);
                                             }
+                                            
+                                            ui.separator();
+                                            ui.heading("Snapshot");
+                                            ui.label("⚠ Snapshot save requires GPU readback");
+                                            ui.label("(Feature in progress)");
+                                            
+                                            // TODO: Implement grid readback from GPU
+                                            // Need to:
+                                            // 1. Create readback buffers for alpha/beta/gamma
+                                            // 2. Copy from GPU buffers to readback
+                                            // 3. Map and read data
+                                            // 4. Create snapshot and save PNG
+                                            
                                             ui.label(format!("World: {}x{}", SIM_SIZE as u32, SIM_SIZE as u32));
                                             ui.label("Grid: 2048x2048");
                                             ui.label(
