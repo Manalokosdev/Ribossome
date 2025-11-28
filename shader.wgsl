@@ -394,7 +394,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 1.3;
             props.mass = 0.018;
         }
-        case 3u: { // E - Glutamic acid - POISON RESISTANT - Very heavy pink blob (cumulative: each F reduces poison damage by 50%)
+        case 3u: { // E - Glutamic acid - POISON RESISTANT - Very heavy pink blob (cumulative: each E reduces poison damage by 10%)
             props.segment_length = 30.0;
             props.thickness = 30.0; // Very fat blob
             // Old CSV: Seed Angle = -60°
@@ -1063,7 +1063,7 @@ fn hash_f32(v: u32) -> f32 {
 // Stochastic gaussian field sampling for sensors
 // Takes N samples around center position with distance-weighted averaging
 fn sample_stochastic_gaussian(center: vec2<f32>, radius: f32, seed: u32, grid_type: u32, debug_mode: bool, sensor_perpendicular: vec2<f32>) -> f32 {
-    let sample_count = 7u;
+    let sample_count = 14u;
     var weighted_sum = 0.0;
     var weight_total = 0.0;
     
@@ -1615,8 +1615,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 poison_resistant_count += 1u;
             }
         }
-        // Each E reduces signal-based angle changes by 50%
-        let signal_angle_multiplier = pow(0.5, f32(poison_resistant_count));
+        // Each E reduces signal-based angle changes by 10%
+        let signal_angle_multiplier = pow(0.9, f32(poison_resistant_count));
 
         // Dynamic chain build - angles modulated by alpha/beta signals
     var current_pos = vec2<f32>(0.0);
@@ -1840,7 +1840,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Sensors: stochastic gaussian sampling with 50% smoothing
         // Sample radius based on part size (larger radius for better field integration)
-        let sensor_radius = 100.0;
+        let sensor_radius = 200.0;
         
         // Calculate sensor perpendicular orientation (pointing direction)
         var segment_dir = vec2<f32>(0.0);
@@ -1866,16 +1866,20 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let world_pos = agent.position + rotated_pos;
             let sensor_seed = agent_id * 1000u + i * 13u;
             let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, perpendicular_world);
+            // Apply sqrt to increase sensitivity to low signals (0.01 -> 0.1, 0.25 -> 0.5, 1.0 -> 1.0)
+            let nonlinear_value = sqrt(clamp(sensed_value, 0.0, 1.0));
             // 50% contribution: blend with current value for smoothing
-            new_alpha = mix(new_alpha, sensed_value, 0.5);
+            new_alpha = mix(new_alpha, nonlinear_value, 0.5);
         }
         if (amino_props.is_beta_sensor) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let world_pos = agent.position + rotated_pos;
             let sensor_seed = agent_id * 1000u + i * 13u;
             let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, perpendicular_world);
+            // Apply sqrt to increase sensitivity to low signals (0.01 -> 0.1, 0.25 -> 0.5, 1.0 -> 1.0)
+            let nonlinear_value = sqrt(clamp(sensed_value, 0.0, 1.0));
             // 50% contribution: blend with current value for smoothing
-            new_beta = mix(new_beta, sensed_value, 0.5);
+            new_beta = mix(new_beta, nonlinear_value, 0.5);
         }
 
     // Energy sensor contribution rate (now 1.0 as requested)
@@ -2051,8 +2055,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             // Capacities adjusted for 0..1 range
                             let alpha_capacity = max(0.0, 1.0 - target_alpha);
                             let beta_capacity = max(0.0, 1.0 - target_beta);
+                            let gamma_capacity = max(0.0, 1.0 - target_gamma);
 
-                            let gamma_transfer = min(center_gamma, transfer_amount);
+                            let gamma_transfer = min(min(center_gamma, transfer_amount), gamma_capacity);
                             let alpha_transfer = min(min(center_alpha, transfer_amount), alpha_capacity);
                             let beta_transfer = min(min(center_beta, transfer_amount), beta_capacity);
 
@@ -2149,8 +2154,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             // Capacities adjusted for 0..1 range
                             let alpha_capacity = max(0.0, 1.0 - target_alpha);
                             let beta_capacity = max(0.0, 1.0 - target_beta);
+                            let gamma_capacity = max(0.0, 1.0 - target_gamma);
 
-                            let gamma_transfer = min(center_gamma, transfer_amount);
+                            let gamma_transfer = min(min(center_gamma, transfer_amount), gamma_capacity);
                             let alpha_transfer = min(min(center_alpha, transfer_amount), alpha_capacity);
                             let beta_transfer = min(min(center_beta, transfer_amount), beta_capacity);
 
@@ -2188,7 +2194,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Apply linear forces - overdamped regime (fluid dynamics at nanoscale)
     // In viscous fluids at low Reynolds number, velocity is directly proportional to force
     // No inertia: velocity = force / drag
-    agent.velocity = force / drag_coefficient;
+    let new_velocity = force / drag_coefficient;
+    
+    // Mass-dependent velocity smoothing to prevent jitter in heavy agents on slopes
+    // Higher mass = more smoothing (0.95 for mass=0.01, 0.7 for mass=0.1)
+    // This filters high-frequency oscillations while preserving directed motion
+    let mass_smoothing = clamp(1.0 - (total_mass * 2.5), 0.1, 0.95);
+    agent.velocity = mix(agent.velocity, new_velocity, mass_smoothing);
+    
     let v_len = length(agent.velocity);
     if (v_len > VEL_MAX) {
         agent.velocity = agent.velocity * (VEL_MAX / v_len);
@@ -2273,8 +2286,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Bite size is now independent of speed; keep fixed capture per frame
     
     // poison_resistant_count and poison_multiplier already calculated in signal propagation section
-    // Each F reduces poison/radiation damage by 50%
-    let poison_multiplier = pow(0.5, f32(poison_resistant_count));
+    // Each E reduces poison/radiation damage by 10%
+    let poison_multiplier = pow(0.9, f32(poison_resistant_count));
     
     // Track total consumption for regurgitation
     var total_consumed_alpha = 0.0;
@@ -2439,9 +2452,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let energy_for_pair = max(agent.energy, 0.0);
         
         // Probability to increment counter
+        // Apply sqrt scaling: diminishing returns for high energy (sqrt(1)=1, sqrt(10)=3.16, sqrt(50)=7.07)
+        // This makes low energy more viable while still rewarding energy accumulation
+        let energy_scaled = sqrt(energy_for_pair + 1.0);
         // Apply radiation_factor (beta acts as reproductive inhibitor)
         // Poison protection also slows pairing by the same amount
-        let pair_p = clamp(params.spawn_probability * (energy_for_pair + 1.0) * 0.1 * radiation_factor * poison_multiplier, 0.0, 1.0);
+        let pair_p = clamp(params.spawn_probability * energy_scaled * 0.1 * radiation_factor * poison_multiplier, 0.0, 1.0);
         if (rnd < pair_p) {
             // Pairing cost per increment
             let pairing_cost = params.pairing_cost;

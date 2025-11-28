@@ -998,7 +998,7 @@ impl Default for SimulationSettings {
             gamma_hidden: false,
             debug_per_segment: false,
             gamma_vis_min: 0.0,
-            gamma_vis_max: 0.5,
+            gamma_vis_max: 1.0,
             alpha_show: true,
             beta_show: true,
             gamma_show: true,
@@ -1185,11 +1185,11 @@ impl SimulationSettings {
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         self.repulsion_strength = self.repulsion_strength.clamp(0.0, 100.0);
         self.render_interval = self.render_interval.clamp(1, 10_000);
-        self.gamma_vis_min = self.gamma_vis_min.clamp(-1000.0, 1000.0);
-        self.gamma_vis_max = self.gamma_vis_max.clamp(-1000.0, 1000.0);
+        self.gamma_vis_min = self.gamma_vis_min.clamp(0.0, 1.0);
+        self.gamma_vis_max = self.gamma_vis_max.clamp(0.0, 1.0);
         if self.gamma_vis_min >= self.gamma_vis_max {
-            self.gamma_vis_max = (self.gamma_vis_min + 0.001).clamp(-1000.0, 1000.0);
-            self.gamma_vis_min = (self.gamma_vis_max - 0.001).clamp(-1000.0, 1000.0);
+            self.gamma_vis_max = (self.gamma_vis_min + 0.001).clamp(0.0, 1.0);
+            self.gamma_vis_min = (self.gamma_vis_max - 0.001).clamp(0.0, 1.0);
         }
         self.alpha_rain_variation = self.alpha_rain_variation.clamp(0.0, 1.0);
         self.beta_rain_variation = self.beta_rain_variation.clamp(0.0, 1.0);
@@ -2006,7 +2006,7 @@ impl GpuState {
             gamma_strength: 10.0 * TERRAIN_FORCE_SCALE,
             prop_wash_strength: 1.0,
             gamma_vis_min: 0.0,
-            gamma_vis_max: 0.5,
+            gamma_vis_max: 1.0,
             draw_enabled: 1,
             gamma_debug: 0,
             gamma_hidden: 0,
@@ -3183,45 +3183,24 @@ impl GpuState {
         let path = path.as_ref();
         let image = image::open(path)?;
         let resized = image.resize_exact(GRID_DIM as u32, GRID_DIM as u32, FilterType::Lanczos3);
-        let width = resized.width();
-        let height = resized.height();
-        let rgb = resized.to_rgb8();
-        let raw = rgb.as_raw();
+        let gray = resized.to_luma8();
+        let width = gray.width() as usize;
+        let height = gray.height() as usize;
+        let raw = gray.as_raw();
 
-        let mut gamma_heights = Vec::with_capacity(GRID_CELL_COUNT);
-        let mut alpha_values = Vec::with_capacity(GRID_CELL_COUNT);
-        let mut beta_values = Vec::with_capacity(GRID_CELL_COUNT);
+        let mut gamma_values = Vec::with_capacity(GRID_CELL_COUNT);
         for row in (0..height).rev() {
-            let row_offset = row as usize * width as usize * 3;
-            for col in 0..width as usize {
-                let pixel_offset = row_offset + col * 3;
-                let r = raw[pixel_offset];
-                let g = raw[pixel_offset + 1];
-                let b = raw[pixel_offset + 2];
-
-                let gamma_normalized = (b as f32 / 255.0).powf(GAMMA_CORRECTION_EXPONENT);
-                let alpha_normalized = (g as f32 / 255.0).powf(GAMMA_CORRECTION_EXPONENT);
-                let beta_normalized = (r as f32 / 255.0).powf(GAMMA_CORRECTION_EXPONENT);
-
-                gamma_heights.push(gamma_normalized * 0.5);
-                alpha_values.push((alpha_normalized * 10.0).clamp(0.0, 10.0));
-                beta_values.push((beta_normalized * 10.0).clamp(0.0, 10.0));
+            let row_offset = row * width;
+            for col in 0..width {
+                let pix = raw[row_offset + col] as f32 / 255.0;
+                gamma_values.push(pix.clamp(0.0, 1.0));
             }
         }
 
-        debug_assert_eq!(gamma_heights.len(), GRID_CELL_COUNT);
-        debug_assert_eq!(alpha_values.len(), GRID_CELL_COUNT);
-        debug_assert_eq!(beta_values.len(), GRID_CELL_COUNT);
-
-        let mut combined_data = vec![0.0f32; GRID_CELL_COUNT * 3];
-        combined_data[..GRID_CELL_COUNT].copy_from_slice(&gamma_heights);
+        debug_assert_eq!(gamma_values.len(), GRID_CELL_COUNT);
 
         self.queue
-            .write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&combined_data));
-        self.queue
-            .write_buffer(&self.alpha_grid, 0, bytemuck::cast_slice(&alpha_values));
-        self.queue
-            .write_buffer(&self.beta_grid, 0, bytemuck::cast_slice(&beta_values));
+            .write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_values));
         self.slope_counter = 0;
 
         println!(
@@ -5530,7 +5509,7 @@ fn save_simulation_snapshot(
     for i in 0..GRID_CELL_COUNT {
         img_data[i * 3 + 0] = (beta_grid[i].clamp(0.0, 1.0) * 255.0) as u8;   // R = beta (poison)
         img_data[i * 3 + 1] = (alpha_grid[i].clamp(0.0, 1.0) * 255.0) as u8;  // G = alpha (food)
-        img_data[i * 3 + 2] = ((gamma_grid[i] + 100.0) / 200.0 * 255.0).clamp(0.0, 255.0) as u8; // B = gamma (terrain, remapped)
+        img_data[i * 3 + 2] = (gamma_grid[i].clamp(0.0, 1.0) * 255.0) as u8;  // B = gamma (terrain)
     }
     
     // 2. Serialize and compress metadata
@@ -5582,7 +5561,7 @@ fn load_simulation_snapshot(
     for i in 0..GRID_CELL_COUNT {
         beta_grid[i] = buf[i * 3 + 0] as f32 / 255.0;  // R = beta (poison)
         alpha_grid[i] = buf[i * 3 + 1] as f32 / 255.0; // G = alpha (food)
-        gamma_grid[i] = (buf[i * 3 + 2] as f32 / 255.0) * 200.0 - 100.0; // Unmap gamma
+        gamma_grid[i] = buf[i * 3 + 2] as f32 / 255.0; // B = gamma (terrain)
     }
     
     // Extract metadata from text chunks
@@ -6885,7 +6864,7 @@ fn main() {
                                                             .add(
                                                                 egui::Slider::new(
                                                                     &mut state.gamma_vis_min,
-                                                                    -1000.0..=1000.0,
+                                                                    0.0..=1.0,
                                                                 )
                                                                 .text("Gamma Min"),
                                                             )
@@ -6894,21 +6873,21 @@ fn main() {
                                                             .add(
                                                                 egui::Slider::new(
                                                                     &mut state.gamma_vis_max,
-                                                                    -1000.0..=1000.0,
+                                                                    0.0..=1.0,
                                                                 )
                                                                 .text("Gamma Max"),
                                                             )
                                                             .changed();
                                                         if state.gamma_vis_min >= state.gamma_vis_max {
                                                             state.gamma_vis_max =
-                                                                (state.gamma_vis_min + 0.001).min(1000.0);
+                                                                (state.gamma_vis_min + 0.001).min(1.0);
                                                             state.gamma_vis_min =
-                                                                (state.gamma_vis_max - 0.001).max(-1000.0);
+                                                                (state.gamma_vis_max - 0.001).max(0.0);
                                                         } else if min_changed || max_changed {
                                                             state.gamma_vis_min =
-                                                                state.gamma_vis_min.clamp(-1000.0, 1000.0);
+                                                                state.gamma_vis_min.clamp(0.0, 1.0);
                                                             state.gamma_vis_max =
-                                                                state.gamma_vis_max.clamp(-1000.0, 1000.0);
+                                                                state.gamma_vis_max.clamp(0.0, 1.0);
                                                         }
                                                         ui.add(
                                                             egui::Slider::new(&mut state.prop_wash_strength, 0.0..=5.0)
@@ -8206,37 +8185,35 @@ fn main() {
 
                                             ui.separator();
                                             ui.heading("Visualization");
-                                            let min_changed = ui
-                                                .add(
-                                                    egui::Slider::new(
-                                                        &mut state.gamma_vis_min,
-                                                        -1000.0..=1000.0,
-                                                    )
-                                                    .text("Gamma Min"),
-                                                )
-                                                .changed();
-                                            let max_changed = ui
-                                                .add(
-                                                    egui::Slider::new(
-                                                        &mut state.gamma_vis_max,
-                                                        -1000.0..=1000.0,
-                                                    )
-                                                    .text("Gamma Max"),
-                                                )
-                                                .changed();
-                                            if state.gamma_vis_min >= state.gamma_vis_max {
-                                                state.gamma_vis_max =
-                                                    (state.gamma_vis_min + 0.001).min(1000.0);
-                                                state.gamma_vis_min =
-                                                    (state.gamma_vis_max - 0.001).max(-1000.0);
-                                            } else if min_changed || max_changed {
-                                                state.gamma_vis_min =
-                                                    state.gamma_vis_min.clamp(-1000.0, 1000.0);
-                                                state.gamma_vis_max =
-                                                    state.gamma_vis_max.clamp(-1000.0, 1000.0);
-                                            }
-
-                                            ui.separator();
+                                                    let min_changed = ui
+                                                        .add(
+                                                            egui::Slider::new(
+                                                                &mut state.gamma_vis_min,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Gamma Min"),
+                                                        )
+                                                        .changed();
+                                                    let max_changed = ui
+                                                        .add(
+                                                            egui::Slider::new(
+                                                                &mut state.gamma_vis_max,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Gamma Max"),
+                                                        )
+                                                        .changed();
+                                                    if state.gamma_vis_min >= state.gamma_vis_max {
+                                                        state.gamma_vis_max =
+                                                            (state.gamma_vis_min + 0.001).min(1.0);
+                                                        state.gamma_vis_min =
+                                                            (state.gamma_vis_max - 0.001).max(0.0);
+                                                    } else if min_changed || max_changed {
+                                                        state.gamma_vis_min =
+                                                            state.gamma_vis_min.clamp(0.0, 1.0);
+                                                        state.gamma_vis_max =
+                                                            state.gamma_vis_max.clamp(0.0, 1.0);
+                                                    }                                            ui.separator();
                                             ui.collapsing("Evolution", |ui| {
                                                 ui.label("Rain Cycling");
                                                 ui.add(egui::Slider::new(&mut state.alpha_rain_variation, 0.0..=1.0).text("Alpha Var %"));
