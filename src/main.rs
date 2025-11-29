@@ -36,6 +36,8 @@ const SLOPE_WG_SIZE_Y: u32 = 16;
 const TERRAIN_FORCE_SCALE: f32 = 250.0;
 const GAMMA_CORRECTION_EXPONENT: f32 = 2.2;
 const SETTINGS_FILE_NAME: &str = "simulation_settings.json";
+const AUTO_SNAPSHOT_FILE_NAME: &str = "autosave_snapshot.png";
+const AUTO_SNAPSHOT_INTERVAL: u64 = 10000; // Save every 10,000 epochs
 const RAIN_THUMB_SIZE: usize = 128;
 
 // Shared genome/body sizing (must stay in sync with shader constants)
@@ -1321,6 +1323,9 @@ struct GpuState {
     epoch_sample_interval: u64,   // Sample every N epochs (1000)
     last_sample_epoch: u64,       // Last epoch when we sampled
     max_history_points: usize,    // Maximum data points (5000)
+    
+    // Auto-snapshot tracking
+    last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
 
     // Mouse dragging state
     is_dragging: bool,
@@ -3036,6 +3041,7 @@ impl GpuState {
             epoch_sample_interval: 1000,
             last_sample_epoch: 0,
             max_history_points: 5000,
+            last_autosave_epoch: 0,
             is_dragging: false,
             last_mouse_pos: None,
             selected_agent_index: None,
@@ -5755,7 +5761,20 @@ fn main() {
     let _ = event_loop.run(move |event, target| {
         // Check if loading finished
         if state.is_none() {
-            if let Ok(loaded_state) = rx.try_recv() {
+            if let Ok(mut loaded_state) = rx.try_recv() {
+                // Try to auto-load previous session from autosave snapshot
+                let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
+                if autosave_path.exists() {
+                    match loaded_state.load_snapshot_from_file(autosave_path) {
+                        Ok(_) => {
+                            println!("✓ Auto-loaded previous session from epoch {}", loaded_state.epoch);
+                        }
+                        Err(e) => {
+                            eprintln!("⚠ Failed to auto-load snapshot: {:?}", e);
+                        }
+                    }
+                }
+                
                 state = Some(loaded_state);
                 window.set_title("GPU Artificial Life Simulator");
                 let _ = window.request_inner_size(winit::dpi::LogicalSize::new(1600, 800));
@@ -5950,6 +5969,17 @@ fn main() {
                                 // Only increment epoch and update stats when simulation is running
                                 if should_run_simulation {
                                     state.epoch += 1;
+                                    
+                                    // Auto-snapshot every AUTO_SNAPSHOT_INTERVAL epochs
+                                    if state.epoch > 0 && state.epoch % AUTO_SNAPSHOT_INTERVAL == 0 && state.epoch != state.last_autosave_epoch {
+                                        state.last_autosave_epoch = state.epoch;
+                                        let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
+                                        if let Err(e) = state.save_snapshot_to_file(autosave_path) {
+                                            eprintln!("⚠ Auto-snapshot failed at epoch {}: {:?}", state.epoch, e);
+                                        } else {
+                                            println!("✓ Auto-snapshot saved at epoch {}", state.epoch);
+                                        }
+                                    }
 
                                     // Sample population for statistics graph
                                     if state.epoch - state.last_sample_epoch >= state.epoch_sample_interval {
