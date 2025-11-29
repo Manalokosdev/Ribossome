@@ -800,7 +800,8 @@ struct SimParams {
     agent_color_r: f32,
     agent_color_g: f32,
     agent_color_b: f32,
-    _padding: [f32; 1],  // Ensure 16-byte alignment
+    agent_color_blend: f32,   // Blend factor: 0.0=amino only, 1.0=agent only
+    _padding: [f32; 3],  // Ensure 16-byte alignment
 }
 
 #[repr(C)]
@@ -957,6 +958,7 @@ struct SimulationSettings {
     light_direction: [f32; 3],  // Light direction for slope-based lighting effects
     agent_blend_mode: u32,  // Agent blend mode: 0=comp, 1=add, 2=subtract, 3=multiply
     agent_color: [f32; 3],  // Agent color tint
+    agent_color_blend: f32,  // Blend factor between amino acid color (0.0) and agent color (1.0)
     alpha_noise_scale: f32,
     beta_noise_scale: f32,
     gamma_noise_scale: f32,
@@ -1034,6 +1036,7 @@ impl Default for SimulationSettings {
             light_direction: [0.5, 0.5, 0.5],  // Default diagonal light
             agent_blend_mode: 0,  // Comp by default
             agent_color: [1.0, 1.0, 1.0],  // White
+            agent_color_blend: 0.0,  // Default: show only amino acid colors (no agent color blend)
             alpha_noise_scale: 1.0,
             beta_noise_scale: 1.0,
             gamma_noise_scale: 1.0,
@@ -1420,6 +1423,7 @@ struct GpuState {
     light_direction: [f32; 3],
     agent_blend_mode: u32, // 0=comp, 1=add, 2=subtract, 3=multiply
     agent_color: [f32; 3],
+    agent_color_blend: f32,
     
     settings_path: PathBuf,
     last_saved_settings: SimulationSettings,
@@ -1501,6 +1505,7 @@ impl GpuState {
             light_direction: self.light_direction,
             agent_blend_mode: self.agent_blend_mode,
             agent_color: self.agent_color,
+            agent_color_blend: self.agent_color_blend,
         };
         settings.save_to_disk(path)
     }
@@ -1578,6 +1583,7 @@ impl GpuState {
         self.light_direction = settings.light_direction;
         self.agent_blend_mode = settings.agent_blend_mode;
         self.agent_color = settings.agent_color;
+        self.agent_color_blend = settings.agent_color_blend;
         
         if let Some(path) = &self.alpha_rain_map_path.clone() {
              let _ = self.load_alpha_rain_map(path);
@@ -2053,7 +2059,8 @@ impl GpuState {
             agent_color_r: 1.0,
             agent_color_g: 1.0,
             agent_color_b: 1.0,
-            _padding: [0.0],
+            agent_color_blend: 0.0,
+            _padding: [0.0, 0.0, 0.0],
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3115,6 +3122,7 @@ impl GpuState {
             light_direction: settings.light_direction,
             agent_blend_mode: settings.agent_blend_mode,
             agent_color: settings.agent_color,
+            agent_color_blend: settings.agent_color_blend,
             settings_path: settings_path.clone(),
             last_saved_settings: settings.clone(),
             destroyed: false,
@@ -3754,6 +3762,7 @@ impl GpuState {
             light_direction: self.light_direction,
             agent_blend_mode: self.agent_blend_mode,
             agent_color: self.agent_color,
+            agent_color_blend: self.agent_color_blend,
         }
     }
 
@@ -4303,7 +4312,8 @@ impl GpuState {
             agent_color_r: self.agent_color[0],
             agent_color_g: self.agent_color[1],
             agent_color_b: self.agent_color[2],
-            _padding: [0.0],
+            agent_color_blend: self.agent_color_blend,
+            _padding: [0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
@@ -5009,6 +5019,7 @@ impl GpuState {
         self.light_direction = settings.light_direction;
         self.agent_blend_mode = settings.agent_blend_mode;
         self.agent_color = settings.agent_color;
+        self.agent_color_blend = settings.agent_color_blend;
         
         if let Some(path) = &settings.alpha_rain_map_path {
              let _ = self.load_alpha_rain_map(path);
@@ -6276,6 +6287,7 @@ fn main() {
                                                                         light_direction: state.light_direction,
                                                                         agent_blend_mode: state.agent_blend_mode,
                                                                         agent_color: state.agent_color,
+                                                                        agent_color_blend: state.agent_color_blend,
                                                                     };
                                                                     if let Err(err) = settings.save_to_disk(&path) {
                                                                         eprintln!("Failed to save settings: {err:?}");
@@ -7293,6 +7305,11 @@ fn main() {
                                                                 ];
                                                             }
                                                         });
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.agent_color_blend, 0.0..=1.0)
+                                                                .text("Color Blend")
+                                                                .clamp_to_range(true)
+                                                        ).on_hover_text("0.0 = amino acid colors only, 1.0 = agent color only");
                                                     });
                                                 }
                                                 _ => {}

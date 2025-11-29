@@ -170,7 +170,10 @@ struct SimParams {
     agent_color_r: f32,
     agent_color_g: f32,
     agent_color_b: f32,
+    agent_color_blend: f32,   // Blend factor: 0.0=amino color only, 1.0=agent color only
     _padding: f32,
+    _padding2: f32,
+    _padding3: f32,
 }
 
 struct EnvironmentInitParams {
@@ -1946,9 +1949,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     // Apply sine waves with different multipliers to generate RGB channels
     let agent_color = vec3<f32>(
-        sin(color_sum * 1.0) * 0.5 + 0.5,      // R: multiplier = 1.0
-        sin(color_sum * 1.75) * 0.5 + 0.5,     // G: multiplier = 1.75
-        sin(color_sum * 2.1215) * 0.5 + 0.5    // B: multiplier = 2.1215
+        sin(color_sum * 3.0) * 0.5 + 0.5,      // R: multiplier = 3.0
+        sin(color_sum * 5.25) * 0.5 + 0.5,     // G: multiplier = 5.25
+        sin(color_sum * 7.364) * 0.5 + 0.5     // B: multiplier = 7.364
     );
     
     let drag_coefficient = total_mass * 0.5;
@@ -2796,9 +2799,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Overlay endpoint circles only for terminals (first/last) when body has >1 parts.
                 if (!in_debug_mode) {
                     let thickness = part.size * 0.5;
-                    draw_thick_line(segment_start_world, world_pos, thickness, vec4<f32>(amino_props.color, 1.0));
+                    // Blend between amino acid color and agent color based on agent_color_blend parameter
+                    let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
+                    draw_thick_line(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0));
                     if (!is_single && (is_first || is_last)) {
-                        draw_filled_circle(world_pos, thickness, vec4<f32>(amino_props.color, 1.0));
+                        draw_filled_circle(world_pos, thickness, vec4<f32>(blended_color, 1.0));
                     }
                 }
                 if (in_debug_mode) {
@@ -2839,7 +2844,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let p1 = world_pos - perp_world * half_length;
                 let p2 = world_pos + perp_world * half_length;
                 let perp_thickness = part.size * 0.3; // Thinner than the normal segment
-                draw_thick_line(p1, p2, perp_thickness, vec4<f32>(amino_props.color, 1.0));
+                let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
+                draw_thick_line(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0));
             }
             
             // Special rendering for CONDENSER - filled circle with charge level
