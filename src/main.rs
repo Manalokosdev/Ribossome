@@ -1103,7 +1103,8 @@ struct SimulationSnapshot {
     version: String,
     timestamp: String,
     epoch: u64,
-    settings: SimulationSettings,
+    #[serde(default)]
+    settings: Option<SimulationSettings>,
     agents: Vec<AgentSnapshot>,
 }
 
@@ -1135,7 +1136,7 @@ impl SimulationSnapshot {
             version: "1.0".to_string(),
             timestamp,
             epoch,
-            settings,
+            settings: Some(settings),
             agents: agent_snapshots,
         }
     }
@@ -4946,86 +4947,89 @@ impl GpuState {
         // Load snapshot from PNG file
         let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
         
-        // Apply loaded settings directly
-        let settings = &snapshot.settings;
-        self.camera_zoom = settings.camera_zoom;
-        self.spawn_probability = settings.spawn_probability;
-        self.death_probability = settings.death_probability;
-        self.mutation_rate = settings.mutation_rate;
-        self.auto_replenish = settings.auto_replenish;
-        self.diffusion_interval = settings.diffusion_interval;
-        self.slope_interval = settings.slope_interval;
-        self.alpha_blur = settings.alpha_blur;
-        self.beta_blur = settings.beta_blur;
-        self.gamma_blur = settings.gamma_blur;
-        self.alpha_slope_bias = settings.alpha_slope_bias;
-        self.beta_slope_bias = settings.beta_slope_bias;
-        self.alpha_multiplier = settings.alpha_multiplier;
-        self.beta_multiplier = settings.beta_multiplier;
-        self.alpha_rain_map_path = settings.alpha_rain_map_path.clone();
-        self.beta_rain_map_path = settings.beta_rain_map_path.clone();
-        self.chemical_slope_scale_alpha = settings.chemical_slope_scale_alpha;
-        self.chemical_slope_scale_beta = settings.chemical_slope_scale_beta;
-        self.alpha_noise_scale = settings.alpha_noise_scale;
-        self.beta_noise_scale = settings.beta_noise_scale;
-        self.gamma_noise_scale = settings.gamma_noise_scale;
-        self.noise_power = settings.noise_power;
-        self.food_power = settings.food_power;
-        self.poison_power = settings.poison_power;
-        self.amino_maintenance_cost = settings.amino_maintenance_cost;
-        self.pairing_cost = settings.pairing_cost;
-        self.prop_wash_strength = settings.prop_wash_strength;
-        self.repulsion_strength = settings.repulsion_strength;
-        self.limit_fps = settings.limit_fps;
-        self.limit_fps_25 = settings.limit_fps_25;
-        self.render_interval = settings.render_interval;
-        self.gamma_debug_visual = settings.gamma_debug_visual;
-        self.slope_debug_visual = settings.slope_debug_visual;
-        self.gamma_hidden = settings.gamma_hidden;
-        self.debug_per_segment = settings.debug_per_segment;
-        self.gamma_vis_min = settings.gamma_vis_min;
-        self.gamma_vis_max = settings.gamma_vis_max;
-        self.alpha_show = settings.alpha_show;
-        self.beta_show = settings.beta_show;
-        self.gamma_show = settings.gamma_show;
-        self.slope_lighting = settings.slope_lighting;
-        self.slope_lighting_strength = settings.slope_lighting_strength;
-        self.trail_diffusion = settings.trail_diffusion;
-        self.trail_decay = settings.trail_decay;
-        self.trail_opacity = settings.trail_opacity;
-        self.trail_show = settings.trail_show;
-        self.interior_isotropic = settings.interior_isotropic;
-        self.ignore_stop_codons = settings.ignore_stop_codons;
-        self.require_start_codon = settings.require_start_codon;
-        self.alpha_rain_variation = settings.alpha_rain_variation;
-        self.beta_rain_variation = settings.beta_rain_variation;
-        self.alpha_rain_phase = settings.alpha_rain_phase;
-        self.beta_rain_phase = settings.beta_rain_phase;
-        self.alpha_rain_freq = settings.alpha_rain_freq;
-        self.beta_rain_freq = settings.beta_rain_freq;
-        self.difficulty = settings.difficulty.clone();
-        self.background_color = settings.background_color;
-        self.alpha_blend_mode = settings.alpha_blend_mode;
-        self.beta_blend_mode = settings.beta_blend_mode;
-        self.gamma_blend_mode = settings.gamma_blend_mode;
-        self.slope_blend_mode = settings.slope_blend_mode;
-        self.alpha_color = settings.alpha_color;
-        self.beta_color = settings.beta_color;
-        self.gamma_color = settings.gamma_color;
-        self.grid_interpolation = settings.grid_interpolation;
-        self.alpha_gamma_adjust = settings.alpha_gamma_adjust;
-        self.beta_gamma_adjust = settings.beta_gamma_adjust;
-        self.gamma_gamma_adjust = settings.gamma_gamma_adjust;
-        self.light_direction = settings.light_direction;
-        self.agent_blend_mode = settings.agent_blend_mode;
-        self.agent_color = settings.agent_color;
-        self.agent_color_blend = settings.agent_color_blend;
-        
-        if let Some(path) = &settings.alpha_rain_map_path {
-             let _ = self.load_alpha_rain_map(path);
-        }
-        if let Some(path) = &settings.beta_rain_map_path {
-             let _ = self.load_beta_rain_map(path);
+        // Apply loaded settings only if they exist in the snapshot (backwards compatibility)
+        if let Some(settings) = &snapshot.settings {
+            self.camera_zoom = settings.camera_zoom;
+            self.spawn_probability = settings.spawn_probability;
+            self.death_probability = settings.death_probability;
+            self.mutation_rate = settings.mutation_rate;
+            self.auto_replenish = settings.auto_replenish;
+            self.diffusion_interval = settings.diffusion_interval;
+            self.slope_interval = settings.slope_interval;
+            self.alpha_blur = settings.alpha_blur;
+            self.beta_blur = settings.beta_blur;
+            self.gamma_blur = settings.gamma_blur;
+            self.alpha_slope_bias = settings.alpha_slope_bias;
+            self.beta_slope_bias = settings.beta_slope_bias;
+            self.alpha_multiplier = settings.alpha_multiplier;
+            self.beta_multiplier = settings.beta_multiplier;
+            self.alpha_rain_map_path = settings.alpha_rain_map_path.clone();
+            self.beta_rain_map_path = settings.beta_rain_map_path.clone();
+            self.chemical_slope_scale_alpha = settings.chemical_slope_scale_alpha;
+            self.chemical_slope_scale_beta = settings.chemical_slope_scale_beta;
+            self.alpha_noise_scale = settings.alpha_noise_scale;
+            self.beta_noise_scale = settings.beta_noise_scale;
+            self.gamma_noise_scale = settings.gamma_noise_scale;
+            self.noise_power = settings.noise_power;
+            self.food_power = settings.food_power;
+            self.poison_power = settings.poison_power;
+            self.amino_maintenance_cost = settings.amino_maintenance_cost;
+            self.pairing_cost = settings.pairing_cost;
+            self.prop_wash_strength = settings.prop_wash_strength;
+            self.repulsion_strength = settings.repulsion_strength;
+            self.limit_fps = settings.limit_fps;
+            self.limit_fps_25 = settings.limit_fps_25;
+            self.render_interval = settings.render_interval;
+            self.gamma_debug_visual = settings.gamma_debug_visual;
+            self.slope_debug_visual = settings.slope_debug_visual;
+            self.gamma_hidden = settings.gamma_hidden;
+            self.debug_per_segment = settings.debug_per_segment;
+            self.gamma_vis_min = settings.gamma_vis_min;
+            self.gamma_vis_max = settings.gamma_vis_max;
+            self.alpha_show = settings.alpha_show;
+            self.beta_show = settings.beta_show;
+            self.gamma_show = settings.gamma_show;
+            self.slope_lighting = settings.slope_lighting;
+            self.slope_lighting_strength = settings.slope_lighting_strength;
+            self.trail_diffusion = settings.trail_diffusion;
+            self.trail_decay = settings.trail_decay;
+            self.trail_opacity = settings.trail_opacity;
+            self.trail_show = settings.trail_show;
+            self.interior_isotropic = settings.interior_isotropic;
+            self.ignore_stop_codons = settings.ignore_stop_codons;
+            self.require_start_codon = settings.require_start_codon;
+            self.alpha_rain_variation = settings.alpha_rain_variation;
+            self.beta_rain_variation = settings.beta_rain_variation;
+            self.alpha_rain_phase = settings.alpha_rain_phase;
+            self.beta_rain_phase = settings.beta_rain_phase;
+            self.alpha_rain_freq = settings.alpha_rain_freq;
+            self.beta_rain_freq = settings.beta_rain_freq;
+            self.difficulty = settings.difficulty.clone();
+            self.background_color = settings.background_color;
+            self.alpha_blend_mode = settings.alpha_blend_mode;
+            self.beta_blend_mode = settings.beta_blend_mode;
+            self.gamma_blend_mode = settings.gamma_blend_mode;
+            self.slope_blend_mode = settings.slope_blend_mode;
+            self.alpha_color = settings.alpha_color;
+            self.beta_color = settings.beta_color;
+            self.gamma_color = settings.gamma_color;
+            self.grid_interpolation = settings.grid_interpolation;
+            self.alpha_gamma_adjust = settings.alpha_gamma_adjust;
+            self.beta_gamma_adjust = settings.beta_gamma_adjust;
+            self.gamma_gamma_adjust = settings.gamma_gamma_adjust;
+            self.light_direction = settings.light_direction;
+            self.agent_blend_mode = settings.agent_blend_mode;
+            self.agent_color = settings.agent_color;
+            self.agent_color_blend = settings.agent_color_blend;
+            
+            if let Some(path) = &settings.alpha_rain_map_path {
+                 let _ = self.load_alpha_rain_map(path);
+            }
+            if let Some(path) = &settings.beta_rain_map_path {
+                 let _ = self.load_beta_rain_map(path);
+            }
+        } else {
+            println!("⚠ Loaded snapshot without settings (old format) - using current settings");
         }
         
         // Upload grids to GPU
