@@ -2932,8 +2932,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     draw_thick_line(prev, p, 0.25, color); // ultra-thin outline
                     prev = p;
                 }
-                // Small white center marker to indicate exact enabler position
-                draw_filled_circle(world_pos, 2.0, vec4<f32>(1.0, 1.0, 1.0, 0.95));
+                // Small blended color center marker to indicate exact enabler position
+                let blended_color_enabler = mix(amino_props.color, agent_color, params.agent_color_blend);
+                draw_filled_circle(world_pos, 2.0, vec4<f32>(blended_color_enabler, 0.95));
             }
 
             if (PROPELLERS_ENABLED && amino_props.is_propeller && agent.energy > 0.0 && params.camera_zoom > 2.0) {
@@ -2968,7 +2969,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor || amino_props.is_energy_sensor) {
                 let sensor_radius = part.size * 2.0;
                 let sensor_seed = agent_id * 500u + i * 13u;
-                let sensor_color = vec4<f32>(amino_props.color * 0.6, 0.5); // Semi-transparent
+                let blended_color_sensor = mix(amino_props.color, agent_color, params.agent_color_blend);
+                let sensor_color = vec4<f32>(blended_color_sensor * 0.6, 0.5); // Semi-transparent
                 draw_cloud(world_pos, sensor_radius, sensor_color, sensor_seed);
             }
 
@@ -2996,10 +2998,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let right = world_pos + vec2<f32>(square_size, 0.0);
                 let bottom = world_pos + vec2<f32>(0.0, square_size);
                 let left = world_pos + vec2<f32>(-square_size, 0.0);
-                draw_thick_line(top, right, 1.0, vec4<f32>(amino_props.color, 1.0));
-                draw_thick_line(right, bottom, 1.0, vec4<f32>(amino_props.color, 1.0));
-                draw_thick_line(bottom, left, 1.0, vec4<f32>(amino_props.color, 1.0));
-                draw_thick_line(left, top, 1.0, vec4<f32>(amino_props.color, 1.0));
+                let blended_color_displacer = mix(amino_props.color, agent_color, params.agent_color_blend);
+                draw_thick_line(top, right, 1.0, vec4<f32>(blended_color_displacer, 1.0));
+                draw_thick_line(right, bottom, 1.0, vec4<f32>(blended_color_displacer, 1.0));
+                draw_thick_line(bottom, left, 1.0, vec4<f32>(blended_color_displacer, 1.0));
+                draw_thick_line(left, top, 1.0, vec4<f32>(blended_color_displacer, 1.0));
             }
         }
 
