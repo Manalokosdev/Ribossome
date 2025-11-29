@@ -5065,6 +5065,12 @@ impl GpuState {
         // Update epoch from snapshot
         self.epoch = snapshot.epoch;
         
+        // Immediately save to autosave to ensure continuity
+        let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
+        if let Err(e) = self.save_snapshot_to_file(autosave_path) {
+            eprintln!("⚠ Failed to update autosave after loading snapshot: {:?}", e);
+        }
+        
         println!("✓ Loaded settings and queued {} agents from snapshot", self.cpu_spawn_queue.len());
         
         Ok(())
