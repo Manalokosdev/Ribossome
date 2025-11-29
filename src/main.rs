@@ -5943,6 +5943,19 @@ fn main() {
                                 window.request_redraw();
                             }
                         }
+                        WindowEvent::DroppedFile(path) => {
+                            // Handle drag-and-drop file loading
+                            if let Some(ext) = path.extension() {
+                                if ext == "png" {
+                                    if let Some(gpu_state) = state.as_mut() {
+                                        match gpu_state.load_snapshot_from_file(&path) {
+                                            Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
+                                            Err(e) => eprintln!("✗ Failed to load snapshot: {}", e),
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         WindowEvent::RedrawRequested => {
                             let mut reset_requested = false;
 
