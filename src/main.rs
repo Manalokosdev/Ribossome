@@ -4950,6 +4950,25 @@ impl GpuState {
     }
 
     fn load_snapshot_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
+        // Reset simulation state before loading to prevent crashes on subsequent loads
+        // Clear alive counter
+        self.queue.write_buffer(&self.alive_counter, 0, bytemuck::bytes_of(&0u32));
+        
+        // Clear spawn counter
+        self.queue.write_buffer(&self.spawn_counter, 0, bytemuck::bytes_of(&0u32));
+        
+        // Zero out all agent buffers
+        let zero_agents = vec![Agent::zeroed(); self.agent_buffer_capacity];
+        self.queue.write_buffer(&self.agents_buffer_a, 0, bytemuck::cast_slice(&zero_agents));
+        self.queue.write_buffer(&self.agents_buffer_b, 0, bytemuck::cast_slice(&zero_agents));
+        
+        // Clear CPU-side state
+        self.agents_cpu.clear();
+        self.cpu_spawn_queue.clear();
+        self.agent_count = 0;
+        self.alive_count = 0;
+        self.spawn_request_count = 0;
+        
         // Load snapshot from PNG file
         let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
         
@@ -5042,16 +5061,6 @@ impl GpuState {
         self.queue.write_buffer(&self.alpha_grid, 0, bytemuck::cast_slice(&alpha_grid));
         self.queue.write_buffer(&self.beta_grid, 0, bytemuck::cast_slice(&beta_grid));
         self.queue.write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_grid));
-        
-        // Mark all existing agents as dead by zeroing the alive counter
-        // This will effectively clear the simulation
-        self.queue.write_buffer(&self.alive_counter, 0, bytemuck::bytes_of(&0u32));
-        
-        // Clear CPU-side state
-        self.agents_cpu.clear();
-        self.cpu_spawn_queue.clear();
-        self.agent_count = 0;
-        self.alive_count = 0;
         
         // Queue agents from snapshot for spawning
         for agent_snap in snapshot.agents.iter() {
@@ -5947,6 +5956,8 @@ fn main() {
                             // Handle drag-and-drop file loading
                             if let Some(ext) = path.extension() {
                                 if ext == "png" {
+                                    // Reset simulation state before loading
+                                    reset_simulation_state(&mut state, &window, &mut egui_state);
                                     if let Some(gpu_state) = state.as_mut() {
                                         match gpu_state.load_snapshot_from_file(&path) {
                                             Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
@@ -8243,9 +8254,13 @@ fn main() {
                                         .add_filter("PNG Image", &["png"])
                                         .pick_file()
                                     {
-                                        match gpu_state.load_snapshot_from_file(&path) {
-                                            Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
-                                            Err(e) => eprintln!("✗ Failed to load snapshot: {}", e),
+                                        // Reset simulation state before loading
+                                        reset_simulation_state(&mut state, &window, &mut egui_state);
+                                        if let Some(gpu_state) = state.as_mut() {
+                                            match gpu_state.load_snapshot_from_file(&path) {
+                                                Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
+                                                Err(e) => eprintln!("✗ Failed to load snapshot: {}", e),
+                                            }
                                         }
                                     }
                                 }
