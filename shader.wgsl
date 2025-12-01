@@ -171,9 +171,9 @@ struct SimParams {
     agent_color_g: f32,
     agent_color_b: f32,
     agent_color_blend: f32,   // Blend factor: 0.0=amino color only, 1.0=agent color only
-    _padding: f32,
-    _padding2: f32,
-    _padding3: f32,
+    epoch: u32,               // Current simulation epoch for time-based effects
+    perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
+    perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
 }
 
 struct EnvironmentInitParams {
@@ -361,8 +361,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_absorption_rate = 0.3;
             props.beta_damage = 0.42; // Color value
             props.energy_storage = 0.0;
-            // Reduced sensor energy consumption to near-zero to keep sensors viable
-            props.energy_consumption = 0.0002;
+            // Very low sensor energy consumption to favor intelligent agents
+            props.energy_consumption = 0.00005;
             props.is_alpha_sensor = false;
             props.is_beta_sensor = true;
             props.signal_decay = 0.1;
@@ -370,7 +370,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.alpha_right_mult = 0.5;
             props.beta_left_mult = 0.5;
             props.beta_right_mult = 0.5;
-            props.mass = 0.1;
+            props.mass = 0.05;
         }
         case 2u: { // D - Aspartic acid - Small, charged (real: acidic, negatively charged)
             props.segment_length = 13.0;
@@ -534,11 +534,11 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.thrust_force = 0.0;
             props.color = vec3<f32>(1.0, 1.0, 0.0); // Yellow (MOUTH)
             props.is_mouth = true;
-            props.energy_absorption_rate = 0.2;
-            props.beta_absorption_rate = 0.2;
+            props.energy_absorption_rate = 0.08; // Reduced to nerf simple mouth strategies
+            props.beta_absorption_rate = 0.08; // Matched to alpha rate
             props.beta_damage = -0.12; // Color value
             props.energy_storage = 10.0; // Reduced from 20.0
-            props.energy_consumption = 0.001; // Reduced 10x (was 0.01)
+            props.energy_consumption = 0.025; // Increased to make mouths more costly
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
             props.signal_decay = 0.2;
@@ -717,8 +717,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_absorption_rate = 0.2;
             props.beta_damage = 0.71; // Color value
             props.energy_storage = 0.0;
-            // Reduced sensor energy consumption to near-zero
-            props.energy_consumption = 0.0002;
+            // Very low sensor energy consumption to favor intelligent agents
+            props.energy_consumption = 0.00005;
             props.is_alpha_sensor = true;
             props.is_beta_sensor = false;
             props.signal_decay = 0.1;
@@ -726,7 +726,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.alpha_right_mult = 0.5;
             props.beta_left_mult = 0.5;
             props.beta_right_mult = 0.5;
-            props.mass = 0.1;
+            props.mass = 0.05;
         }
         case 16u: { // T - Threonine - ENERGY SENSOR - Small, polar (real: beta-branched hydroxyl)
             props.segment_length = 10.5;
@@ -743,7 +743,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_absorption_rate = 0.2;
             props.beta_damage = -0.66; // Color value
             props.energy_storage = 0.0;
-            props.energy_consumption = 0.001;
+            // Very low sensor energy consumption to favor intelligent agents
+            props.energy_consumption = 0.00005;
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
             props.is_energy_sensor = true;
@@ -752,7 +753,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.alpha_right_mult = 0.1;
             props.beta_left_mult = 1.0;
             props.beta_right_mult = 0.0;
-            props.mass = 0.1;
+            props.mass = 0.05;
         }
         case 17u: { // V - Valine - DISPLACER - Cyan, short and fat, displaces environment
             props.segment_length = 12.0;
@@ -1084,8 +1085,8 @@ fn sample_stochastic_gaussian(center: vec2<f32>, radius: f32, seed: u32, grid_ty
         let idx = grid_index(sample_pos);
         
         // Distance-based gaussian weight: exp(-d^2 / (2*sigma^2))
-        // Using sigma = radius/2 for nice falloff
-        let sigma = radius * 0.5;
+        // Using sigma = radius/3 for sharper falloff
+        let sigma = radius * 0.15;
         let distance_weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
         
         // Directional weight: dot product of sensor perpendicular and sample direction
@@ -1139,6 +1140,33 @@ fn noise2d(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+fn noise3d(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    
+    // Smooth interpolation
+    let u = f * f * (3.0 - 2.0 * f);
+    
+    // Hash corners of the cube
+    let h000 = hash_f32(u32(i.x) + u32(i.y) * 57u + u32(i.z) * 113u);
+    let h100 = hash_f32(u32(i.x + 1.0) + u32(i.y) * 57u + u32(i.z) * 113u);
+    let h010 = hash_f32(u32(i.x) + u32(i.y + 1.0) * 57u + u32(i.z) * 113u);
+    let h110 = hash_f32(u32(i.x + 1.0) + u32(i.y + 1.0) * 57u + u32(i.z) * 113u);
+    let h001 = hash_f32(u32(i.x) + u32(i.y) * 57u + u32(i.z + 1.0) * 113u);
+    let h101 = hash_f32(u32(i.x + 1.0) + u32(i.y) * 57u + u32(i.z + 1.0) * 113u);
+    let h011 = hash_f32(u32(i.x) + u32(i.y + 1.0) * 57u + u32(i.z + 1.0) * 113u);
+    let h111 = hash_f32(u32(i.x + 1.0) + u32(i.y + 1.0) * 57u + u32(i.z + 1.0) * 113u);
+    
+    // Trilinear interpolation
+    let x00 = mix(h000, h100, u.x);
+    let x10 = mix(h010, h110, u.x);
+    let x01 = mix(h001, h101, u.x);
+    let x11 = mix(h011, h111, u.x);
+    let y0 = mix(x00, x10, u.y);
+    let y1 = mix(x01, x11, u.y);
+    return mix(y0, y1, u.z);
+}
+
 fn layered_noise(
     coord: vec2<f32>,
     seed: u32,
@@ -1160,6 +1188,38 @@ fn layered_noise(
             hash_f32(octave_seed ^ 0x63D3F6ABu) * 512.0,
         );
         sum = sum + noise2d(coord * frequency * safe_scale + offset) * amplitude;
+        total = total + amplitude;
+        amplitude = amplitude * 0.5;
+        frequency = frequency * 2.0;
+        octave_seed = hash(octave_seed ^ i);
+    }
+
+    let normalized = sum / max(total, 0.0001);
+    return clamp((normalized - 0.5) * contrast + 0.5, 0.0, 1.0);
+}
+
+fn layered_noise_3d(
+    coord: vec3<f32>,
+    seed: u32,
+    octaves: u32,
+    scale: f32,
+    contrast: f32,
+) -> f32 {
+    let octave_count = max(octaves, 1u);
+    var amplitude = 1.0;
+    var frequency = 1.0;
+    var sum = 0.0;
+    var total = 0.0;
+    var octave_seed = seed ^ 0x9E3779B1u;
+    let safe_scale = max(scale, 0.0001);
+
+    for (var i = 0u; i < octave_count; i = i + 1u) {
+        let offset = vec3<f32>(
+            hash_f32(octave_seed ^ 0xA511E9B5u) * 512.0,
+            hash_f32(octave_seed ^ 0x63D3F6ABu) * 512.0,
+            hash_f32(octave_seed ^ 0x7C159E3Du) * 512.0,
+        );
+        sum = sum + noise3d(coord * frequency * safe_scale + offset) * amplitude;
         total = total + amplitude;
         amplitude = amplitude * 0.5;
         frequency = frequency * 2.0;
@@ -1771,6 +1831,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // For each part, sum contributions from all enablers (flag is_inhibitor reused) within 40 units.
     // Linear falloff: 1 at distance 0, 0 at >=40. Cap total at 1.0.
     var amplification_per_part: array<f32, MAX_BODY_PARTS>;
+    var propeller_thrust_magnitude: array<f32, MAX_BODY_PARTS>; // Store thrust for cost calculation
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part_i = agents_out[agent_id].body[i];
         var amp = 0.0;
@@ -1785,6 +1846,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         amplification_per_part[i] = min(amp, 1.0);
+        propeller_thrust_magnitude[i] = 0.0; // Initialize
     }
     
     // ====== SIGNAL PROPAGATION ======
@@ -1843,7 +1905,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Sensors: stochastic gaussian sampling with 50% smoothing
         // Sample radius based on part size (larger radius for better field integration)
-        let sensor_radius = 200.0;
+        let sensor_radius = 100.0;
         
         // Calculate sensor perpendicular orientation (pointing direction)
         var segment_dir = vec2<f32>(0.0);
@@ -1871,8 +1933,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, perpendicular_world);
             // Apply sqrt to increase sensitivity to low signals (0.01 -> 0.1, 0.25 -> 0.5, 1.0 -> 1.0)
             let nonlinear_value = sqrt(clamp(sensed_value, 0.0, 1.0));
-            // 50% contribution: blend with current value for smoothing
-            new_alpha = mix(new_alpha, nonlinear_value, 0.5);
+            // Add sensor contribution to diffused signal (instead of mixing)
+            new_alpha = new_alpha + nonlinear_value;
         }
         if (amino_props.is_beta_sensor) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
@@ -1881,8 +1943,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, perpendicular_world);
             // Apply sqrt to increase sensitivity to low signals (0.01 -> 0.1, 0.25 -> 0.5, 1.0 -> 1.0)
             let nonlinear_value = sqrt(clamp(sensed_value, 0.0, 1.0));
-            // 50% contribution: blend with current value for smoothing
-            new_beta = mix(new_beta, nonlinear_value, 0.5);
+            // Add sensor contribution to diffused signal (instead of mixing)
+            new_beta = new_beta + nonlinear_value;
         }
 
     // Energy sensor contribution rate (now 1.0 as requested)
@@ -2090,8 +2152,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             if (PROPELLERS_ENABLED) {
-                // Propeller strength scaled by amplification (enabler effect)
-                let propeller_strength = amino_props.thrust_force * 3 * amplification; // 2x power
+                // Propeller strength scaled by quadratic amplification (enabler effect)
+                // Squaring amplification makes thrust grow sharply only when enablers are very close
+                // amp=0.5 -> thrust multiplier = 0.25, amp=0.8 -> 0.64, amp=1.0 -> 1.0
+                let quadratic_amp = amplification * amplification;
+                let propeller_strength = amino_props.thrust_force * 3 * quadratic_amp;
+                propeller_thrust_magnitude[i] = propeller_strength; // Store for cost calculation
                 let thrust_force = thrust_dir_world * propeller_strength;
                 force += thrust_force;
                 // Torque from lever arm r_com cross thrust (scaled down to reduce perpetual spinning)
@@ -2274,13 +2340,29 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
         let props = get_amino_acid_properties(part.part_type);
-        // Mouths no longer use amplification, only propellers and displacers
-        let amp = select(0.0, amplification_per_part[i], (props.is_propeller || props.is_displacer));
         // Minimum baseline cost per amino acid (always paid)
         let baseline = params.amino_maintenance_cost;
-        // Amplified organ extra cost (if organ); keep previous scaling
-        // Mouths now have fixed energy cost (no amplification bonus)
-        let organ_extra = select(props.energy_consumption * amp * 1.5, props.energy_consumption, props.is_mouth);
+        // Organ-specific energy costs
+        var organ_extra = 0.0;
+        if (props.is_mouth) {
+            organ_extra = props.energy_consumption;
+        } else if (props.is_propeller) {
+            // Propellers: base cost (always paid) + activity cost (linear with thrust)
+            // Since thrust already scales quadratically with amp, cost should scale linearly with thrust
+            let base_thrust = props.thrust_force * 3.0; // Max thrust with amp=1
+            let thrust_ratio = propeller_thrust_magnitude[i] / base_thrust;
+            let activity_cost = props.energy_consumption * thrust_ratio * 1.5;
+            organ_extra = props.energy_consumption + activity_cost; // Base + activity
+        } else if (props.is_displacer) {
+            // Displacers: base cost (always paid) + activity cost (from amplification)
+            let amp = amplification_per_part[i];
+            let activity_cost = props.energy_consumption * amp * amp * 1.5;
+            organ_extra = props.energy_consumption + activity_cost; // Base + activity
+        } else {
+            // Other organs use linear amplification scaling
+            let amp = amplification_per_part[i];
+            organ_extra = props.energy_consumption * amp * 1.5;
+        }
         energy_consumption += baseline + organ_extra;
     }
 
@@ -2314,8 +2396,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part = agents_out[agent_id].body[i];
         let amino_props = get_amino_acid_properties(part.part_type);
         if (amino_props.is_mouth) {
-            // Mouths benefit from enabler amplification (same as other organs)
-            let amplification_mouth = amplification_per_part[i];
+            // Mouths do not use enabler amplification
             
             let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
             let world_pos = agent.position + rotated_pos;
@@ -2327,9 +2408,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let available_beta = beta_grid[idx];
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
-            // Apply speed and enabler effects to the rates themselves
-            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier * amplification_mouth;
-            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier*amplification_mouth;
+            // Apply speed effects to the rates themselves
+            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier;
+            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
@@ -3503,25 +3584,32 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Beta grid constrained to 0..1
     var final_beta = clamp(new_beta - beta_flux * kernel_scale, 0.0, 1.0);
     
-    // Stochastic rain - randomly add food/poison droplets instead of multipliers
-    // Use position and random seed to generate unique random values per cell
+    // Perlin noise rain that evolves through 3D noise (time is Z axis)
+    // Time evolution: use epoch counter for deterministic animation
+    let time_factor = f32(params.epoch) * params.perlin_noise_speed;
+    
+    // Alpha rain: 3D Perlin noise evolving through time
+    let alpha_noise_coord = vec3<f32>(f32(x) / params.grid_size, f32(y) / params.grid_size, time_factor) * params.perlin_noise_scale;
+    let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, 50.0, 1.2);
+    let alpha_probability = params.alpha_multiplier * 0.05 * alpha_perlin;
+    
+    // Beta rain: Independent 3D Perlin noise with different seed
+    let beta_noise_coord = vec3<f32>(f32(x) / params.grid_size, f32(y) / params.grid_size, time_factor) * params.perlin_noise_scale;
+    let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, 50.0, 1.2);
+    let beta_probability = params.beta_multiplier * 0.05 * beta_perlin;
+    
+    // Stochastic sampling: compare against hash-based random value
     let cell_seed = idx * 2654435761u + params.random_seed;
     let rain_chance = f32(hash(cell_seed)) / 4294967295.0;
-    // Uniform alpha rain (food): remove spatial and beta-dependent gradients.
-    // Each cell independently receives a saturated rain event with probability alpha_multiplier * 0.05.
-    // (Scaling by 0.05 preserves prior expected value semantics.)
-    let alpha_rain_factor = clamp(rain_map[idx].x, 0.0, 1.0);
-    let alpha_probability_sat = params.alpha_multiplier * 0.05 * alpha_rain_factor;
-    if (rain_chance < alpha_probability_sat) {
+    
+    if (rain_chance < alpha_probability) {
         final_alpha = 1.0;
     }
 
-    // Uniform beta rain (poison): also no vertical gradient. Probability = beta_multiplier * 0.05.
+    // Beta uses different hash offset for independence
     let beta_seed = cell_seed * 1103515245u;
     let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
-    let beta_rain_factor = clamp(rain_map[idx].y, 0.0, 1.0);
-    let beta_probability_sat = params.beta_multiplier * 0.05 * beta_rain_factor;
-    if (beta_rain_chance < beta_probability_sat) {
+    if (beta_rain_chance < beta_probability) {
         final_beta = 1.0;
     }
     
@@ -3717,6 +3805,23 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             let green = slope.y * 100.0 + 0.5;
             base_color = vec3<f32>(red, green, 0.0);
         }
+    } else if (params.debug_mode == 2u) {
+        // Rain probability visualization mode
+        // Show 3D Perlin noise patterns for alpha and beta rain
+        let time_factor = f32(params.epoch) * params.perlin_noise_speed;
+        
+        // Calculate alpha rain probability (green channel)
+        let alpha_noise_coord = vec3<f32>(world_pos.x / params.grid_size, world_pos.y / params.grid_size, time_factor) * params.perlin_noise_scale;
+        let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, 50.0, 1.2);
+        let alpha_probability = clamp(alpha_perlin, 0.0, 1.0);
+        
+        // Calculate beta rain probability (red channel)
+        let beta_noise_coord = vec3<f32>(world_pos.x / params.grid_size, world_pos.y / params.grid_size, time_factor) * params.perlin_noise_scale;
+        let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, 50.0, 1.2);
+        let beta_probability = clamp(beta_perlin, 0.0, 1.0);
+        
+        // Visualize: green for alpha (food), red for beta (poison), yellow for overlap
+        base_color = vec3<f32>(beta_probability, alpha_probability, 0.0);
     } else {
         // New visualization system: composite channels with blend modes
         

@@ -803,7 +803,9 @@ struct SimParams {
     agent_color_g: f32,
     agent_color_b: f32,
     agent_color_blend: f32,   // Blend factor: 0.0=amino only, 1.0=agent only
-    _padding: [f32; 3],  // Ensure 16-byte alignment
+    epoch: u32,               // Current simulation epoch for time-based effects
+    perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
+    perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
 }
 
 #[repr(C)]
@@ -921,6 +923,9 @@ struct SimulationSettings {
     render_interval: u32,
     gamma_debug_visual: bool,
     slope_debug_visual: bool,
+    rain_debug_visual: bool,  // Visualization mode for Perlin rain patterns
+    perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
+    perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
     gamma_hidden: bool,
     debug_per_segment: bool,
     gamma_vis_min: f32,
@@ -999,6 +1004,9 @@ impl Default for SimulationSettings {
             render_interval: 100, // Draw every 100 steps in fast mode
             gamma_debug_visual: false,
             slope_debug_visual: false,
+            rain_debug_visual: false,
+            perlin_noise_scale: 0.5,    // Bigger patterns (lower scale)
+            perlin_noise_speed: 0.00005, // Slower evolution
             gamma_hidden: false,
             debug_per_segment: false,
             gamma_vis_min: 0.0,
@@ -1395,6 +1403,9 @@ struct GpuState {
     repulsion_strength: f32,
     gamma_debug_visual: bool,
     slope_debug_visual: bool,
+    rain_debug_visual: bool,
+    perlin_noise_scale: f32,
+    perlin_noise_speed: f32,
     prop_wash_strength: f32,
     gamma_hidden: bool,
     gamma_vis_min: f32,
@@ -1472,6 +1483,9 @@ impl GpuState {
             render_interval: self.render_interval,
             gamma_debug_visual: self.gamma_debug_visual,
             slope_debug_visual: self.slope_debug_visual,
+            rain_debug_visual: self.rain_debug_visual,
+            perlin_noise_scale: self.perlin_noise_scale,
+            perlin_noise_speed: self.perlin_noise_speed,
             gamma_hidden: self.gamma_hidden,
             debug_per_segment: self.debug_per_segment,
             gamma_vis_min: self.gamma_vis_min,
@@ -2066,7 +2080,9 @@ impl GpuState {
             agent_color_g: 1.0,
             agent_color_b: 1.0,
             agent_color_blend: 0.0,
-            _padding: [0.0, 0.0, 0.0],
+            epoch: 0,
+            perlin_noise_scale: 0.5,
+            perlin_noise_speed: 0.00005,
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3097,6 +3113,9 @@ impl GpuState {
             repulsion_strength: settings.repulsion_strength,
             gamma_debug_visual: settings.gamma_debug_visual,
             slope_debug_visual: settings.slope_debug_visual,
+            rain_debug_visual: settings.rain_debug_visual,
+            perlin_noise_scale: settings.perlin_noise_scale,
+            perlin_noise_speed: settings.perlin_noise_speed,
             prop_wash_strength: settings.prop_wash_strength,
             gamma_hidden: settings.gamma_hidden,
             gamma_vis_min: settings.gamma_vis_min,
@@ -3730,6 +3749,9 @@ impl GpuState {
             render_interval: self.render_interval,
             gamma_debug_visual: self.gamma_debug_visual,
             slope_debug_visual: self.slope_debug_visual,
+            rain_debug_visual: self.rain_debug_visual,
+            perlin_noise_scale: self.perlin_noise_scale,
+            perlin_noise_speed: self.perlin_noise_speed,
             gamma_hidden: self.gamma_hidden,
             debug_per_segment: self.debug_per_segment,
             gamma_vis_min: self.gamma_vis_min,
@@ -4262,7 +4284,13 @@ impl GpuState {
             cpu_spawn_count,
             agent_count: self.agent_count,
             random_seed: (self.rng_state >> 32) as u32,
-            debug_mode: if self.debug_per_segment { 1 } else { 0 },
+            debug_mode: if self.rain_debug_visual {
+                2
+            } else if self.debug_per_segment {
+                1
+            } else {
+                0
+            },
             visual_stride: self.visual_stride_pixels,
             selected_agent_index: self
                 .selected_agent_index
@@ -4320,7 +4348,9 @@ impl GpuState {
             agent_color_g: self.agent_color[1],
             agent_color_b: self.agent_color[2],
             agent_color_blend: self.agent_color_blend,
-            _padding: [0.0, 0.0, 0.0],
+            epoch: self.epoch as u32,
+            perlin_noise_scale: self.perlin_noise_scale,
+            perlin_noise_speed: self.perlin_noise_speed,
         };
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
@@ -6312,6 +6342,9 @@ fn main() {
                                                                         render_interval: state.render_interval,
                                                                         gamma_debug_visual: state.gamma_debug_visual,
                                                                         slope_debug_visual: state.slope_debug_visual,
+                                                                        rain_debug_visual: state.rain_debug_visual,
+                                                                        perlin_noise_scale: state.perlin_noise_scale,
+                                                                        perlin_noise_speed: state.perlin_noise_speed,
                                                                         gamma_hidden: state.gamma_hidden,
                                                                         debug_per_segment: state.debug_per_segment,
                                                                         gamma_vis_min: state.gamma_vis_min,
@@ -6849,6 +6882,19 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(&mut state.alpha_multiplier, 0.0..=0.001)
                                                                 .text("Rain Probability"),
+                                                        );
+                                                        ui.checkbox(&mut state.rain_debug_visual, "🎨 Show Perlin Rain Pattern");
+                                                        if state.rain_debug_visual {
+                                                            ui.label("🟢 Green = Alpha (food) | 🔴 Red = Beta (poison)");
+                                                        }
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.perlin_noise_scale, 0.1..=2.0)
+                                                                .text("Perlin Scale (lower = bigger)"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.perlin_noise_speed, 0.00001..=0.001)
+                                                                .logarithmic(true)
+                                                                .text("Perlin Speed (lower = slower)"),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(
