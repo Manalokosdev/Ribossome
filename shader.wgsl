@@ -174,6 +174,8 @@ struct SimParams {
     epoch: u32,               // Current simulation epoch for time-based effects
     perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
     perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
+    perlin_noise_contrast: f32,  // Contrast of Perlin noise (higher = sharper)
+    _padding: f32,
 }
 
 struct EnvironmentInitParams {
@@ -1143,20 +1145,20 @@ fn noise2d(p: vec2<f32>) -> f32 {
 fn noise3d(p: vec3<f32>) -> f32 {
     let i = floor(p);
     let f = fract(p);
-    
+
     // Smooth interpolation
     let u = f * f * (3.0 - 2.0 * f);
-    
-    // Hash corners of the cube
-    let h000 = hash_f32(u32(i.x) + u32(i.y) * 57u + u32(i.z) * 113u);
-    let h100 = hash_f32(u32(i.x + 1.0) + u32(i.y) * 57u + u32(i.z) * 113u);
-    let h010 = hash_f32(u32(i.x) + u32(i.y + 1.0) * 57u + u32(i.z) * 113u);
-    let h110 = hash_f32(u32(i.x + 1.0) + u32(i.y + 1.0) * 57u + u32(i.z) * 113u);
-    let h001 = hash_f32(u32(i.x) + u32(i.y) * 57u + u32(i.z + 1.0) * 113u);
-    let h101 = hash_f32(u32(i.x + 1.0) + u32(i.y) * 57u + u32(i.z + 1.0) * 113u);
-    let h011 = hash_f32(u32(i.x) + u32(i.y + 1.0) * 57u + u32(i.z + 1.0) * 113u);
-    let h111 = hash_f32(u32(i.x + 1.0) + u32(i.y + 1.0) * 57u + u32(i.z + 1.0) * 113u);
-    
+
+    // Hash corners of the cube with fully 3D mixing to avoid simple XY shifts
+    let h000 = hash_f32(u32(i.x) * 73856093u ^ u32(i.y) * 19349663u ^ u32(i.z) * 83492791u);
+    let h100 = hash_f32(u32(i.x + 1.0) * 73856093u ^ u32(i.y) * 19349663u ^ u32(i.z) * 83492791u);
+    let h010 = hash_f32(u32(i.x) * 73856093u ^ u32(i.y + 1.0) * 19349663u ^ u32(i.z) * 83492791u);
+    let h110 = hash_f32(u32(i.x + 1.0) * 73856093u ^ u32(i.y + 1.0) * 19349663u ^ u32(i.z) * 83492791u);
+    let h001 = hash_f32(u32(i.x) * 73856093u ^ u32(i.y) * 19349663u ^ u32(i.z + 1.0) * 83492791u);
+    let h101 = hash_f32(u32(i.x + 1.0) * 73856093u ^ u32(i.y) * 19349663u ^ u32(i.z + 1.0) * 83492791u);
+    let h011 = hash_f32(u32(i.x) * 73856093u ^ u32(i.y + 1.0) * 19349663u ^ u32(i.z + 1.0) * 83492791u);
+    let h111 = hash_f32(u32(i.x + 1.0) * 73856093u ^ u32(i.y + 1.0) * 19349663u ^ u32(i.z + 1.0) * 83492791u);
+
     // Trilinear interpolation
     let x00 = mix(h000, h100, u.x);
     let x10 = mix(h010, h110, u.x);
@@ -3586,16 +3588,21 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     // Perlin noise rain that evolves through 3D noise (time is Z axis)
     // Time evolution: use epoch counter for deterministic animation
-    let time_factor = f32(params.epoch) * params.perlin_noise_speed;
-    
+    let base_time = f32(params.epoch) * params.perlin_noise_speed;
+
     // Alpha rain: 3D Perlin noise evolving through time
-    let alpha_noise_coord = vec3<f32>(f32(x) / params.grid_size, f32(y) / params.grid_size, time_factor) * params.perlin_noise_scale;
-    let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, 50.0, 1.2);
+    // Use grid coordinates normalized to 0..1 for consistency with visualization
+    let grid_coord_norm = vec2<f32>(f32(x), f32(y)) / params.grid_size;
+    let alpha_time = base_time + 1000.0; // Offset alpha time evolution
+    // Scale is applied via perlin_noise_scale: lower = bigger features
+    let alpha_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, alpha_time);
+    let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
     let alpha_probability = params.alpha_multiplier * 0.05 * alpha_perlin;
-    
-    // Beta rain: Independent 3D Perlin noise with different seed
-    let beta_noise_coord = vec3<f32>(f32(x) / params.grid_size, f32(y) / params.grid_size, time_factor) * params.perlin_noise_scale;
-    let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, 50.0, 1.2);
+
+    // Beta rain: Independent 3D Perlin noise with different seed and time offset
+    let beta_time = base_time + 5000.0; // Different time offset for independent evolution
+    let beta_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, beta_time);
+    let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
     let beta_probability = params.beta_multiplier * 0.05 * beta_perlin;
     
     // Stochastic sampling: compare against hash-based random value
@@ -3807,19 +3814,24 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     } else if (params.debug_mode == 2u) {
         // Rain probability visualization mode
-        // Show 3D Perlin noise patterns for alpha and beta rain
-        let time_factor = f32(params.epoch) * params.perlin_noise_speed;
-        
-        // Calculate alpha rain probability (green channel)
-        let alpha_noise_coord = vec3<f32>(world_pos.x / params.grid_size, world_pos.y / params.grid_size, time_factor) * params.perlin_noise_scale;
-        let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, 50.0, 1.2);
-        let alpha_probability = clamp(alpha_perlin, 0.0, 1.0);
-        
-        // Calculate beta rain probability (red channel)
-        let beta_noise_coord = vec3<f32>(world_pos.x / params.grid_size, world_pos.y / params.grid_size, time_factor) * params.perlin_noise_scale;
-        let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, 50.0, 1.2);
-        let beta_probability = clamp(beta_perlin, 0.0, 1.0);
-        
+        // Show the same alpha/beta rain PROBABILITIES that the compute pass uses
+        let base_time = f32(params.epoch) * params.perlin_noise_speed;
+
+        // Use grid coordinates for consistency with actual deposit calculation
+        let grid_coord_norm = vec2<f32>(world_pos.x, world_pos.y) / params.grid_size;
+
+        // Alpha noise and probability
+        let alpha_time = base_time + 1000.0; // Match deposit time offset
+        let alpha_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, alpha_time);
+        let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
+        let alpha_probability = clamp(params.alpha_multiplier * 0.05 * alpha_perlin, 0.0, 1.0);
+
+        // Beta noise and probability
+        let beta_time = base_time + 5000.0; // Match deposit time offset
+        let beta_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, beta_time);
+        let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
+        let beta_probability = clamp(params.beta_multiplier * 0.05 * beta_perlin, 0.0, 1.0);
+
         // Visualize: green for alpha (food), red for beta (poison), yellow for overlap
         base_color = vec3<f32>(beta_probability, alpha_probability, 0.0);
     } else {
