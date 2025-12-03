@@ -671,10 +671,22 @@ fn load_agent_via_dialog() -> anyhow::Result<[u32; GENOME_WORDS]> {
 struct BodyPart {
     pos: [f32; 2],
     size: f32,
-    part_type: u32,
+    part_type: u32,  // Encoded: bits 0-7 = base type (amino acid or organ), bits 8-15 = organ parameter
     alpha_signal: f32,
     beta_signal: f32,
     pad: [f32; 2],
+}
+
+impl BodyPart {
+    /// Extract base type from encoded part_type (0-19 for amino acids, 20+ for organs)
+    fn base_type(&self) -> u32 {
+        self.part_type & 0xFF
+    }
+    
+    /// Extract organ parameter from encoded part_type (0-255)
+    fn organ_param(&self) -> u32 {
+        (self.part_type >> 8) & 0xFF
+    }
 }
 
 #[repr(C, align(16))]
@@ -7492,7 +7504,7 @@ fn main() {
 
                                             // Check for mouth (Methionine = amino type 10)
                                             let has_mouth = (0..agent_data.body_count.min(MAX_BODY_PARTS as u32) as usize).any(|i| {
-                                                let idx = agent_data.body[i].part_type as usize;
+                                                let idx = agent_data.body[i].base_type() as usize;
                                                 AMINO_FLAGS
                                                     .get(idx)
                                                     .copied()
@@ -7625,11 +7637,11 @@ fn main() {
                                                     .enumerate()
                                                 {
                                                     let flags = AMINO_FLAGS
-                                                        .get(part.part_type as usize)
+                                                        .get(part.base_type() as usize)
                                                         .copied()
                                                         .unwrap_or(DEFAULT_AMINO_FLAGS);
                                                     let raw_color = AMINO_COLORS
-                                                        .get(part.part_type as usize)
+                                                        .get(part.base_type() as usize)
                                                         .copied()
                                                         .unwrap_or(DEFAULT_PART_COLOR);
                                                     let part_color = rgb_to_color32(raw_color);
@@ -7748,7 +7760,7 @@ fn main() {
                                                     };
                                                     let axis_local = normalize_vec2(neighbor_axis());
 
-                                                    if part.part_type as usize == 9 {
+                                                    if part.base_type() as usize == 9 {
                                                         let perp = egui::Vec2::new(-axis_local.y, axis_local.x);
                                                         let perp_screen = to_screen_vec(perp);
                                                         let half_length = part.size * 0.8;
@@ -8188,7 +8200,7 @@ fn main() {
                                                 let safe_body_count = agent_data.body_count.min(MAX_BODY_PARTS as u32) as usize;
                                                 for i in 0..safe_body_count {
                                                     has_parts = true;
-                                                    let t = agent_data.body[i].part_type as usize;
+                                                    let t = agent_data.body[i].base_type() as usize;
                                                     let name = if t < amino_names.len() { amino_names[t] } else { "?" };
 
                                                     // Get signal values for this body part

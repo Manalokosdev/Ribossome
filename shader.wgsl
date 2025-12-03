@@ -44,10 +44,35 @@ const PROP_TORQUE_COUPLING: f32 = 1; // 0=no spin from props, 1=full lever-arm t
 struct BodyPart {
     pos: vec2<f32>,           // relative position from agent center
     size: f32,                // radius
-    part_type: u32,           // encoded amino acid type
+    part_type: u32,           // encoded: bits 0-7 = base type (amino acid or organ), bits 8-15 = organ parameter
     alpha_signal: f32,        // alpha signal propagating through body
     beta_signal: f32,         // beta signal propagating through body
-    _pad: vec2<f32>,
+    _pad: vec2<f32>,          // _pad.x = smoothed signal angle OR alpha condenser charge
+                              // _pad.y = beta condenser charge
+}
+
+// ============================================================================
+// BODY PART ENCODING HELPERS
+// ============================================================================
+
+// Extract base type from encoded part_type (0-19 for amino acids, 20+ for organs)
+fn get_base_part_type(part_type: u32) -> u32 {
+    return part_type & 0xFFu;
+}
+
+// Extract organ parameter from encoded part_type (0-255)
+fn get_organ_param(part_type: u32) -> u32 {
+    return (part_type >> 8u) & 0xFFu;
+}
+
+// Encode base type and organ parameter into single u32
+fn encode_part_type(base_type: u32, organ_param: u32) -> u32 {
+    return (base_type & 0xFFu) | ((organ_param & 0xFFu) << 8u);
+}
+
+// Convert organ parameter (0-255) to strength multiplier (0.0-2.0)
+fn organ_param_to_strength(param: u32) -> f32 {
+    return f32(param) / 127.5;  // 0 -> 0.0, 127 -> ~1.0, 255 -> 2.0
 }
 
 struct Agent {
@@ -1676,7 +1701,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Count poison-resistant amino acids (E = Glutamic Acid, amino index 3) for angle modulation
         var poison_resistant_count = 0u;
         for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
-            if (agents_out[agent_id].body[i].part_type == 3u) { // Glutamic Acid
+            if (get_base_part_type(agents_out[agent_id].body[i].part_type) == 3u) { // Glutamic Acid
                 poison_resistant_count += 1u;
             }
         }
@@ -1775,7 +1800,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (rec_n > 0u) {
             var mass_sum = 0.0;
             for (var i = 0u; i < min(rec_n, MAX_BODY_PARTS); i++) {
-                let part_type = agents_out[agent_id].body[i].part_type;
+                let part_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
                 let props = get_amino_acid_properties(part_type);
                 let m = max(props.mass, 0.01);
                 com += agents_out[agent_id].body[i].pos * m;
@@ -1839,7 +1864,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         var amp = 0.0;
         for (var j = 0u; j < min(body_count, MAX_BODY_PARTS); j++) {
             let other = agents_out[agent_id].body[j];
-            let other_props = get_amino_acid_properties(other.part_type);
+            let other_props = get_amino_acid_properties(get_base_part_type(other.part_type));
             if (other_props.is_inhibitor) { // enabler role
                 let d = length(part_i.pos - other.pos);
                 if (d < 40.0) {
@@ -1858,7 +1883,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Count poison-resistant amino acids (E = Glutamic Acid, amino index 3) for metabolism effects
     var poison_resistant_count = 0u;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        if (agents_out[agent_id].body[i].part_type == 3u) { // Glutamic Acid
+        if (get_base_part_type(agents_out[agent_id].body[i].part_type) == 3u) { // Glutamic Acid
             poison_resistant_count += 1u;
         }
     }
@@ -1983,7 +2008,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let morphology_origin = agents_out[agent_id].morphology_origin;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
-        let part_props = get_amino_acid_properties(part.part_type);
+        let part_props = get_amino_acid_properties(get_base_part_type(part.part_type));
         let mass = max(part_props.mass, 0.01);
         total_mass += mass;
         
@@ -2008,7 +2033,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var color_sum = 0.0;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
-        let part_props = get_amino_acid_properties(part.part_type);
+        let part_props = get_amino_acid_properties(get_base_part_type(part.part_type));
         color_sum += part_props.beta_damage;
     }
     // Apply sine waves with different multipliers to generate RGB channels
@@ -2030,10 +2055,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part = agents_out[agent_id].body[i];
         
         // Get amino acid properties
-        let amino_props = get_amino_acid_properties(part.part_type);
+        let base_type = get_base_part_type(part.part_type);
+        let amino_props = get_amino_acid_properties(base_type);
         
         // Check if this part is Leucine (index 9) and flip chirality
-        if (part.part_type == 9u) {
+        if (base_type == 9u) {
             chirality_flip_physics = -chirality_flip_physics;
         }
         
@@ -2285,7 +2311,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var moment_of_inertia = 0.0;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
-        let props = get_amino_acid_properties(part.part_type);
+        let props = get_amino_acid_properties(get_base_part_type(part.part_type));
         let mass = max(props.mass, 0.01);
         
         // Calculate segment midpoint
@@ -2341,7 +2367,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var energy_consumption = params.energy_cost; // base maintenance (can be 0)
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
-        let props = get_amino_acid_properties(part.part_type);
+        let props = get_amino_acid_properties(get_base_part_type(part.part_type));
         // Minimum baseline cost per amino acid (always paid)
         let baseline = params.amino_maintenance_cost;
         // Organ-specific energy costs
@@ -2396,7 +2422,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
-        let amino_props = get_amino_acid_properties(part.part_type);
+        let amino_props = get_amino_acid_properties(get_base_part_type(part.part_type));
         if (amino_props.is_mouth) {
             // Get enabler amplification for this mouth
             let amplification = amplification_per_part[i];
@@ -2860,7 +2886,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // For segments: draw from the START of each segment (previous endpoint or origin) to its END (current part pos)
             for (var i = 0u; i < min(agents_out[agent_id].body_count, MAX_BODY_PARTS); i++) {
                 let part = agents_out[agent_id].body[i];
-                let amino_props = get_amino_acid_properties(part.part_type);
+                let amino_props = get_amino_acid_properties(get_base_part_type(part.part_type));
                 let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
                 let world_pos = center + rotated_pos;
 
@@ -2906,7 +2932,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             
             // Special rendering for Leucine (chiral flipper) - draw as perpendicular segment
-            if (part.part_type == 9u) {
+            if (get_base_part_type(part.part_type) == 9u) {
                 // Calculate segment direction
                 var segment_dir = vec2<f32>(0.0);
                 if (i > 0u) {
