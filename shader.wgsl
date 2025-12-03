@@ -2398,7 +2398,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part = agents_out[agent_id].body[i];
         let amino_props = get_amino_acid_properties(part.part_type);
         if (amino_props.is_mouth) {
-            // Mouths do not use enabler amplification
+            // Get enabler amplification for this mouth
+            let amplification = amplification_per_part[i];
             
             let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
             let world_pos = agent.position + rotated_pos;
@@ -2410,9 +2411,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let available_beta = beta_grid[idx];
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
-            // Apply speed effects to the rates themselves
-            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier;
-            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier;
+            // Apply speed effects and amplification to the rates themselves
+            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier * amplification;
+            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier * amplification;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
@@ -2562,7 +2563,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let spawn_index = atomicAdd(&spawn_counter, 1u);
             if (spawn_index < 2000u) {
                 // Generate hash for offspring randomization
-                let offspring_hash = (hash3 ^ (spawn_index * 0x9e3779b9u)) * 1664525u + 1013904223u;
+                // CRITICAL: Include agent_id to ensure each parent's offspring gets unique mutations
+                let offspring_hash = (hash3 ^ (spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu)) * 1664525u + 1013904223u;
                 
                 // Create brand new offspring agent (don't copy parent)
                 var offspring: Agent;
