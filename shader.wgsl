@@ -1618,6 +1618,215 @@ fn genome_revcomp_word(parent: array<u32, GENOME_WORDS>, wi: u32) -> u32 {
 }
 
 // ============================================================================
+// PART RENDERING FUNCTION
+// ============================================================================
+
+// Render a single body part with all its visual elements
+fn render_body_part(
+    part: BodyPart,
+    part_index: u32,
+    agent_id: u32,
+    agent_position: vec2<f32>,
+    agent_rotation: f32,
+    agent_energy: f32,
+    agent_color: vec3<f32>,
+    body_count: u32,
+    morphology_origin: vec2<f32>,
+    amplification: f32,
+    in_debug_mode: bool
+) {
+    let base_type = get_base_part_type(part.part_type);
+    let amino_props = get_amino_acid_properties(base_type);
+    let rotated_pos = apply_agent_rotation(part.pos, agent_rotation);
+    let world_pos = agent_position + rotated_pos;
+    
+    // Determine segment start position
+    var segment_start_world = agent_position + apply_agent_rotation(morphology_origin, agent_rotation);
+    if (part_index > 0u) {
+        let prev_part = agents_out[agent_id].body[part_index - 1u];
+        let prev_rotated = apply_agent_rotation(prev_part.pos, agent_rotation);
+        segment_start_world = agent_position + prev_rotated;
+    }
+    
+    let is_first = part_index == 0u;
+    let is_last = part_index == body_count - 1u;
+    let is_single = body_count == 1u;
+    
+    // 1. STRUCTURAL RENDERING: Base segment line
+    if (!in_debug_mode) {
+        let thickness = part.size * 0.5;
+        let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
+        draw_thick_line(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0));
+        if (!is_single && (is_first || is_last)) {
+            draw_filled_circle(world_pos, thickness, vec4<f32>(blended_color, 1.0));
+        }
+    }
+    
+    // 2. DEBUG MODE RENDERING: Signal visualization
+    if (in_debug_mode) {
+        let a = part.alpha_signal;
+        let b = part.beta_signal;
+        let r = max(b, 0.0);
+        let g = max(a, 0.0);
+        let bl = max(max(-a, 0.0), max(-b, 0.0));
+        let dbg_color = vec4<f32>(r, g, bl, 1.0);
+        let thickness_dbg = max(part.size * 0.25, 0.5);
+        draw_thick_line(segment_start_world, world_pos, thickness_dbg, dbg_color);
+        if (!is_single && (is_first || is_last)) {
+            draw_filled_circle(world_pos, thickness_dbg, dbg_color);
+        }
+        draw_filled_circle(world_pos, 1.5, dbg_color);
+    }
+    
+    // 3. SPECIAL STRUCTURAL: Leucine (chirality flipper) - perpendicular bar
+    if (base_type == 9u) {
+        var segment_dir = vec2<f32>(0.0);
+        if (part_index > 0u) {
+            let prev = agents_out[agent_id].body[part_index-1u].pos;
+            segment_dir = part.pos - prev;
+        } else if (body_count > 1u) {
+            let next = agents_out[agent_id].body[1u].pos;
+            segment_dir = next - part.pos;
+        } else {
+            segment_dir = vec2<f32>(1.0, 0.0);
+        }
+        let seg_len = length(segment_dir);
+        let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
+        let perp_local = vec2<f32>(-axis_local.y, axis_local.x);
+        let perp_world = apply_agent_rotation(perp_local, agent_rotation);
+        
+        let half_length = part.size * 0.8;
+        let p1 = world_pos - perp_world * half_length;
+        let p2 = world_pos + perp_world * half_length;
+        let perp_thickness = part.size * 0.3;
+        let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
+        draw_thick_line(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0));
+    }
+    
+    // 4. ORGAN: Condenser (charge storage/discharge)
+    if (amino_props.is_condenser) {
+        let signed_alpha_charge = part._pad.x;
+        let signed_beta_charge = part._pad.y;
+        let alpha_charge = clamp(abs(signed_alpha_charge), 0.0, 10.0);
+        let beta_charge = clamp(abs(signed_beta_charge), 0.0, 10.0);
+        let alpha_ratio = clamp(alpha_charge / 10.0, 0.0, 1.0);
+        let beta_ratio = clamp(beta_charge / 10.0, 0.0, 1.0);
+        let is_alpha_discharging = (signed_alpha_charge > 0.0);
+        let is_beta_discharging = (signed_beta_charge > 0.0);
+        
+        let radius = max(part.size * 0.5, 3.0);
+        
+        var fill_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        if (is_alpha_discharging || is_beta_discharging) {
+            fill_color = vec4<f32>(1.0, 1.0, 1.0, 1.0); // White flash
+        } else {
+            let red_component = beta_ratio;
+            let green_component = alpha_ratio;
+            let charge_ratio = max(alpha_ratio, beta_ratio);
+            let low_tint = vec3<f32>(red_component, green_component, 0.0) * 0.25;
+            let base_tint = vec3<f32>(red_component, green_component, 0.0);
+            let fill_rgb = mix(low_tint, base_tint, charge_ratio);
+            fill_color = vec4<f32>(fill_rgb, 1.0);
+        }
+        
+        // Fill circle
+        let fill_segments = 32u;
+        for (var s = 0u; s < fill_segments; s++) {
+            let ang1 = f32(s) / f32(fill_segments) * 6.28318530718;
+            let ang2 = f32(s + 1u) / f32(fill_segments) * 6.28318530718;
+            let p1 = world_pos + vec2<f32>(cos(ang1) * radius, sin(ang1) * radius);
+            let p2 = world_pos + vec2<f32>(cos(ang2) * radius, sin(ang2) * radius);
+            draw_thick_line(world_pos, p1, radius * 0.5, fill_color);
+            draw_thick_line(p1, p2, 1.0, fill_color);
+        }
+        
+        // White outline
+        let segments = 24u;
+        var prev = world_pos + vec2<f32>(radius, 0.0);
+        for (var s = 1u; s <= segments; s++) {
+            let t = f32(s) / f32(segments);
+            let ang = t * 6.28318530718;
+            let p = world_pos + vec2<f32>(cos(ang) * radius, sin(ang) * radius);
+            draw_thick_line(prev, p, 0.5, vec4<f32>(1.0, 1.0, 1.0, 1.0));
+            prev = p;
+        }
+    }
+    
+    // 5. ORGAN: Enabler field visualization (debug only)
+    if (amino_props.is_inhibitor && params.camera_zoom > 5.0 && params.debug_mode > 0u) {
+        let radius = 20.0;
+        let segments = 32u;
+        let zoom = params.camera_zoom;
+        let fade = clamp((zoom - 5.0) / 10.0, 0.0, 1.0);
+        let alpha = 0.02 * fade;
+        let color = vec4<f32>(0.15, 0.2, 0.15, alpha);
+        var prev = world_pos + vec2<f32>(radius, 0.0);
+        for (var s = 1u; s <= segments; s++) {
+            let t = f32(s) / f32(segments);
+            let ang = t * 6.28318530718;
+            let p = world_pos + vec2<f32>(cos(ang)*radius, sin(ang)*radius);
+            draw_thick_line(prev, p, 0.25, color);
+            prev = p;
+        }
+        let blended_color_enabler = mix(amino_props.color, agent_color, params.agent_color_blend);
+        draw_filled_circle(world_pos, 2.0, vec4<f32>(blended_color_enabler, 0.95));
+    }
+    
+    // 6. ORGAN: Propeller jet particles
+    if (PROPELLERS_ENABLED && amino_props.is_propeller && agent_energy > 0.0 && params.camera_zoom > 2.0) {
+        var segment_dir = vec2<f32>(0.0);
+        if (part_index > 0u) {
+            let prev = agents_out[agent_id].body[part_index-1u].pos;
+            segment_dir = part.pos - prev;
+        } else if (body_count > 1u) {
+            let next = agents_out[agent_id].body[1u].pos;
+            segment_dir = next - part.pos;
+        } else {
+            segment_dir = vec2<f32>(1.0, 0.0);
+        }
+        let seg_len = length(segment_dir);
+        let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
+        let axis_world = apply_agent_rotation(axis_local, agent_rotation);
+        let jet_dir = normalize(vec2<f32>(-axis_world.y, axis_world.x));
+        let exhaust_dir = -jet_dir;
+        let propeller_strength = part.size * 2.5 * amplification;
+        let zoom_factor = clamp((params.camera_zoom - 2.0) / 8.0, 0.0, 1.0);
+        let jet_length = propeller_strength * mix(0.6, 1.2, zoom_factor);
+        let jet_seed = agent_id * 1000u + part_index * 17u;
+        let particle_count = 1u + u32(round(amplification * 5.0)) + u32(round(zoom_factor * 3.0));
+        draw_particle_jet(world_pos, exhaust_dir, jet_length, jet_seed, particle_count);
+    }
+    
+    // 7. ORGAN: Sensor cloud
+    if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor || amino_props.is_energy_sensor) {
+        let sensor_radius = part.size * 2.0;
+        let sensor_seed = agent_id * 500u + part_index * 13u;
+        let blended_color_sensor = mix(amino_props.color, agent_color, params.agent_color_blend);
+        let sensor_color = vec4<f32>(blended_color_sensor * 0.6, 0.5);
+        draw_cloud(world_pos, sensor_radius, sensor_color, sensor_seed);
+    }
+    
+    // 8. ORGAN: Mouth indicator (yellow asterisk)
+    if (amino_props.is_mouth && !in_debug_mode) {
+        draw_asterisk(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0));
+    }
+    
+    // 9. ORGAN: Displacer indicator (diamond shape)
+    if (amino_props.is_displacer && !in_debug_mode) {
+        let square_size = part.size * 2.0;
+        let top = world_pos + vec2<f32>(0.0, -square_size);
+        let right = world_pos + vec2<f32>(square_size, 0.0);
+        let bottom = world_pos + vec2<f32>(0.0, square_size);
+        let left = world_pos + vec2<f32>(-square_size, 0.0);
+        let blended_color_displacer = mix(amino_props.color, agent_color, params.agent_color_blend);
+        draw_thick_line(top, right, 1.0, vec4<f32>(blended_color_displacer, 1.0));
+        draw_thick_line(right, bottom, 1.0, vec4<f32>(blended_color_displacer, 1.0));
+        draw_thick_line(bottom, left, 1.0, vec4<f32>(blended_color_displacer, 1.0));
+        draw_thick_line(left, top, 1.0, vec4<f32>(blended_color_displacer, 1.0));
+    }
+}
+
+// ============================================================================
 // UNIFIED AGENT KERNEL - Does everything in one pass
 // ============================================================================
 
@@ -2861,240 +3070,24 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Get the morphology origin (where the chain starts in local space after CoM centering)
             let morphology_origin = agents_out[agent_id].morphology_origin;
 
-            // Draw all body parts relative to this center position
-            // For segments: draw from the START of each segment (previous endpoint or origin) to its END (current part pos)
+            // Draw all body parts using unified rendering function
             for (var i = 0u; i < min(agents_out[agent_id].body_count, MAX_BODY_PARTS); i++) {
                 let part = agents_out[agent_id].body[i];
-                let amino_props = get_amino_acid_properties(get_base_part_type(part.part_type));
-                let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
-                let world_pos = center + rotated_pos;
-
-                // Determine segment start position
-                var segment_start_world = center + apply_agent_rotation(morphology_origin, agent.rotation);
-                if (i > 0u) {
-                    // Multi-part: start from previous part's position
-                    let prev_part = agents_out[agent_id].body[i - 1u];
-                    let prev_rotated = apply_agent_rotation(prev_part.pos, agent.rotation);
-                    segment_start_world = center + prev_rotated;
-                }
-                // For i == 0, segment_start_world uses stored morphology_origin (transformed chain origin)
-
-                // Draw based on position in chain
-                let is_first = i == 0u;
-                let is_last = i == agents_out[agent_id].body_count - 1u;
-                let is_single = agents_out[agent_id].body_count == 1u;
-                
-                // Unified rendering rule to avoid zero-length artifacts:
-                // Draw a segment for EVERY part. For first part of a multi-part chain, segment starts at morphology_origin.
-                // Overlay endpoint circles only for terminals (first/last) when body has >1 parts.
-                if (!in_debug_mode) {
-                    let thickness = part.size * 0.5;
-                    // Blend between amino acid color and agent color based on agent_color_blend parameter
-                    let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
-                    draw_thick_line(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0));
-                    if (!is_single && (is_first || is_last)) {
-                        draw_filled_circle(world_pos, thickness, vec4<f32>(blended_color, 1.0));
-                    }
-                }
-                if (in_debug_mode) {
-                    let a = agents_out[agent_id].body[i].alpha_signal;
-                    let b = agents_out[agent_id].body[i].beta_signal;
-                    let r = max(b, 0.0);
-                    let g = max(a, 0.0);
-                    let bl = max(max(-a, 0.0), max(-b, 0.0));
-                    let dbg_color = vec4<f32>(r, g, bl, 1.0);
-                    let thickness_dbg = max(part.size * 0.25, 0.5);
-                    draw_thick_line(segment_start_world, world_pos, thickness_dbg, dbg_color);
-                    if (!is_single && (is_first || is_last)) {
-                        draw_filled_circle(world_pos, thickness_dbg, dbg_color);
-                    }
-                }
-            
-            // Special rendering for Leucine (chiral flipper) - draw as perpendicular segment
-            if (get_base_part_type(part.part_type) == 9u) {
-                // Calculate segment direction
-                var segment_dir = vec2<f32>(0.0);
-                if (i > 0u) {
-                    let prev = agents_out[agent_id].body[i-1u].pos;
-                    segment_dir = part.pos - prev;
-                } else if (agents_out[agent_id].body_count > 1u) {
-                    let next = agents_out[agent_id].body[1u].pos;
-                    segment_dir = next - part.pos;
-                } else {
-                    segment_dir = vec2<f32>(1.0, 0.0);
-                }
-                let seg_len = length(segment_dir);
-                let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
-                // Perpendicular to segment axis
-                let perp_local = vec2<f32>(-axis_local.y, axis_local.x);
-                let perp_world = apply_agent_rotation(perp_local, agent.rotation);
-                
-                // Draw perpendicular line centered on the part position
-                let half_length = part.size * 0.8; // Use the width (size) for perpendicular length
-                let p1 = world_pos - perp_world * half_length;
-                let p2 = world_pos + perp_world * half_length;
-                let perp_thickness = part.size * 0.3; // Thinner than the normal segment
-                let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
-                draw_thick_line(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0));
-            }
-            
-            // Special rendering for CONDENSER - filled circle with charge level
-            // Only Tyrosine (Y) is a dual-channel condenser
-            // FLASH: White when discharging either channel (positive charge value)
-            if (amino_props.is_condenser) {
-                let signed_charge = part._pad.y; // Signed charge: negative=charging, positive=discharging
-                let charge = abs(signed_charge); // Absolute charge level (0.0 to 10.0)
-                let max_charge = 10.0;
-                let is_discharging = (signed_charge > 0.0); // Positive = discharging
-                let charge_ratio = clamp(charge / max_charge, 0.0, 1.0); // 0.0 to 1.0
-                
-                let min_radius = 3.0;
-                let radius = max(part.size * 0.5, min_radius);
-                let segments = 24u;
-                
-                let amino_type = part.part_type;
-                // Only Tyrosine (19) is a condenser now - Glycine (5) is structural
-                
-                // Read both alpha and beta charges independently
-                let signed_alpha_charge = part._pad.x;
-                let signed_beta_charge = part._pad.y;
-                let alpha_charge = clamp(abs(signed_alpha_charge), 0.0, 10.0);
-                let beta_charge = clamp(abs(signed_beta_charge), 0.0, 10.0);
-                let alpha_ratio = clamp(alpha_charge / 10.0, 0.0, 1.0);
-                let beta_ratio = clamp(beta_charge / 10.0, 0.0, 1.0);
-                let is_alpha_discharging = (signed_alpha_charge > 0.0);
-                let is_beta_discharging = (signed_beta_charge > 0.0);
-                
-                // Fill color blends alpha (green) and beta (red) based on their independent charge levels
-                var fill_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-                if (is_alpha_discharging || is_beta_discharging) {
-                    // Flash white when either channel is discharging
-                    fill_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
-                } else {
-                    // Mix red (beta) and green (alpha) based on their charge ratios
-                    let red_component = beta_ratio; // More beta = more red
-                    let green_component = alpha_ratio; // More alpha = more green
-                    let low_tint = vec3<f32>(red_component, green_component, 0.0) * 0.25;
-                    let base_tint = vec3<f32>(red_component, green_component, 0.0);
-                    let fill_rgb = mix(low_tint, base_tint, charge_ratio);
-                    fill_color = vec4<f32>(fill_rgb, 1.0);
-                }
-                
-                // Draw filled circle by drawing many lines from center to edge
-                let fill_segments = 32u;
-                for (var s = 0u; s < fill_segments; s++) {
-                    let ang1 = f32(s) / f32(fill_segments) * 6.28318530718;
-                    let ang2 = f32(s + 1u) / f32(fill_segments) * 6.28318530718;
-                    let p1 = world_pos + vec2<f32>(cos(ang1) * radius, sin(ang1) * radius);
-                    let p2 = world_pos + vec2<f32>(cos(ang2) * radius, sin(ang2) * radius);
-                    draw_thick_line(world_pos, p1, radius * 0.5, fill_color);
-                    draw_thick_line(p1, p2, 1.0, fill_color);
-                }
-                
-                // Draw white outline
-                var prev = world_pos + vec2<f32>(radius, 0.0);
-                for (var s = 1u; s <= segments; s++) {
-                    let t = f32(s) / f32(segments);
-                    let ang = t * 6.28318530718;
-                    let p = world_pos + vec2<f32>(cos(ang) * radius, sin(ang) * radius);
-                    draw_thick_line(prev, p, 0.5, vec4<f32>(1.0, 1.0, 1.0, 1.0));
-                    prev = p;
-                }
-            }
-            
-            // Draw ultra-subtle circular outline for ENABLER amino acids (was inhibitor)
-            // Fade rules: fully visible at zoom >= 15, starts fading below 15, fully transparent at zoom <= 5
-            // Only visible in debug mode
-            if (amino_props.is_inhibitor && params.camera_zoom > 5.0 && params.debug_mode > 0u) {
-                let radius = 20.0;
-                let segments = 32u;
-                // Fade alpha linearly from zoom 5 -> 15: 0 at 5, 1 at 15, clamp outside
-                let zoom = params.camera_zoom;
-                let alpha_base = 0.02;
-                let fade = clamp((zoom - 5.0) / 10.0, 0.0, 1.0);
-                let alpha = alpha_base * fade;
-                let color = vec4<f32>(0.15, 0.2, 0.15, alpha);
-                var prev = world_pos + vec2<f32>(radius,0.0);
-                for (var s = 1u; s <= segments; s++) {
-                    let t = f32(s) / f32(segments);
-                    let ang = t * 6.28318530718;
-                    let p = world_pos + vec2<f32>(cos(ang)*radius, sin(ang)*radius);
-                    draw_thick_line(prev, p, 0.25, color); // ultra-thin outline
-                    prev = p;
-                }
-                // Small blended color center marker to indicate exact enabler position
-                let blended_color_enabler = mix(amino_props.color, agent_color, params.agent_color_blend);
-                draw_filled_circle(world_pos, 2.0, vec4<f32>(blended_color_enabler, 0.95));
-            }
-
-            if (PROPELLERS_ENABLED && amino_props.is_propeller && agent.energy > 0.0 && params.camera_zoom > 2.0) {
-                // Use cached amplification for jet visuals
                 let jet_amplification = amplification_per_part[i];
-                // Match thrust visual direction to physics: use segment axis perpendicular
-                var segment_dir = vec2<f32>(0.0);
-                if (i > 0u) {
-                    let prev = agents_out[agent_id].body[i-1u].pos;
-                    segment_dir = part.pos - prev;
-                } else if (agents_out[agent_id].body_count > 1u) {
-                    let next = agents_out[agent_id].body[1u].pos;
-                    segment_dir = next - part.pos;
-                } else {
-                    segment_dir = vec2<f32>(1.0, 0.0);
-                }
-                let seg_len = length(segment_dir);
-                let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
-                let axis_world = apply_agent_rotation(axis_local, agent.rotation);
-                let jet_dir = normalize(vec2<f32>(-axis_world.y, axis_world.x));
-                // Exhaust particles point opposite to thrust direction
-                let exhaust_dir = -jet_dir;
-                let propeller_strength = part.size * 2.5 * jet_amplification; // Visual scale with amplification
-                let zoom_factor = clamp((params.camera_zoom - 2.0) / 8.0, 0.0, 1.0);
-                let jet_length = propeller_strength * mix(0.6, 1.2, zoom_factor);
-                let jet_seed = agent_id * 1000u + i * 17u;
-                let particle_count = 1u + u32(round(jet_amplification * 5.0)) + u32(round(zoom_factor * 3.0));
-                draw_particle_jet(world_pos, exhaust_dir, jet_length, jet_seed, particle_count);
+                render_body_part(
+                    part,
+                    i,
+                    agent_id,
+                    center,
+                    agent.rotation,
+                    agent.energy,
+                    agent_color,
+                    agents_out[agent_id].body_count,
+                    morphology_origin,
+                    jet_amplification,
+                    in_debug_mode
+                );
             }
-            
-            // Draw cloud-like sensors
-            if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor || amino_props.is_energy_sensor) {
-                let sensor_radius = part.size * 2.0;
-                let sensor_seed = agent_id * 500u + i * 13u;
-                let blended_color_sensor = mix(amino_props.color, agent_color, params.agent_color_blend);
-                let sensor_color = vec4<f32>(blended_color_sensor * 0.6, 0.5); // Semi-transparent
-                draw_cloud(world_pos, sensor_radius, sensor_color, sensor_seed);
-            }
-
-            if (in_debug_mode) {
-                let a = agents_out[agent_id].body[i].alpha_signal;
-                let b = agents_out[agent_id].body[i].beta_signal;
-                let r = max(b, 0.0);
-                let g = max(a, 0.0);
-                let bl = max(max(-a, 0.0), max(-b, 0.0));
-                let dbg_color = vec4<f32>(r, g, bl, 1.0);
-                draw_filled_circle(world_pos, 1.5, dbg_color);
-            }
-            
-            // Draw yellow asterisk (*) on mouth parts (larger for visibility)
-            if (amino_props.is_mouth && !in_debug_mode) {
-                draw_asterisk(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0));
-            }
-            
-            // Draw small rotated square for displacers (averaging indicator)
-            if (amino_props.is_displacer && !in_debug_mode) {
-                let square_size = part.size * 2.0;
-                let d = square_size * 0.70710678; // diagonal distance
-                // Draw diamond shape (rotated square)
-                let top = world_pos + vec2<f32>(0.0, -square_size);
-                let right = world_pos + vec2<f32>(square_size, 0.0);
-                let bottom = world_pos + vec2<f32>(0.0, square_size);
-                let left = world_pos + vec2<f32>(-square_size, 0.0);
-                let blended_color_displacer = mix(amino_props.color, agent_color, params.agent_color_blend);
-                draw_thick_line(top, right, 1.0, vec4<f32>(blended_color_displacer, 1.0));
-                draw_thick_line(right, bottom, 1.0, vec4<f32>(blended_color_displacer, 1.0));
-                draw_thick_line(bottom, left, 1.0, vec4<f32>(blended_color_displacer, 1.0));
-                draw_thick_line(left, top, 1.0, vec4<f32>(blended_color_displacer, 1.0));
-            }
-        }
 
         if (in_debug_mode) {
             // Draw center cross marker only in debug mode
