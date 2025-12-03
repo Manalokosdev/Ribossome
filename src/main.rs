@@ -1741,7 +1741,7 @@ impl GpuState {
         debug_assert_eq!(std::mem::align_of::<BodyPart>(), 16);
         debug_assert_eq!(
             std::mem::size_of::<Agent>(),
-            2288,
+            2256,
             "Agent layout mismatch for MAX_BODY_PARTS={}",
             MAX_BODY_PARTS
         );
