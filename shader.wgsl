@@ -85,15 +85,13 @@ struct Agent {
     morphology_origin: vec2<f32>, // Where the chain origin is in local space after CoM centering
     alive: u32,               // 1 = alive, 0 = dead
     body_count: u32,          // number of body parts
-    rna_progress: u32,        // progress of RNA pairing (0..GENOME_WORDS)
     pairing_counter: u32,     // number of bases successfully paired (0..gene_length)
     is_selected: u32,         // 1 = selected for debug view, 0 = not selected
     generation: u32,          // lineage generation (0 = initial spawn)
     age: u32,                 // age in frames since spawn
     total_mass: f32,          // total mass computed after morphology
     genome: array<u32, GENOME_WORDS>,   // GENOME_BYTES bytes genome (ASCII RNA bases)
-    genome_packed: array<u32, PACKED_GENOME_WORDS>, // GENOME_BYTES bases packed as 2 bits each (A/U/G/C -> 0/1/2/3)
-    _pad_body_align: array<u32, 2>, // padding to align body to 16 bytes
+    _pad_genome_align: array<u32, 3>, // padding to maintain struct alignment
     body: array<BodyPart, MAX_BODY_PARTS>, // body parts array
 }
 
@@ -2611,7 +2609,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Initialize as alive, will build body on first frame
                 offspring.alive = 1u;
                 offspring.body_count = 0u; // Forces morphology rebuild
-                offspring.rna_progress = 0u;
                 offspring.pairing_counter = 0u;
                 offspring.is_selected = 0u;
                 // Lineage and lifecycle
@@ -2630,14 +2627,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     for (var w = 0u; w < GENOME_WORDS; w++) {
                         let rev_word = genome_revcomp_word(agents_out[agent_id].genome, w);
                         offspring.genome[w] = rev_word;
-                    }
-                }
-                // Pack initial rev-comp genome
-                {
-                    let packed0 = genome_pack_into(offspring);
-                    for (var i = 0u; i < PACKED_GENOME_WORDS; i++) {
-                        let packed_word = packed_read_word(packed0, i);
-                        offspring.genome_packed[i] = packed_word;
                     }
                 }
                 
@@ -2812,14 +2801,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         }
                     }
                 }
-                // Re-pack the genome after mutations so packed form stays consistent
-                {
-                    let packed1 = genome_pack_into(offspring);
-                    for (var i = 0u; i < PACKED_GENOME_WORDS; i++) {
-                        let packed_word = packed_read_word(packed1, i);
-                        offspring.genome_packed[i] = packed_word;
-                    }
-                }
                 
                 // New rule: offspring always receives 50% of parent's current energy.
                 // Pairing costs are NOT passed to the offspring.
@@ -2846,8 +2827,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         pairing_counter = 0u;
     }
     agents_out[agent_id].pairing_counter = pairing_counter;
-    // Store the counter as progress for debug viewing
-    agents_out[agent_id].rna_progress = pairing_counter;
     
     // ====== FRUSTUM CULLING & RENDERING ======
     // Skip rendering if no body parts (will die from energy loss naturally)
@@ -4211,7 +4190,6 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent.torque_debug = 0.0;
     agent.alive = 1u;
     agent.body_count = 0u;
-    agent.rna_progress = 0u;
     agent.pairing_counter = 0u;
     agent.is_selected = 0u;
     agent.generation = 0u;
@@ -4246,14 +4224,6 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
             let b3 = bytes[w * 4u + 3u] & 0xFFu;
             let word_val = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
             agent.genome[w] = word_val;
-        }
-    }
-    // Initialize packed genome from ASCII genome
-    {
-        let packed = genome_pack_into(agent);
-        for (var i = 0u; i < PACKED_GENOME_WORDS; i++) {
-            let packed_word = packed_read_word(packed, i);
-            agent.genome_packed[i] = packed_word;
         }
     }
 

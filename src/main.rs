@@ -701,15 +701,13 @@ struct Agent {
     morphology_origin: [f32; 2],               // 8 bytes (32-39) - chain origin after CoM centering
     alive: u32,                                // 4 bytes (40-43)
     body_count: u32,                           // 4 bytes (44-47)
-    rna_progress: u32,                         // 4 bytes (48-51)
-    pairing_counter: u32,                      // 4 bytes (52-55) - number of bases paired
-    is_selected: u32,                          // 4 bytes (56-59) - selected for debug view
-    generation: u32,                           // 4 bytes (60-63) - lineage generation counter
-    age: u32,                                  // 4 bytes (64-67) - age in frames
-    total_mass: f32, // 4 bytes (68-71) - computed each frame after morphology
-    genome: [u32; GENOME_WORDS], // GENOME_BYTES bytes (ASCII bases)
-    genome_packed: [u32; PACKED_GENOME_WORDS], // GENOME_BYTES bases packed as 2 bits each
-    _pad_body_align: [u32; 2], // 8 bytes (152-159) - padding to align body to 16 bytes
+    pairing_counter: u32,                      // 4 bytes (48-51) - number of bases paired
+    is_selected: u32,                          // 4 bytes (52-55) - selected for debug view
+    generation: u32,                           // 4 bytes (56-59) - lineage generation counter
+    age: u32,                                  // 4 bytes (60-63) - age in frames
+    total_mass: f32,                           // 4 bytes (64-67) - computed each frame after morphology
+    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases)
+    _pad_genome_align: [u32; 3],               // 12 bytes - padding to maintain struct alignment
     body: [BodyPart; MAX_BODY_PARTS],
 }
 
