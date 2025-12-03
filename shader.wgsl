@@ -4256,7 +4256,6 @@ fn initialize_dead_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent.body_count = 0u;
     agent.energy = 0.0;
     agent.velocity = vec2<f32>(0.0);
-    agent.rna_progress = 0u;
     agent.pairing_counter = 0u;
     agents_out[idx] = agent;
 }
