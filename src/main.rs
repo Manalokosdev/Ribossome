@@ -1285,6 +1285,7 @@ struct GpuState {
     clear_visual_pipeline: wgpu::ComputePipeline,
     clear_agent_grid_pipeline: wgpu::ComputePipeline,
     render_inspector_pipeline: wgpu::ComputePipeline,
+    draw_inspector_agent_pipeline: wgpu::ComputePipeline,
     composite_agents_pipeline: wgpu::ComputePipeline,
     gamma_slope_pipeline: wgpu::ComputePipeline,
     merge_pipeline: wgpu::ComputePipeline, // Merge spawned agents
@@ -1337,6 +1338,9 @@ struct GpuState {
     // Epoch tracking for speed display
     last_epoch_update: std::time::Instant,
     last_epoch_count: u64,
+    
+    // Inspector refresh throttling (update at ~25fps to save GPU time)
+    inspector_frame_counter: u32,
     epochs_per_second: f32,
 
     // Population statistics tracking
@@ -2732,6 +2736,17 @@ impl GpuState {
             });
         profiler.mark("render inspector pipeline");
 
+        let draw_inspector_agent_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Draw Inspector Agent Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "draw_inspector_agent",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("draw inspector agent pipeline");
+
         let composite_agents_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Composite Agents Pipeline"),
@@ -3054,6 +3069,7 @@ impl GpuState {
             clear_visual_pipeline,
             clear_agent_grid_pipeline,
             render_inspector_pipeline,
+            draw_inspector_agent_pipeline,
             composite_agents_pipeline,
             gamma_slope_pipeline,
             merge_pipeline,
@@ -3096,6 +3112,7 @@ impl GpuState {
             epoch: 0,
             last_epoch_update: std::time::Instant::now(),
             last_epoch_count: 0,
+            inspector_frame_counter: 0,
             epochs_per_second: 0.0,
             population_history: Vec::new(),
             alpha_rain_history: VecDeque::new(),
@@ -4492,13 +4509,27 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
 
-                // Render inspector panel if an agent is selected
-                cpass.set_pipeline(&self.render_inspector_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                // Inspector is 300 pixels wide, dispatch appropriate workgroups
-                let inspector_width_workgroups = (300 + 15) / 16; // 16x16 workgroup size
-                let inspector_height_workgroups = (self.surface_config.height + 15) / 16;
-                cpass.dispatch_workgroups(inspector_width_workgroups, inspector_height_workgroups, 1);
+                // Render inspector panel at reduced rate (~25fps to save GPU time)
+                // Update every 2-3 frames depending on main loop speed
+                let should_update_inspector = self.inspector_frame_counter % 2 == 0;
+                self.inspector_frame_counter = self.inspector_frame_counter.wrapping_add(1);
+                
+                if should_update_inspector {
+                    // Render inspector panel background if an agent is selected
+                    cpass.set_pipeline(&self.render_inspector_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    // Inspector is 300 pixels wide, dispatch appropriate workgroups
+                    let inspector_width_workgroups = (300 + 15) / 16; // 16x16 workgroup size
+                    let inspector_height_workgroups = (self.surface_config.height + 15) / 16;
+                    cpass.dispatch_workgroups(inspector_width_workgroups, inspector_height_workgroups, 1);
+
+                    // Draw inspector agent closeup in preview window
+                    cpass.set_pipeline(&self.draw_inspector_agent_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    // Preview window is 280x280, dispatch appropriate workgroups
+                    let preview_workgroups = (280 + 15) / 16;
+                    cpass.dispatch_workgroups(preview_workgroups, preview_workgroups, 1);
+                }
             }
 
             // Run simulation compute passes, but skip everything when paused or no living agents
@@ -5444,6 +5475,9 @@ fn reset_simulation_state(
     }
 
     let mut new_state = pollster::block_on(GpuState::new(window.clone()));
+
+    // Clear selected agent on reset to prevent stack overflow in inspector
+    new_state.selected_agent_index = None;
 
     // Reset difficulty levels to 0 on simulation reset
     new_state.difficulty.food_power.difficulty_level = 0;

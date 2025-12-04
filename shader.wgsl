@@ -36,6 +36,7 @@ const ANGLE_GAIN_BETA: f32 = 1.0;   // relative weighting for beta term
 const MAX_SIGNAL_ANGLE: f32 = 2.4;    // hard cap on signal-induced angle (radians)
 const MAX_SIGNAL_STEP: f32 = 0.8;    // max per-frame change due to signals (radians)
 const PROP_TORQUE_COUPLING: f32 = 1; // 0=no spin from props, 1=full lever-arm torque
+const INSPECTOR_WIDTH: u32 = 300u;    // Width of inspector panel on right side
 
 // ============================================================================
 // STRUCTURES (std430 aligned)
@@ -1767,6 +1768,129 @@ fn genome_revcomp_word(parent: array<u32, GENOME_WORDS>, wi: u32) -> u32 {
 // PART RENDERING FUNCTION
 // ============================================================================
 
+// Inspector-specific render function (uses selected_agent_buffer instead of agents_out)
+fn render_body_part_inspector(
+    part: BodyPart,
+    part_index: u32,
+    agent_position: vec2<f32>,
+    agent_rotation: f32,
+    agent_energy: f32,
+    agent_color: vec3<f32>,
+    body_count: u32,
+    morphology_origin: vec2<f32>,
+    amplification: f32,
+    in_debug_mode: bool,
+    ctx: InspectorContext
+) {
+    let base_type = get_base_part_type(part.part_type);
+    let amino_props = get_amino_acid_properties(base_type);
+    let rotated_pos = apply_agent_rotation(part.pos, agent_rotation);
+    let world_pos = agent_position + rotated_pos;
+    
+    // Determine segment start position
+    var segment_start_world = agent_position + apply_agent_rotation(morphology_origin, agent_rotation);
+    if (part_index > 0u) {
+        let prev_part = selected_agent_buffer[0].body[part_index - 1u];
+        let prev_rotated = apply_agent_rotation(prev_part.pos, agent_rotation);
+        segment_start_world = agent_position + prev_rotated;
+    }
+    
+    let is_first = part_index == 0u;
+    let is_last = part_index == body_count - 1u;
+    let is_single = body_count == 1u;
+    
+    // 1. STRUCTURAL RENDERING: Base segment line
+    if (!in_debug_mode) {
+        let thickness = part.size * 0.5;
+        let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
+        draw_thick_line_ctx(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
+        if (!is_single && (is_first || is_last)) {
+            draw_filled_circle_ctx(world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
+        }
+    }
+    
+    // 2. DEBUG MODE RENDERING: Signal visualization
+    if (in_debug_mode) {
+        let a = part.alpha_signal;
+        let b = part.beta_signal;
+        let r = max(b, 0.0);
+        let g = max(a, 0.0);
+        let bl = max(max(-a, 0.0), max(-b, 0.0));
+        let dbg_color = vec4<f32>(r, g, bl, 1.0);
+        let thickness_dbg = max(part.size * 0.25, 0.5);
+        draw_thick_line_ctx(segment_start_world, world_pos, thickness_dbg, dbg_color, ctx);
+        if (!is_single && (is_first || is_last)) {
+            draw_filled_circle_ctx(world_pos, thickness_dbg, dbg_color, ctx);
+        }
+        draw_filled_circle_ctx(world_pos, 1.5, dbg_color, ctx);
+    }
+    
+    // 3. SPECIAL STRUCTURAL: Leucine (chirality flipper) - perpendicular bar
+    if (base_type == 9u) {
+        var segment_dir = vec2<f32>(0.0);
+        if (part_index > 0u) {
+            let prev = selected_agent_buffer[0].body[part_index-1u].pos;
+            segment_dir = part.pos - prev;
+        } else if (body_count > 1u) {
+            let next = selected_agent_buffer[0].body[1u].pos;
+            segment_dir = next - part.pos;
+        } else {
+            segment_dir = vec2<f32>(1.0, 0.0);
+        }
+        let seg_len = length(segment_dir);
+        let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
+        let perp_local = vec2<f32>(-axis_local.y, axis_local.x);
+        let perp_world = apply_agent_rotation(perp_local, agent_rotation);
+        
+        let half_length = part.size * 0.8;
+        let p1 = world_pos - perp_world * half_length;
+        let p2 = world_pos + perp_world * half_length;
+        let perp_thickness = part.size * 0.3;
+        let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
+        draw_thick_line_ctx(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0), ctx);
+    }
+    
+    // 4. ORGAN: Condenser (charge storage/discharge) - SIMPLIFIED for inspector
+    if (amino_props.is_condenser) {
+        let radius = max(part.size * 0.5, 3.0);
+        
+        // Just draw a simple filled circle - skip complex rendering to avoid stack overflow
+        let blended_color_cond = mix(amino_props.color, agent_color, params.agent_color_blend);
+        draw_filled_circle_ctx(world_pos, radius, vec4<f32>(blended_color_cond, 0.8), ctx);
+        
+        // Simple outline
+        draw_filled_circle_ctx(world_pos, radius + 1.0, vec4<f32>(1.0, 1.0, 1.0, 0.3), ctx);
+    }
+    
+    // 5. ORGAN: Sensor cloud
+    if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor || amino_props.is_energy_sensor) {
+        let sensor_radius = part.size * 2.0;
+        let sensor_seed = part_index * 500u + part_index * 13u;
+        let blended_color_sensor = mix(amino_props.color, agent_color, params.agent_color_blend);
+        let sensor_color = vec4<f32>(blended_color_sensor * 0.6, 0.5);
+        draw_cloud_ctx(world_pos, sensor_radius, sensor_color, sensor_seed, ctx);
+    }
+    
+    // 6. ORGAN: Mouth indicator (yellow asterisk)
+    if (amino_props.is_mouth && !in_debug_mode) {
+        draw_asterisk_ctx(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
+    }
+    
+    // 7. ORGAN: Displacer indicator (diamond shape)
+    if (amino_props.is_displacer && !in_debug_mode) {
+        let square_size = part.size * 2.0;
+        let top = world_pos + vec2<f32>(0.0, -square_size);
+        let right = world_pos + vec2<f32>(square_size, 0.0);
+        let bottom = world_pos + vec2<f32>(0.0, square_size);
+        let left = world_pos + vec2<f32>(-square_size, 0.0);
+        let blended_color_displacer = mix(amino_props.color, agent_color, params.agent_color_blend);
+        draw_thick_line_ctx(top, right, 1.0, vec4<f32>(blended_color_displacer, 1.0), ctx);
+        draw_thick_line_ctx(right, bottom, 1.0, vec4<f32>(blended_color_displacer, 1.0), ctx);
+        draw_thick_line_ctx(bottom, left, 1.0, vec4<f32>(blended_color_displacer, 1.0), ctx);
+        draw_thick_line_ctx(left, top, 1.0, vec4<f32>(blended_color_displacer, 1.0), ctx);
+    }
+}
+
 // Render a single body part with all its visual elements
 fn render_body_part(
     part: BodyPart,
@@ -1780,6 +1904,23 @@ fn render_body_part(
     morphology_origin: vec2<f32>,
     amplification: f32,
     in_debug_mode: bool
+) {
+    render_body_part_ctx(part, part_index, agent_id, agent_position, agent_rotation, agent_energy, agent_color, body_count, morphology_origin, amplification, in_debug_mode, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+}
+
+fn render_body_part_ctx(
+    part: BodyPart,
+    part_index: u32,
+    agent_id: u32,
+    agent_position: vec2<f32>,
+    agent_rotation: f32,
+    agent_energy: f32,
+    agent_color: vec3<f32>,
+    body_count: u32,
+    morphology_origin: vec2<f32>,
+    amplification: f32,
+    in_debug_mode: bool,
+    ctx: InspectorContext
 ) {
     let base_type = get_base_part_type(part.part_type);
     let amino_props = get_amino_acid_properties(base_type);
@@ -1802,9 +1943,9 @@ fn render_body_part(
     if (!in_debug_mode) {
         let thickness = part.size * 0.5;
         let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
-        draw_thick_line(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0));
+        draw_thick_line_ctx(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
         if (!is_single && (is_first || is_last)) {
-            draw_filled_circle(world_pos, thickness, vec4<f32>(blended_color, 1.0));
+            draw_filled_circle_ctx(world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
         }
     }
     
@@ -1817,11 +1958,11 @@ fn render_body_part(
         let bl = max(max(-a, 0.0), max(-b, 0.0));
         let dbg_color = vec4<f32>(r, g, bl, 1.0);
         let thickness_dbg = max(part.size * 0.25, 0.5);
-        draw_thick_line(segment_start_world, world_pos, thickness_dbg, dbg_color);
+        draw_thick_line_ctx(segment_start_world, world_pos, thickness_dbg, dbg_color, ctx);
         if (!is_single && (is_first || is_last)) {
-            draw_filled_circle(world_pos, thickness_dbg, dbg_color);
+            draw_filled_circle_ctx(world_pos, thickness_dbg, dbg_color, ctx);
         }
-        draw_filled_circle(world_pos, 1.5, dbg_color);
+        draw_filled_circle_ctx(world_pos, 1.5, dbg_color, ctx);
     }
     
     // 3. SPECIAL STRUCTURAL: Leucine (chirality flipper) - perpendicular bar
@@ -1846,7 +1987,7 @@ fn render_body_part(
         let p2 = world_pos + perp_world * half_length;
         let perp_thickness = part.size * 0.3;
         let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
-        draw_thick_line(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0));
+        draw_thick_line_ctx(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0), ctx);
     }
     
     // 4. ORGAN: Condenser (charge storage/discharge)
@@ -1882,8 +2023,8 @@ fn render_body_part(
             let ang2 = f32(s + 1u) / f32(fill_segments) * 6.28318530718;
             let p1 = world_pos + vec2<f32>(cos(ang1) * radius, sin(ang1) * radius);
             let p2 = world_pos + vec2<f32>(cos(ang2) * radius, sin(ang2) * radius);
-            draw_thick_line(world_pos, p1, radius * 0.5, fill_color);
-            draw_thick_line(p1, p2, 1.0, fill_color);
+            draw_thick_line_ctx(world_pos, p1, radius * 0.5, fill_color, ctx);
+            draw_thick_line_ctx(p1, p2, 1.0, fill_color, ctx);
         }
         
         // White outline
@@ -1893,7 +2034,7 @@ fn render_body_part(
             let t = f32(s) / f32(segments);
             let ang = t * 6.28318530718;
             let p = world_pos + vec2<f32>(cos(ang) * radius, sin(ang) * radius);
-            draw_thick_line(prev, p, 0.5, vec4<f32>(1.0, 1.0, 1.0, 1.0));
+            draw_thick_line_ctx(prev, p, 0.5, vec4<f32>(1.0, 1.0, 1.0, 1.0), ctx);
             prev = p;
         }
     }
@@ -1911,11 +2052,11 @@ fn render_body_part(
             let t = f32(s) / f32(segments);
             let ang = t * 6.28318530718;
             let p = world_pos + vec2<f32>(cos(ang)*radius, sin(ang)*radius);
-            draw_thick_line(prev, p, 0.25, color);
+            draw_thick_line_ctx(prev, p, 0.25, color, ctx);
             prev = p;
         }
         let blended_color_enabler = mix(amino_props.color, agent_color, params.agent_color_blend);
-        draw_filled_circle(world_pos, 2.0, vec4<f32>(blended_color_enabler, 0.95));
+        draw_filled_circle_ctx(world_pos, 2.0, vec4<f32>(blended_color_enabler, 0.95), ctx);
     }
     
     // 6. ORGAN: Propeller jet particles
@@ -1940,7 +2081,7 @@ fn render_body_part(
         let jet_length = propeller_strength * mix(0.6, 1.2, zoom_factor);
         let jet_seed = agent_id * 1000u + part_index * 17u;
         let particle_count = 1u + u32(round(amplification * 5.0)) + u32(round(zoom_factor * 3.0));
-        draw_particle_jet(world_pos, exhaust_dir, jet_length, jet_seed, particle_count);
+        draw_particle_jet_ctx(world_pos, exhaust_dir, jet_length, jet_seed, particle_count, ctx);
     }
     
     // 7. ORGAN: Sensor cloud
@@ -1949,12 +2090,12 @@ fn render_body_part(
         let sensor_seed = agent_id * 500u + part_index * 13u;
         let blended_color_sensor = mix(amino_props.color, agent_color, params.agent_color_blend);
         let sensor_color = vec4<f32>(blended_color_sensor * 0.6, 0.5);
-        draw_cloud(world_pos, sensor_radius, sensor_color, sensor_seed);
+        draw_cloud_ctx(world_pos, sensor_radius, sensor_color, sensor_seed, ctx);
     }
     
     // 8. ORGAN: Mouth indicator (yellow asterisk)
     if (amino_props.is_mouth && !in_debug_mode) {
-        draw_asterisk(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0));
+        draw_asterisk_ctx(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
     }
     
     // 9. ORGAN: Displacer indicator (diamond shape)
@@ -1965,10 +2106,37 @@ fn render_body_part(
         let bottom = world_pos + vec2<f32>(0.0, square_size);
         let left = world_pos + vec2<f32>(-square_size, 0.0);
         let blended_color_displacer = mix(amino_props.color, agent_color, params.agent_color_blend);
-        draw_thick_line(top, right, 1.0, vec4<f32>(blended_color_displacer, 1.0));
-        draw_thick_line(right, bottom, 1.0, vec4<f32>(blended_color_displacer, 1.0));
-        draw_thick_line(bottom, left, 1.0, vec4<f32>(blended_color_displacer, 1.0));
-        draw_thick_line(left, top, 1.0, vec4<f32>(blended_color_displacer, 1.0));
+        draw_thick_line_ctx(top, right, 1.0, vec4<f32>(blended_color_displacer, 1.0), ctx);
+        draw_thick_line_ctx(right, bottom, 1.0, vec4<f32>(blended_color_displacer, 1.0), ctx);
+        draw_thick_line_ctx(bottom, left, 1.0, vec4<f32>(blended_color_displacer, 1.0), ctx);
+        draw_thick_line_ctx(left, top, 1.0, vec4<f32>(blended_color_displacer, 1.0), ctx);
+    }
+}
+
+// Draw a selection circle around an agent
+fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) {
+    if (params.draw_enabled == 0u) { return; }
+    // Calculate approximate radius based on body size from the agent's actual body
+    var max_dist = 20.0; // minimum radius
+    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+        let part = agents_out[agent_id].body[i];
+        let dist = length(part.pos) + part.size;
+        max_dist = max(max_dist, dist);
+    }
+    
+    let radius = max_dist + 5.0; // Add some padding
+    let num_segments = 64u; // Circle segments
+    let color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Yellow circle
+    
+    // Draw circle as line segments
+    for (var i = 0u; i < num_segments; i++) {
+        let angle1 = f32(i) / f32(num_segments) * 6.28318530718;
+        let angle2 = f32(i + 1u) / f32(num_segments) * 6.28318530718;
+        
+        let p1 = center_pos + vec2<f32>(cos(angle1) * radius, sin(angle1) * radius);
+        let p2 = center_pos + vec2<f32>(cos(angle2) * radius, sin(angle2) * radius);
+        
+        draw_thick_line(p1, p2, 2.0, color);
     }
 }
 
@@ -3373,36 +3541,154 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 // HELPER FUNCTIONS FOR DRAWING
 // ============================================================================
 
+// Inspector rendering context (pass vec2(-1.0) for use_inspector_coords to disable)
+struct InspectorContext {
+    use_inspector_coords: vec2<f32>,  // if x >= 0, use inspector mode
+    center: vec2<f32>,                // center of preview window
+    scale: f32,                       // scale factor for inspector
+    offset: vec2<f32>,                // offset to actual buffer position
+}
+
 // Helper function to draw a thick line in screen space
 fn draw_thick_line(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32>) {
-    let screen_p0 = world_to_screen(p0);
-    let screen_p1 = world_to_screen(p1);
-    
-    let dx = screen_p1.x - screen_p0.x;
-    let dy = screen_p1.y - screen_p0.y;
-    let steps = max(abs(dx), abs(dy));
+    draw_thick_line_ctx(p0, p1, thickness, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+}
 
-    let world_to_screen_scale = params.window_width / (params.grid_size / params.camera_zoom);
-    let screen_thickness = i32(thickness * world_to_screen_scale);
+fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32>, ctx: InspectorContext) {
+    var screen_p0: vec2<i32>;
+    var screen_p1: vec2<i32>;
+    var screen_thickness: i32;
     
-    for (var s = 0; s <= steps; s++) {
-        let t = f32(s) / f32(max(steps, 1));
-        let screen_x = i32(mix(f32(screen_p0.x), f32(screen_p1.x), t));
-        let screen_y = i32(mix(f32(screen_p0.y), f32(screen_p1.y), t));
-        
-        // Draw thicker line by filling a small circle around each point
-        for (var dy = -screen_thickness; dy <= screen_thickness; dy++) {
-            for (var dx = -screen_thickness; dx <= screen_thickness; dx++) {
-                if (dx * dx + dy * dy <= screen_thickness * screen_thickness) {
-                    let screen_pos = vec2<i32>(screen_x + dx, screen_y + dy);
-                    
-                    // Check if in screen bounds and not in inspector area (rightmost 300px)
+    if (ctx.use_inspector_coords.x >= 0.0) {
+        // Inspector mode: direct coordinate mapping
+        screen_p0 = vec2<i32>(i32(ctx.center.x + p0.x * ctx.scale), i32(ctx.center.y + p0.y * ctx.scale));
+        screen_p1 = vec2<i32>(i32(ctx.center.x + p1.x * ctx.scale), i32(ctx.center.y + p1.y * ctx.scale));
+        screen_thickness = clamp(i32(thickness * ctx.scale), 0, 50);  // Clamp to prevent overflow
+    } else {
+        // World mode: use world-to-screen conversion
+        screen_p0 = world_to_screen(p0);
+        screen_p1 = world_to_screen(p1);
+        let world_to_screen_scale = params.window_width / (params.grid_size / params.camera_zoom);
+        screen_thickness = clamp(i32(thickness * world_to_screen_scale), 0, 50);  // Clamp to prevent overflow
+    }
+    
+    // Optimized capsule drawing: rectangle + endpoint circles
+    let dx = f32(screen_p1.x - screen_p0.x);
+    let dy = f32(screen_p1.y - screen_p0.y);
+    let len = sqrt(dx * dx + dy * dy);
+    
+    if (len < 0.5) {
+        // Degenerate case: just draw a circle
+        draw_filled_circle_optimized(screen_p0, f32(screen_thickness), color, ctx);
+        return;
+    }
+    
+    // Normalized direction and perpendicular
+    let dir_x = dx / len;
+    let dir_y = dy / len;
+    let perp_x = -dir_y;
+    let perp_y = dir_x;
+    
+    // Calculate bounding box for the capsule
+    let half_thick = f32(screen_thickness);
+    let min_x = min(screen_p0.x, screen_p1.x) - screen_thickness;
+    let max_x = max(screen_p0.x, screen_p1.x) + screen_thickness;
+    let min_y = min(screen_p0.y, screen_p1.y) - screen_thickness;
+    let max_y = max(screen_p0.y, screen_p1.y) + screen_thickness;
+    
+    // Iterate only over bounding box (much smaller than full screen)
+    for (var py = min_y; py <= max_y; py++) {
+        for (var px = min_x; px <= max_x; px++) {
+            let pixel_x = f32(px);
+            let pixel_y = f32(py);
+            
+            // Vector from p0 to pixel
+            let to_pixel_x = pixel_x - f32(screen_p0.x);
+            let to_pixel_y = pixel_y - f32(screen_p0.y);
+            
+            // Project onto line direction to get position along line (0 to len)
+            let t = to_pixel_x * dir_x + to_pixel_y * dir_y;
+            
+            // Distance to capsule axis
+            var dist_sq: f32;
+            if (t < 0.0) {
+                // Before p0: distance to p0
+                dist_sq = to_pixel_x * to_pixel_x + to_pixel_y * to_pixel_y;
+            } else if (t > len) {
+                // After p1: distance to p1
+                let to_p1_x = pixel_x - f32(screen_p1.x);
+                let to_p1_y = pixel_y - f32(screen_p1.y);
+                dist_sq = to_p1_x * to_p1_x + to_p1_y * to_p1_y;
+            } else {
+                // Between p0 and p1: perpendicular distance to line
+                let perp_dist = to_pixel_x * perp_x + to_pixel_y * perp_y;
+                dist_sq = perp_dist * perp_dist;
+            }
+            
+            // Check if pixel is within capsule radius
+            if (dist_sq <= half_thick * half_thick) {
+                var screen_pos = vec2<i32>(px, py);
+                var idx: u32;
+                var in_bounds = false;
+                
+                if (ctx.use_inspector_coords.x >= 0.0) {
+                    // Inspector mode: offset to actual buffer position and check inspector bounds
+                    let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                    // Allow drawing anywhere in the inspector area (300px wide, full height)
+                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                        buffer_pos.y >= 0 && buffer_pos.y < i32(params.window_height)) {
+                        idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                        in_bounds = true;
+                    }
+                } else {
+                    // World mode: check screen bounds and not in inspector area
                     if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
                         screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
-                        
-                        let idx = screen_to_grid_index(screen_pos);
-                        agent_grid[idx] = color;
+                        idx = screen_to_grid_index(screen_pos);
+                        in_bounds = true;
                     }
+                }
+                
+                if (in_bounds) {
+                    agent_grid[idx] = color;
+                }
+            }
+        }
+    }
+}
+
+// Helper for drawing optimized filled circles (used by optimized thick line)
+fn draw_filled_circle_optimized(center: vec2<i32>, radius: f32, color: vec4<f32>, ctx: InspectorContext) {
+    let radius_i = i32(ceil(radius));
+    let radius_sq = radius * radius;
+    
+    for (var dy = -radius_i; dy <= radius_i; dy++) {
+        for (var dx = -radius_i; dx <= radius_i; dx++) {
+            let dist_sq = f32(dx * dx + dy * dy);
+            if (dist_sq <= radius_sq) {
+                var screen_pos = center + vec2<i32>(dx, dy);
+                var idx: u32;
+                var in_bounds = false;
+                
+                if (ctx.use_inspector_coords.x >= 0.0) {
+                    // Inspector mode
+                    let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x + 280.0) &&
+                        buffer_pos.y >= i32(ctx.offset.y) && buffer_pos.y < i32(ctx.offset.y + 280.0)) {
+                        idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                        in_bounds = true;
+                    }
+                } else {
+                    // World mode
+                    if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
+                        screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
+                        idx = screen_to_grid_index(screen_pos);
+                        in_bounds = true;
+                    }
+                }
+                
+                if (in_bounds) {
+                    agent_grid[idx] = color;
                 }
             }
         }
@@ -3443,12 +3729,23 @@ fn draw_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
 
 // Helper: draw a filled circle in screen space
 fn draw_filled_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
-    // Convert world position to screen coordinates
-    let screen_center = world_to_screen(center);
+    draw_filled_circle_ctx(center, radius, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+}
+
+fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: InspectorContext) {
+    var screen_center: vec2<i32>;
+    var screen_radius: f32;
     
-    // Calculate screen-space radius (accounting for zoom)
-    let world_to_screen_scale = params.window_width / (params.grid_size / params.camera_zoom);
-    let screen_radius = radius * world_to_screen_scale;
+    if (ctx.use_inspector_coords.x >= 0.0) {
+        // Inspector mode
+        screen_center = vec2<i32>(i32(ctx.center.x + center.x * ctx.scale), i32(ctx.center.y + center.y * ctx.scale));
+        screen_radius = clamp(radius * ctx.scale, 0.0, 50.0);  // Clamp to prevent overflow
+    } else {
+        // World mode
+        screen_center = world_to_screen(center);
+        let world_to_screen_scale = params.window_width / (params.grid_size / params.camera_zoom);
+        screen_radius = clamp(radius * world_to_screen_scale, 0.0, 50.0);  // Clamp to prevent overflow
+    }
 
     let radius_i = i32(ceil(screen_radius));
     
@@ -3457,11 +3754,28 @@ fn draw_filled_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
             let offset = vec2<f32>(f32(dx), f32(dy));
             let dist2 = dot(offset, offset);
             if (dist2 <= screen_radius * screen_radius) {
-                let screen_pos = screen_center + vec2<i32>(dx, dy);
-                // Check if in visible window bounds and not in inspector area (rightmost 300px)
-                if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
-                    screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
-                    let idx = screen_to_grid_index(screen_pos);
+                var screen_pos = screen_center + vec2<i32>(dx, dy);
+                var idx: u32;
+                var in_bounds = false;
+                
+                if (ctx.use_inspector_coords.x >= 0.0) {
+                    // Inspector mode
+                    let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x + 280.0) &&
+                        buffer_pos.y >= i32(ctx.offset.y) && buffer_pos.y < i32(ctx.offset.y + 280.0)) {
+                        idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                        in_bounds = true;
+                    }
+                } else {
+                    // World mode
+                    if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
+                        screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
+                        idx = screen_to_grid_index(screen_pos);
+                        in_bounds = true;
+                    }
+                }
+                
+                if (in_bounds) {
                     agent_grid[idx] = color;
                 }
             }
@@ -3505,48 +3819,139 @@ fn draw_star(center: vec2<f32>, radius: f32, color: vec4<f32>) {
 
 // Helper: draw an asterisk (*) with 6 crossing lines (vertical, horizontal, 2 diagonals)
 fn draw_asterisk(center: vec2<f32>, radius: f32, color: vec4<f32>) {
+    draw_asterisk_ctx(center, radius, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+}
+
+fn draw_asterisk_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: InspectorContext) {
     // Draw 4 lines: vertical, horizontal, and two diagonals
     let diag_offset = radius * 0.70710678; // radius / sqrt(2)
     
     // Vertical line
     let up = center + vec2<f32>(0.0, -radius);
     let down = center + vec2<f32>(0.0, radius);
-    draw_thick_line(up, down, 1.0, color);
+    draw_thick_line_ctx(up, down, 1.0, color, ctx);
     
     // Horizontal line
     let left = center + vec2<f32>(-radius, 0.0);
     let right = center + vec2<f32>(radius, 0.0);
-    draw_thick_line(left, right, 1.0, color);
+    draw_thick_line_ctx(left, right, 1.0, color, ctx);
     
     // Diagonal 1 (top-left to bottom-right)
     let tl = center + vec2<f32>(-diag_offset, -diag_offset);
     let br = center + vec2<f32>(diag_offset, diag_offset);
-    draw_thick_line(tl, br, 1.0, color);
+    draw_thick_line_ctx(tl, br, 1.0, color, ctx);
     
     // Diagonal 2 (top-right to bottom-left)
     let tr = center + vec2<f32>(diag_offset, -diag_offset);
     let bl = center + vec2<f32>(-diag_offset, diag_offset);
-    draw_thick_line(tr, bl, 1.0, color);
+    draw_thick_line_ctx(tr, bl, 1.0, color, ctx);
 }
 
 // Helper: draw a cloud-like shape (fuzzy circle with some random bumps)
 fn draw_cloud(center: vec2<f32>, radius: f32, color: vec4<f32>, seed: u32) {
-    // Draw multiple overlapping circles to create a fluffy cloud appearance
+    draw_cloud_ctx(center, radius, color, seed, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+}
+
+fn draw_cloud_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, seed: u32, ctx: InspectorContext) {
+    // Optimized: single-pass cloud rendering instead of 9 separate circle draws
+    var screen_center: vec2<i32>;
+    var screen_radius: f32;
+    
+    if (ctx.use_inspector_coords.x >= 0.0) {
+        screen_center = vec2<i32>(i32(ctx.center.x + center.x * ctx.scale), i32(ctx.center.y + center.y * ctx.scale));
+        screen_radius = clamp(radius * ctx.scale, 0.0, 50.0);
+    } else {
+        screen_center = world_to_screen(center);
+        let world_to_screen_scale = params.window_width / (params.grid_size / params.camera_zoom);
+        screen_radius = clamp(radius * world_to_screen_scale, 0.0, 50.0);
+    }
+    
+    // Pre-calculate all puff centers and radii
     let num_puffs = 8u;
+    var puff_centers: array<vec2<f32>, 9>;
+    var puff_radii: array<f32, 9>;
+    
+    // Central puff (larger)
+    puff_centers[0] = vec2<f32>(f32(screen_center.x), f32(screen_center.y));
+    puff_radii[0] = screen_radius * 0.7;
+    
+    // Surrounding puffs
     for (var i = 0u; i < num_puffs; i++) {
         let angle = f32(i) * 6.28318530718 / f32(num_puffs);
         let hash_val = hash_f32(seed * (i + 1u) * 2654435761u);
-        let offset_dist = radius * 0.4 * hash_val;
-        let puff_center = center + vec2<f32>(cos(angle) * offset_dist, sin(angle) * offset_dist);
-        let puff_radius = radius * (0.5 + 0.3 * hash_val);
-        draw_filled_circle(puff_center, puff_radius, color);
+        let offset_dist = screen_radius * 0.4 * hash_val;
+        puff_centers[i + 1u] = vec2<f32>(
+            f32(screen_center.x) + cos(angle) * offset_dist,
+            f32(screen_center.y) + sin(angle) * offset_dist
+        );
+        puff_radii[i + 1u] = screen_radius * (0.5 + 0.3 * hash_val);
     }
-    // Draw a larger central circle
-    draw_filled_circle(center, radius * 0.7, color);
+    
+    // Find bounding box for all puffs
+    var min_x = screen_center.x;
+    var max_x = screen_center.x;
+    var min_y = screen_center.y;
+    var max_y = screen_center.y;
+    
+    for (var i = 0u; i < 9u; i++) {
+        let r = i32(ceil(puff_radii[i]));
+        min_x = min(min_x, i32(puff_centers[i].x) - r);
+        max_x = max(max_x, i32(puff_centers[i].x) + r);
+        min_y = min(min_y, i32(puff_centers[i].y) - r);
+        max_y = max(max_y, i32(puff_centers[i].y) + r);
+    }
+    
+    // Single pass over bounding box, check distance to all puffs
+    for (var py = min_y; py <= max_y; py++) {
+        for (var px = min_x; px <= max_x; px++) {
+            let pixel_pos = vec2<f32>(f32(px), f32(py));
+            var inside_any_puff = false;
+            
+            // Check if pixel is inside any of the 9 puffs
+            for (var i = 0u; i < 9u; i++) {
+                let dx = pixel_pos.x - puff_centers[i].x;
+                let dy = pixel_pos.y - puff_centers[i].y;
+                let dist_sq = dx * dx + dy * dy;
+                if (dist_sq <= puff_radii[i] * puff_radii[i]) {
+                    inside_any_puff = true;
+                    break;
+                }
+            }
+            
+            if (inside_any_puff) {
+                var screen_pos = vec2<i32>(px, py);
+                var idx: u32;
+                var in_bounds = false;
+                
+                if (ctx.use_inspector_coords.x >= 0.0) {
+                    let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x + 280.0) &&
+                        buffer_pos.y >= i32(ctx.offset.y) && buffer_pos.y < i32(ctx.offset.y + 280.0)) {
+                        idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                        in_bounds = true;
+                    }
+                } else {
+                    if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
+                        screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
+                        idx = screen_to_grid_index(screen_pos);
+                        in_bounds = true;
+                    }
+                }
+                
+                if (in_bounds) {
+                    agent_grid[idx] = color;
+                }
+            }
+        }
+    }
 }
 
 // Helper: draw a particle jet (motion-blurred particles in a cone)
 fn draw_particle_jet(origin: vec2<f32>, direction: vec2<f32>, length: f32, seed: u32, particle_count: u32) {
+    draw_particle_jet_ctx(origin, direction, length, seed, particle_count, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+}
+
+fn draw_particle_jet_ctx(origin: vec2<f32>, direction: vec2<f32>, length: f32, seed: u32, particle_count: u32, ctx: InspectorContext) {
     // Draw motion-blurred particles spread in a cone
     let num_particles = clamp(particle_count, 2u, 10u);
     if (num_particles < 2u) { return; }
@@ -3584,11 +3989,360 @@ fn draw_particle_jet(origin: vec2<f32>, direction: vec2<f32>, length: f32, seed:
         
         // Draw motion-blurred particle as a thick line
     let fade_color = vec4<f32>(particle_color.xyz, particle_color.w * (0.6 * (1.0 - t * 0.5)));
-        draw_thick_line(particle_pos, streak_end, streak_thickness, fade_color);
+        draw_thick_line_ctx(particle_pos, streak_end, streak_thickness, fade_color, ctx);
     }
 }
+// ============================================================================
+// VECTOR FONT DATA
+// ============================================================================
+struct VecSeg { p0: vec2<f32>, p1: vec2<f32> }
 
-// Helper: draw a line between two screen pixel positions
+var<private> FONT_SEGMENTS: array<VecSeg, 160> = array<VecSeg, 160>(
+    // '0' (5 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.0), vec2(0.8,1.0)),
+    // '1' (2 segments)
+    VecSeg(vec2(0.5,0.0), vec2(0.5,1.0)),
+    VecSeg(vec2(0.5,1.0), vec2(0.3,0.8)),
+    // '2' (5 segments)
+    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.8,0.5)),
+    VecSeg(vec2(0.8,0.5), vec2(0.2,0.5)),
+    VecSeg(vec2(0.2,0.5), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    // '3' (4 segments)
+    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.8,0.5), vec2(0.4,0.5)),
+    // '4' (3 segments)
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.4)),
+    VecSeg(vec2(0.2,0.4), vec2(0.8,0.4)),
+    VecSeg(vec2(0.7,0.0), vec2(0.7,1.0)),
+    // '5' (5 segments)
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.5)),
+    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
+    VecSeg(vec2(0.8,0.5), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.2,0.0)),
+    // '6' (5 segments)
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.8,0.5)),
+    VecSeg(vec2(0.8,0.5), vec2(0.2,0.5)),
+    // '7' (2 segments)
+    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.4,0.0)),
+    // '8' (5 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
+    // '9' (5 segments)
+    VecSeg(vec2(0.8,0.5), vec2(0.2,0.5)),
+    VecSeg(vec2(0.2,0.5), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.2,0.0)),
+    // 'A' (3 segments)
+    VecSeg(vec2(0.1,0.0), vec2(0.5,1.0)),
+    VecSeg(vec2(0.5,1.0), vec2(0.9,0.0)),
+    VecSeg(vec2(0.25,0.4), vec2(0.75,0.4)),
+    // 'B' (8 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.7,1.0)),
+    VecSeg(vec2(0.7,1.0), vec2(0.8,0.75)),
+    VecSeg(vec2(0.8,0.75), vec2(0.7,0.5)),
+    VecSeg(vec2(0.7,0.5), vec2(0.2,0.5)),
+    VecSeg(vec2(0.7,0.5), vec2(0.8,0.25)),
+    VecSeg(vec2(0.8,0.25), vec2(0.7,0.0)),
+    VecSeg(vec2(0.7,0.0), vec2(0.2,0.0)),
+    // 'C' (3 segments)
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    // 'D' (6 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.6,1.0)),
+    VecSeg(vec2(0.6,1.0), vec2(0.8,0.8)),
+    VecSeg(vec2(0.8,0.8), vec2(0.8,0.2)),
+    VecSeg(vec2(0.8,0.2), vec2(0.6,0.0)),
+    VecSeg(vec2(0.6,0.0), vec2(0.2,0.0)),
+    // 'E' (4 segments)
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.5), vec2(0.7,0.5)),
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    // 'F' (3 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.2,0.5), vec2(0.7,0.5)),
+    // 'G' (5 segments)
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.8,0.5)),
+    VecSeg(vec2(0.8,0.5), vec2(0.5,0.5)),
+    // 'H' (3 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
+    // 'I' (3 segments)
+    VecSeg(vec2(0.5,0.0), vec2(0.5,1.0)),
+    VecSeg(vec2(0.3,0.0), vec2(0.7,0.0)),
+    VecSeg(vec2(0.3,1.0), vec2(0.7,1.0)),
+    // 'J' (3 segments)
+    VecSeg(vec2(0.6,1.0), vec2(0.6,0.2)),
+    VecSeg(vec2(0.6,0.2), vec2(0.4,0.0)),
+    VecSeg(vec2(0.4,0.0), vec2(0.2,0.2)),
+    // 'K' (3 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.2,0.5)),
+    VecSeg(vec2(0.2,0.5), vec2(0.8,0.0)),
+    // 'L' (2 segments)
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    // 'M' (4 segments)
+    VecSeg(vec2(0.1,0.0), vec2(0.1,1.0)),
+    VecSeg(vec2(0.1,1.0), vec2(0.5,0.5)),
+    VecSeg(vec2(0.5,0.5), vec2(0.9,1.0)),
+    VecSeg(vec2(0.9,1.0), vec2(0.9,0.0)),
+    // 'N' (3 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
+    // 'O' (4 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
+    // 'P' (5 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.7,1.0)),
+    VecSeg(vec2(0.7,1.0), vec2(0.8,0.75)),
+    VecSeg(vec2(0.8,0.75), vec2(0.7,0.5)),
+    VecSeg(vec2(0.7,0.5), vec2(0.2,0.5)),
+    // 'Q' (5 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.6,0.3), vec2(0.9,-0.1)),
+    // 'R' (6 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.7,1.0)),
+    VecSeg(vec2(0.7,1.0), vec2(0.8,0.75)),
+    VecSeg(vec2(0.8,0.75), vec2(0.7,0.5)),
+    VecSeg(vec2(0.7,0.5), vec2(0.2,0.5)),
+    VecSeg(vec2(0.5,0.5), vec2(0.8,0.0)),
+    // 'S' (5 segments)
+    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.5)),
+    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
+    VecSeg(vec2(0.8,0.5), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.2,0.0)),
+    // 'T' (2 segments)
+    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.5,1.0), vec2(0.5,0.0)),
+    // 'U' (5 segments)
+    VecSeg(vec2(0.2,1.0), vec2(0.2,0.2)),
+    VecSeg(vec2(0.2,0.2), vec2(0.3,0.0)),
+    VecSeg(vec2(0.3,0.0), vec2(0.7,0.0)),
+    VecSeg(vec2(0.7,0.0), vec2(0.8,0.2)),
+    VecSeg(vec2(0.8,0.2), vec2(0.8,1.0)),
+    // 'V' (2 segments)
+    VecSeg(vec2(0.1,1.0), vec2(0.5,0.0)),
+    VecSeg(vec2(0.5,0.0), vec2(0.9,1.0)),
+    // 'W' (4 segments)
+    VecSeg(vec2(0.1,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.0), vec2(0.5,0.6)),
+    VecSeg(vec2(0.5,0.6), vec2(0.8,0.0)),
+    VecSeg(vec2(0.8,0.0), vec2(0.9,1.0)),
+    // 'X' (2 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.2,1.0), vec2(0.8,0.0)),
+    // 'Y' (3 segments)
+    VecSeg(vec2(0.2,1.0), vec2(0.5,0.5)),
+    VecSeg(vec2(0.8,1.0), vec2(0.5,0.5)),
+    VecSeg(vec2(0.5,0.5), vec2(0.5,0.0)),
+    // 'Z' (3 segments)
+    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
+    VecSeg(vec2(0.8,1.0), vec2(0.2,0.0)),
+    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
+    // ' ' space (0 segments)
+    // '.' period (2 segments)
+    VecSeg(vec2(0.45,0.0), vec2(0.55,0.0)),
+    VecSeg(vec2(0.45,0.05), vec2(0.55,0.05)),
+    // ',' comma (1 segments)
+    VecSeg(vec2(0.5,0.0), vec2(0.4,-0.2)),
+    // ':' colon (2 segments)
+    VecSeg(vec2(0.45,0.3), vec2(0.55,0.3)),
+    VecSeg(vec2(0.45,0.7), vec2(0.55,0.7)),
+    // '-' dash (1 segments)
+    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
+    // '+' plus (2 segments)
+    VecSeg(vec2(0.5,0.2), vec2(0.5,0.8)),
+    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
+    // '=' equals (2 segments)
+    VecSeg(vec2(0.2,0.4), vec2(0.8,0.4)),
+    VecSeg(vec2(0.2,0.6), vec2(0.8,0.6)),
+    // '%' percent (3 segments)
+    VecSeg(vec2(0.2,0.8), vec2(0.3,0.9)),
+    VecSeg(vec2(0.7,0.1), vec2(0.8,0.2)),
+    VecSeg(vec2(0.2,0.0), vec2(0.8,1.0)),
+    // '(' left paren (3 segments)
+    VecSeg(vec2(0.6,1.0), vec2(0.4,0.7)),
+    VecSeg(vec2(0.4,0.7), vec2(0.4,0.3)),
+    VecSeg(vec2(0.4,0.3), vec2(0.6,0.0)),
+    // ')' right paren (3 segments)
+    VecSeg(vec2(0.4,1.0), vec2(0.6,0.7)),
+    VecSeg(vec2(0.6,0.7), vec2(0.6,0.3)),
+    VecSeg(vec2(0.6,0.3), vec2(0.4,0.0)),
+    // '/' slash (1 segments)
+    VecSeg(vec2(0.2,0.0), vec2(0.8,1.0)),
+);
+// Offset of first segment for each character (0..46)
+var<private> CHAR_OFFSET: array<u32,47> = array<u32,47>(
+    0, 5, 7, 12, 16, 19, 24, 29, 31, 36,
+    41, 44, 52, 55, 61, 65, 68, 73, 76, 79,
+    82, 85, 87, 91, 94, 98, 103, 108, 114, 119,
+    121, 126, 128, 132, 134, 137, 140, 140, 142, 143,
+    145, 146, 148, 150, 153, 156, 159
+);
+// How many segments each character uses
+var<private> CHAR_COUNT: array<u32,47> = array<u32,47>(
+    5, 2, 5, 4, 3, 5, 5, 2, 5, 5,
+    3, 8, 3, 6, 4, 3, 5, 3, 3, 3,
+    3, 2, 4, 3, 4, 5, 5, 6, 5, 2,
+    5, 2, 4, 2, 3, 3, 0, 2, 1, 2,
+    1, 2, 2, 3, 3, 3, 1
+);
+fn char_index(c: u32) -> i32 {
+    if (c >= 48u && c <= 57u) { return i32(c - 48u); }
+    if (c >= 65u && c <= 90u) { return i32(c - 65u + 10u); }
+    if (c == 32u) { return 36; }
+    if (c == 46u) { return 37; }
+    if (c == 44u) { return 38; }
+    if (c == 58u) { return 39; }
+    if (c == 45u) { return 40; }
+    if (c == 43u) { return 41; }
+    if (c == 61u) { return 42; }
+    if (c == 37u) { return 43; }
+    if (c == 40u) { return 44; }
+    if (c == 41u) { return 45; }
+    if (c == 47u) { return 46; }
+    return -1;
+}
+
+// Get character width (relative to height=1.0)
+fn get_char_width(c: u32) -> f32 {
+    if (c == 32u) { return 0.5; } // space
+    if (c == 46u || c == 44u || c == 58u) { return 0.3; } // punctuation
+    if (c == 73u || c == 49u) { return 0.5; } // 'I' and '1'
+    if (c == 77u || c == 87u) { return 1.2; } // 'M' and 'W'
+    return 1.0; // default width
+}
+
+// Draw a single character at position with specified height
+fn draw_char_vector(pos: vec2<f32>, c: u32, height: f32, color: vec4<f32>, ctx: InspectorContext) -> f32 {
+    let idx = char_index(c);
+    if (idx < 0) {
+        return height * 0.4; // fallback spacing for unsupported chars
+    }
+
+    let uidx = u32(idx);
+    let base = CHAR_OFFSET[uidx];
+    let seg_count = CHAR_COUNT[uidx];
+    let char_width = get_char_width(c) * height;
+    
+    for (var i = 0u; i < seg_count; i++) {
+        let seg = FONT_SEGMENTS[base + i];
+        let p0 = pos + vec2<f32>(seg.p0.x * char_width, seg.p0.y * height);
+        let p1 = pos + vec2<f32>(seg.p1.x * char_width, seg.p1.y * height);
+        draw_thick_line_ctx(p0, p1, 1.0, color, ctx);
+    }
+    
+    return char_width + height * 0.2; // width plus a bit of spacing
+}
+
+// Draw a string at position with specified height
+fn draw_string_vector(pos: vec2<f32>, text: ptr<function, array<u32, 32>>, length: u32, height: f32, color: vec4<f32>, ctx: InspectorContext) -> f32 {
+    var cursor_x = pos.x;
+    
+    for (var i = 0u; i < length && i < 32u; i++) {
+        let char_code = (*text)[i];
+        let width = draw_char_vector(vec2<f32>(cursor_x, pos.y), char_code, height, color, ctx);
+        cursor_x += width;
+    }
+    
+    return cursor_x - pos.x;
+}
+
+// Helper: Convert u32 number to string (max 10 digits)
+fn u32_to_string(value: u32, out_str: ptr<function, array<u32, 32>>, start: u32) -> u32 {
+    if (value == 0u) {
+        (*out_str)[start] = 48u; // '0'
+        return 1u;
+    }
+    
+    var temp = value;
+    var digit_count = 0u;
+    var digits: array<u32, 10>;
+    
+    // Extract digits in reverse order
+    while (temp > 0u && digit_count < 10u) {
+        digits[digit_count] = (temp % 10u) + 48u; // Convert to ASCII
+        temp = temp / 10u;
+        digit_count++;
+    }
+    
+    // Reverse into output string starting at `start`
+    for (var i = 0u; i < digit_count; i++) {
+        (*out_str)[start + i] = digits[digit_count - 1u - i];
+    }
+    
+    return digit_count;
+}
+
+// Helper: Convert f32 to string (with 2 decimal places, max 16 chars)
+fn f32_to_string(value: f32, out_str: ptr<function, array<u32, 32>>, start: u32) -> u32 {
+    var pos = start;
+    var val = value;
+    
+    // Handle negative
+    if (val < 0.0) {
+        (*out_str)[pos] = 45u; // '-'
+        pos++;
+        val = -val;
+    }
+    
+    // Integer part
+    let int_part = u32(floor(val));
+    let int_len = u32_to_string(int_part, out_str, pos);
+    pos += int_len;
+    
+    // Decimal point
+    (*out_str)[pos] = 46u; // '.'
+    pos++;
+    
+    // Fractional part (2 digits)
+    let frac = val - floor(val);
+    let frac_scaled = u32(frac * 100.0);
+    let tens = (frac_scaled / 10u) % 10u;
+    let ones = frac_scaled % 10u;
+    (*out_str)[pos] = tens + 48u;
+    (*out_str)[pos + 1u] = ones + 48u;
+    pos += 2u;
+    
+    return pos - start;
+}
+
+// Helper: draw_line_pixels (for star rendering)
 fn draw_line_pixels(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
     let dx = p1.x - p0.x;
     let dy = p1.y - p0.y;
@@ -3630,33 +4384,6 @@ fn draw_line(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>) {
             let idx = screen_to_grid_index(screen_pos);
             agent_grid[idx] = color;
         }
-    }
-}
-
-// Draw a selection circle around an agent
-fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) {
-    if (params.draw_enabled == 0u) { return; }
-    // Calculate approximate radius based on body size from the agent's actual body
-    var max_dist = 20.0; // minimum radius
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        let part = agents_out[agent_id].body[i];
-        let dist = length(part.pos) + part.size;
-        max_dist = max(max_dist, dist);
-    }
-    
-    let radius = max_dist + 5.0; // Add some padding
-    let num_segments = 64u; // Circle segments
-    let color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Yellow circle
-    
-    // Draw circle as line segments
-    for (var i = 0u; i < num_segments; i++) {
-        let angle1 = f32(i) / f32(num_segments) * 6.28318530718;
-        let angle2 = f32(i + 1u) / f32(num_segments) * 6.28318530718;
-        
-        let p1 = center_pos + vec2<f32>(cos(angle1) * radius, sin(angle1) * radius);
-        let p2 = center_pos + vec2<f32>(cos(angle2) * radius, sin(angle2) * radius);
-        
-        draw_thick_line(p1, p2, 2.0, color);
     }
 }
 
@@ -4196,12 +4923,17 @@ fn clear_agent_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     
+    // Skip clearing the inspector area (rightmost 300px) to preserve it across frames
+    if (x >= width - INSPECTOR_WIDTH) {
+        return;
+    }
+    
     let agent_idx = y * params.visual_stride + x;
     // Clear to transparent black
     agent_grid[agent_idx] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
-// Render inspector panel every frame (called after clear, before agent drawing)
+// Render inspector panel background (called after clear, before agent drawing)
 @compute @workgroup_size(16, 16)
 fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (params.draw_enabled == 0u) { return; }
@@ -4227,22 +4959,183 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Map to actual buffer position (rightmost area)
     let buffer_x = window_width - INSPECTOR_WIDTH + x;
     
-    // Simple placeholder: blue panel with lighter border for testing
-    var color = vec4<f32>(0.0, 0.0, 0.5, 1.0); // Blue background
+    // Dark grey background
+    var color = vec4<f32>(0.15, 0.15, 0.15, 1.0);
     
-    // Border on left edge
-    if (x < 3u) {
-        color = vec4<f32>(0.3, 0.5, 0.8, 1.0); // Lighter blue border
+    // Border on left edge (lighter grey)
+    if (x < 2u) {
+        color = vec4<f32>(0.3, 0.3, 0.3, 1.0);
     }
     
-    // Title bar at top
-    if (y < 30u) {
-        color = vec4<f32>(0.1, 0.2, 0.6, 1.0); // Darker blue title
+    // Agent preview window (square at top, 280x280 with 10px padding)
+    let preview_size = 280u;
+    let preview_x_start = 10u;
+    let preview_y_start = 10u;
+    let preview_x_end = preview_x_start + preview_size;
+    let preview_y_end = preview_y_start + preview_size;
+    
+    if (x >= preview_x_start && x < preview_x_end && 
+        y >= preview_y_start && y < preview_y_end) {
+        // Black background for preview window
+        color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        
+        // Draw border around preview window
+        if (x == preview_x_start || x == preview_x_end - 1u ||
+            y == preview_y_start || y == preview_y_end - 1u) {
+            color = vec4<f32>(0.4, 0.4, 0.4, 1.0);
+        }
     }
     
     // Write to agent_grid using visual_stride
     let idx = y * params.visual_stride + buffer_x;
     agent_grid[idx] = color;
+}
+
+// Draw inspector agent (called after render_inspector, draws agent closeup in preview)
+@compute @workgroup_size(16, 16)
+fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (params.draw_enabled == 0u) { return; }
+    if (params.selected_agent_index == 0xFFFFFFFFu) { return; }
+    
+    // This shader doesn't need to do pixel-level work anymore
+    // Just call render_body_part_ctx for each part with inspector context
+    // Only run once (use thread 0,0)
+    if (gid.x != 0u || gid.y != 0u) { return; }
+    
+    let body_count = min(selected_agent_buffer[0].body_count, MAX_BODY_PARTS);
+    if (body_count == 0u) { return; }
+    
+    // Preview window setup
+    let preview_size = 280u;
+    let preview_x_start = 10u;
+    let preview_y_start = 10u;
+    
+    // Calculate auto-scale to fit agent
+    var max_extent = 0.0;
+    for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+        if (i < body_count) {
+            let part = selected_agent_buffer[0].body[i];
+            let dist = length(part.pos);
+            max_extent = max(max_extent, dist + part.size);
+        }
+    }
+    let available_space = f32(preview_size) * 0.45; // Half width, 90% of that
+    let scale_factor = select(available_space / max_extent, 1.0, max_extent > 1.0);  // Reduced from 4.0 to 1.0 (4x smaller)
+    
+    // Preview center
+    let preview_center_x = f32(preview_x_start + preview_size / 2u);
+    let preview_center_y = f32(preview_y_start + preview_size / 2u);
+    
+    // Calculate buffer offset (rightmost area)
+    let safe_width = max(params.window_width, 1.0);
+    let safe_height = max(params.window_height, 1.0);
+    let window_width = u32(safe_width);
+    let buffer_offset_x = f32(window_width - INSPECTOR_WIDTH);
+    
+    // Create inspector context
+    let ctx = InspectorContext(
+        vec2<f32>(0.0, 0.0),  // use_inspector_coords (x >= 0 enables inspector mode)
+        vec2<f32>(preview_center_x, preview_center_y),  // center of preview
+        scale_factor,  // scale
+        vec2<f32>(buffer_offset_x, 0.0)  // offset to actual buffer position
+    );
+    
+    // Calculate agent color
+    var color_sum = 0.0;
+    for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+        if (i < body_count) {
+            let part_props = get_amino_acid_properties(get_base_part_type(selected_agent_buffer[0].body[i].part_type));
+            color_sum += part_props.beta_damage;
+        }
+    }
+    let agent_color = vec3<f32>(
+        sin(color_sum * 3.0) * 0.5 + 0.5,
+        sin(color_sum * 5.0) * 0.5 + 0.5,
+        sin(color_sum * 7.0) * 0.5 + 0.5
+    );
+    
+    // Get morphology origin (where chain starts in local space)
+    let morphology_origin = selected_agent_buffer[0].morphology_origin;
+    
+    // Render all body parts using the unified render function
+    // Note: agent is unrotated (rotation=0) in selected_agent_buffer
+    let in_debug_mode = params.debug_mode != 0u;
+    for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+        if (i >= body_count) { break; }
+        
+        let part = selected_agent_buffer[0].body[i];
+        // Use a dummy agent_id since we're rendering from selected_agent_buffer
+        let dummy_agent_id = params.selected_agent_index;
+        
+        // For inspector, we need to temporarily copy the agent to agents_out for render_body_part_ctx to access
+        // Actually, render_body_part_ctx uses agents_out[agent_id].body[...] so we need a workaround
+        // Let's just pass agent_id = 0xFFFFFFFFu and handle it in render_body_part_ctx
+        
+        // Wait - render_body_part_ctx accesses agents_out[agent_id].body for prev parts
+        // We need to use selected_agent_buffer instead
+        // This is getting complex - let me create an inspector-specific version
+        
+        render_body_part_inspector(
+            part,
+            i,
+            vec2<f32>(0.0, 0.0),  // agent_position (will be offset by ctx)
+            0.0,  // agent_rotation (already unrotated)
+            selected_agent_buffer[0].energy,
+            agent_color,
+            body_count,
+            morphology_origin,
+            1.0,  // amplification (no jets in inspector for now)
+            in_debug_mode,
+            ctx
+        );
+    }
+    
+    // ============================================================================
+    // TEXT LABELS - Display agent information with scalable vector font
+    // ============================================================================
+    let text_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    
+    // Direct pixel inspector context (origin at inspector top-left).
+    let text_ctx = InspectorContext(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(0.0, 0.0),
+        1.0,
+        vec2<f32>(buffer_offset_x, 0.0)
+    );
+    
+    let text_height = 14.0;
+    
+    // "HELLO WORLD" label positioned just below the preview window.
+    var hello_text: array<u32, 32>;
+    hello_text[0] = 72u;  // 'H'
+    hello_text[1] = 69u;  // 'E'
+    hello_text[2] = 76u;  // 'L'
+    hello_text[3] = 76u;  // 'L'
+    hello_text[4] = 79u;  // 'O'
+    hello_text[5] = 32u;  // ' '
+    hello_text[6] = 87u;  // 'W'
+    hello_text[7] = 79u;  // 'O'
+    hello_text[8] = 82u;  // 'R'
+    hello_text[9] = 76u;  // 'L'
+    hello_text[10] = 68u; // 'D'
+    let hello_world_pos = vec2<f32>(10.0, 310.0);
+    draw_string_vector(hello_world_pos, &hello_text, 11u, text_height, text_color, text_ctx);
+    
+    // "ENERGY: XXX.XX" label with live energy value appended.
+    var energy_text: array<u32, 32>;
+    energy_text[0] = 69u;  // 'E'
+    energy_text[1] = 78u;  // 'N'
+    energy_text[2] = 69u;  // 'E'
+    energy_text[3] = 82u;  // 'R'
+    energy_text[4] = 71u;  // 'G'
+    energy_text[5] = 89u;  // 'Y'
+    energy_text[6] = 58u;  // ':'
+    energy_text[7] = 32u;  // ' '
+    let energy_prefix_len = 8u;
+    let energy_value_len = f32_to_string(selected_agent_buffer[0].energy, &energy_text, energy_prefix_len);
+    let energy_total_len = energy_prefix_len + energy_value_len;
+    let energy_pos = vec2<f32>(10.0, 330.0);
+    draw_string_vector(energy_pos, &energy_text, energy_total_len, text_height, text_color, text_ctx);
 }
 
 @compute @workgroup_size(16, 16)
@@ -4301,7 +5194,6 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 // INSPECTOR PANEL RENDERING (done in separate compute pass)
 // ============================================================================
 
-const INSPECTOR_WIDTH: u32 = 300u;
 const INSPECTOR_PADDING: u32 = 10u;
 
 // ============================================================================
