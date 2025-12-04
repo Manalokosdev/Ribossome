@@ -1285,6 +1285,7 @@ struct GpuState {
     clear_visual_pipeline: wgpu::ComputePipeline,
     clear_agent_grid_pipeline: wgpu::ComputePipeline,
     composite_agents_pipeline: wgpu::ComputePipeline,
+    render_inspector_pipeline: wgpu::ComputePipeline,
     gamma_slope_pipeline: wgpu::ComputePipeline,
     merge_pipeline: wgpu::ComputePipeline, // Merge spawned agents
     compact_pipeline: wgpu::ComputePipeline, // Remove dead agents
@@ -2002,9 +2003,12 @@ impl GpuState {
         });
         profiler.mark("Visual grid buffer");
 
+        // Agent grid extended 300 pixels wider for inspector panel
+        let agent_grid_width = surface_config.width + 300;
+        let agent_stride_bytes = ((agent_grid_width * bytes_per_pixel + (align - 1)) / align) * align;
         let agent_grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Agent Grid"),
-            size: (stride_bytes * surface_config.height) as u64,
+            size: (agent_stride_bytes * surface_config.height) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
@@ -2730,6 +2734,17 @@ impl GpuState {
             });
         profiler.mark("composite agents pipeline");
 
+        let render_inspector_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Render Inspector Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "render_inspector",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("render inspector pipeline");
+
         let merge_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Merge Agents Pipeline"),
             layout: Some(&compute_pipeline_layout),
@@ -2835,6 +2850,16 @@ impl GpuState {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -2853,6 +2878,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: agent_grid_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -3027,6 +3056,7 @@ impl GpuState {
             clear_visual_pipeline,
             clear_agent_grid_pipeline,
             composite_agents_pipeline,
+            render_inspector_pipeline,
             gamma_slope_pipeline,
             merge_pipeline,
             compact_pipeline,
@@ -3498,9 +3528,12 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
+        // Agent grid extended 300 pixels wider for inspector panel
+        let agent_grid_width = self.surface_config.width + 300;
+        let agent_stride_bytes = ((agent_grid_width * bytes_per_pixel + (align - 1)) / align) * align;
         self.agent_grid_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Agent Grid"),
-            size: (stride_bytes * self.surface_config.height) as u64,
+            size: (agent_stride_bytes * self.surface_config.height) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -3682,6 +3715,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: self.params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.agent_grid_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -4511,6 +4548,15 @@ impl GpuState {
                 let height_workgroups =
                     (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+
+                // Render inspector panel if an agent is selected
+                if self.selected_agent_index.is_some() {
+                    cpass.set_pipeline(&self.render_inspector_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    // Inspector is 300 pixels wide
+                    let inspector_width_workgroups = (300 + 15) / 16;
+                    cpass.dispatch_workgroups(inspector_width_workgroups, height_workgroups, 1);
+                }
             }
         }
 
@@ -7453,816 +7499,7 @@ fn main() {
                                             }
                             });
 
-                                    // Right side panel for agent inspector
-                                    if let Some(agent_data) = state.selected_agent_data.clone() {
-                                        let selected_idx = state.selected_agent_index;
-
-                                        egui::SidePanel::right("agent_inspector")
-                                            .default_width(350.0)
-                                            .resizable(true)
-                                            .show(ctx, |ui| {
-                                                egui::ScrollArea::vertical().show(ui, |ui| {
-                                            if let Some(idx) = selected_idx {
-                                                ui.label(format!("Agent Index: {}", idx));
-                                            }
-                                            
-                                            ui.checkbox(&mut state.follow_selected_agent, "Follow Agent");
-
-                                            ui.separator();
-                                            ui.heading("Identity");
-                                            ui.label(format!("Generation: {}", agent_data.generation));
-                                            ui.label(format!("Age: {} frames", agent_data.age));
-                                            ui.label(format!("Total mass: {:.2}", agent_data.total_mass));
-
-                                            ui.separator();
-                                            ui.heading("Position & Motion");
-                                            ui.label(format!("Pos: ({:.1}, {:.1})",
-                                                agent_data.position[0], agent_data.position[1]));
-                                            ui.label(format!("Vel: ({:.2}, {:.2})",
-                                                agent_data.velocity[0], agent_data.velocity[1]));
-                                            ui.label(format!("Rot: {:.2} rad", agent_data.rotation));
-                                            ui.label(format!("Alive: {}", if agent_data.alive != 0 { "Yes" } else { "No" }));
-                                            // Debug: speed and absorption multiplier (encoded in _pad_energy/torque_debug)
-                                            // Decode: speed * 1000.0 + multiplier
-                                            let encoded = agent_data._pad_energy;
-                                            let agent_speed = (encoded / 1000.0).floor();
-                                            let speed_mult = encoded - (agent_speed * 1000.0);
-                                            ui.label(format!("Speed: {:.2}", agent_speed));
-                                            ui.label(format!("Absorption mult: {:.4}", speed_mult));
-
-                                            ui.separator();
-                                            ui.heading("Energy");
-                                            let energy_percent = if agent_data.energy_capacity > 0.0 {
-                                                (agent_data.energy / agent_data.energy_capacity * 100.0).min(100.0)
-                                            } else {
-                                                0.0
-                                            };
-                                            ui.add(egui::ProgressBar::new(energy_percent / 100.0)
-                                                .text(format!("{:.1}/{:.1}", agent_data.energy, agent_data.energy_capacity)));
-
-                                            // Check for mouth (Methionine = amino type 10)
-                                            let has_mouth = (0..agent_data.body_count.min(MAX_BODY_PARTS as u32) as usize).any(|i| {
-                                                let idx = agent_data.body[i].base_type() as usize;
-                                                AMINO_FLAGS
-                                                    .get(idx)
-                                                    .copied()
-                                                    .unwrap_or(DEFAULT_AMINO_FLAGS)
-                                                    .is_mouth
-                                            });
-
-                                            if !has_mouth {
-                                                ui.colored_label(egui::Color32::RED, "Warning: NO MOUTH - No Methionine (M)!");
-                                                ui.colored_label(egui::Color32::RED, "Cannot absorb energy or reproduce");
-                                            } else if agent_data.energy_capacity == 0.0 {
-                                                ui.colored_label(egui::Color32::RED, "Warning: NO ENERGY CAPACITY");
-                                                ui.colored_label(egui::Color32::RED, "Cannot store energy");
-                                            }
-
-                                            ui.separator();
-                                            ui.heading("Close-up");
-                                            let preview_side = ui.available_width().min(240.0);
-                                            let size = egui::vec2(preview_side, preview_side);
-                                            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                                            let painter = ui.painter_at(rect);
-                                            painter.rect_filled(rect, 4.0, egui::Color32::from_gray(15));
-                                            painter.rect_stroke(
-                                                rect,
-                                                4.0,
-                                                egui::Stroke::new(1.0, egui::Color32::from_gray(60)),
-                                            );
-                                            let center = rect.center();
-
-                                            let part_count = agent_data.body_count.min(MAX_BODY_PARTS as u32) as usize;
-                                            if part_count == 0 {
-                                                painter.text(
-                                                    center,
-                                                    egui::Align2::CENTER_CENTER,
-                                                    "No built segments",
-                                                    egui::FontId::monospace(12.0),
-                                                    egui::Color32::LIGHT_GRAY,
-                                                );
-                                            } else {
-                                                let uses_world_positions = agent_data
-                                                    .body
-                                                    .iter()
-                                                    .take(part_count)
-                                                    .any(|part| part.pos[0].abs() > 200.0 || part.pos[1].abs() > 200.0);
-
-                                                let agent_pos_vec = egui::Vec2::new(agent_data.position[0], agent_data.position[1]);
-                                                let (sin_r, cos_r) = agent_data.rotation.sin_cos();
-                                                let to_local = |pos: [f32; 2]| -> egui::Vec2 {
-                                                    let v = egui::Vec2::new(pos[0], pos[1]);
-                                                    if uses_world_positions {
-                                                        let rel = v - agent_pos_vec;
-                                                        egui::Vec2::new(
-                                                            rel.x * cos_r + rel.y * sin_r,
-                                                            -rel.x * sin_r + rel.y * cos_r,
-                                                        )
-                                                    } else {
-                                                        v
-                                                    }
-                                                };
-
-                                                let mut origin_local = to_local(agent_data.morphology_origin);
-                                                let mut local_positions: Vec<egui::Vec2> = agent_data
-                                                    .body
-                                                    .iter()
-                                                    .take(part_count)
-                                                    .map(|part| to_local(part.pos))
-                                                    .collect();
-
-                                                let start_point = local_positions
-                                                    .first()
-                                                    .copied()
-                                                    .unwrap_or(origin_local);
-                                                let end_point = if part_count > 1 {
-                                                    local_positions
-                                                        .last()
-                                                        .copied()
-                                                        .unwrap_or(start_point)
-                                                } else {
-                                                    start_point + egui::Vec2::new(1.0, 0.0)
-                                                };
-                                                let axis_vec = end_point - start_point;
-                                                let axis_len = axis_vec.length();
-                                                let (align_cos, align_sin) = if axis_len > 1e-4 {
-                                                    (axis_vec.x / axis_len, axis_vec.y / axis_len)
-                                                } else {
-                                                    (1.0, 0.0)
-                                                };
-                                                let rotate_local = |v: egui::Vec2| -> egui::Vec2 {
-                                                    egui::Vec2::new(
-                                                        v.x * align_cos + v.y * align_sin,
-                                                        -v.x * align_sin + v.y * align_cos,
-                                                    )
-                                                };
-                                                origin_local = rotate_local(origin_local);
-                                                for pos in &mut local_positions {
-                                                    *pos = rotate_local(*pos);
-                                                }
-
-                                                let mut max_extent = 1.0f32;
-                                                for (local, part) in local_positions.iter().zip(agent_data.body.iter()) {
-                                                    let extent = local.length() + part.size.max(0.5);
-                                                    if extent > max_extent {
-                                                        max_extent = extent;
-                                                    }
-                                                }
-
-                                                let margin = 8.0;
-                                                let scale = if max_extent > 0.0 {
-                                                    ((preview_side / 2.0) - margin).max(4.0) / max_extent
-                                                } else {
-                                                    1.0
-                                                };
-
-                                                let to_screen_vec = |v: egui::Vec2| -> egui::Vec2 {
-                                                    egui::vec2(v.x * scale, -v.y * scale)
-                                                };
-                                                let to_screen_pos = |v: egui::Vec2| -> egui::Pos2 {
-                                                    center + to_screen_vec(v)
-                                                };
-                                                let normalize_vec2 = |v: egui::Vec2| -> egui::Vec2 {
-                                                    let len = v.length();
-                                                    if len > 1e-4 { v / len } else { egui::Vec2::new(1.0, 0.0) }
-                                                };
-
-                                                for (idx, (part, local)) in agent_data
-                                                    .body
-                                                    .iter()
-                                                    .zip(local_positions.iter())
-                                                    .take(part_count)
-                                                    .enumerate()
-                                                {
-                                                    let flags = AMINO_FLAGS
-                                                        .get(part.base_type() as usize)
-                                                        .copied()
-                                                        .unwrap_or(DEFAULT_AMINO_FLAGS);
-                                                    let raw_color = AMINO_COLORS
-                                                        .get(part.base_type() as usize)
-                                                        .copied()
-                                                        .unwrap_or(DEFAULT_PART_COLOR);
-                                                    let part_color = rgb_to_color32(raw_color);
-
-                                                    let screen_pos = to_screen_pos(*local);
-                                                    let segment_start_local = if idx == 0 {
-                                                        origin_local
-                                                    } else {
-                                                        local_positions[idx - 1]
-                                                    };
-                                                    let segment_start = to_screen_pos(segment_start_local);
-
-                                                    let is_first = idx == 0;
-                                                    let is_last = idx == part_count - 1;
-                                                    let is_single = part_count == 1;
-                                                    let stroke_width = (part.size * 0.5 * scale).max(1.0);
-                                                    painter.line_segment(
-                                                        [segment_start, screen_pos],
-                                                        egui::Stroke::new(stroke_width, part_color),
-                                                    );
-                                                    if !is_single && (is_first || is_last) {
-                                                        painter.circle_filled(screen_pos, stroke_width, part_color);
-                                                    }
-
-                                                    if flags.is_alpha_sensor || flags.is_beta_sensor || flags.is_energy_sensor {
-                                                        // Match GPU: sensor_radius = part.size * 2.0 (no scaling by scale factor for world size)
-                                                        let sensor_radius_world = part.size * 2.0;
-                                                        let sensor_radius = (sensor_radius_world * scale).max(4.0);
-                                                        // Match GPU: color * 0.6 with 0.5 alpha
-                                                        let sensor_rgb = [
-                                                            raw_color[0] * 0.6,
-                                                            raw_color[1] * 0.6,
-                                                            raw_color[2] * 0.6,
-                                                        ];
-                                                        let sensor_color = rgb_to_color32_with_alpha(sensor_rgb, 0.5);
-                                                        // Use cloud rendering to match GPU (seed based on agent index + part index)
-                                                        let sensor_seed = (agent_data.generation as u64) * 500 + (idx as u64) * 13;
-                                                        paint_cloud(&painter, screen_pos, sensor_radius, sensor_color, sensor_seed);
-                                                    }
-
-                                                    if flags.is_mouth {
-                                                        // Match GPU: part.size * 4.0
-                                                        let asterisk_radius_world = part.size * 4.0;
-                                                        let asterisk_radius = (asterisk_radius_world * scale).max(6.0);
-                                                        paint_asterisk(&painter, screen_pos, asterisk_radius, egui::Color32::from_rgb(255, 255, 0));
-                                                    }
-
-                                                    if flags.is_condenser {
-                                                        // Read both alpha and beta charges independently
-                                                        let signed_alpha_charge = agent_data.body[idx].pad[0];
-                                                        let signed_beta_charge = agent_data.body[idx].pad[1];
-                                                        let alpha_charge = signed_alpha_charge.abs().clamp(0.0, 10.0);
-                                                        let beta_charge = signed_beta_charge.abs().clamp(0.0, 10.0);
-                                                        let alpha_ratio = (alpha_charge / 10.0).clamp(0.0, 1.0);
-                                                        let beta_ratio = (beta_charge / 10.0).clamp(0.0, 1.0);
-                                                        let is_alpha_discharging = signed_alpha_charge > 0.0;
-                                                        let is_beta_discharging = signed_beta_charge > 0.0;
-                                                        
-                                                        // Fill color blends alpha (green) and beta (red) based on their independent charge levels
-                                                        let fill_color = if is_alpha_discharging || is_beta_discharging {
-                                                            // Flash white when either channel is discharging
-                                                            egui::Color32::WHITE
-                                                        } else {
-                                                            // Mix red (beta) and green (alpha) based on their charge ratios
-                                                            let red_component = beta_ratio; // More beta = more red
-                                                            let green_component = alpha_ratio; // More alpha = more green
-                                                            let low_tint = [red_component * 0.25, green_component * 0.25, 0.0];
-                                                            let base_tint = [red_component, green_component, 0.0];
-                                                            let interp = [
-                                                                low_tint[0] + (base_tint[0] - low_tint[0]) * ((alpha_ratio + beta_ratio) * 0.5).clamp(0.0, 1.0),
-                                                                low_tint[1] + (base_tint[1] - low_tint[1]) * ((alpha_ratio + beta_ratio) * 0.5).clamp(0.0, 1.0),
-                                                                low_tint[2] + (base_tint[2] - low_tint[2]) * ((alpha_ratio + beta_ratio) * 0.5).clamp(0.0, 1.0),
-                                                            ];
-                                                            rgb_to_color32(interp)
-                                                        };
-                                                        
-                                                        // Match GPU: radius = max(part.size * 0.5, 3.0) not part.size * 1.5
-                                                        let radius_world = (part.size * 0.5).max(3.0);
-                                                        let radius = (radius_world * scale).max(4.0);
-                                                        painter.circle_filled(screen_pos, radius, fill_color);
-                                                        
-                                                        // Match GPU: white outline with fixed thickness 0.5
-                                                        painter.circle_stroke(
-                                                            screen_pos,
-                                                            radius,
-                                                            egui::Stroke::new(0.5, egui::Color32::WHITE),
-                                                        );
-                                                    }
-
-                                                    if flags.is_inhibitor {
-                                                        let outline_radius = 20.0 * scale;
-                                                        let color = egui::Color32::from_rgba_unmultiplied(120, 160, 120, 180);
-                                                        painter.circle_stroke(
-                                                            screen_pos,
-                                                            outline_radius,
-                                                            egui::Stroke::new(2.0, color),
-                                                        );
-                                                        painter.circle_filled(
-                                                            screen_pos,
-                                                            (2.5 * scale).clamp(2.0, 4.0),
-                                                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255),
-                                                        );
-                                                    }
-
-                                                    let neighbor_axis = || -> egui::Vec2 {
-                                                        if part_count == 1 {
-                                                            return egui::Vec2::new(1.0, 0.0);
-                                                        }
-                                                        if idx > 0 {
-                                                            return *local - local_positions[idx - 1];
-                                                        }
-                                                        if idx + 1 < part_count {
-                                                            return local_positions[idx + 1] - *local;
-                                                        }
-                                                        egui::Vec2::new(1.0, 0.0)
-                                                    };
-                                                    let axis_local = normalize_vec2(neighbor_axis());
-
-                                                    if part.base_type() as usize == 9 {
-                                                        let perp = egui::Vec2::new(-axis_local.y, axis_local.x);
-                                                        let perp_screen = to_screen_vec(perp);
-                                                        let half_length = part.size * 0.8;
-                                                        let offset = perp_screen * half_length;
-                                                        painter.line_segment(
-                                                            [screen_pos + offset, screen_pos - offset],
-                                                            egui::Stroke::new((part.size * 0.3 * scale).max(0.8), part_color),
-                                                        );
-                                                    }
-
-                                                    if flags.is_propeller {
-                                                        let jet_dir_local = egui::Vec2::new(-axis_local.y, axis_local.x);
-                                                        let jet_screen_dir = normalize_vec2(to_screen_vec(jet_dir_local));
-                                                        let jet_length = (part.size * 3.0 * scale).max(6.0);
-                                                        let jet_vec = jet_screen_dir * jet_length;
-                                                        let plume_color = egui::Color32::from_rgba_unmultiplied(200, 220, 255, 220);
-                                                        let plume_width = (part.size * 0.2 * scale).clamp(1.0, 3.0);
-                                                        painter.line_segment(
-                                                            [screen_pos, screen_pos + jet_vec],
-                                                            egui::Stroke::new(plume_width, plume_color),
-                                                        );
-                                                        let wing_offset = egui::Vec2::new(-jet_vec.y, jet_vec.x) * 0.1;
-                                                        painter.line_segment(
-                                                            [screen_pos + wing_offset, screen_pos + jet_vec * 0.5],
-                                                            egui::Stroke::new(plume_width * 0.7, plume_color),
-                                                        );
-                                                        painter.line_segment(
-                                                            [screen_pos - wing_offset, screen_pos + jet_vec * 0.5],
-                                                            egui::Stroke::new(plume_width * 0.7, plume_color),
-                                                        );
-                                                    }
-                                                    
-                                                    // Draw small diamond for displacers (averaging indicator)
-                                                    if flags.is_displacer {
-                                                        let square_size_world = part.size * 2.0;
-                                                        let square_size = (square_size_world * scale).max(4.0);
-                                                        // Draw diamond shape (rotated square)
-                                                        let top = screen_pos + egui::vec2(0.0, -square_size);
-                                                        let right = screen_pos + egui::vec2(square_size, 0.0);
-                                                        let bottom = screen_pos + egui::vec2(0.0, square_size);
-                                                        let left = screen_pos + egui::vec2(-square_size, 0.0);
-                                                        painter.line_segment([top, right], egui::Stroke::new(1.0, part_color));
-                                                        painter.line_segment([right, bottom], egui::Stroke::new(1.0, part_color));
-                                                        painter.line_segment([bottom, left], egui::Stroke::new(1.0, part_color));
-                                                        painter.line_segment([left, top], egui::Stroke::new(1.0, part_color));
-                                                    }
-
-                                                    if part_count > 1 && (is_first || is_last) {
-                                                        let marker_radius = (part.size.max(0.5) * scale * 0.4).max(2.0);
-                                                        painter.circle_filled(screen_pos, marker_radius, part_color);
-                                                        painter.circle_stroke(
-                                                            screen_pos,
-                                                            marker_radius,
-                                                            egui::Stroke::new(0.6, egui::Color32::from_black_alpha(100)),
-                                                        );
-                                                    }
-                                                }
-                                            }
-
-                                            // Morphology details hidden for simplicity
-
-                                            ui.separator();
-                                            ui.heading("Reproduction");
-
-                                            // Calculate gene length (number of non-X bases)
-                                            let mut genome_bytes_temp = Vec::new();
-                                            for &word in agent_data.genome.iter() {
-                                                for i in 0..4 {
-                                                    let byte = ((word >> (i * 8)) & 0xFF) as u8;
-                                                    genome_bytes_temp.push(byte);
-                                                }
-                                            }
-                                            let gene_length = genome_bytes_temp.iter().filter(|&&b| b != 88).count() as u32;
-
-                                            let rna_percent = if gene_length > 0 {
-                                                agent_data.pairing_counter as f32 / gene_length as f32
-                                            } else {
-                                                0.0
-                                            };
-                                            ui.add(egui::ProgressBar::new(rna_percent)
-                                                .text(format!("{}/{} bases paired", agent_data.pairing_counter, gene_length)));
-
-                                            if agent_data.pairing_counter >= gene_length && gene_length > 0 {
-                                                ui.colored_label(egui::Color32::GREEN, "Ready to reproduce");
-                                            }
-
-                                            ui.separator();
-                                            ui.heading("Genome");
-
-                                            // Convert genome bytes to RNA base sequence (A, U, G, C)
-                                            let mut genome_bytes = Vec::new();
-                                            for &word in agent_data.genome.iter() {
-                                                for i in 0..4 {
-                                                    let byte = ((word >> (i * 8)) & 0xFF) as u8;
-                                                    genome_bytes.push(byte);
-                                                }
-                                            }
-
-                                            // Determine active gene region (exclude 'X' padding on both sides)
-                                            let mut first_non_x: Option<usize> = None;
-                                            let mut last_non_x: Option<usize> = None;
-                                            for (i, &b) in genome_bytes.iter().enumerate() {
-                                                if b != 88 { // 'X'
-                                                    if first_non_x.is_none() { first_non_x = Some(i); }
-                                                    last_non_x = Some(i);
-                                                }
-                                            }
-
-                                            // Find translation start and stop positions
-                                            // Respects require_start_codon and ignore_stop_codons settings
-                                            let mut start_pos: Option<usize> = None;
-                                            let mut stop_pos: Option<usize> = None;
-
-                                            if let (Some(region_start), Some(region_end)) = (first_non_x, last_non_x) {
-                                                if state.require_start_codon {
-                                                    // Search for AUG start codon at any position
-                                                    for scan_idx in region_start..=region_end.saturating_sub(2) {
-                                                        let b0 = genome_bytes[scan_idx];
-                                                        let b1 = genome_bytes[scan_idx + 1];
-                                                        let b2 = genome_bytes[scan_idx + 2];
-                                                        // Skip if any base is padding
-                                                        if b0 == 88 || b1 == 88 || b2 == 88 {
-                                                            continue;
-                                                        }
-                                                        // Check for AUG (A=65, U=85, G=71)
-                                                        if b0 == 65 && b1 == 85 && b2 == 71 {
-                                                            start_pos = Some(scan_idx);
-                                                            break;
-                                                        }
-                                                    }
-                                                } else {
-                                                    // No start codon required - start at first complete codon
-                                                    let mut scan_idx = region_start;
-                                                    while scan_idx + 2 <= region_end {
-                                                        let b0 = genome_bytes[scan_idx];
-                                                        let b1 = genome_bytes[scan_idx + 1];
-                                                        let b2 = genome_bytes[scan_idx + 2];
-                                                        if b0 != 88 && b1 != 88 && b2 != 88 {
-                                                            start_pos = Some(scan_idx);
-                                                            break;
-                                                        }
-                                                        scan_idx += 1;
-                                                    }
-                                                }
-                                            }
-
-                                            if let (Some(start), Some(region_end)) = (start_pos, last_non_x) {
-                                                let mut scan_idx = start;
-                                                while scan_idx + 2 <= region_end {
-                                                    let b0 = genome_bytes[scan_idx];
-                                                    let b1 = genome_bytes[scan_idx + 1];
-                                                    let b2 = genome_bytes[scan_idx + 2];
-                                                    // Padding denotes termination
-                                                    if b0 == 88 || b1 == 88 || b2 == 88 {
-                                                        stop_pos = Some(scan_idx);
-                                                        break;
-                                                    }
-                                                    // Check for stop codons only if not ignoring them
-                                                    if !state.ignore_stop_codons {
-                                                        let is_stop = (b0 == 85 && b1 == 65 && b2 == 65)
-                                                            || (b0 == 85 && b1 == 65 && b2 == 71)
-                                                            || (b0 == 85 && b1 == 71 && b2 == 65);
-                                                        if is_stop {
-                                                            stop_pos = Some(scan_idx);
-                                                            break;
-                                                        }
-                                                    }
-                                                    scan_idx += 3;
-                                                }
-                                            }
-
-                                            // Display RNA sequence by codons starting from the first coding position
-                                            // Build styled segments for layouting
-                                            let mut segments = Vec::new();
-
-                                            if let Some(start) = start_pos {
-                                                // Build inactive prefix before the first valid codon
-                                                // Separate padding ('X') from actual inactive bases
-                                                let mut padding_prefix = String::new();
-                                                let mut inactive_prefix = String::new();
-                                                for idx in 0..start {
-                                                    let byte = genome_bytes[idx];
-                                                    let base = match byte { 65 => 'A', 85 => 'U', 71 => 'G', 67 => 'C', 88 => 'X', _ => '?' };
-                                                    if byte == 88 {
-                                                        padding_prefix.push(base);
-                                                    } else {
-                                                        // If we accumulated padding, flush it first
-                                                        if !padding_prefix.is_empty() {
-                                                            segments.push((padding_prefix.clone(), egui::Color32::from_rgb(40, 40, 40), false));
-                                                            padding_prefix.clear();
-                                                        }
-                                                        inactive_prefix.push(base);
-                                                    }
-                                                }
-                                                // Flush remaining padding
-                                                if !padding_prefix.is_empty() {
-                                                    segments.push((padding_prefix, egui::Color32::from_rgb(40, 40, 40), false));
-                                                }
-                                                // Flush inactive bases
-                                                if !inactive_prefix.is_empty() {
-                                                    segments.push((inactive_prefix, egui::Color32::DARK_GRAY, false));
-                                                }
-
-                                                // Process codons from the first active base onwards
-                                                let mut codon_idx = start;
-                                                while codon_idx + 2 < genome_bytes.len() {
-                                                    let b0 = genome_bytes[codon_idx];
-                                                    let b1 = genome_bytes[codon_idx + 1];
-                                                    let b2 = genome_bytes[codon_idx + 2];
-                                                    // Stop at padding boundary
-                                                    if b0 == 88 || b1 == 88 || b2 == 88 { break; }
-
-                                                    let base0 = match b0 { 65 => 'A', 85 => 'U', 71 => 'G', 67 => 'C', 88 => 'X', _ => '?' };
-                                                    let base1 = match b1 { 65 => 'A', 85 => 'U', 71 => 'G', 67 => 'C', 88 => 'X', _ => '?' };
-                                                    let base2 = match b2 { 65 => 'A', 85 => 'U', 71 => 'G', 67 => 'C', 88 => 'X', _ => '?' };
-
-                                                    let codon_str = format!("{}{}{}", base0, base1, base2);
-
-                                                    // Calculate amino acid type from codon using genetic code table
-                                                    let aa_type = codon_to_amino_acid(b0, b1, b2);
-
-                                                    // Check if we've reached the stop codon or are beyond it
-                                                    let is_active = if let Some(stop) = stop_pos {
-                                                        codon_idx <= stop
-                                                    } else {
-                                                        true // No stop codon found, all active
-                                                    };
-
-                                                    // Check for stop codons (UAA, UAG, UGA)
-                                                    let is_stop_codon = (b0 == 85 && b1 == 65 && b2 == 65) ||  // UAA
-                                                                        (b0 == 85 && b1 == 65 && b2 == 71) ||  // UAG
-                                                                        (b0 == 85 && b1 == 71 && b2 == 65);    // UGA
-
-                                                    // Determine color based on function
-                                                    let color = if !is_active {
-                                                        egui::Color32::DARK_GRAY // Inactive - dark grey
-                                                    } else if is_stop_codon {
-                                                        egui::Color32::from_rgb(128, 0, 128) // Stop codon - purple
-                                                    } else {
-                                                        // Color by amino acid function
-                                                        match aa_type {
-                                                            1 => egui::Color32::from_rgb(255, 0, 0),     // Cys (Beta sensor) - red
-                                                            4 => egui::Color32::from_rgb(255, 102, 178), // Phe (Poison resistant) - pink
-                                                            8 => egui::Color32::from_rgb(255, 255, 0),   // Lys (Mouth) - yellow
-                                                            9 => egui::Color32::from_rgb(0, 255, 255),   // Leu (Chiral flipper) - cyan
-                                                            12 => egui::Color32::from_rgb(0, 100, 255),  // Pro (Propeller) - blue
-                                                            15 => egui::Color32::from_rgb(0, 255, 0),    // Ser (Alpha sensor) - green
-                                                            16 => egui::Color32::from_rgb(153, 51, 204), // Thr (Energy sensor) - purple
-                                                            17 => egui::Color32::from_rgb(0, 255, 255),  // Val (Displacer) - cyan
-                                                            18 => egui::Color32::from_rgb(255, 165, 0),  // Trp (Storage) - orange
-                                                            _ => egui::Color32::from_rgb(180, 180, 180), // Structural - light grey
-                                                        }
-                                                    };
-
-                                                    segments.push((codon_str, color, is_active));
-                                                    codon_idx += 3;
-                                                }
-
-                                                // Append leftover sequence (including padding) after the active codons
-                                                let tail_start = codon_idx.min(genome_bytes.len());
-                                                if tail_start < genome_bytes.len() {
-                                                    let mut inactive_suffix = String::new();
-                                                    let mut padding_suffix = String::new();
-                                                    for idx in tail_start..genome_bytes.len() {
-                                                        let byte = genome_bytes[idx];
-                                                        let base = match byte { 65 => 'A', 85 => 'U', 71 => 'G', 67 => 'C', 88 => 'X', _ => '?' };
-                                                        if byte == 88 {
-                                                            // If we had inactive bases, flush them first
-                                                            if !inactive_suffix.is_empty() {
-                                                                segments.push((inactive_suffix.clone(), egui::Color32::DARK_GRAY, false));
-                                                                inactive_suffix.clear();
-                                                            }
-                                                            padding_suffix.push(base);
-                                                        } else {
-                                                            // If we had padding, flush it first
-                                                            if !padding_suffix.is_empty() {
-                                                                segments.push((padding_suffix.clone(), egui::Color32::from_rgb(40, 40, 40), false));
-                                                                padding_suffix.clear();
-                                                            }
-                                                            inactive_suffix.push(base);
-                                                        }
-                                                    }
-                                                    // Flush remaining inactive bases
-                                                    if !inactive_suffix.is_empty() {
-                                                        segments.push((inactive_suffix, egui::Color32::DARK_GRAY, false));
-                                                    }
-                                                    // Flush remaining padding
-                                                    if !padding_suffix.is_empty() {
-                                                        segments.push((padding_suffix, egui::Color32::from_rgb(40, 40, 40), false));
-                                                    }
-                                                }
-                                            } else {
-                                                // No complete codon found - show all bases as inactive/padding
-                                                let mut inactive_bases = String::new();
-                                                let mut padding_bases = String::new();
-                                                for byte in &genome_bytes {
-                                                    let base = match *byte { 65 => 'A', 85 => 'U', 71 => 'G', 67 => 'C', 88 => 'X', _ => '?' };
-                                                    if *byte == 88 {
-                                                        // Flush inactive first
-                                                        if !inactive_bases.is_empty() {
-                                                            segments.push((inactive_bases.clone(), egui::Color32::DARK_GRAY, false));
-                                                            inactive_bases.clear();
-                                                        }
-                                                        padding_bases.push(base);
-                                                    } else {
-                                                        // Flush padding first
-                                                        if !padding_bases.is_empty() {
-                                                            segments.push((padding_bases.clone(), egui::Color32::from_rgb(40, 40, 40), false));
-                                                            padding_bases.clear();
-                                                        }
-                                                        inactive_bases.push(base);
-                                                    }
-                                                }
-                                                // Flush remaining
-                                                if !inactive_bases.is_empty() {
-                                                    segments.push((inactive_bases, egui::Color32::DARK_GRAY, false));
-                                                }
-                                                if !padding_bases.is_empty() {
-                                                    segments.push((padding_bases, egui::Color32::from_rgb(40, 40, 40), false));
-                                                }
-                                            }
-
-                                            // Display header with status
-                                            if let (Some(start), Some(end)) = (first_non_x, last_non_x) {
-                                                let active_len = end.saturating_sub(start) + 1;
-                                                let left_pad = start;
-                                                let right_pad = genome_bytes.len().saturating_sub(end + 1);
-                                                ui.label(format!(
-                                                    "Padding: left {} | active {} | right {}",
-                                                    left_pad, active_len, right_pad
-                                                ));
-                                            }
-
-                                            if start_pos.is_some() {
-                                                ui.label("RNA Sequence (colored = active gene region):");
-                                            } else if first_non_x.is_some() {
-                                                ui.label(egui::RichText::new("RNA Sequence (no complete codons - translation idle)").color(egui::Color32::RED));
-                                            } else {
-                                                ui.label("RNA Sequence (all padding)");
-                                            }
-
-                                            // Display all segments in one label using LayoutJob for no spacing
-                                            use egui::text::{LayoutJob, TextFormat};
-                                            let mut job = LayoutJob::default();
-                                            for (text, color, _is_bold) in segments {
-                                                let format = TextFormat {
-                                                    font_id: egui::FontId::monospace(10.0),
-                                                    color,
-                                                    ..Default::default()
-                                                };
-                                                job.append(&text, 0.0, format);
-                                            }
-                                            ui.label(job);
-
-                                            // Show only active organs (built parts) with signal visualization
-                                            ui.separator();
-                                            ui.heading("Active organs (colored by Î±/Î² signals)");
-                                            let amino_names = [
-                                                "Ala", "Cys", "Asp", "Glu", "Phe", "Gly", "His", "Ile", "Lys(MOUTH)", "Leu",
-                                                "Met", "Asn", "Pro", "Gln", "Arg", "Ser", "Thr", "Val", "Trp(STORAGE)", "Tyr"
-                                            ];
-                                            let mut m_count: u32 = 0; // Lysine (Mouth) index 8
-                                            let mut w_count: u32 = 0; // Tryptophan (Storage) index 18
-
-                                            // Build colored organ display using LayoutJob
-                                            let mut organ_job = egui::text::LayoutJob::default();
-                                            let mut has_parts = false;
-
-                                            if let Some((dbg_count, dbg_types)) = state.debug_parts_data.as_ref() {
-                                                for i in 0..(*dbg_count as usize).min(MAX_BODY_PARTS) {
-                                                    has_parts = true;
-                                                    let t = dbg_types[i] as usize;
-                                                    let name = if t < amino_names.len() { amino_names[t] } else { "?" };
-
-                                                    // Get signal values for this body part
-                                                    let alpha = agent_data.body[i].alpha_signal;
-                                                    let beta = agent_data.body[i].beta_signal;
-
-                                                    // Match shader debug mode color scheme:
-                                                    // r = max(beta, 0.0)
-                                                    // g = max(alpha, 0.0)
-                                                    // b = max(-alpha, -beta, 0.0)
-                                                    let r = beta.max(0.0);
-                                                    let g = alpha.max(0.0);
-                                                    let bl = (-alpha).max(-beta).max(0.0);
-
-                                                    // Apply sqrt for enhanced visibility
-                                                    let r_enhanced = r.sqrt();
-                                                    let g_enhanced = g.sqrt();
-                                                    let bl_enhanced = bl.sqrt();
-
-                                                    let color = egui::Color32::from_rgb(
-                                                        (r_enhanced * 255.0) as u8,
-                                                        (g_enhanced * 255.0) as u8,
-                                                        (bl_enhanced * 255.0) as u8
-                                                    );
-
-                                                    let format = egui::text::TextFormat {
-                                                        font_id: egui::FontId::monospace(10.0),
-                                                        color,
-                                                        ..Default::default()
-                                                    };
-                                                    organ_job.append(name, 0.0, format);
-
-                                                    // Show charge level for condensers (Tyrosine=19, Glycine=5)
-                                                    if t == 19 || t == 5 {
-                                                        let signed_charge = agent_data.body[i].pad[1]; // Signed: negative=charging, positive=discharging
-                                                        let charge = signed_charge.abs(); // Absolute charge level (0.0 to 10.0)
-                                                        let is_discharging = signed_charge > 0.0;
-                                                        let charge_text = format!("[{:.1}]", charge);
-                                                        let charge_format = egui::text::TextFormat {
-                                                            font_id: egui::FontId::monospace(8.0),
-                                                            color: if is_discharging && charge >= 10.0 {
-                                                                egui::Color32::YELLOW // Full charge - discharging!
-                                                            } else if charge > 0.1 {
-                                                                egui::Color32::from_rgb(150, 150, 150) // Charging
-                                                            } else {
-                                                                egui::Color32::from_rgb(80, 80, 80) // Empty
-                                                            },
-                                                            ..Default::default()
-                                                        };
-                                                        organ_job.append(&charge_text, 0.0, charge_format);
-                                                    }
-
-                                                    if t == 8 { m_count += 1; }
-                                                    if t == 18 { w_count += 1; }
-                                                    if i + 1 < *dbg_count as usize {
-                                                        let separator_format = egui::text::TextFormat {
-                                                            font_id: egui::FontId::monospace(10.0),
-                                                            color: egui::Color32::GRAY,
-                                                            ..Default::default()
-                                                        };
-                                                        organ_job.append("-", 0.0, separator_format);
-                                                    }
-                                                }
-                                            } else {
-                                                let safe_body_count = agent_data.body_count.min(MAX_BODY_PARTS as u32) as usize;
-                                                for i in 0..safe_body_count {
-                                                    has_parts = true;
-                                                    let t = agent_data.body[i].base_type() as usize;
-                                                    let name = if t < amino_names.len() { amino_names[t] } else { "?" };
-
-                                                    // Get signal values for this body part
-                                                    let alpha = agent_data.body[i].alpha_signal;
-                                                    let beta = agent_data.body[i].beta_signal;
-
-                                                    // Match shader debug mode color scheme
-                                                    let r = beta.max(0.0);
-                                                    let g = alpha.max(0.0);
-                                                    let bl = (-alpha).max(-beta).max(0.0);
-                                                    let r_enhanced = r.sqrt();
-                                                    let g_enhanced = g.sqrt();
-                                                    let bl_enhanced = bl.sqrt();
-
-                                                    let color = egui::Color32::from_rgb(
-                                                        (r_enhanced * 255.0) as u8,
-                                                        (g_enhanced * 255.0) as u8,
-                                                        (bl_enhanced * 255.0) as u8
-                                                    );
-
-                                                    let format = egui::text::TextFormat {
-                                                        font_id: egui::FontId::monospace(10.0),
-                                                        color,
-                                                        ..Default::default()
-                                                    };
-                                                    organ_job.append(name, 0.0, format);
-
-                                                    if t == 8 { m_count += 1; }
-                                                    if t == 18 { w_count += 1; }
-                                                    if i + 1 < safe_body_count {
-                                                        let separator_format = egui::text::TextFormat {
-                                                            font_id: egui::FontId::monospace(10.0),
-                                                            color: egui::Color32::GRAY,
-                                                            ..Default::default()
-                                                        };
-                                                        organ_job.append("-", 0.0, separator_format);
-                                                    }
-                                                }
-                                            }
-
-                                            if !has_parts {
-                                                ui.label("(none)");
-                                            } else {
-                                                ui.label(organ_job);
-                                                ui.label(egui::RichText::new("Î±+â†’green  Î²+â†’red  Î±-/Î²-â†’blue")
-                                                    .font(egui::FontId::monospace(8.0))
-                                                    .color(egui::Color32::GRAY));
-                                            }
-
-                                            // Capacity cross-check: estimate from Mouth/Storage counts (Lys and Trp)
-                                            let estimated_capacity = (m_count as f32) * 10.0 + (w_count as f32) * 50.0;
-                                            ui.label(format!(
-                                                "Capacity estimate: Mouth(Lys x10)={} Storage(Trp x50)={} => {:.1} | reported {:.1}",
-                                                m_count, w_count, estimated_capacity, agent_data.energy_capacity
-                                            ));
-
-                                            ui.separator();
-                                                if ui.button("Deselect").clicked() {
-                                                    state.selected_agent_index = None;
-                                                    state.selected_agent_data = None;
-                                                }
-                                            });
-                                        });
-                                    }
+                                   
                                 });
 
                                 // Handle platform output

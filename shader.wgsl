@@ -4255,6 +4255,55 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ============================================================================
+// INSPECTOR PANEL RENDERING
+// ============================================================================
+
+const INSPECTOR_WIDTH: u32 = 300u;
+const INSPECTOR_PADDING: u32 = 10u;
+
+@compute @workgroup_size(16, 16)
+fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    
+    // Only render if we have a selected agent
+    if (params.selected_agent_index == 0xFFFFFFFFu) {
+        return;
+    }
+    
+    // Check if we're in the inspector area (300 pixels to the right of window)
+    let safe_width = max(params.window_width, 1.0);
+    let safe_height = max(params.window_height, 1.0);
+    let window_width = u32(safe_width);
+    let window_height = u32(safe_height);
+    
+    if (x < window_width || x >= window_width + INSPECTOR_WIDTH || y >= window_height) {
+        return;
+    }
+    
+    // Calculate position in inspector panel (0 to INSPECTOR_WIDTH)
+    let inspector_x = x - window_width;
+    let inspector_y = y;
+    
+    // Simple placeholder: dark gray panel with lighter border
+    var color = vec4<f32>(0.2, 0.2, 0.2, 1.0);
+    
+    // Border on left edge
+    if (inspector_x < 3u) {
+        color = vec4<f32>(0.5, 0.5, 0.5, 1.0);
+    }
+    
+    // Title bar at top
+    if (inspector_y < 30u) {
+        color = vec4<f32>(0.3, 0.35, 0.4, 1.0);
+    }
+    
+    // Write to agent_grid (extended buffer)
+    let idx = y * params.visual_stride + x;
+    agent_grid[idx] = color;
+}
+
+// ============================================================================
 // RENDER VERTEX/FRAGMENT SHADERS
 // ============================================================================
 
@@ -4291,11 +4340,32 @@ var visual_sampler: sampler;
 @group(0) @binding(2)
 var<uniform> render_params: SimParams;
 
+@group(0) @binding(3)
+var<storage, read> agent_grid_render: array<vec4<f32>>;
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Direct 1:1 pixel mapping - no camera transform needed
-    // The agents already drew in screen space with camera applied
+    // Calculate pixel coordinates based on window size (not extended buffer)
+    let safe_width = max(render_params.window_width, 1.0);
+    let safe_height = max(render_params.window_height, 1.0);
+    let window_width = u32(safe_width);
+    let window_height = u32(safe_height);
+    
+    let pixel_x = u32(in.uv.x * f32(window_width));
+    let pixel_y = u32(in.uv.y * f32(window_height));
+    
+    // Normal window area - sample visual texture and composite with agent_grid
     let color = textureSample(visual_tex, visual_sampler, in.uv);
+    
+    // Check if there's an agent pixel to composite
+    let idx = pixel_y * render_params.visual_stride + pixel_x;
+    let agent_pixel = agent_grid_render[idx];
+    
+    // Composite agent on top if it has alpha
+    if (agent_pixel.a > 0.0) {
+        return vec4<f32>(agent_pixel.rgb, 1.0);
+    }
+    
     return vec4<f32>(color.rgb, 1.0);
 }
 
