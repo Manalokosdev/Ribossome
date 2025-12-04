@@ -857,6 +857,152 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.04;
             props.is_condenser = true;
         }
+        case 20u: { // MOUTH ORGAN (2-codon: P + modifier 0-6)
+            props.segment_length = 5.0;
+            props.thickness = 3.5;
+            props.base_angle = 0.0872665;
+            props.alpha_sensitivity = 0.6;
+            props.beta_sensitivity = -0.16;
+            props.color = vec3<f32>(1.0, 1.0, 0.0); // Yellow
+            props.is_mouth = true;
+            props.energy_absorption_rate = 0.8;
+            props.beta_absorption_rate = 0.8;
+            props.beta_damage = -0.12;
+            props.energy_storage = 10.0;
+            props.energy_consumption = 0.025;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 1.4;
+            props.alpha_right_mult = -0.4;
+            props.beta_left_mult = 1.3;
+            props.beta_right_mult = -0.3;
+            props.mass = 0.05;
+        }
+        case 21u: { // PROPELLER ORGAN (2-codon: L + modifier 0-9)
+            props.segment_length = 16.0;
+            props.thickness = 8.0;
+            props.base_angle = -0.523599;
+            props.alpha_sensitivity = 0.5;
+            props.beta_sensitivity = -0.1;
+            props.color = vec3<f32>(0.0, 0.0, 1.0); // Blue
+            props.is_propeller = true;
+            props.thrust_force = 2.5;
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = -0.77;
+            props.energy_consumption = 0.007;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.45;
+            props.alpha_right_mult = 0.55;
+            props.beta_left_mult = 0.5;
+            props.beta_right_mult = 0.5;
+            props.mass = 0.05;
+        }
+        case 22u: { // ALPHA SENSOR ORGAN (2-codon: Q + modifier 0-6)
+            props.segment_length = 10.5;
+            props.thickness = 2.5;
+            props.base_angle = -0.349066;
+            props.alpha_sensitivity = -0.349066;
+            props.beta_sensitivity = 0.0;
+            props.color = vec3<f32>(0.0, 1.0, 0.0); // Green
+            props.beta_absorption_rate = 0.2;
+            props.beta_damage = 0.71;
+            props.energy_consumption = 0.00005;
+            props.is_alpha_sensor = true;
+            props.signal_decay = 0.1;
+            props.alpha_left_mult = 0.5;
+            props.alpha_right_mult = 0.5;
+            props.beta_left_mult = 0.5;
+            props.beta_right_mult = 0.5;
+            props.mass = 0.05;
+        }
+        case 23u: { // BETA SENSOR ORGAN (2-codon: Q + modifier 7-13)
+            props.segment_length = 10.0;
+            props.thickness = 2.5;
+            props.base_angle = 0.523599;
+            props.alpha_sensitivity = 0.0;
+            props.beta_sensitivity = 0.349066;
+            props.color = vec3<f32>(1.0, 0.0, 0.0); // Red
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.42;
+            props.energy_consumption = 0.00005;
+            props.is_beta_sensor = true;
+            props.signal_decay = 0.1;
+            props.alpha_left_mult = 0.5;
+            props.alpha_right_mult = 0.5;
+            props.beta_left_mult = 0.5;
+            props.beta_right_mult = 0.5;
+            props.mass = 0.05;
+        }
+        case 24u: { // ENERGY SENSOR ORGAN (2-codon: Q + modifier 14-19)
+            props.segment_length = 10.5;
+            props.thickness = 3.5;
+            props.base_angle = 1.570796;
+            props.alpha_sensitivity = 0.1;
+            props.beta_sensitivity = -0.5;
+            props.color = vec3<f32>(0.6, 0.2, 0.8); // Purple
+            props.beta_absorption_rate = 0.2;
+            props.beta_damage = -0.66;
+            props.energy_consumption = 0.00005;
+            props.is_energy_sensor = true;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.9;
+            props.alpha_right_mult = 0.1;
+            props.beta_left_mult = 0.85;
+            props.beta_right_mult = 0.15;
+            props.mass = 0.05;
+        }
+        case 25u: { // DISPLACER ORGAN (2-codon: L + modifier 10-19)
+            props.segment_length = 12.0;
+            props.thickness = 8.0;
+            props.base_angle = 0.0;
+            props.alpha_sensitivity = -0.3;
+            props.beta_sensitivity = 0.73;
+            props.color = vec3<f32>(0.0, 1.0, 1.0); // Cyan
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.36;
+            props.energy_consumption = 0.007;
+            props.is_displacer = true;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = -0.3;
+            props.alpha_right_mult = 1.3;
+            props.beta_left_mult = 1.2;
+            props.beta_right_mult = -0.2;
+            props.mass = 0.15;
+        }
+        case 26u: { // ENABLER ORGAN (2-codon: P + modifier 14-19)
+            props.segment_length = 6.0;
+            props.thickness = 6.0;
+            props.base_angle = 0.785398;
+            props.alpha_sensitivity = 0.2;
+            props.beta_sensitivity = 0.3;
+            props.color = vec3<f32>(1.0, 1.0, 1.0); // White
+            props.beta_damage = 0.24;
+            props.energy_consumption = 0.001;
+            props.is_inhibitor = true; // Reused flag for enabler
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.5;
+            props.alpha_right_mult = 0.5;
+            props.beta_left_mult = 0.5;
+            props.beta_right_mult = 0.5;
+            props.mass = 0.05;
+        }
+        case 27u: { // CONDENSER ORGAN (2-codon: P + modifier 7-13, or H + any)
+            props.segment_length = 11.5;
+            props.thickness = 4.0;
+            props.base_angle = -0.523599;
+            props.alpha_sensitivity = -0.2;
+            props.beta_sensitivity = 0.52;
+            props.color = vec3<f32>(0.0, 0.4, 0.0); // Dark green
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.08;
+            props.energy_consumption = 0.001;
+            props.is_condenser = true;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = -0.5;
+            props.alpha_right_mult = 1.5;
+            props.beta_left_mult = -0.4;
+            props.beta_right_mult = 1.4;
+            props.mass = 0.04;
+        }
         default: { // Fallback (should never happen)
             props.segment_length = 8.0;
             props.thickness = 3.0;
