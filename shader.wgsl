@@ -2018,11 +2018,25 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         start_byte = start;
 
     // Count codons starting from the first valid codon until stop codon (UAA, UAG, UGA) or limits
+    // 2-CODON ORGAN SYSTEM: L(9), P(12), Q(13), H(6) are organ promoters that consume 2 codons
     var count = 0u;
     var pos_b = start_byte;
         for (var i = 0u; i < MAX_BODY_PARTS; i++) {
             if (pos_b + 2u >= GENOME_LENGTH) { break; }
             if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(agent.genome, pos_b)) { break; }
+
+            let codon = genome_get_codon_ascii(agent.genome, pos_b);
+            let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
+
+            // Check if this is an organ promoter: L(9), P(12), Q(13), H(6)
+            if ((amino_type == 9u || amino_type == 12u || amino_type == 13u || amino_type == 6u) && pos_b + 5u < GENOME_LENGTH) {
+                // This is a 2-letter organ (promoter + modifier), skip 6 bytes total
+                count += 1u;
+                pos_b += 6u;
+                continue;
+            }
+
+            // Regular amino acid (1 codon = 3 bytes)
             count += 1u;
             pos_b += 3u;
         }
@@ -2076,16 +2090,74 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         var total_capacity = 0.0; // Calculate energy capacity as we build
         for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
             if (build_b + 2u >= GENOME_LENGTH) { break; }
+            
+            if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(agent.genome, build_b)) {
+                break;
+            }
+
             let codon = genome_get_codon_ascii(agent.genome, build_b);
             let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
+
+            // 2-LETTER ORGAN SYSTEM
+            // Promoter defines family: L(9)=Propelling, P(12)=Energy, Q(13)=Sensors, H(6)=Others
+            // Second amino acid (0-19) defines specific organ within family
+            var final_part_type = amino_type; // Default: structural amino acid
+            var is_organ = false;
+
+            if ((amino_type == 9u || amino_type == 12u || amino_type == 13u || amino_type == 6u) && build_b + 5u < GENOME_LENGTH) {
+                // Found organ promoter, read second codon
+                let codon2 = genome_get_codon_ascii(agent.genome, build_b + 3u);
+                let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
+
+                var organ_base_type = 0u;
+
+                // L (Leucine, 9) = PROPELLING FAMILY
+                if (amino_type == 9u) {
+                    if (modifier < 10u) { organ_base_type = 21u; } // 0-9: Propeller
+                    else { organ_base_type = 25u; } // 10-19: Displacer
+                }
+                // P (Proline, 12) = ENERGY FAMILY
+                else if (amino_type == 12u) {
+                    if (modifier < 7u) { organ_base_type = 20u; } // 0-6: Mouth
+                    else if (modifier < 14u) { organ_base_type = 27u; } // 7-13: Condenser (storage)
+                    else { organ_base_type = 26u; } // 14-19: Enabler (protection)
+                }
+                // Q (Glutamine, 13) = SENSORS FAMILY
+                else if (amino_type == 13u) {
+                    if (modifier < 7u) { organ_base_type = 22u; } // 0-6: Alpha Sensor
+                    else if (modifier < 14u) { organ_base_type = 23u; } // 7-13: Beta Sensor
+                    else { organ_base_type = 24u; } // 14-19: Energy Sensor
+                }
+                // H (Histidine, 6) = OTHERS FAMILY
+                else if (amino_type == 6u) {
+                    // Future: sine wave, other special functions
+                    // For now, all create condensers as placeholder
+                    organ_base_type = 27u; // Condenser
+                }
+
+                if (organ_base_type >= 20u) {
+                    // Valid organ detected! Use modifier (0-19) as parameter (0-255)
+                    let param_value = u32((f32(modifier) / 19.0) * 255.0);
+                    final_part_type = encode_part_type(organ_base_type, param_value);
+                    is_organ = true;
+                    build_b += 6u; // Consume both codons (6 bytes)
+                } else {
+                    // Invalid organ pattern, treat first codon as regular amino
+                    final_part_type = amino_type;
+                    build_b += 3u;
+                }
+            } else {
+                // Regular amino acid
+                build_b += 3u;
+            }
             
-            // Check if this amino acid is a chiral flipper (Leucine, 'L' = ASCII 76)
-            let is_leucine = (codon.x == 76u || codon.y == 76u || codon.z == 76u);
-            if (is_leucine) {
+            // Check if this amino acid is a chiral flipper (Leucine promoter without valid organ)
+            // Only flip if it's a raw Leucine (not used as organ promoter)
+            if (!is_organ && amino_type == 9u) {
                 chirality_flip = -chirality_flip; // Flip chirality for all following amino acids
             }
             
-            let props = get_amino_acid_properties(amino_type);
+            let props = get_amino_acid_properties(get_base_part_type(final_part_type));
             
             // Add this part's energy storage to total capacity
             total_capacity += props.energy_storage;
@@ -2135,11 +2207,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 rendered_size *= 0.5; // Condensers render half-sized for contrast
             }
             agents_out[agent_id].body[i].size = rendered_size;
-            agents_out[agent_id].body[i].part_type = amino_type;
+            agents_out[agent_id].body[i].part_type = final_part_type; // Use encoded organ type
             // Persist the smoothed angle contribution in _pad.x for next frame
             let keep_pad_y = agents_out[agent_id].body[i]._pad.y;
             agents_out[agent_id].body[i]._pad = vec2<f32>(smoothed_signal, keep_pad_y);
-            build_b += 3u;
             parts_built += 1u;
         }
         
