@@ -1284,8 +1284,8 @@ struct GpuState {
     diffuse_trails_pipeline: wgpu::ComputePipeline,
     clear_visual_pipeline: wgpu::ComputePipeline,
     clear_agent_grid_pipeline: wgpu::ComputePipeline,
-    composite_agents_pipeline: wgpu::ComputePipeline,
     render_inspector_pipeline: wgpu::ComputePipeline,
+    composite_agents_pipeline: wgpu::ComputePipeline,
     gamma_slope_pipeline: wgpu::ComputePipeline,
     merge_pipeline: wgpu::ComputePipeline, // Merge spawned agents
     compact_pipeline: wgpu::ComputePipeline, // Remove dead agents
@@ -2003,12 +2003,10 @@ impl GpuState {
         });
         profiler.mark("Visual grid buffer");
 
-        // Agent grid extended 300 pixels wider for inspector panel
-        let agent_grid_width = surface_config.width + 300;
-        let agent_stride_bytes = ((agent_grid_width * bytes_per_pixel + (align - 1)) / align) * align;
+        // Agent grid (same size as visual grid, leftmost 300px reserved for inspector)
         let agent_grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Agent Grid"),
-            size: (agent_stride_bytes * surface_config.height) as u64,
+            size: (stride_bytes * surface_config.height) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
@@ -2723,17 +2721,6 @@ impl GpuState {
             });
         profiler.mark("clear agent grid pipeline");
 
-        let composite_agents_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("Composite Agents Pipeline"),
-                layout: Some(&compute_pipeline_layout),
-                module: &shader,
-                entry_point: "composite_agents",
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        profiler.mark("composite agents pipeline");
-
         let render_inspector_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Render Inspector Pipeline"),
@@ -2744,6 +2731,17 @@ impl GpuState {
                 cache: None,
             });
         profiler.mark("render inspector pipeline");
+
+        let composite_agents_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Composite Agents Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "composite_agents",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("composite agents pipeline");
 
         let merge_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Merge Agents Pipeline"),
@@ -3055,8 +3053,8 @@ impl GpuState {
             diffuse_trails_pipeline,
             clear_visual_pipeline,
             clear_agent_grid_pipeline,
-            composite_agents_pipeline,
             render_inspector_pipeline,
+            composite_agents_pipeline,
             gamma_slope_pipeline,
             merge_pipeline,
             compact_pipeline,
@@ -3528,12 +3526,10 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
-        // Agent grid extended 300 pixels wider for inspector panel
-        let agent_grid_width = self.surface_config.width + 300;
-        let agent_stride_bytes = ((agent_grid_width * bytes_per_pixel + (align - 1)) / align) * align;
+        // Agent grid (same size as visual grid, leftmost 300px reserved for inspector)
         self.agent_grid_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Agent Grid"),
-            size: (agent_stride_bytes * self.surface_config.height) as u64,
+            size: (stride_bytes * self.surface_config.height) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -4495,6 +4491,14 @@ impl GpuState {
                 cpass.set_pipeline(&self.clear_agent_grid_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+
+                // Render inspector panel if an agent is selected
+                cpass.set_pipeline(&self.render_inspector_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                // Inspector is 300 pixels wide, dispatch appropriate workgroups
+                let inspector_width_workgroups = (300 + 15) / 16; // 16x16 workgroup size
+                let inspector_height_workgroups = (self.surface_config.height + 15) / 16;
+                cpass.dispatch_workgroups(inspector_width_workgroups, inspector_height_workgroups, 1);
             }
 
             // Run simulation compute passes, but skip everything when paused or no living agents
@@ -4548,15 +4552,8 @@ impl GpuState {
                 let height_workgroups =
                     (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-
-                // Render inspector panel if an agent is selected
-                if self.selected_agent_index.is_some() {
-                    cpass.set_pipeline(&self.render_inspector_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    // Inspector is 300 pixels wide
-                    let inspector_width_workgroups = (300 + 15) / 16;
-                    cpass.dispatch_workgroups(inspector_width_workgroups, height_workgroups, 1);
-                }
+                
+                // Inspector panel is now drawn by the selected agent during simulation
             }
         }
 
@@ -5809,7 +5806,7 @@ fn main() {
             .create_window(
                 winit::window::WindowAttributes::default()
                     .with_title("Loading Ribossome...")
-                    .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
+                    .with_inner_size(winit::dpi::LogicalSize::new(1100, 600)), // 800 + 300 for inspector
             )
             .unwrap(),
     );

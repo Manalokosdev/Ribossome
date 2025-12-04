@@ -1483,7 +1483,7 @@ fn screen_to_grid_index(screen_pos: vec2<i32>) -> u32 {
     // Direct mapping - visual grid now matches window size
     let x = u32(clamp(screen_pos.x, 0, i32(params.window_width) - 1));
     let y = u32(clamp(screen_pos.y, 0, i32(params.window_height) - 1));
-    // Use padded visual stride for row indexing
+    // Use visual_stride for row indexing (agent_grid same size as visual_grid)
     return y * params.visual_stride + x;
 }
 
@@ -3396,8 +3396,8 @@ fn draw_thick_line(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32
                 if (dx * dx + dy * dy <= screen_thickness * screen_thickness) {
                     let screen_pos = vec2<i32>(screen_x + dx, screen_y + dy);
                     
-                    // Check if in screen bounds
-                    if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) &&
+                    // Check if in screen bounds and not in inspector area (rightmost 300px)
+                    if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
                         screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
                         
                         let idx = screen_to_grid_index(screen_pos);
@@ -3426,12 +3426,11 @@ fn draw_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
             let offset = vec2<f32>(f32(dx), f32(dy));
             let dist = length(offset);
             
-            // Draw only the outline (distance close to radius)
             if (abs(dist - screen_radius) < line_thickness) {
                 let screen_pos = screen_center + vec2<i32>(dx, dy);
                 
-                // Check if in screen bounds
-                if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) &&
+                // Check if in visible window bounds and not in inspector area (rightmost 300px)
+                if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
                     screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
                     
                     let idx = screen_to_grid_index(screen_pos);
@@ -3459,8 +3458,8 @@ fn draw_filled_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
             let dist2 = dot(offset, offset);
             if (dist2 <= screen_radius * screen_radius) {
                 let screen_pos = screen_center + vec2<i32>(dx, dy);
-                // Check if in screen bounds
-                if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) &&
+                // Check if in visible window bounds and not in inspector area (rightmost 300px)
+                if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
                     screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
                     let idx = screen_to_grid_index(screen_pos);
                     agent_grid[idx] = color;
@@ -3600,8 +3599,8 @@ fn draw_line_pixels(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
         let screen_x = i32(mix(f32(p0.x), f32(p1.x), t));
         let screen_y = i32(mix(f32(p0.y), f32(p1.y), t));
         
-        // Check if in screen bounds
-        if (screen_x >= 0 && screen_x < i32(params.window_width) &&
+        // Check if in visible window bounds and not in inspector area (rightmost 300px)
+        if (screen_x >= 0 && screen_x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
             screen_y >= 0 && screen_y < i32(params.window_height)) {
             let idx = screen_to_grid_index(vec2<i32>(screen_x, screen_y));
             agent_grid[idx] = color;
@@ -3624,8 +3623,8 @@ fn draw_line(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>) {
         let screen_y = i32(mix(f32(screen_p0.y), f32(screen_p1.y), t));
         let screen_pos = vec2<i32>(screen_x, screen_y);
         
-        // Check if in screen bounds
-        if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) &&
+        // Check if in visible window bounds and not in inspector area (rightmost 300px)
+        if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) - i32(INSPECTOR_WIDTH) &&
             screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
             
             let idx = screen_to_grid_index(screen_pos);
@@ -4202,6 +4201,50 @@ fn clear_agent_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent_grid[agent_idx] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
+// Render inspector panel every frame (called after clear, before agent drawing)
+@compute @workgroup_size(16, 16)
+fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (params.draw_enabled == 0u) { return; }
+    
+    // Only draw if we have a selected agent
+    if (params.selected_agent_index == 0xFFFFFFFFu) {
+        return;
+    }
+    
+    let x = gid.x;
+    let y = gid.y;
+    
+    let safe_width = max(params.window_width, 1.0);
+    let safe_height = max(params.window_height, 1.0);
+    let window_width = u32(safe_width);
+    let window_height = u32(safe_height);
+    
+    // Only render in the inspector region (rightmost 300 pixels)
+    if (x >= INSPECTOR_WIDTH || y >= window_height) {
+        return;
+    }
+    
+    // Map to actual buffer position (rightmost area)
+    let buffer_x = window_width - INSPECTOR_WIDTH + x;
+    
+    // Simple placeholder: blue panel with lighter border for testing
+    var color = vec4<f32>(0.0, 0.0, 0.5, 1.0); // Blue background
+    
+    // Border on left edge
+    if (x < 3u) {
+        color = vec4<f32>(0.3, 0.5, 0.8, 1.0); // Lighter blue border
+    }
+    
+    // Title bar at top
+    if (y < 30u) {
+        color = vec4<f32>(0.1, 0.2, 0.6, 1.0); // Darker blue title
+    }
+    
+    // Write to agent_grid using visual_stride
+    let idx = y * params.visual_stride + buffer_x;
+    agent_grid[idx] = color;
+}
+
 @compute @workgroup_size(16, 16)
 fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (params.draw_enabled == 0u) { return; }
@@ -4255,53 +4298,11 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ============================================================================
-// INSPECTOR PANEL RENDERING
+// INSPECTOR PANEL RENDERING (done in separate compute pass)
 // ============================================================================
 
 const INSPECTOR_WIDTH: u32 = 300u;
 const INSPECTOR_PADDING: u32 = 10u;
-
-@compute @workgroup_size(16, 16)
-fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    
-    // Only render if we have a selected agent
-    if (params.selected_agent_index == 0xFFFFFFFFu) {
-        return;
-    }
-    
-    // Check if we're in the inspector area (300 pixels to the right of window)
-    let safe_width = max(params.window_width, 1.0);
-    let safe_height = max(params.window_height, 1.0);
-    let window_width = u32(safe_width);
-    let window_height = u32(safe_height);
-    
-    if (x < window_width || x >= window_width + INSPECTOR_WIDTH || y >= window_height) {
-        return;
-    }
-    
-    // Calculate position in inspector panel (0 to INSPECTOR_WIDTH)
-    let inspector_x = x - window_width;
-    let inspector_y = y;
-    
-    // Simple placeholder: dark gray panel with lighter border
-    var color = vec4<f32>(0.2, 0.2, 0.2, 1.0);
-    
-    // Border on left edge
-    if (inspector_x < 3u) {
-        color = vec4<f32>(0.5, 0.5, 0.5, 1.0);
-    }
-    
-    // Title bar at top
-    if (inspector_y < 30u) {
-        color = vec4<f32>(0.3, 0.35, 0.4, 1.0);
-    }
-    
-    // Write to agent_grid (extended buffer)
-    let idx = y * params.visual_stride + x;
-    agent_grid[idx] = color;
-}
 
 // ============================================================================
 // RENDER VERTEX/FRAGMENT SHADERS
@@ -4345,7 +4346,7 @@ var<storage, read> agent_grid_render: array<vec4<f32>>;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Calculate pixel coordinates based on window size (not extended buffer)
+    // Calculate pixel coordinates based on window size
     let safe_width = max(render_params.window_width, 1.0);
     let safe_height = max(render_params.window_height, 1.0);
     let window_width = u32(safe_width);
@@ -4354,10 +4355,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixel_x = u32(in.uv.x * f32(window_width));
     let pixel_y = u32(in.uv.y * f32(window_height));
     
-    // Normal window area - sample visual texture and composite with agent_grid
+    // Sample visual texture and composite with agent_grid (which includes inspector)
     let color = textureSample(visual_tex, visual_sampler, in.uv);
     
-    // Check if there's an agent pixel to composite
+    // Check if there's an agent pixel to composite (or inspector if selected)
     let idx = pixel_y * render_params.visual_stride + pixel_x;
     let agent_pixel = agent_grid_render[idx];
     
