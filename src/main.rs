@@ -6908,6 +6908,19 @@ fn main() {
                                                             )
                                                             .text("Obstacle / Terrain Force"),
                                                         );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.vector_force_power, 0.0..=100.0)
+                                                                .text("Vector Force Power"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.vector_force_x, -1.0..=1.0)
+                                                                .text("Vector Force X"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.vector_force_y, -1.0..=1.0)
+                                                                .text("Vector Force Y"),
+                                                        );
+                                                        ui.label("Constant force applied to all agents (wind/gravity effect)");
 
                                                         ui.separator();
                                                         ui.heading("Trail Layer Controls");
@@ -6987,18 +7000,6 @@ fn main() {
                                                         if state.rain_debug_visual {
                                                             ui.label("🟢 Green = Alpha (food) | 🔴 Red = Beta (poison)");
                                                         }
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.vector_force_power, 0.0..=10.0)
-                                                                .text("Vector Force Power"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.vector_force_x, -1.0..=1.0)
-                                                                .text("Vector Force X"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.vector_force_y, -1.0..=1.0)
-                                                                .text("Vector Force Y"),
-                                                        );
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.chemical_slope_scale_alpha,
