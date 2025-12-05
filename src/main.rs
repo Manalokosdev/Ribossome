@@ -1,4 +1,4 @@
-// Ribossome - GPU-Accelerated Artificial Life Simulator
+﻿// Ribossome - GPU-Accelerated Artificial Life Simulator
 // Copyright (c) 2025 Filipe da Veiga Ventura Alves
 // Licensed under MIT License
 
@@ -41,10 +41,9 @@ const AUTO_SNAPSHOT_INTERVAL: u64 = 10000; // Save every 10,000 epochs
 const RAIN_THUMB_SIZE: usize = 128;
 
 // Shared genome/body sizing (must stay in sync with shader constants)
-const GENOME_BYTES: usize = 512; // ASCII bases including padding
+const MAX_BODY_PARTS: usize = 64;
+const GENOME_BYTES: usize = 256; // ASCII bases including padding
 const GENOME_WORDS: usize = GENOME_BYTES / std::mem::size_of::<u32>();
-// MAX_BODY_PARTS reduced to 64 to avoid GPU storage buffer element count limits
-const MAX_BODY_PARTS: usize = 64; // Reduced from 128 for GPU compatibility
 const PACKED_GENOME_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const MIN_GENE_LENGTH: usize = 6;
 const MAX_SPAWN_REQUESTS: usize = 2000;
@@ -691,14 +690,14 @@ impl BodyPart {
 }
 
 #[repr(C, align(16))]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Copy, Clone, Zeroable)]
 struct Agent {
     position: [f32; 2],                        // 8 bytes (0-7)
     velocity: [f32; 2],                        // 8 bytes (8-15)
     rotation: f32,                             // 4 bytes (16-19)
     energy: f32,                               // 4 bytes (20-23)
     energy_capacity: f32,                      // 4 bytes (24-27)
-    _pad_energy: f32,                          // 4 bytes (28-31)
+    torque_debug: f32,                         // 4 bytes (28-31) - accumulated torque (matches shader)
     morphology_origin: [f32; 2],               // 8 bytes (32-39) - chain origin after CoM centering
     alive: u32,                                // 4 bytes (40-43)
     body_count: u32,                           // 4 bytes (44-47)
@@ -707,10 +706,14 @@ struct Agent {
     generation: u32,                           // 4 bytes (56-59) - lineage generation counter
     age: u32,                                  // 4 bytes (60-63) - age in frames
     total_mass: f32,                           // 4 bytes (64-67) - computed each frame after morphology
-    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases)
-    _pad_genome_align: [u32; 3],               // 12 bytes - padding to maintain struct alignment
+    poison_resistant_count: u32,               // 4 bytes (68-71) - number of poison-resistant organs
+    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases) - 72 to 327
+    _pad_genome_align: [u32; 6],               // 24 bytes - padding to align body array to 16-byte boundary
     body: [BodyPart; MAX_BODY_PARTS],
 }
+
+// SAFETY: Agent is repr(C) with explicit padding, matching shader layout exactly
+unsafe impl bytemuck::Pod for Agent {}
 
 #[repr(C, align(16))]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -1747,7 +1750,7 @@ impl GpuState {
         debug_assert_eq!(std::mem::align_of::<BodyPart>(), 16);
         debug_assert_eq!(
             std::mem::size_of::<Agent>(),
-            2640,
+            2400,
             "Agent layout mismatch for MAX_BODY_PARTS={}",
             MAX_BODY_PARTS
         );
@@ -1757,11 +1760,11 @@ impl GpuState {
         // seed/genome_seed/flags/_pad_seed = 16 bytes total
         // position ([f32;2]) = 8  -> offset 16..24
         // energy (4) + rotation (4) = 8 -> offset 24..32
-        // genome_override ([u32; GENOME_WORDS]) = GENOME_BYTES -> offset 32..544 total
-        // Total size = 544 bytes; alignment = 16 bytes.
+        // genome_override ([u32; GENOME_WORDS]) = GENOME_BYTES -> offset 32..288 total
+        // Total size = 288 bytes; alignment = 16 bytes.
         debug_assert_eq!(
             std::mem::size_of::<SpawnRequest>(),
-            544,
+            288,
             "SpawnRequest size mismatch; update buffer allocations/bindings if this fails"
         );
         debug_assert_eq!(std::mem::align_of::<SpawnRequest>(), 16);
@@ -1791,7 +1794,7 @@ impl GpuState {
         profiler.mark("egui renderer");
 
         // Initialize agents with minimal data - GPU will generate genome and build body
-        let max_agents = 20_000usize; // Limited by GPU storage buffer limits (~2.6 KB/agent with MAX_BODY_PARTS=64)
+        let max_agents = 50_000usize; // Limited by 128MB WebGPU buffer size (~2.2 KB/agent)
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
@@ -4627,7 +4630,7 @@ impl GpuState {
             // Poll for readback completion
             self.device.poll(wgpu::Maintain::Poll);
             self.process_completed_alive_readbacks();
-            println!("  â†’ After spawn: {} agents alive", self.alive_count);
+            println!("  ├óΓÇáΓÇÖ After spawn: {} agents alive", self.alive_count);
 
             // Clear the processed spawn requests from the queue
             let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue.len());
@@ -5181,7 +5184,7 @@ impl GpuState {
                  let _ = self.load_beta_rain_map(path);
             }
         } else {
-            println!("⚠ Loaded snapshot without settings (old format) - using current settings");
+            println!("ΓÜá Loaded snapshot without settings (old format) - using current settings");
         }
         
         // Upload grids to GPU
@@ -5204,10 +5207,10 @@ impl GpuState {
         // Immediately save to autosave to ensure continuity
         let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
         if let Err(e) = self.save_snapshot_to_file(autosave_path) {
-            eprintln!("⚠ Failed to update autosave after loading snapshot: {:?}", e);
+            eprintln!("ΓÜá Failed to update autosave after loading snapshot: {:?}", e);
         }
         
-        println!("✓ Loaded settings and queued {} agents from snapshot", self.cpu_spawn_queue.len());
+        println!("Γ£ô Loaded settings and queued {} agents from snapshot", self.cpu_spawn_queue.len());
         
         Ok(())
     }
@@ -5780,7 +5783,7 @@ fn save_simulation_snapshot(
     let mut writer = encoder.write_header()?;
     writer.write_image_data(&img_data)?;
     
-    println!("✓ Saved snapshot: {} agents, epoch {}", snapshot.agents.len(), snapshot.epoch);
+    println!("Γ£ô Saved snapshot: {} agents, epoch {}", snapshot.agents.len(), snapshot.epoch);
     Ok(())
 }
 
@@ -5822,7 +5825,7 @@ fn load_simulation_snapshot(
             let json = zstd::decode_all(&compressed[..])?;
             let snapshot: SimulationSnapshot = serde_json::from_slice(&json)?;
             
-            println!("✓ Loaded snapshot: {} agents, epoch {}, saved {}", 
+            println!("Γ£ô Loaded snapshot: {} agents, epoch {}, saved {}", 
                 snapshot.agents.len(), snapshot.epoch, snapshot.timestamp);
             
             return Ok((alpha_grid, beta_grid, gamma_grid, snapshot));
@@ -5912,10 +5915,10 @@ fn main() {
                 if autosave_path.exists() {
                     match loaded_state.load_snapshot_from_file(autosave_path) {
                         Ok(_) => {
-                            println!("✓ Auto-loaded previous session from epoch {}", loaded_state.epoch);
+                            println!("Γ£ô Auto-loaded previous session from epoch {}", loaded_state.epoch);
                         }
                         Err(e) => {
-                            eprintln!("⚠ Failed to auto-load snapshot: {:?}", e);
+                            eprintln!("ΓÜá Failed to auto-load snapshot: {:?}", e);
                         }
                     }
                 }
@@ -6090,8 +6093,8 @@ fn main() {
                                     reset_simulation_state(&mut state, &window, &mut egui_state);
                                     if let Some(gpu_state) = state.as_mut() {
                                         match gpu_state.load_snapshot_from_file(&path) {
-                                            Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
-                                            Err(e) => eprintln!("✗ Failed to load snapshot: {}", e),
+                                            Ok(_) => println!("Γ£ô Snapshot loaded from: {}", path.display()),
+                                            Err(e) => eprintln!("Γ£ù Failed to load snapshot: {}", e),
                                         }
                                     }
                                 }
@@ -6135,9 +6138,9 @@ fn main() {
                                         state.last_autosave_epoch = state.epoch;
                                         let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
                                         if let Err(e) = state.save_snapshot_to_file(autosave_path) {
-                                            eprintln!("⚠ Auto-snapshot failed at epoch {}: {:?}", state.epoch, e);
+                                            eprintln!("ΓÜá Auto-snapshot failed at epoch {}: {:?}", state.epoch, e);
                                         } else {
-                                            println!("✓ Auto-snapshot saved at epoch {}", state.epoch);
+                                            println!("Γ£ô Auto-snapshot saved at epoch {}", state.epoch);
                                         }
                                     }
 
@@ -6268,10 +6271,10 @@ fn main() {
                                                 }
                                                 
                                                 ui.separator();
-                                                if ui.button("💾 Save Snapshot").clicked() {
+                                                if ui.button("≡ƒÆ╛ Save Snapshot").clicked() {
                                                     state.snapshot_save_requested = true;
                                                 }
-                                                if ui.button("📂 Load Snapshot").clicked() {
+                                                if ui.button("≡ƒôé Load Snapshot").clicked() {
                                                     state.snapshot_load_requested = true;
                                                 }
                                             });
@@ -6994,12 +6997,12 @@ fn main() {
                                                                 .text("Slope Bias"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.0..=0.001)
+                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.0..=0.01)
                                                                 .text("Rain Probability"),
                                                         );
-                                                        ui.checkbox(&mut state.rain_debug_visual, "🎨 Show Rain Pattern");
+                                                        ui.checkbox(&mut state.rain_debug_visual, "≡ƒÄ¿ Show Rain Pattern");
                                                         if state.rain_debug_visual {
-                                                            ui.label("🟢 Green = Alpha (food) | 🔴 Red = Beta (poison)");
+                                                            ui.label("≡ƒƒó Green = Alpha (food) | ≡ƒö┤ Red = Beta (poison)");
                                                         }
                                                         ui.add(
                                                             egui::Slider::new(
@@ -7080,7 +7083,7 @@ fn main() {
                                                                 .text("Slope Bias"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.beta_multiplier, 0.0..=0.001)
+                                                            egui::Slider::new(&mut state.beta_multiplier, 0.0..=0.01)
                                                                 .text("Rain Probability"),
                                                         );
                                                         ui.add(
@@ -7582,8 +7585,8 @@ fn main() {
                                         .save_file()
                                     {
                                         match gpu_state.save_snapshot_to_file(&path) {
-                                            Ok(_) => println!("✓ Snapshot saved to: {}", path.display()),
-                                            Err(e) => eprintln!("✗ Failed to save snapshot: {}", e),
+                                            Ok(_) => println!("Γ£ô Snapshot saved to: {}", path.display()),
+                                            Err(e) => eprintln!("Γ£ù Failed to save snapshot: {}", e),
                                         }
                                     }
                                 }
@@ -7600,8 +7603,8 @@ fn main() {
                                         reset_simulation_state(&mut state, &window, &mut egui_state);
                                         if let Some(gpu_state) = state.as_mut() {
                                             match gpu_state.load_snapshot_from_file(&path) {
-                                                Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
-                                                Err(e) => eprintln!("✗ Failed to load snapshot: {}", e),
+                                                Ok(_) => println!("Γ£ô Snapshot loaded from: {}", path.display()),
+                                                Err(e) => eprintln!("Γ£ù Failed to load snapshot: {}", e),
                                             }
                                         }
                                     }
@@ -7630,8 +7633,8 @@ fn main() {
                                 if ext == "png" {
                                     if let Some(gpu_state) = state.as_mut() {
                                         match gpu_state.load_snapshot_from_file(&path) {
-                                            Ok(_) => println!("✓ Snapshot loaded from dropped file: {}", path.display()),
-                                            Err(e) => eprintln!("✗ Failed to load dropped snapshot: {}", e),
+                                            Ok(_) => println!("Γ£ô Snapshot loaded from dropped file: {}", path.display()),
+                                            Err(e) => eprintln!("Γ£ù Failed to load dropped snapshot: {}", e),
                                         }
                                     }
                                 }
@@ -7682,7 +7685,7 @@ fn main() {
                                             
                                             ui.separator();
                                             ui.heading("Snapshot");
-                                            if ui.button("💾 Save Snapshot (PNG)").clicked() {
+                                            if ui.button("≡ƒÆ╛ Save Snapshot (PNG)").clicked() {
                                                 state.snapshot_save_requested = true;
                                             }
                                             ui.label("Saves environment + up to 5000 agents (random sample)");

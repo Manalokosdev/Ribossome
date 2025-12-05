@@ -1,4 +1,4 @@
-// Ribossome - GPU-Accelerated Artificial Life Simulator
+﻿// Ribossome - GPU-Accelerated Artificial Life Simulator
 // Copyright (c) 2025 Filipe da Veiga Ventura Alves
 // Licensed under MIT License
 
@@ -11,10 +11,10 @@
 
 const GRID_SIZE: u32 = 2048u;          // Environment grid resolution (original)
 const SIM_SIZE: u32 = 30720u;          // Simulation world size
-const GENOME_BYTES: u32 = 512u;
+const MAX_BODY_PARTS: u32 = 64u;
+const GENOME_BYTES: u32 = 256u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
 const GENOME_WORDS: u32 = GENOME_BYTES / 4u;
-const MAX_BODY_PARTS: u32 = 64u; // Reduced from 128 to avoid GPU storage buffer limits
 const PACKED_GENOME_WORDS: u32 = GENOME_BYTES / 16u;
 const PACKED_BASES_PER_WORD: u32 = 16u;
 const MIN_GENE_LENGTH: u32 = 6u;
@@ -91,8 +91,9 @@ struct Agent {
     generation: u32,          // lineage generation (0 = initial spawn)
     age: u32,                 // age in frames since spawn
     total_mass: f32,          // total mass computed after morphology
+    poison_resistant_count: u32, // number of poison-resistant organs (type 29)
     genome: array<u32, GENOME_WORDS>,   // GENOME_BYTES bytes genome (ASCII RNA bases)
-    _pad_genome_align: array<u32, 3>, // padding to maintain struct alignment
+    _pad_genome_align: array<u32, 6>, // padding to align body array to 16-byte boundary
     body: array<BodyPart, MAX_BODY_PARTS>, // body parts array
 }
 
@@ -349,7 +350,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 0u: { // A - Alanine - Small, simple, common (real: CH3 side chain)
             props.segment_length = 8.5;
             props.thickness = 2.5;
-            // Old CSV: Seed Angle = 20°
+            // Old CSV: Seed Angle = 20┬░
             props.base_angle = 0.349066; // 20 deg in radians
             props.alpha_sensitivity = -0.2;
             props.beta_sensitivity = 0.2;
@@ -398,7 +399,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 2u: { // D - Aspartic acid - Small, charged (real: acidic, negatively charged)
             props.segment_length = 13.0;
             props.thickness = 3.0;
-            // Old CSV: Seed Angle = 0°
+            // Old CSV: Seed Angle = 0┬░
             props.base_angle = 0.0;
             props.alpha_sensitivity = -0.2;
             props.beta_sensitivity = 0.3;
@@ -423,7 +424,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 3u: { // E - Glutamic acid - POISON RESISTANT - Very heavy pink blob (cumulative: each E reduces poison damage by 10%)
             props.segment_length = 30.0;
             props.thickness = 30.0; // Very fat blob
-            // Old CSV: Seed Angle = -60°
+            // Old CSV: Seed Angle = -60┬░
             props.base_angle = -1.047198;
             props.alpha_sensitivity = 0.1;
             props.beta_sensitivity = 0.12;
@@ -448,7 +449,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 4u: { // F - Phenylalanine - )
             props.segment_length = 18.5;
             props.thickness = 3.0;
-            // Old CSV: Seed Angle = 30°
+            // Old CSV: Seed Angle = 30┬░
             props.base_angle = 0.523599;
             props.alpha_sensitivity = 0.2;
             props.beta_sensitivity = -0.33;
@@ -473,7 +474,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 5u: { // G - Glycine - Structural (smallest amino acid, flexible)
             props.segment_length = 4.0;
             props.thickness = 0.75;
-            // Old CSV: Seed Angle = -20°
+            // Old CSV: Seed Angle = -20┬░
             props.base_angle = -0.349066;
             props.alpha_sensitivity = 1.2;
             props.beta_sensitivity = 0.1;
@@ -498,7 +499,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 6u: { // H - Histidine - Aromatic, charged (real: imidazole ring, pH-sensitive)
             props.segment_length = 9.0;
             props.thickness = 6.0;
-            // Old CSV: Seed Angle = -10°
+            // Old CSV: Seed Angle = -10┬░
             props.base_angle = -0.174533;
             props.alpha_sensitivity = 0.2;
             props.beta_sensitivity = -0.61;
@@ -523,7 +524,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 7u: { // I - Isoleucine - Branched, hydrophobic (real: beta-branched aliphatic)
             props.segment_length = 19.0;
             props.thickness = 5.5;
-            // Old CSV: Seed Angle = 30°
+            // Old CSV: Seed Angle = 30┬░
             props.base_angle = 0.523599;
             props.alpha_sensitivity = -0.3;
             props.beta_sensitivity = 0.9;
@@ -596,7 +597,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 10u: { // M - Methionine - START CODON - Medium, sulfur-containing (real: linear thioether)
             props.segment_length = 8.5;
             props.thickness = 4.0;
-            // Old CSV: Seed Angle = -45°
+            // Old CSV: Seed Angle = -45┬░
             props.base_angle = -0.785398;
             props.alpha_sensitivity = 0.14;
             props.beta_sensitivity = -0.64;
@@ -621,7 +622,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     case 11u: { // N - ENABLER (was INHIBITOR) - Increases power of nearby propellers, displacers, and mouths up to 40 units
             props.segment_length = 6.0;
             props.thickness = 6.0;
-            // Old CSV: Seed Angle = 45°
+            // Old CSV: Seed Angle = 45┬░
             props.base_angle = 0.785398;
             props.alpha_sensitivity = 0.2;
             props.beta_sensitivity = 0.3;
@@ -649,7 +650,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 12u: { // P - Proline - PROPELLER - Rigid cyclic (real: backbone constraint, helix breaker)
             props.segment_length = 16.0;
             props.thickness = 8.0;
-            // Old CSV: Seed Angle = -30°
+            // Old CSV: Seed Angle = -30┬░
             props.base_angle = -0.523599;
             props.alpha_sensitivity = 0.5;
             props.beta_sensitivity = -0.1;
@@ -674,7 +675,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 13u: { // Q - Glutamine - Medium, polar (real: amide side chain, similar to E)
             props.segment_length = 8.5;
             props.thickness = 3.0;
-            // Old CSV: Seed Angle = -50°
+            // Old CSV: Seed Angle = -50┬░
             props.base_angle = -0.872665;
             props.alpha_sensitivity = 0.24;
             props.beta_sensitivity = -0.4;
@@ -699,7 +700,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         case 14u: { // R - Arginine - Very long, positively charged (real: longest, guanidinium group)
             props.segment_length = 18.5;
             props.thickness = 3.5;
-            // Old CSV: Seed Angle = -10°
+            // Old CSV: Seed Angle = -10┬░
             props.base_angle = -0.174533;
             props.alpha_sensitivity = 0.5;
             props.beta_sensitivity = -0.15;
@@ -1051,17 +1052,6 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     
 
     return props;
-}
-
-// Calculate rendered size from part properties
-fn get_part_size(part_type: u32) -> f32 {
-    let props = get_amino_acid_properties(get_base_part_type(part_type));
-    var rendered_size = props.thickness * 0.5;
-    let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor;
-    if (is_sensor) {
-        rendered_size *= 2.0; // Sensors render larger for readability
-    }
-    return rendered_size;
 }
 
 // ============================================================================
@@ -1831,7 +1821,7 @@ fn render_body_part_inspector(
     
     // 1. STRUCTURAL RENDERING: Base segment line
     if (!in_debug_mode) {
-        let thickness = get_part_size(part.part_type) * 0.5;
+        let thickness = part.size * 0.5;
         let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_thick_line_ctx(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
         if (!is_single && (is_first || is_last)) {
@@ -1847,7 +1837,7 @@ fn render_body_part_inspector(
         let g = max(a, 0.0);
         let bl = max(max(-a, 0.0), max(-b, 0.0));
         let dbg_color = vec4<f32>(r, g, bl, 1.0);
-        let thickness_dbg = max(get_part_size(part.part_type) * 0.25, 0.5);
+        let thickness_dbg = max(part.size * 0.25, 0.5);
         draw_thick_line_ctx(segment_start_world, world_pos, thickness_dbg, dbg_color, ctx);
         if (!is_single && (is_first || is_last)) {
             draw_filled_circle_ctx(world_pos, thickness_dbg, dbg_color, ctx);
@@ -1872,17 +1862,17 @@ fn render_body_part_inspector(
         let perp_local = vec2<f32>(-axis_local.y, axis_local.x);
         let perp_world = apply_agent_rotation(perp_local, agent_rotation);
         
-        let half_length = get_part_size(part.part_type) * 0.8;
+        let half_length = part.size * 0.8;
         let p1 = world_pos - perp_world * half_length;
         let p2 = world_pos + perp_world * half_length;
-        let perp_thickness = get_part_size(part.part_type) * 0.3;
+        let perp_thickness = part.size * 0.3;
         let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_thick_line_ctx(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0), ctx);
     }
     
     // 4. ORGAN: Condenser (charge storage/discharge) - SIMPLIFIED for inspector
     if (amino_props.is_condenser) {
-        let radius = max(get_part_size(part.part_type) * 0.5, 3.0);
+        let radius = max(part.size * 0.5, 3.0);
         
         // Just draw a simple filled circle - skip complex rendering to avoid stack overflow
         let blended_color_cond = mix(amino_props.color, agent_color, params.agent_color_blend);
@@ -1894,7 +1884,7 @@ fn render_body_part_inspector(
     
     // 5. ORGAN: Sensor cloud
     if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor || amino_props.is_energy_sensor) {
-        let sensor_radius = get_part_size(part.part_type) * 2.0;
+        let sensor_radius = part.size * 2.0;
         let sensor_seed = part_index * 500u + part_index * 13u;
         let blended_color_sensor = mix(amino_props.color, agent_color, params.agent_color_blend);
         let sensor_color = vec4<f32>(blended_color_sensor * 0.6, 0.5);
@@ -1903,12 +1893,12 @@ fn render_body_part_inspector(
     
     // 6. ORGAN: Mouth indicator (yellow asterisk)
     if (amino_props.is_mouth && !in_debug_mode) {
-        draw_asterisk_ctx(world_pos, get_part_size(part.part_type) * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
+        draw_asterisk_ctx(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
     }
     
     // 7. ORGAN: Displacer indicator (diamond shape)
     if (amino_props.is_displacer && !in_debug_mode) {
-        let square_size = get_part_size(part.part_type) * 2.0;
+        let square_size = part.size * 2.0;
         let top = world_pos + vec2<f32>(0.0, -square_size);
         let right = world_pos + vec2<f32>(square_size, 0.0);
         let bottom = world_pos + vec2<f32>(0.0, square_size);
@@ -1971,7 +1961,7 @@ fn render_body_part_ctx(
     
     // 1. STRUCTURAL RENDERING: Base segment line
     if (!in_debug_mode) {
-        let thickness = get_part_size(part.part_type) * 0.5;
+        let thickness = part.size * 0.5;
         let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_thick_line_ctx(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
         if (!is_single && (is_first || is_last)) {
@@ -1987,7 +1977,7 @@ fn render_body_part_ctx(
         let g = max(a, 0.0);
         let bl = max(max(-a, 0.0), max(-b, 0.0));
         let dbg_color = vec4<f32>(r, g, bl, 1.0);
-        let thickness_dbg = max(get_part_size(part.part_type) * 0.25, 0.5);
+        let thickness_dbg = max(part.size * 0.25, 0.5);
         draw_thick_line_ctx(segment_start_world, world_pos, thickness_dbg, dbg_color, ctx);
         if (!is_single && (is_first || is_last)) {
             draw_filled_circle_ctx(world_pos, thickness_dbg, dbg_color, ctx);
@@ -2012,10 +2002,10 @@ fn render_body_part_ctx(
         let perp_local = vec2<f32>(-axis_local.y, axis_local.x);
         let perp_world = apply_agent_rotation(perp_local, agent_rotation);
         
-        let half_length = get_part_size(part.part_type) * 0.8;
+        let half_length = part.size * 0.8;
         let p1 = world_pos - perp_world * half_length;
         let p2 = world_pos + perp_world * half_length;
-        let perp_thickness = get_part_size(part.part_type) * 0.3;
+        let perp_thickness = part.size * 0.3;
         let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_thick_line_ctx(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0), ctx);
     }
@@ -2031,7 +2021,7 @@ fn render_body_part_ctx(
         let is_alpha_discharging = (signed_alpha_charge > 0.0);
         let is_beta_discharging = (signed_beta_charge > 0.0);
         
-        let radius = max(get_part_size(part.part_type) * 0.5, 3.0);
+        let radius = max(part.size * 0.5, 3.0);
         
         var fill_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         if (is_alpha_discharging || is_beta_discharging) {
@@ -2106,7 +2096,7 @@ fn render_body_part_ctx(
         let axis_world = apply_agent_rotation(axis_local, agent_rotation);
         let jet_dir = normalize(vec2<f32>(-axis_world.y, axis_world.x));
         let exhaust_dir = -jet_dir;
-        let propeller_strength = get_part_size(part.part_type) * 2.5 * amplification;
+        let propeller_strength = part.size * 2.5 * amplification;
         let zoom_factor = clamp((params.camera_zoom - 2.0) / 8.0, 0.0, 1.0);
         let jet_length = propeller_strength * mix(0.6, 1.2, zoom_factor);
         let jet_seed = agent_id * 1000u + part_index * 17u;
@@ -2116,7 +2106,7 @@ fn render_body_part_ctx(
     
     // 7. ORGAN: Sensor cloud
     if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor || amino_props.is_energy_sensor) {
-        let sensor_radius = get_part_size(part.part_type) * 2.0;
+        let sensor_radius = part.size * 2.0;
         let sensor_seed = agent_id * 500u + part_index * 13u;
         let blended_color_sensor = mix(amino_props.color, agent_color, params.agent_color_blend);
         let sensor_color = vec4<f32>(blended_color_sensor * 0.6, 0.5);
@@ -2125,12 +2115,12 @@ fn render_body_part_ctx(
     
     // 8. ORGAN: Mouth indicator (yellow asterisk)
     if (amino_props.is_mouth && !in_debug_mode) {
-        draw_asterisk_ctx(world_pos, get_part_size(part.part_type) * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
+        draw_asterisk_ctx(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
     }
     
     // 9. ORGAN: Displacer indicator (diamond shape)
     if (amino_props.is_displacer && !in_debug_mode) {
-        let square_size = get_part_size(part.part_type) * 2.0;
+        let square_size = part.size * 2.0;
         let top = world_pos + vec2<f32>(0.0, -square_size);
         let right = world_pos + vec2<f32>(square_size, 0.0);
         let bottom = world_pos + vec2<f32>(0.0, square_size);
@@ -2150,7 +2140,7 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
     var max_dist = 20.0; // minimum radius
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
-        let dist = length(part.pos) + get_part_size(part.part_type);
+        let dist = length(part.pos) + part.size;
         max_dist = max(max_dist, dist);
     }
     
@@ -2192,18 +2182,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agents_out[agent_id] = agent;
 
     // ====== MORPHOLOGY BUILD ======
-    // Genome scan only happens on first frame, but body rebuild happens every frame
+    // Genome scan only happens on first frame (body_count == 0)
+    // After that, we just use the cached part_type values in body[]
     var body_count_val = agent.body_count;
+    var first_build = (agent.body_count == 0u);
     var start_byte = 0u;
     
-    if (agent.body_count == 0u) {
-        // First build: locate start position
+    if (first_build) {
+        // FIRST BUILD: Scan genome and populate body[].part_type
         var start = 0xFFFFFFFFu;
         if (params.require_start_codon == 1u) {
-            // Require AUG start codon
             start = genome_find_start_codon(agent.genome);
         } else {
-            // Use first valid codon (skip padding)
             start = genome_find_first_coding_triplet(agent.genome);
         }
         
@@ -2215,14 +2205,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         start_byte = start;
 
-    // Count codons starting from the first valid codon until stop codon (UAA, UAG, UGA) or limits
-    // 2-CODON ORGAN SYSTEM: 8 promoters (2 per family) that consume 2 codons
-    // PROPELLING: L(9), P(12)
-    // ENERGY: K(8), C(1)
-    // SENSORS: V(17), N(10)
-    // SPECIAL: H(6), Q(13)
-    var count = 0u;
-    var pos_b = start_byte;
+        // Translate genome into body parts (part_type gets cached in body[])
+        var count = 0u;
+        var pos_b = start_byte;
         for (var i = 0u; i < MAX_BODY_PARTS; i++) {
             if (pos_b + 2u >= GENOME_LENGTH) { break; }
             if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(agent.genome, pos_b)) { break; }
@@ -2230,203 +2215,158 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let codon = genome_get_codon_ascii(agent.genome, pos_b);
             let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
 
-            // Check if this is an organ promoter (8 promoters total: 2 per family)
-            // PROPELLING: L(9), P(12)
-            // ENERGY: K(8), C(1)
-            // SENSORS: V(17), N(10)
-            // SPECIAL: H(6), Q(13)
+            var final_part_type = amino_type;
             let is_promoter = (amino_type == 9u || amino_type == 12u ||
                               amino_type == 8u || amino_type == 1u ||
                               amino_type == 17u || amino_type == 10u ||
                               amino_type == 6u || amino_type == 13u);
+            
             if (is_promoter && pos_b + 5u < GENOME_LENGTH) {
-                // This is a 2-letter organ (promoter + modifier), skip 6 bytes total
-                count += 1u;
-                pos_b += 6u;
-                continue;
-            }
+                let codon2 = genome_get_codon_ascii(agent.genome, pos_b + 3u);
+                let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
+                var organ_base_type = 0u;
 
-            // Regular amino acid (1 codon = 3 bytes)
+                if (amino_type == 9u || amino_type == 12u) {
+                    organ_base_type = select(25u, 21u, modifier < 10u);
+                } else if (amino_type == 8u || amino_type == 1u) {
+                    organ_base_type = select(26u, 20u, modifier < 7u);
+                } else if (amino_type == 17u || amino_type == 10u) {
+                    if (modifier < 10u) { organ_base_type = 22u; }
+                    else if (modifier < 18u) { organ_base_type = 23u; }
+                    else { organ_base_type = 24u; }
+                } else if (amino_type == 6u || amino_type == 13u) {
+                    if (modifier < 7u) { organ_base_type = 28u; }
+                    else if (modifier < 14u) { organ_base_type = 29u; }
+                    else { organ_base_type = 30u; }
+                }
+
+                if (organ_base_type >= 20u) {
+                    let param_value = u32((f32(modifier) / 19.0) * 255.0);
+                    final_part_type = encode_part_type(organ_base_type, param_value);
+                } else {
+                    // Promoter that didn't become an organ stays as amino acid
+                    final_part_type = amino_type;
+                }
+                // Promoters always consume 6 bases (2 codons) regardless
+                pos_b += 6u;
+            } else {
+                pos_b += 3u;
+            }
+            
+            // Store part_type (will be reused every frame after this)
+            agents_out[agent_id].body[i].part_type = final_part_type;
             count += 1u;
-            pos_b += 3u;
         }
         
-        // Natural selection: agents with bad genomes (no codons) die immediately
         count = clamp(count, 0u, MAX_BODY_PARTS);
         agents_out[agent_id].body_count = count;
         body_count_val = count;
         
-        // Kill agents with no body parts
         if (count == 0u) {
             agents_out[agent_id].alive = 0u;
             return;
         }
-    } else {
-        // After first frame: find start position again for rebuilding
-        var start = 0xFFFFFFFFu;
-        if (params.require_start_codon == 1u) {
-            start = genome_find_start_codon(agent.genome);
-        } else {
-            start = genome_find_first_coding_triplet(agent.genome);
-        }
-        if (start != 0xFFFFFFFFu) { start_byte = start; }
     }
     
-    // ALWAYS rebuild body positions (enables dynamic shape changes from signals)
+    // REBUILD body positions every frame (enables dynamic shape changes from signals)
+    // Now we just read the cached part_type from body[] instead of re-scanning genome
+    
+    // Initialize outside the if block so they're in scope for agent_color calculation
+    var total_mass_morphology = 0.05; // Default minimum
+    var color_sum_morphology = 0.0;
+    
     if (body_count_val > 0u) {
 
-        // Count poison-resistant amino acids (E = Glutamic Acid, amino index 3) for angle modulation
-        var poison_resistant_count = 0u;
-        for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
-            if (get_base_part_type(agents_out[agent_id].body[i].part_type) == 3u) { // Glutamic Acid
-                poison_resistant_count += 1u;
-            }
-        }
-        // Each E reduces signal-based angle changes by 10%
-        let signal_angle_multiplier = pow(0.9, f32(poison_resistant_count));
+        // Use poison resistance count from previous frame (stored in struct)
+        // This value only changes when morphology changes, so it's safe to use the stored value
+        let signal_angle_multiplier = pow(0.9, f32(agents_out[agent_id].poison_resistant_count));
 
         // Dynamic chain build - angles modulated by alpha/beta signals
-    var current_pos = vec2<f32>(0.0);
-    var current_angle = 0.0;
-    var chirality_flip = 1.0; // Track cumulative chirality: 1.0 or -1.0
-    
-    // Accumulators for average angle calculation
-    var sum_angle_mass = 0.0;
-    var total_mass_angle = 0.0;
+        var current_pos = vec2<f32>(0.0);
+        var current_angle = 0.0;
+        var chirality_flip = 1.0;
+        var sum_angle_mass = 0.0;
+        var total_mass_angle = 0.0;
+        var total_capacity = 0.0;
+        // Reset to 0 before accumulation
+        total_mass_morphology = 0.0;
+        color_sum_morphology = 0.0;
+        var poison_resistant_count = 0u;
 
-    // Build parts starting from the first valid codon
-    var build_b = start_byte;
-        var parts_built = 0u; // Track how many we actually build
-        var total_capacity = 0.0; // Calculate energy capacity as we build
+        // Loop through existing body parts and rebuild positions
         for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
-            if (build_b + 2u >= GENOME_LENGTH) { break; }
-            
-            if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(agent.genome, build_b)) {
-                break;
-            }
-
-            let codon = genome_get_codon_ascii(agent.genome, build_b);
-            let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
-
-            // 2-LETTER ORGAN SYSTEM
-            // Promoter defines family (2 redundant promoters per family for moderate probability):
-            // PROPELLING: L(9), P(12)
-            // ENERGY: K(8), C(1)
-            // SENSORS: V(17), N(10)
-            // SPECIAL: H(6), Q(13)
-            // Second amino acid (0-19) defines specific organ within family
-            var final_part_type = amino_type; // Default: structural amino acid
-            var is_organ = false;
-
-            let is_promoter = (amino_type == 9u || amino_type == 12u ||
-                              amino_type == 8u || amino_type == 1u ||
-                              amino_type == 17u || amino_type == 10u ||
-                              amino_type == 6u || amino_type == 13u);
-            if (is_promoter && build_b + 5u < GENOME_LENGTH) {
-                // Found organ promoter, read second codon
-                let codon2 = genome_get_codon_ascii(agent.genome, build_b + 3u);
-                let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
-
-                var organ_base_type = 0u;
-
-                // PROPELLING FAMILY: L(9), P(12)
-                if (amino_type == 9u || amino_type == 12u) {
-                    if (modifier < 10u) { organ_base_type = 21u; } // 0-9: Propeller
-                    else { organ_base_type = 25u; } // 10-19: Displacer
-                }
-                // ENERGY FAMILY: K(8), C(1)
-                else if (amino_type == 8u || amino_type == 1u) {
-                    if (modifier < 7u) { organ_base_type = 20u; } // 0-6: Mouth
-                    else { organ_base_type = 26u; } // 7-19: Enabler (protection)
-                }
-                // SENSORS FAMILY: V(17), N(10)
-                else if (amino_type == 17u || amino_type == 10u) {
-                    if (modifier < 10u) { organ_base_type = 22u; } // 0-9: Alpha Sensor
-                    else if (modifier < 18u) { organ_base_type = 23u; } // 10-17: Beta Sensor
-                    else { organ_base_type = 24u; } // 18-19: Energy Sensor
-                }
-                // SPECIAL FUNCTIONS FAMILY: H(6), Q(13)
-                else if (amino_type == 6u || amino_type == 13u) {
-                    if (modifier < 7u) { organ_base_type = 28u; } // 0-6: Storage
-                    else if (modifier < 14u) { organ_base_type = 29u; } // 7-13: Poison Resistance
-                    else { organ_base_type = 30u; } // 14-19: Chiral Flipper
-                }
-
-                if (organ_base_type >= 20u) {
-                    // Valid organ detected! Use modifier (0-19) as parameter (0-255)
-                    let param_value = u32((f32(modifier) / 19.0) * 255.0);
-                    final_part_type = encode_part_type(organ_base_type, param_value);
-                    is_organ = true;
-                    build_b += 6u; // Consume both codons (6 bytes)
-                } else {
-                    // Invalid organ pattern, treat first codon as regular amino
-                    final_part_type = amino_type;
-                    build_b += 3u;
-                }
-            } else {
-                // Regular amino acid
-                build_b += 3u;
-            }
-            
-            // Check if this part is a chiral flipper organ (type 30)
+            // Read cached part_type (set during first build or from previous frame)
+            let final_part_type = agents_out[agent_id].body[i].part_type;
             let base_type = get_base_part_type(final_part_type);
+            
+            // Check for chiral flipper
             if (base_type == 30u) {
-                chirality_flip = -chirality_flip; // Flip chirality for all following amino acids
+                chirality_flip = -chirality_flip;
             }
             
-            let props = get_amino_acid_properties(get_base_part_type(final_part_type));
+            // Count poison-resistant organs (type 29) for signal angle modulation
+            if (base_type == 29u) {
+                poison_resistant_count += 1u;
+            }
             
-            // Add this part's energy storage to total capacity
+            let props = get_amino_acid_properties(base_type);
             total_capacity += props.energy_storage;
             
-            // Read previous frame's signals for this part (preserved from physics phase)
-            var alpha = 0.0;
-            var beta = 0.0;
-            if (body_count_val > 0u) {
-                // Not first frame - read signals from previous frame
-                alpha = agents_out[agent_id].body[i].alpha_signal;
-                beta = agents_out[agent_id].body[i].beta_signal;
-            }
+            // Read previous frame's signals
+            let alpha = agents_out[agent_id].body[i].alpha_signal;
+            let beta = agents_out[agent_id].body[i].beta_signal;
             
-            // Modulate angle based on signals and sensitivity
-            // alpha_sensitivity controls how much alpha affects the angle
-            // beta_sensitivity controls how much beta affects the angle
-            // Raw signal effects with reduced gain
+            // Modulate angle based on signals
             let alpha_effect = alpha * props.alpha_sensitivity * SIGNAL_GAIN * ANGLE_GAIN_ALPHA;
             let beta_effect = beta * props.beta_sensitivity * SIGNAL_GAIN * ANGLE_GAIN_BETA;
             var target_signal_angle = alpha_effect + beta_effect;
-            // Apply poison protection: reduce signal-based angle changes
             target_signal_angle = target_signal_angle * signal_angle_multiplier;
-            // Hard cap total contribution
             target_signal_angle = clamp(target_signal_angle, -MAX_SIGNAL_ANGLE, MAX_SIGNAL_ANGLE);
 
-            // Progressive smoothing stored in _pad.x
-            // No inertia: angle reacts instantly to signal
             var smoothed_signal = target_signal_angle;
             
-            // Apply chirality flip to all angles (base_angle and signal modulation)
+            // Apply chirality flip to angles
             current_angle += (props.base_angle + smoothed_signal) * chirality_flip;
             
             // Accumulate for average angle
             let m = max(props.mass, 0.01);
             sum_angle_mass += current_angle * m;
             total_mass_angle += m;
+            // Also accumulate total mass and color sum (only changes when morphology rebuilds)
+            total_mass_morphology += m;
+            color_sum_morphology += props.beta_damage;
 
+            // Calculate new position
             current_pos.x += cos(current_angle) * props.segment_length;
             current_pos.y += sin(current_angle) * props.segment_length;
             agents_out[agent_id].body[i].pos = current_pos;
-            agents_out[agent_id].body[i].part_type = final_part_type; // Use encoded organ type
-            // Persist the smoothed angle contribution in _pad.x for next frame
+            
+            // Update size
+            var rendered_size = props.thickness * 0.5;
+            let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor;
+            if (is_sensor) {
+                rendered_size *= 2.0;
+            }
+            if (props.is_condenser) {
+                rendered_size *= 0.5;
+            }
+            agents_out[agent_id].body[i].size = rendered_size;
+            
+            // Persist smoothed angle in _pad.x
             let keep_pad_y = agents_out[agent_id].body[i]._pad.y;
             agents_out[agent_id].body[i]._pad = vec2<f32>(smoothed_signal, keep_pad_y);
-            parts_built += 1u;
         }
         
-        // Update body_count to actual built count (may be less if we hit genome end)
-        agents_out[agent_id].body_count = parts_built;
-        body_count_val = parts_built;
+        // Energy capacity
+        agents_out[agent_id].energy_capacity = total_capacity;
+        
+        // Store total mass (only changes when morphology rebuilds)
+        agents_out[agent_id].total_mass = max(total_mass_morphology, 0.05);
+        
+        // Store poison resistance count (only changes when morphology rebuilds)
+        agents_out[agent_id].poison_resistant_count = poison_resistant_count;
 
-        // Center of mass recentering (mass-weighted to reflect physical inertia)
+        // Center of mass recentering
         var com = vec2<f32>(0.0);
         let rec_n = body_count_val;
         if (rec_n > 0u) {
@@ -2446,91 +2386,89 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 agents_out[agent_id].body[i].pos -= com;
             }
 
-            // Removed angular re-orientation to avoid unstable whole-body rotations from small internal changes.
-            // Agent's world rotation is driven only by physics (torque integration) ensuring temporal stability.
-            
-            // Calculate mass-weighted average angle of the body
+            // Calculate mass-weighted average angle
             let avg_angle = sum_angle_mass / max(total_mass_angle, 0.0001);
             
-            // Counteract internal rotation:
-            // 1. Add average angle to global rotation (so the "visual average" stays put)
+            // Counteract internal rotation
             if (!DISABLE_GLOBAL_ROTATION) {
                 agents_out[agent_id].rotation += avg_angle;
             }
             
-            // 2. Subtract average angle from all body parts (so they are centered around 0 locally)
-            // We need to rotate the positions around the CoM (0,0) by -avg_angle
+            // Rotate body parts by -avg_angle
             let c_inv = cos(-avg_angle);
             let s_inv = sin(-avg_angle);
             
             for (var i = 0u; i < min(rec_n, MAX_BODY_PARTS); i++) {
                 let p = agents_out[agent_id].body[i].pos;
-                // Rotate p by -avg_angle
                 agents_out[agent_id].body[i].pos = vec2<f32>(
                     p.x * c_inv - p.y * s_inv,
                     p.x * s_inv + p.y * c_inv
                 );
             }
             
-            // Also rotate the morphology origin
+            // Rotate morphology origin
             let o = origin_local;
             agents_out[agent_id].morphology_origin = vec2<f32>(
                 o.x * c_inv - o.y * s_inv,
                 o.x * s_inv + o.y * c_inv
             );
         }
-        
-        // Energy capacity already calculated during build loop above
-        agents_out[agent_id].energy_capacity = total_capacity;
     }
+    
+    // Calculate agent color from color_sum accumulated during morphology rebuild
+    let agent_color = vec3<f32>(
+        sin(color_sum_morphology * 3.0) * 0.5 + 0.5,      // R: multiplier = 3.0
+        sin(color_sum_morphology * 5.25) * 0.5 + 0.5,     // G: multiplier = 5.25
+        sin(color_sum_morphology * 7.364) * 0.5 + 0.5     // B: multiplier = 7.364
+    );
 
     let body_count = body_count_val; // Use computed value instead of reading from agent
 
-    // ====== AMPLIFICATION CACHE (compute once) ======
-    // For each part, sum contributions from all enablers (flag is_inhibitor reused) within 40 units.
-    // Linear falloff: 1 at distance 0, 0 at >=40. Cap total at 1.0.
+    // ====== UNIFIED SIGNAL PROCESSING LOOP ======
+    // Optimized passes: enabler discovery, amplification calculation, signal storage, and propagation
+    
     var amplification_per_part: array<f32, MAX_BODY_PARTS>;
     var propeller_thrust_magnitude: array<f32, MAX_BODY_PARTS>; // Store thrust for cost calculation
+    var old_alpha: array<f32, MAX_BODY_PARTS>;
+    var old_beta: array<f32, MAX_BODY_PARTS>;
+    
+    // First pass: find all enablers and store their positions, store signals
+    var enabler_positions: array<vec2<f32>, MAX_BODY_PARTS>;
+    var enabler_count = 0u;
+    
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part_i = agents_out[agent_id].body[i];
+        let base_type = get_base_part_type(part_i.part_type);
+        let props = get_amino_acid_properties(base_type);
+        
+        // Store old signals for propagation
+        old_alpha[i] = part_i.alpha_signal;
+        old_beta[i] = part_i.beta_signal;
+        
+        // Collect enabler positions
+        if (props.is_inhibitor) { // enabler role
+            enabler_positions[enabler_count] = part_i.pos;
+            enabler_count += 1u;
+        }
+    }
+    
+    // Second pass: calculate amplification and propagate signals (merged for efficiency)
+    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+        let part_pos = agents_out[agent_id].body[i].pos;
+        let amino_props = get_amino_acid_properties(agents_out[agent_id].body[i].part_type);
+        
+        // Calculate amplification using enabler list (O(n ├ù e) instead of O(n┬▓))
         var amp = 0.0;
-        for (var j = 0u; j < min(body_count, MAX_BODY_PARTS); j++) {
-            let other = agents_out[agent_id].body[j];
-            let other_props = get_amino_acid_properties(get_base_part_type(other.part_type));
-            if (other_props.is_inhibitor) { // enabler role
-                let d = length(part_i.pos - other.pos);
-                if (d < 40.0) {
-                    amp += max(0.0, 1.0 - d / 40.0);
-                }
+        for (var e = 0u; e < enabler_count; e++) {
+            let d = length(part_pos - enabler_positions[e]);
+            if (d < 40.0) {
+                amp += max(0.0, 1.0 - d / 40.0);
             }
         }
         amplification_per_part[i] = min(amp, 1.0);
         propeller_thrust_magnitude[i] = 0.0; // Initialize
-    }
-    
-    // ====== SIGNAL PROPAGATION ======
-    // Propagate alpha and beta signals through the amino acid chain
-    // Based on reference: propagate from previous frame's signals, sensors ADD environment
-    
-    // Count poison-resistant amino acids (E = Glutamic Acid, amino index 3) for metabolism effects
-    var poison_resistant_count = 0u;
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        if (get_base_part_type(agents_out[agent_id].body[i].part_type) == 3u) { // Glutamic Acid
-            poison_resistant_count += 1u;
-        }
-    }
-    
-    // Store old signals for propagation (from previous frame)
-    var old_alpha: array<f32, MAX_BODY_PARTS>;
-    var old_beta: array<f32, MAX_BODY_PARTS>;
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        old_alpha[i] = agents_out[agent_id].body[i].alpha_signal;
-        old_beta[i] = agents_out[agent_id].body[i].beta_signal;
-    }
-    
-    // Propagate signals through chain; either weighted (anisotropic) or isotropic depending on params
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        let amino_props = get_amino_acid_properties(agents_out[agent_id].body[i].part_type);
+        
+        // Propagate signals through chain
         
         let has_left = i > 0u;
         let has_right = i < body_count - 1u;
@@ -2633,47 +2571,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     
     // ====== PHYSICS CALCULATIONS ======
-    // Calculate center of mass (CoM) and total mass AFTER morphology
-    // Use segment midpoints for proper mass distribution
-    var center_of_mass = vec2<f32>(0.0);
-    var total_mass = 0.0;
+    // Agent already centered at local (0,0) after morphology re-centering
+    let center_of_mass = vec2<f32>(0.0);
+    let total_mass = agents_out[agent_id].total_mass; // Already calculated during morphology
     let morphology_origin = agents_out[agent_id].morphology_origin;
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        let part = agents_out[agent_id].body[i];
-        let part_props = get_amino_acid_properties(get_base_part_type(part.part_type));
-        let mass = max(part_props.mass, 0.01);
-        total_mass += mass;
-        
-        // Calculate segment midpoint for mass distribution
-        var segment_start_chain = vec2<f32>(0.0);
-        if (i > 0u) {
-            segment_start_chain = agents_out[agent_id].body[i - 1u].pos;
-        }
-        let segment_midpoint_chain = (segment_start_chain + part.pos) * 0.5;
-        let segment_midpoint = morphology_origin + segment_midpoint_chain;
-        
-        center_of_mass += segment_midpoint * mass;
-    }
-    total_mass = max(total_mass, 0.05); // Prevent division by zero
-    center_of_mass /= total_mass;
-    // Persist total_mass for inspector (will be overwritten each frame)
-    agents_out[agent_id].total_mass = total_mass;
-    
-    // ====== AGENT COLOR CALCULATION ======
-    // Calculate agent color from amino acid beta_damage values using sine waves
-    // Sum beta_damage across all body parts
-    var color_sum = 0.0;
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        let part = agents_out[agent_id].body[i];
-        let part_props = get_amino_acid_properties(get_base_part_type(part.part_type));
-        color_sum += part_props.beta_damage;
-    }
-    // Apply sine waves with different multipliers to generate RGB channels
-    let agent_color = vec3<f32>(
-        sin(color_sum * 3.0) * 0.5 + 0.5,      // R: multiplier = 3.0
-        sin(color_sum * 5.25) * 0.5 + 0.5,     // G: multiplier = 5.25
-        sin(color_sum * 7.364) * 0.5 + 0.5     // B: multiplier = 7.364
-    );
     
     let drag_coefficient = total_mass * 0.5;
 
@@ -2986,66 +2887,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Closed world: clamp at boundaries
     agent.position = clamp_position(agent.position + agent.velocity);
 
-    // ====== TRAIL DEPOSITION ======
-    // Deposit agent color to RGB trail at each body part position
-    let trail_deposit_strength = 0.08; // Strength of trail deposition (0-1)
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        let part = agents_out[agent_id].body[i];
-        let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
-        let world_pos = agent.position + rotated_pos;
-        let idx = grid_index(world_pos);
-        
-    // Blend agent color with existing trail (not additive - replaces with weighted blend)
-    let current_trail = trail_grid[idx].xyz;
-    let blended = mix(current_trail, agent_color, trail_deposit_strength);
-    trail_grid[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-    }
-
-    // ====== FEEDING, ENERGY AND DEATH ======
+    // ====== UNIFIED ORGAN ACTIVITY LOOP ======
+    // Process trail deposition, energy consumption, and feeding in single pass
+    
     // Use the post-morphology capacity written into agents_out this frame
     let capacity = agents_out[agent_id].energy_capacity;
-    // 1) Compute energy consumption from morphology (capacity already calculated in morphology phase)
-    var energy_consumption = params.energy_cost; // base maintenance (can be 0)
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        let part = agents_out[agent_id].body[i];
-        let props = get_amino_acid_properties(get_base_part_type(part.part_type));
-        // Minimum baseline cost per amino acid (always paid)
-        let baseline = params.amino_maintenance_cost;
-        // Organ-specific energy costs
-        var organ_extra = 0.0;
-        if (props.is_mouth) {
-            organ_extra = props.energy_consumption;
-        } else if (props.is_propeller) {
-            // Propellers: base cost (always paid) + activity cost (linear with thrust)
-            // Since thrust already scales quadratically with amp, cost should scale linearly with thrust
-            let base_thrust = props.thrust_force * 3.0; // Max thrust with amp=1
-            let thrust_ratio = propeller_thrust_magnitude[i] / base_thrust;
-            let activity_cost = props.energy_consumption * thrust_ratio * 1.5;
-            organ_extra = props.energy_consumption + activity_cost; // Base + activity
-        } else if (props.is_displacer) {
-            // Displacers: base cost (always paid) + activity cost (from amplification)
-            let amp = amplification_per_part[i];
-            let activity_cost = props.energy_consumption * amp * amp * 1.5;
-            organ_extra = props.energy_consumption + activity_cost; // Base + activity
-        } else {
-            // Other organs use linear amplification scaling
-            let amp = amplification_per_part[i];
-            organ_extra = props.energy_consumption * amp * 1.5;
-        }
-        energy_consumption += baseline + organ_extra;
-    }
-
-    // 2) Feeding: mouths pull from alpha grid and add to energy, consume beta and lose energy
-    // Speed-dependent absorption: slower agents absorb more efficiently
-    // Bite size is now independent of speed; keep fixed capture per frame
     
-    // poison_resistant_count and poison_multiplier already calculated in signal propagation section
-    // Each E reduces poison/radiation damage by 10%
-    let poison_multiplier = pow(0.9, f32(poison_resistant_count));
-    
-    // Track total consumption for regurgitation
-    var total_consumed_alpha = 0.0;
-    var total_consumed_beta = 0.0;
+    // poison_resistant_count stored in agent struct during morphology
+    // Each poison-resistant organ reduces poison/radiation damage by 10%
+    let poison_multiplier = pow(0.9, f32(agents_out[agent_id].poison_resistant_count));
     
     // Calculate speed-dependent absorption multiplier for mouths
     // Exponential decay: 1.0x at rest, sharp falloff exp(-8)
@@ -3061,16 +2911,36 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         agents_out[agent_id].body[63].pos.y = speed_absorption_multiplier;
     }
     
+    // Initialize accumulators
+    let trail_deposit_strength = 0.08; // Strength of trail deposition (0-1)
+    var energy_consumption = params.energy_cost; // base maintenance (can be 0)
+    var total_consumed_alpha = 0.0;
+    var total_consumed_beta = 0.0;
+    
+    // Single loop through all body parts
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
-        let amino_props = get_amino_acid_properties(get_base_part_type(part.part_type));
-        if (amino_props.is_mouth) {
+        let props = get_amino_acid_properties(get_base_part_type(part.part_type));
+        let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
+        let world_pos = agent.position + rotated_pos;
+        let idx = grid_index(world_pos);
+        
+        // 1) Trail deposition: blend agent color with existing trail
+        let current_trail = trail_grid[idx].xyz;
+        let blended = mix(current_trail, agent_color, trail_deposit_strength);
+        trail_grid[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+        
+        // 2) Energy consumption: calculate costs per organ type
+        // Minimum baseline cost per amino acid (always paid)
+        let baseline = params.amino_maintenance_cost;
+        // Organ-specific energy costs
+        var organ_extra = 0.0;
+        if (props.is_mouth) {
+            organ_extra = props.energy_consumption;
+            
+            // 3) Feeding: mouths consume from alpha/beta grids
             // Get enabler amplification for this mouth
             let amplification = amplification_per_part[i];
-            
-            let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
-            let world_pos = agent.position + rotated_pos;
-            let idx = grid_index(world_pos);
             
             // Consume alpha and beta based on per-amino absorption rates
             // and local availability, scaled by speed (slower = more absorption)
@@ -3079,8 +2949,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed effects and amplification to the rates themselves
-            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier * amplification;
-            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier * amplification;
+            let alpha_rate = max(props.energy_absorption_rate, 0.0) * speed_absorption_multiplier * amplification;
+            let beta_rate  = max(props.beta_absorption_rate, 0.0) * speed_absorption_multiplier * amplification;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
@@ -3111,7 +2981,24 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     total_consumed_beta += consumed_beta;
                 }
             }
+        } else if (props.is_propeller) {
+            // Propellers: base cost (always paid) + activity cost (linear with thrust)
+            // Since thrust already scales quadratically with amp, cost should scale linearly with thrust
+            let base_thrust = props.thrust_force * 3.0; // Max thrust with amp=1
+            let thrust_ratio = propeller_thrust_magnitude[i] / base_thrust;
+            let activity_cost = props.energy_consumption * thrust_ratio * 1.5;
+            organ_extra = props.energy_consumption + activity_cost; // Base + activity
+        } else if (props.is_displacer) {
+            // Displacers: base cost (always paid) + activity cost (from amplification)
+            let amp = amplification_per_part[i];
+            let activity_cost = props.energy_consumption * amp * amp * 1.5;
+            organ_extra = props.energy_consumption + activity_cost; // Base + activity
+        } else {
+            // Other organs use linear amplification scaling
+            let amp = amplification_per_part[i];
+            organ_extra = props.energy_consumption * amp * 1.5;
         }
+        energy_consumption += baseline + organ_extra;
     }
     
     // Cap energy by storage capacity after feeding (use post-build capacity)
@@ -3258,6 +3145,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 offspring.generation = agents_out[agent_id].generation + 1u;
                 offspring.age = 0u;
                 offspring.total_mass = 0.0; // Will be computed after morphology build
+                offspring.poison_resistant_count = 0u; // Will be computed after morphology build
 
                 // Child genome: reverse complement (sexual) or direct copy (asexual)
                 if (params.asexual_reproduction == 1u) {
@@ -3456,7 +3344,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Initialize body array to zeros
                 for (var bi = 0u; bi < MAX_BODY_PARTS; bi++) {
                     offspring.body[bi].pos = vec2<f32>(0.0);
-                    // size calculated on-the-fly from part_type
+                    offspring.body[bi].size = 0.0;
                     offspring.body[bi].part_type = 0u;
                     offspring.body[bi].alpha_signal = 0.0;
                     offspring.body[bi].beta_signal = 0.0;
@@ -4578,7 +4466,30 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Beta grid constrained to 0..1
     var final_beta = clamp(new_beta - beta_flux * kernel_scale, 0.0, 1.0);
 
-    // Apply the diffused values (rain maps are loaded separately via GPU texture upload)
+    // Stochastic rain - randomly add food/poison droplets (saturated drops)
+    // Use position and random seed to generate unique random values per cell
+    let cell_seed = idx * 2654435761u + params.random_seed;
+    let rain_chance = f32(hash(cell_seed)) / 4294967295.0;
+    
+    // Uniform alpha rain (food): remove spatial and beta-dependent gradients.
+    // Each cell independently receives a saturated rain event with probability alpha_multiplier * 0.05.
+    // (Scaling by 0.05 preserves prior expected value semantics.)
+    let alpha_rain_factor = clamp(rain_map[idx].x, 0.0, 1.0);
+    let alpha_probability_sat = params.alpha_multiplier * 0.05 * alpha_rain_factor;
+    if (rain_chance < alpha_probability_sat) {
+        final_alpha = 1.0;  // Saturated drop
+    }
+    
+    // Uniform beta rain (poison): also no vertical gradient. Probability = beta_multiplier * 0.05.
+    let beta_seed = cell_seed * 1103515245u;
+    let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
+    let beta_rain_factor = clamp(rain_map[idx].y, 0.0, 1.0);
+    let beta_probability_sat = params.beta_multiplier * 0.05 * beta_rain_factor;
+    if (beta_rain_chance < beta_probability_sat) {
+        final_beta = 1.0;  // Saturated drop
+    }
+
+    // Apply the diffused values
     alpha_grid[idx] = final_alpha;
     beta_grid[idx] = final_beta;
     // Gamma also switched to 0..1
@@ -4605,7 +4516,7 @@ fn compute_gamma_slope(@builtin(global_invocation_id) gid: vec3<u32>) {
     let top = read_combined_height(ix, iy - 1);
     let bottom = read_combined_height(ix, iy + 1);
     
-    // Diagonal neighbors (distance = sqrt(2) ≈ 1.414)
+    // Diagonal neighbors (distance = sqrt(2) Γëê 1.414)
     let top_left = read_combined_height(ix - 1, iy - 1);
     let top_right = read_combined_height(ix + 1, iy - 1);
     let bottom_left = read_combined_height(ix - 1, iy + 1);
@@ -4943,9 +4854,10 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
     let safe_height = max(params.window_height, 1.0);
     let window_width = u32(safe_width);
     let window_height = u32(safe_height);
+    let inspector_height = window_height;
     
     // Only render in the inspector region (rightmost 300 pixels)
-    if (x >= INSPECTOR_WIDTH || y >= window_height) {
+    if (x >= INSPECTOR_WIDTH || y >= inspector_height) {
         return;
     }
     
@@ -4960,22 +4872,181 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
         color = vec4<f32>(0.3, 0.3, 0.3, 1.0);
     }
     
-    // Agent preview window (square at top, 280x280 with 10px padding)
+    // Agent preview window at bottom (280x280 with 10px padding from bottom-left)
     let preview_size = 280u;
     let preview_x_start = 10u;
-    let preview_y_start = 10u;
+    let preview_y_start = window_height - preview_size - 10u;  // 10px from bottom
     let preview_x_end = preview_x_start + preview_size;
     let preview_y_end = preview_y_start + preview_size;
     
     if (x >= preview_x_start && x < preview_x_end && 
         y >= preview_y_start && y < preview_y_end) {
-        // Black background for preview window
-        color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        // Very dark grey background for preview window
+        color = vec4<f32>(0.04, 0.04, 0.04, 1.0);
         
         // Draw border around preview window
         if (x == preview_x_start || x == preview_x_end - 1u ||
             y == preview_y_start || y == preview_y_end - 1u) {
             color = vec4<f32>(0.4, 0.4, 0.4, 1.0);
+        }
+    }
+    
+    // Combined genome and amino acid visualization (single pass)
+    let genome_height = 20u;
+    let genome_y_start = preview_y_start - genome_height - 5u;  // 5px gap above preview
+    let genome_y_end = genome_y_start + genome_height;
+    let amino_height = 20u;
+    let amino_y_start = genome_y_start - amino_height - 2u;  // 2px gap above genome
+    let amino_y_end = amino_y_start + amino_height;
+    
+    let in_genome_bar = y >= genome_y_start && y < genome_y_end && x >= preview_x_start && x < preview_x_end;
+    let in_amino_bar = y >= amino_y_start && y < amino_y_end && x >= preview_x_start && x < preview_x_end;
+    
+    // Draw full genome bar (all nucleotides from start)
+    if (in_genome_bar) {
+        let genome = selected_agent_buffer[0].genome;
+        let genome_pixel_x = x - preview_x_start;
+        
+        // Find start position using same logic as genome translation
+        var start_byte = 0xFFFFFFFFu;
+        if (params.require_start_codon == 1u) {
+            start_byte = genome_find_start_codon(genome);
+        } else {
+            start_byte = genome_find_first_coding_triplet(genome);
+        }
+        
+        if (start_byte != 0xFFFFFFFFu && genome_pixel_x < GENOME_LENGTH - start_byte) {
+            let base_index = start_byte + genome_pixel_x;
+            if (base_index < GENOME_LENGTH) {
+                // Default base coloring
+                let base_ascii = genome_get_base_ascii(genome, base_index);
+                if (base_ascii == 65u) {  // 'A'
+                    color = vec4<f32>(0.0, 1.0, 0.0, 1.0);
+                } else if (base_ascii == 85u) {  // 'U'
+                    color = vec4<f32>(0.0, 0.5, 1.0, 1.0);
+                } else if (base_ascii == 71u) {  // 'G'
+                    color = vec4<f32>(1.0, 1.0, 0.0, 1.0);
+                } else if (base_ascii == 67u) {  // 'C'
+                    color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+                }
+
+                // Overlay special colors for start/stop codons (3-base windows)
+                let rel = base_index - start_byte;
+                let codon_start = start_byte + (rel / 3u) * 3u;
+                if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(genome, codon_start)) {
+                    // Stop codon: black
+                    color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+                } else {
+                    // Start codon: AUG -> purple
+                    let s0 = genome_get_base_ascii(genome, codon_start);
+                    let s1 = genome_get_base_ascii(genome, codon_start + 1u);
+                    let s2 = genome_get_base_ascii(genome, codon_start + 2u);
+                    if (s0 == 65u && s1 == 85u && s2 == 71u) {
+                        color = vec4<f32>(0.7, 0.0, 0.7, 1.0);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Draw amino acid/organ bar (only translated parts up to body_count)
+    if (in_amino_bar) {
+        let genome = selected_agent_buffer[0].genome;
+        let body_count = selected_agent_buffer[0].body_count;
+        let genome_pixel_x = x - preview_x_start;
+        
+        // Find start position using same logic as genome translation
+        var start_byte = 0xFFFFFFFFu;
+        if (params.require_start_codon == 1u) {
+            start_byte = genome_find_start_codon(genome);
+        } else {
+            start_byte = genome_find_first_coding_triplet(genome);
+        }
+        
+        if (start_byte != 0xFFFFFFFFu) {
+            // Walk through genome following translation logic in base space
+            var cumulative_bases = 0u;  // how many bases from start_byte
+            var pos_b = start_byte;
+            var part_count = 0u;
+            
+            for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+                if (part_count >= body_count) { break; }
+                if (pos_b + 2u >= GENOME_LENGTH) { break; }
+                if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(genome, pos_b)) { break; }
+                
+                let codon = genome_get_codon_ascii(genome, pos_b);
+                let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
+                
+                // Check if this is a promoter (can become an organ)
+                let is_promoter = (amino_type == 9u || amino_type == 12u ||
+                                  amino_type == 8u || amino_type == 1u ||
+                                  amino_type == 17u || amino_type == 10u ||
+                                  amino_type == 6u || amino_type == 13u);
+                
+                var base_type = amino_type;
+                var bases_consumed = 3u;  // default: 1 codon
+                var is_organ = false;
+                
+                if (is_promoter && pos_b + 5u < GENOME_LENGTH) {
+                    let codon2 = genome_get_codon_ascii(genome, pos_b + 3u);
+                    let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
+                    var organ_base_type = 0u;
+                    
+                    if (amino_type == 9u || amino_type == 12u) {
+                        organ_base_type = select(25u, 21u, modifier < 10u);
+                    } else if (amino_type == 8u || amino_type == 1u) {
+                        organ_base_type = select(26u, 20u, modifier < 7u);
+                    } else if (amino_type == 17u || amino_type == 10u) {
+                        if (modifier < 10u) { organ_base_type = 22u; }
+                        else if (modifier < 18u) { organ_base_type = 23u; }
+                        else { organ_base_type = 24u; }
+                    } else if (amino_type == 6u || amino_type == 13u) {
+                        if (modifier < 7u) { organ_base_type = 28u; }
+                        else if (modifier < 14u) { organ_base_type = 29u; }
+                        else { organ_base_type = 30u; }
+                    }
+                    
+                    if (organ_base_type >= 20u) {
+                        base_type = organ_base_type;
+                        is_organ = true;
+                    }
+                    bases_consumed = 6u;  // promoters always consume 2 codons
+                }
+
+                // Map genome_pixel_x (in bases) into this part's span
+                let span_start = cumulative_bases;
+                let span_end = cumulative_bases + bases_consumed;
+                if (genome_pixel_x >= span_start && genome_pixel_x < span_end) {
+                    var draw_color = vec3<f32>(0.5, 0.5, 0.5);
+
+                    // Special colors for start/stop amino acids
+                    if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(genome, pos_b)) {
+                        // Stop amino acid: black
+                        draw_color = vec3<f32>(0.0, 0.0, 0.0);
+                    } else {
+                        let s0 = genome_get_base_ascii(genome, pos_b);
+                        let s1 = genome_get_base_ascii(genome, pos_b + 1u);
+                        let s2 = genome_get_base_ascii(genome, pos_b + 2u);
+                        if (s0 == 65u && s1 == 85u && s2 == 71u) {
+                            // Start amino acid: purple
+                            draw_color = vec3<f32>(0.7, 0.0, 0.7);
+                        } else {
+                            let props = get_amino_acid_properties(base_type);
+                            draw_color = props.color;
+                        }
+                    }
+
+                    // If organ, stretch color over full 6-base span; amino acids still per-base but same color
+                    color = vec4<f32>(draw_color, 1.0);
+                }
+
+                pos_b += bases_consumed;
+                cumulative_bases += bases_consumed;
+                part_count += 1u;
+                
+                // Stop if we've rendered beyond the visible area
+                if (cumulative_bases > 280u) { break; }
+            }
         }
     }
     
@@ -4998,10 +5069,14 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let body_count = min(selected_agent_buffer[0].body_count, MAX_BODY_PARTS);
     if (body_count == 0u) { return; }
     
-    // Preview window setup
+    // Preview window setup (now at bottom with same coordinates as render_inspector)
     let preview_size = 280u;
     let preview_x_start = 10u;
-    let preview_y_start = 10u;
+    let safe_width = max(params.window_width, 1.0);
+    let safe_height = max(params.window_height, 1.0);
+    let window_width = u32(safe_width);
+    let window_height = u32(safe_height);
+    let preview_y_start = window_height - preview_size - 10u;  // 10px from bottom
     
     // Calculate auto-scale to fit agent
     var max_extent = 0.0;
@@ -5009,7 +5084,7 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (i < body_count) {
             let part = selected_agent_buffer[0].body[i];
             let dist = length(part.pos);
-            max_extent = max(max_extent, dist + get_part_size(part.part_type));
+            max_extent = max(max_extent, dist + part.size);
         }
     }
     let available_space = f32(preview_size) * 0.45; // Half width, 90% of that
@@ -5020,9 +5095,6 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let preview_center_y = f32(preview_y_start + preview_size / 2u);
     
     // Calculate buffer offset (rightmost area)
-    let safe_width = max(params.window_width, 1.0);
-    let safe_height = max(params.window_height, 1.0);
-    let window_width = u32(safe_width);
     let buffer_offset_x = f32(window_width - INSPECTOR_WIDTH);
     
     // Create inspector context
@@ -5089,32 +5161,24 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let text_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     
     // Direct pixel inspector context (origin at inspector top-left).
+    // Use scale of 0.33 to make lines thinner (1px * 0.33 Γëê 0.33px which rounds to 1px)
     let text_ctx = InspectorContext(
         vec2<f32>(0.0, 0.0),
         vec2<f32>(0.0, 0.0),
-        1.0,
+        0.33,
         vec2<f32>(buffer_offset_x, 0.0)
     );
     
-    let text_height = 14.0;
+    let text_height = 14.0;  // Will be scaled down by ctx.scale
+    let char_width = 9.0;    // Approximate character width at this size (will be scaled)
+    let line_height = 18.0;  // Spacing between lines (will be scaled)
+    let max_width = 280.0;   // 300 - 20px padding
     
-    // "HELLO WORLD" label positioned just below the preview window.
-    var hello_text: array<u32, 32>;
-    hello_text[0] = 72u;  // 'H'
-    hello_text[1] = 69u;  // 'E'
-    hello_text[2] = 76u;  // 'L'
-    hello_text[3] = 76u;  // 'L'
-    hello_text[4] = 79u;  // 'O'
-    hello_text[5] = 32u;  // ' '
-    hello_text[6] = 87u;  // 'W'
-    hello_text[7] = 79u;  // 'O'
-    hello_text[8] = 82u;  // 'R'
-    hello_text[9] = 76u;  // 'L'
-    hello_text[10] = 68u; // 'D'
-    let hello_world_pos = vec2<f32>(10.0, 310.0);
-    draw_string_vector(hello_world_pos, &hello_text, 11u, text_height, text_color, text_ctx);
+    // Simple top-down layout with explicit Y positions
+    let energy_y = 20.0;     // 20px from top
+    let organs_y = 50.0;     // 50px from top
     
-    // "ENERGY: XXX.XX" label with live energy value appended.
+    // ENERGY label
     var energy_text: array<u32, 32>;
     energy_text[0] = 69u;  // 'E'
     energy_text[1] = 78u;  // 'N'
@@ -5127,8 +5191,54 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let energy_prefix_len = 8u;
     let energy_value_len = f32_to_string(selected_agent_buffer[0].energy, &energy_text, energy_prefix_len);
     let energy_total_len = energy_prefix_len + energy_value_len;
-    let energy_pos = vec2<f32>(10.0, 330.0);
+    let energy_pos = vec2<f32>(10.0, energy_y);
     draw_string_vector(energy_pos, &energy_text, energy_total_len, text_height, text_color, text_ctx);
+    
+    // Organ letters wrapped across multiple lines
+    var current_y = organs_y;
+    var current_x = 10.0;
+    
+    for (var i = 0u; i < body_count; i++) {
+        let part = selected_agent_buffer[0].body[i];
+        let base_type = get_base_part_type(part.part_type);
+        
+        // Get organ properties for color
+        let part_props = get_amino_acid_properties(base_type);
+        let letter_color = vec4<f32>(part_props.color, 1.0);
+        
+        // Convert organ type to letter
+        var letter = 63u; // '?' default
+        if (base_type < 20u) {
+            // Amino acids A-T (0-19)
+            letter = 65u + base_type;  // 'A' + offset
+        } else {
+            // Organs - assign letters
+            switch (base_type) {
+                case 20u: { letter = 77u; }  // 'M' = Mouth
+                case 21u: { letter = 80u; }  // 'P' = Propeller
+                case 22u: { letter = 65u; }  // 'A' = Alpha Sensor
+                case 23u: { letter = 66u; }  // 'B' = Beta Sensor
+                case 24u: { letter = 69u; }  // 'E' = Energy Sensor
+                case 25u: { letter = 68u; }  // 'D' = Displacer
+                case 26u: { letter = 78u; }  // 'N' = eNabler
+                case 28u: { letter = 83u; }  // 'S' = Storage
+                case 29u: { letter = 82u; }  // 'R' = poison Resistance
+                case 30u: { letter = 67u; }  // 'C' = Chiral Flipper
+                case 31u: { letter = 88u; }  // 'X' = armor
+                default: { letter = 63u; }   // '?' = unknown
+            }
+        }
+        
+        // Check if we need to wrap to next line
+        if (current_x + char_width > max_width) {
+            current_x = 10.0;
+            current_y += line_height;  // Move down
+        }
+        
+        // Draw the character with organ color
+        let char_pos = vec2<f32>(current_x, current_y);
+        current_x += draw_char_vector(char_pos, letter, text_height, letter_color, text_ctx);
+    }
 }
 
 @compute @workgroup_size(16, 16)
@@ -5361,6 +5471,7 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent.generation = 0u;
     agent.age = 0u;
     agent.total_mass = 0.0;
+    agent.poison_resistant_count = 0u;
 
     // If flags bit 0 set, use provided genome_override (ASCII bytes)
     if ((request.flags & 1u) != 0u) {
@@ -5395,7 +5506,7 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var i = 0u; i < MAX_BODY_PARTS; i++) {
         agent.body[i].pos = vec2<f32>(0.0);
-        // size calculated on-the-fly from part_type
+        agent.body[i].size = 0.0;
         agent.body[i].part_type = 0u;
         agent.body[i].alpha_signal = 0.0;
         agent.body[i].beta_signal = 0.0;
