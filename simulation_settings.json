@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.2571977,
+  "camera_zoom": 0.39498615,
   "spawn_probability": 0.3,
   "death_probability": 0.001,
   "mutation_rate": 0.001,
@@ -29,7 +29,7 @@
   "gamma_debug_visual": false,
   "slope_debug_visual": false,
   "rain_debug_visual": false,
-  "vector_force_power": 0.0,
+  "vector_force_power": 66.0,
   "vector_force_x": 0.0,
   "vector_force_y": -1.0,
   "gamma_hidden": false,

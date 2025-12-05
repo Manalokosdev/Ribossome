@@ -2885,6 +2885,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Persist torque for inspector debugging
     agents_out[agent_id].torque_debug = torque;
     
+    // Apply global vector force (wind/gravity)
+    if (params.vector_force_power > 0.0) {
+        let vector_force = vec2<f32>(
+            params.vector_force_x * params.vector_force_power,
+            params.vector_force_y * params.vector_force_power
+        );
+        force += vector_force;
+    }
+    
     // Apply linear forces - overdamped regime (fluid dynamics at nanoscale)
     // In viscous fluids at low Reynolds number, velocity is directly proportional to force
     // No inertia: velocity = force / drag
