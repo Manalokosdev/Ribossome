@@ -1791,7 +1791,7 @@ impl GpuState {
         profiler.mark("egui renderer");
 
         // Initialize agents with minimal data - GPU will generate genome and build body
-        let max_agents = 27_000usize; // Limited by 128MB WebGPU buffer size (~4.7 KB/agent with MAX_BODY_PARTS=128)
+        let max_agents = 20_000usize; // Limited by 128MB WebGPU buffer size (~4.7 KB/agent with MAX_BODY_PARTS=128)
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 

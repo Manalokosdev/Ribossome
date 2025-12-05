@@ -61,6 +61,17 @@ fn get_base_part_type(part_type: u32) -> u32 {
     return part_type & 0xFFu;
 }
 
+// Calculate rendered size from part properties
+fn get_part_size(part_type: u32) -> f32 {
+    let props = get_amino_acid_properties(get_base_part_type(part_type));
+    var rendered_size = props.thickness * 0.5;
+    let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor;
+    if (is_sensor) {
+        rendered_size *= 2.0; // Sensors render larger for readability
+    }
+    return rendered_size;
+}
+
 // Extract organ parameter from encoded part_type (0-255)
 fn get_organ_param(part_type: u32) -> u32 {
     return (part_type >> 8u) & 0xFFu;
@@ -2095,7 +2106,7 @@ fn render_body_part_ctx(
         let axis_world = apply_agent_rotation(axis_local, agent_rotation);
         let jet_dir = normalize(vec2<f32>(-axis_world.y, axis_world.x));
         let exhaust_dir = -jet_dir;
-        let propeller_strength = part.size * 2.5 * amplification;
+        let propeller_strength = get_part_size(part.part_type) * 2.5 * amplification;
         let zoom_factor = clamp((params.camera_zoom - 2.0) / 8.0, 0.0, 1.0);
         let jet_length = propeller_strength * mix(0.6, 1.2, zoom_factor);
         let jet_seed = agent_id * 1000u + part_index * 17u;
@@ -2139,7 +2150,7 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
     var max_dist = 20.0; // minimum radius
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
-        let dist = length(part.pos) + part.size;
+        let dist = length(part.pos) + get_part_size(part.part_type);
         max_dist = max(max_dist, dist);
     }
     
@@ -2404,15 +2415,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             current_pos.x += cos(current_angle) * props.segment_length;
             current_pos.y += sin(current_angle) * props.segment_length;
             agents_out[agent_id].body[i].pos = current_pos;
-            var rendered_size = props.thickness * 0.5;
-            let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor;
-            if (is_sensor) {
-                rendered_size *= 2.0; // Sensors render larger for readability
-            }
-            if (props.is_condenser) {
-                rendered_size *= 0.5; // Condensers render half-sized for contrast
-            }
-            agents_out[agent_id].body[i].size = rendered_size;
             agents_out[agent_id].body[i].part_type = final_part_type; // Use encoded organ type
             // Persist the smoothed angle contribution in _pad.x for next frame
             let keep_pad_y = agents_out[agent_id].body[i]._pad.y;
@@ -3454,7 +3456,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Initialize body array to zeros
                 for (var bi = 0u; bi < MAX_BODY_PARTS; bi++) {
                     offspring.body[bi].pos = vec2<f32>(0.0);
-                    offspring.body[bi].size = 0.0;
+                    // size calculated on-the-fly from part_type
                     offspring.body[bi].part_type = 0u;
                     offspring.body[bi].alpha_signal = 0.0;
                     offspring.body[bi].beta_signal = 0.0;
@@ -5007,7 +5009,7 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (i < body_count) {
             let part = selected_agent_buffer[0].body[i];
             let dist = length(part.pos);
-            max_extent = max(max_extent, dist + part.size);
+            max_extent = max(max_extent, dist + get_part_size(part.part_type));
         }
     }
     let available_space = f32(preview_size) * 0.45; // Half width, 90% of that
@@ -5393,7 +5395,7 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var i = 0u; i < MAX_BODY_PARTS; i++) {
         agent.body[i].pos = vec2<f32>(0.0);
-        agent.body[i].size = 0.0;
+        // size calculated on-the-fly from part_type
         agent.body[i].part_type = 0u;
         agent.body[i].alpha_signal = 0.0;
         agent.body[i].beta_signal = 0.0;
