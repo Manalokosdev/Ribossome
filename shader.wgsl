@@ -843,7 +843,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.7;
             props.mass = 0.03;
         }
-        case 20u: { // MOUTH ORGAN (2-codon: P + modifier 0-9)
+        case 20u: { // MOUTH ORGAN (2-codon: K/C + modifier 0-6)
             props.segment_length = 8.0;
             props.thickness = 3.5;
             props.base_angle = 0.0872665;
@@ -863,7 +863,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = -0.3;
             props.mass = 0.05;
         }
-        case 21u: { // PROPELLER ORGAN (2-codon: L + modifier 0-9)
+        case 21u: { // PROPELLER ORGAN (2-codon: L/P + modifier 0-9)
             props.segment_length = 16.0;
             props.thickness = 8.0;
             props.base_angle = -0.523599;
@@ -882,7 +882,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.5;
             props.mass = 0.05;
         }
-        case 22u: { // ALPHA SENSOR ORGAN (2-codon: Q + modifier 0-6)
+        case 22u: { // ALPHA SENSOR ORGAN (2-codon: V/N + modifier 0-9)
             props.segment_length = 10.5;
             props.thickness = 2.5;
             props.base_angle = -0.349066;
@@ -900,7 +900,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.5;
             props.mass = 0.05;
         }
-        case 23u: { // BETA SENSOR ORGAN (2-codon: Q + modifier 7-13)
+        case 23u: { // BETA SENSOR ORGAN (2-codon: V/N + modifier 10-17)
             props.segment_length = 10.0;
             props.thickness = 2.5;
             props.base_angle = 0.523599;
@@ -918,7 +918,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.5;
             props.mass = 0.05;
         }
-        case 24u: { // ENERGY SENSOR ORGAN (2-codon: Q + modifier 14-19)
+        case 24u: { // ENERGY SENSOR ORGAN (2-codon: V/N + modifier 18-19)
             props.segment_length = 10.5;
             props.thickness = 3.5;
             props.base_angle = 1.570796;
@@ -936,7 +936,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.15;
             props.mass = 0.05;
         }
-        case 25u: { // DISPLACER ORGAN (2-codon: L + modifier 10-19)
+        case 25u: { // DISPLACER ORGAN (2-codon: L/P + modifier 10-19)
             props.segment_length = 12.0;
             props.thickness = 8.0;
             props.base_angle = 0.0;
@@ -954,7 +954,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = -0.2;
             props.mass = 0.15;
         }
-        case 26u: { // ENABLER ORGAN (2-codon: P + modifier 10-19)
+        case 26u: { // ENABLER ORGAN (2-codon: K/C + modifier 7-19)
             props.segment_length = 6.0;
             props.thickness = 6.0;
             props.base_angle = 0.785398;
@@ -971,7 +971,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.5;
             props.mass = 0.05;
         }
-        case 28u: { // STORAGE ORGAN (2-codon: H + modifier 0-19)
+        case 28u: { // STORAGE ORGAN (2-codon: H/Q + modifier 0-6)
             props.segment_length = 16.0;
             props.thickness = 22.0;
             props.base_angle = 0.349066;
@@ -988,6 +988,40 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 0.6;
             props.beta_right_mult = 0.4;
             props.mass = 1.3;
+        }
+        case 29u: { // POISON RESISTANCE ORGAN (2-codon: H/Q + modifier 7-13)
+            props.segment_length = 16.0;
+            props.thickness = 30.0;
+            props.base_angle = -1.047198;
+            props.alpha_sensitivity = 0.1;
+            props.beta_sensitivity = 0.12;
+            props.color = vec3<f32>(1.0, 0.4, 0.7); // Pink
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = -0.58;
+            props.energy_consumption = 0.003;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.6;
+            props.alpha_right_mult = 0.4;
+            props.beta_left_mult = 0.55;
+            props.beta_right_mult = 0.45;
+            props.mass = 10.0;
+        }
+        case 30u: { // CHIRAL FLIPPER ORGAN (2-codon: H/Q + modifier 14-19)
+            props.segment_length = 13.0;
+            props.thickness = 10.0;
+            props.base_angle = -0.174533;
+            props.alpha_sensitivity = -0.3332;
+            props.beta_sensitivity = 0.1;
+            props.color = vec3<f32>(1.0, 0.0, 1.0); // Magenta
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.95;
+            props.energy_consumption = 0.001;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = -0.3;
+            props.alpha_right_mult = 1.3;
+            props.beta_left_mult = -0.2;
+            props.beta_right_mult = 1.2;
+            props.mass = 0.02;
         }
         default: { // Fallback (should never happen)
             props.segment_length = 8.0;
@@ -2171,7 +2205,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         start_byte = start;
 
     // Count codons starting from the first valid codon until stop codon (UAA, UAG, UGA) or limits
-    // 2-CODON ORGAN SYSTEM: L(9), P(12), Q(13), H(6) are organ promoters that consume 2 codons
+    // 2-CODON ORGAN SYSTEM: 8 promoters (2 per family) that consume 2 codons
+    // PROPELLING: L(9), P(12)
+    // ENERGY: K(8), C(1)
+    // SENSORS: V(17), N(10)
+    // SPECIAL: H(6), Q(13)
     var count = 0u;
     var pos_b = start_byte;
         for (var i = 0u; i < MAX_BODY_PARTS; i++) {
@@ -2181,8 +2219,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let codon = genome_get_codon_ascii(agent.genome, pos_b);
             let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
 
-            // Check if this is an organ promoter: L(9), P(12), Q(13), H(6)
-            if ((amino_type == 9u || amino_type == 12u || amino_type == 13u || amino_type == 6u) && pos_b + 5u < GENOME_LENGTH) {
+            // Check if this is an organ promoter (8 promoters total: 2 per family)
+            // PROPELLING: L(9), P(12)
+            // ENERGY: K(8), C(1)
+            // SENSORS: V(17), N(10)
+            // SPECIAL: H(6), Q(13)
+            let is_promoter = (amino_type == 9u || amino_type == 12u ||
+                              amino_type == 8u || amino_type == 1u ||
+                              amino_type == 17u || amino_type == 10u ||
+                              amino_type == 6u || amino_type == 13u);
+            if (is_promoter && pos_b + 5u < GENOME_LENGTH) {
                 // This is a 2-letter organ (promoter + modifier), skip 6 bytes total
                 count += 1u;
                 pos_b += 6u;
@@ -2252,37 +2298,47 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
 
             // 2-LETTER ORGAN SYSTEM
-            // Promoter defines family: L(9)=Propelling, P(12)=Energy, Q(13)=Sensors, H(6)=Others
+            // Promoter defines family (2 redundant promoters per family for moderate probability):
+            // PROPELLING: L(9), P(12)
+            // ENERGY: K(8), C(1)
+            // SENSORS: V(17), N(10)
+            // SPECIAL: H(6), Q(13)
             // Second amino acid (0-19) defines specific organ within family
             var final_part_type = amino_type; // Default: structural amino acid
             var is_organ = false;
 
-            if ((amino_type == 9u || amino_type == 12u || amino_type == 13u || amino_type == 6u) && build_b + 5u < GENOME_LENGTH) {
+            let is_promoter = (amino_type == 9u || amino_type == 12u ||
+                              amino_type == 8u || amino_type == 1u ||
+                              amino_type == 17u || amino_type == 10u ||
+                              amino_type == 6u || amino_type == 13u);
+            if (is_promoter && build_b + 5u < GENOME_LENGTH) {
                 // Found organ promoter, read second codon
                 let codon2 = genome_get_codon_ascii(agent.genome, build_b + 3u);
                 let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
 
                 var organ_base_type = 0u;
 
-                // L (Leucine, 9) = PROPELLING FAMILY
-                if (amino_type == 9u) {
+                // PROPELLING FAMILY: L(9), P(12)
+                if (amino_type == 9u || amino_type == 12u) {
                     if (modifier < 10u) { organ_base_type = 21u; } // 0-9: Propeller
                     else { organ_base_type = 25u; } // 10-19: Displacer
                 }
-                // P (Proline, 12) = ENERGY FAMILY
-                else if (amino_type == 12u) {
-                    if (modifier < 10u) { organ_base_type = 20u; } // 0-9: Mouth
-                    else { organ_base_type = 26u; } // 10-19: Enabler
+                // ENERGY FAMILY: K(8), C(1)
+                else if (amino_type == 8u || amino_type == 1u) {
+                    if (modifier < 7u) { organ_base_type = 20u; } // 0-6: Mouth
+                    else { organ_base_type = 26u; } // 7-19: Enabler (protection)
                 }
-                // Q (Glutamine, 13) = SENSORS FAMILY
-                else if (amino_type == 13u) {
-                    if (modifier < 7u) { organ_base_type = 22u; } // 0-6: Alpha Sensor
-                    else if (modifier < 14u) { organ_base_type = 23u; } // 7-13: Beta Sensor
-                    else { organ_base_type = 24u; } // 14-19: Energy Sensor
+                // SENSORS FAMILY: V(17), N(10)
+                else if (amino_type == 17u || amino_type == 10u) {
+                    if (modifier < 10u) { organ_base_type = 22u; } // 0-9: Alpha Sensor
+                    else if (modifier < 18u) { organ_base_type = 23u; } // 10-17: Beta Sensor
+                    else { organ_base_type = 24u; } // 18-19: Energy Sensor
                 }
-                // H (Histidine, 6) = OTHERS FAMILY
-                else if (amino_type == 6u) {
-                    organ_base_type = 28u; // 0-19: Storage (all modifiers)
+                // SPECIAL FUNCTIONS FAMILY: H(6), Q(13)
+                else if (amino_type == 6u || amino_type == 13u) {
+                    if (modifier < 7u) { organ_base_type = 28u; } // 0-6: Storage
+                    else if (modifier < 14u) { organ_base_type = 29u; } // 7-13: Poison Resistance
+                    else { organ_base_type = 30u; } // 14-19: Chiral Flipper
                 }
 
                 if (organ_base_type >= 20u) {
@@ -2301,9 +2357,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 build_b += 3u;
             }
             
-            // Check if this amino acid is a chiral flipper (Leucine promoter without valid organ)
-            // Only flip if it's a raw Leucine (not used as organ promoter)
-            if (!is_organ && amino_type == 9u) {
+            // Check if this part is a chiral flipper organ (type 30)
+            let base_type = get_base_part_type(final_part_type);
+            if (base_type == 30u) {
                 chirality_flip = -chirality_flip; // Flip chirality for all following amino acids
             }
             
