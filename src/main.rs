@@ -51,25 +51,25 @@ const MAX_SPAWN_REQUESTS: usize = 2000;
 // RGB colors per amino acid, kept in sync with shader get_amino_acid_properties()
 const AMINO_COLORS: [[f32; 3]; 20] = [
     [0.3, 0.3, 0.3],    // A
-    [1.0, 0.0, 0.0],    // C (beta sensor)
+    [0.7, 0.0, 0.0],    // C (structural - was beta sensor)
     [0.35, 0.35, 0.35], // D
     [0.4, 0.4, 0.4],    // E
-    [1.0, 0.4, 0.7],    // F (poison resistant) - pink, very fat
+    [0.2, 0.2, 0.2],    // F (structural - was poison resistant)
     [0.4, 0.4, 0.4],    // G (structural - smallest amino acid)
     [0.28, 0.28, 0.28], // H
     [0.38, 0.38, 0.38], // I
-    [1.0, 1.0, 0.0],    // K (mouth)
-    [0.0, 1.0, 1.0],    // L (chiral flipper) - cyan
+    [0.8, 0.8, 0.2],    // K (structural - was mouth)
+    [0.6, 0.0, 0.6],    // L (structural - was chiral flipper) - dark magenta
     [0.8, 0.8, 0.2],    // M
-    [0.47, 0.63, 0.47], // N (enabler) - light green
-    [0.0, 0.39, 1.0],   // P (propeller) - blue
+    [0.47, 0.63, 0.47], // N (structural - was enabler) - light green
+    [0.0, 0.39, 1.0],   // P (structural - was propeller) - light blue
     [0.34, 0.34, 0.34], // Q
     [0.29, 0.29, 0.29], // R
-    [0.0, 1.0, 0.0],    // S (alpha sensor)
-    [0.6, 0.2, 0.8],    // T (energy sensor) - purple
-    [0.0, 1.0, 1.0],    // V (displacer) - cyan
-    [1.0, 0.65, 0.0],   // W (storage) - orange
-    [0.26, 0.26, 0.26], // Y (dual-channel condenser)
+    [0.0, 0.7, 0.0],    // S (structural - was alpha sensor)
+    [0.45, 0.15, 0.6],  // T (structural - was energy sensor) - dark purple
+    [0.0, 0.7, 0.7],    // V (structural - was displacer) - dark cyan
+    [0.6, 0.3, 0.0],    // W (structural - was storage) - dark orange
+    [0.26, 0.26, 0.26], // Y (structural - was condenser)
 ];
 
 #[derive(Clone, Copy)]
@@ -817,7 +817,10 @@ struct SimParams {
     perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
     perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
     perlin_noise_contrast: f32,  // Contrast of Perlin noise (higher = sharper)
-    _padding: f32,  // Ensure 16-byte alignment
+    vector_force_power: f32,  // Global force multiplier (0.0 = off, 1.0 = normal)
+    vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
+    vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
+    _padding: f32,            // Ensure 16-byte alignment
 }
 
 #[repr(C)]
@@ -983,6 +986,9 @@ struct SimulationSettings {
     beta_noise_scale: f32,
     gamma_noise_scale: f32,
     noise_power: f32,
+    vector_force_power: f32,
+    vector_force_x: f32,
+    vector_force_y: f32,
 }
 
 impl Default for SimulationSettings {
@@ -1021,6 +1027,9 @@ impl Default for SimulationSettings {
             perlin_noise_scale: 0.5,    // Bigger patterns (lower scale)
             perlin_noise_speed: 0.00005, // Slower evolution
             perlin_noise_contrast: 1.2,  // Default contrast
+            vector_force_power: 0.0,
+            vector_force_x: 0.0,
+            vector_force_y: -1.0,
             gamma_hidden: false,
             debug_per_segment: false,
             gamma_vis_min: 0.0,
@@ -1295,6 +1304,8 @@ struct GpuState {
     initialize_dead_pipeline: wgpu::ComputePipeline, // Sanitize unused agent slots
     environment_init_pipeline: wgpu::ComputePipeline, // Fill alpha/beta/gamma/trails on GPU
     generate_map_pipeline: wgpu::ComputePipeline, // Generate specific map (flat/noise)
+    clear_selections_pipeline: wgpu::ComputePipeline, // Clear all is_selected flags
+    set_selection_pipeline: wgpu::ComputePipeline, // Set is_selected=1 for one agent
     render_pipeline: wgpu::RenderPipeline,
 
     // Bind groups
@@ -1314,8 +1325,6 @@ struct GpuState {
     agent_buffer_capacity: usize,
     // CPU-triggered spawns queued for next frame merge
     cpu_spawn_queue: Vec<SpawnRequest>,
-    spawn_request_count: u32,
-    pending_spawn_upload: bool,
     spawn_probability: f32,
     death_probability: f32,
     auto_replenish: bool,
@@ -1462,6 +1471,10 @@ struct GpuState {
     agent_color: [f32; 3],
     agent_color_blend: f32,
     
+    vector_force_power: f32,
+    vector_force_x: f32,
+    vector_force_y: f32,
+    
     settings_path: PathBuf,
     last_saved_settings: SimulationSettings,
     destroyed: bool,
@@ -1507,6 +1520,9 @@ impl GpuState {
             perlin_noise_scale: self.perlin_noise_scale,
             perlin_noise_speed: self.perlin_noise_speed,
             perlin_noise_contrast: self.perlin_noise_contrast,
+            vector_force_power: self.vector_force_power,
+            vector_force_x: self.vector_force_x,
+            vector_force_y: self.vector_force_y,
             gamma_hidden: self.gamma_hidden,
             debug_per_segment: self.debug_per_segment,
             gamma_vis_min: self.gamma_vis_min,
@@ -1625,6 +1641,9 @@ impl GpuState {
         self.agent_blend_mode = settings.agent_blend_mode;
         self.agent_color = settings.agent_color;
         self.agent_color_blend = settings.agent_color_blend;
+        self.vector_force_power = settings.vector_force_power;
+        self.vector_force_x = settings.vector_force_x;
+        self.vector_force_y = settings.vector_force_y;
         
         if let Some(path) = &self.alpha_rain_map_path.clone() {
              let _ = self.load_alpha_rain_map(path);
@@ -2106,6 +2125,9 @@ impl GpuState {
             perlin_noise_scale: 0.5,
             perlin_noise_speed: 0.00005,
             perlin_noise_contrast: 1.2,
+            vector_force_power: 0.0,
+            vector_force_x: 0.0,
+            vector_force_y: -1.0,
             _padding: 0.0,
         };
 
@@ -2832,6 +2854,28 @@ impl GpuState {
             });
         profiler.mark("generate map pipeline");
 
+        let clear_selections_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Clear Selections Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "clear_selections",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("clear selections pipeline");
+
+        let set_selection_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Set Selection Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "set_selection",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("set selection pipeline");
+
         // Create render bind group layout
         let render_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -3079,6 +3123,8 @@ impl GpuState {
             initialize_dead_pipeline,
             environment_init_pipeline,
             generate_map_pipeline,
+            clear_selections_pipeline,
+            set_selection_pipeline,
             render_pipeline,
             compute_bind_group_a,
             compute_bind_group_b,
@@ -3091,8 +3137,6 @@ impl GpuState {
             agents_cpu: agents,
             agent_buffer_capacity: max_agents,
             cpu_spawn_queue: Vec::new(),
-            spawn_request_count: 0,
-            pending_spawn_upload: false,
             spawn_probability: settings.spawn_probability,
             death_probability: settings.death_probability,
             auto_replenish: settings.auto_replenish,
@@ -3213,6 +3257,9 @@ impl GpuState {
             agent_blend_mode: settings.agent_blend_mode,
             agent_color: settings.agent_color,
             agent_color_blend: settings.agent_color_blend,
+            vector_force_power: settings.vector_force_power,
+            vector_force_x: settings.vector_force_x,
+            vector_force_y: settings.vector_force_y,
             settings_path: settings_path.clone(),
             last_saved_settings: settings.clone(),
             destroyed: false,
@@ -3248,15 +3295,17 @@ impl GpuState {
     // Queue N random agents to be spawned next frame via the GPU merge pass
     fn queue_random_spawns(&mut self, count: usize) {
         for _ in 0..count {
-            // Advance RNG using same method as update()
+            // Advance RNG using same method as update(), mix with epoch for temporal variation
             self.rng_state ^= self.rng_state << 13;
             self.rng_state ^= self.rng_state >> 7;
             self.rng_state ^= self.rng_state << 17;
+            self.rng_state ^= self.epoch; // Mix in epoch for time-based variation
             let seed = (self.rng_state >> 32) as u32;
 
             self.rng_state ^= self.rng_state << 13;
             self.rng_state ^= self.rng_state >> 7;
             self.rng_state ^= self.rng_state << 17;
+            self.rng_state ^= self.epoch.wrapping_mul(0x9E3779B97F4A7C15u64); // Mix epoch with golden ratio
             let genome_seed = (self.rng_state >> 32) as u32;
 
             let request = SpawnRequest {
@@ -3273,8 +3322,6 @@ impl GpuState {
             self.cpu_spawn_queue.push(request);
         }
 
-        self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
-        self.pending_spawn_upload = true;
         self.window.request_redraw();
     }
 
@@ -3487,15 +3534,7 @@ impl GpuState {
             }
         }
 
-        self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
-        self.pending_spawn_upload = true;
         self.window.request_redraw();
-
-        if !self.cpu_spawn_queue.is_empty() {
-            self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
-            self.pending_spawn_upload = true;
-            self.window.request_redraw();
-        }
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -3862,6 +3901,9 @@ impl GpuState {
             agent_blend_mode: self.agent_blend_mode,
             agent_color: self.agent_color,
             agent_color_blend: self.agent_color_blend,
+            vector_force_power: self.vector_force_power,
+            vector_force_x: self.vector_force_x,
+            vector_force_y: self.vector_force_y,
         }
     }
 
@@ -3941,8 +3983,6 @@ impl GpuState {
         self.visual_texture.destroy();
 
         self.cpu_spawn_queue.clear();
-        self.pending_spawn_upload = false;
-        self.spawn_request_count = 0;
         self.selected_agent_index = None;
         self.selected_agent_data = None;
         self.debug_parts_data = None;
@@ -4031,24 +4071,58 @@ impl GpuState {
             return;
         }
 
+        // Clear selection if no agents exist
+        if self.agent_count == 0 {
+            self.selected_agent_index = None;
+            self.selected_agent_data = None;
+            return;
+        }
+
+        // Re-find selected agent after compaction: scan buffer A for is_selected == 1
+        // (compaction reorders agents, so the index changes each epoch)
         if self.selected_agent_index.is_some() {
-            let selected_slice = self.selected_agent_readback.slice(..);
-            selected_slice.map_async(wgpu::MapMode::Read, |_| {});
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Selected Agent Scan Encoder"),
+            });
+
+            encoder.copy_buffer_to_buffer(
+                &self.agents_buffer_a,
+                0,
+                &self.agents_readback,
+                0,
+                (std::mem::size_of::<Agent>() * self.agent_buffer_capacity) as u64,
+            );
+
+            self.queue.submit(Some(encoder.finish()));
+
+            let slice = self.agents_readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
             self.device.poll(wgpu::Maintain::Wait);
             {
-                let selected_data = selected_slice.get_mapped_range();
-                if selected_data.len() >= std::mem::size_of::<Agent>() {
-                    let agent_bytes = &selected_data[..std::mem::size_of::<Agent>()];
-                    let agent: Agent = bytemuck::pod_read_unaligned(agent_bytes);
+                let data = slice.get_mapped_range();
+                let agents: &[Agent] = bytemuck::cast_slice(&data);
+                let take_len = (self.agent_count as usize).min(agents.len());
+
+                let mut found: Option<(usize, Agent)> = None;
+                for (i, agent) in agents.iter().enumerate().take(take_len) {
+                    if agent.alive != 0 && agent.is_selected == 1 {
+                        found = Some((i, *agent));
+                        break;
+                    }
+                }
+
+                if let Some((idx, agent)) = found {
+                    self.selected_agent_index = Some(idx);
                     self.selected_agent_data = Some(agent);
-                    
-                    // Update camera target if following this agent
                     if self.follow_selected_agent {
                         self.camera_target = agent.position;
                     }
+                } else {
+                    self.selected_agent_index = None;
+                    self.selected_agent_data = None;
                 }
             }
-            self.selected_agent_readback.unmap();
+            self.agents_readback.unmap();
         }
 
         let dbg_slice = self.debug_parts_readback.slice(..);
@@ -4075,98 +4149,6 @@ impl GpuState {
             }
         }
         self.debug_parts_readback.unmap();
-    }
-
-    fn process_spawn_requests_only(&mut self, cpu_spawn_count: u32, do_readbacks: bool) {
-        self.process_completed_alive_readbacks();
-
-        if cpu_spawn_count == 0 && !do_readbacks {
-            return;
-        }
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Paused Spawn Encoder"),
-            });
-
-        if cpu_spawn_count > 0 {
-            encoder.clear_buffer(&self.alive_counter, 0, None);
-            encoder.clear_buffer(&self.debug_counter, 0, None);
-
-            // Upload spawn requests for this batch so GPU has per-request seeds/data
-            // Limit to the count actually being processed (capped at 2000 elsewhere)
-            let upload_len = (cpu_spawn_count as usize)
-                .min(self.cpu_spawn_queue.len())
-                .min(2000);
-            if upload_len > 0 {
-                let slice = &self.cpu_spawn_queue[..upload_len];
-                self.queue.write_buffer(
-                    &self.spawn_requests_buffer,
-                    0,
-                    bytemuck::cast_slice(slice),
-                );
-                // After upload we no longer need to treat this as pending
-                self.pending_spawn_upload = false;
-            }
-
-            let bg_swap = if self.ping_pong {
-                &self.compute_bind_group_a
-            } else {
-                &self.compute_bind_group_b
-            };
-
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Paused Spawn Pass"),
-                    timestamp_writes: None,
-                });
-
-                cpass.set_pipeline(&self.compact_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
-
-                cpass.set_pipeline(&self.cpu_spawn_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups((cpu_spawn_count + 63) / 64, 1, 1);
-
-                cpass.set_pipeline(&self.merge_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
-
-                let init_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
-                cpass.set_pipeline(&self.initialize_dead_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups(init_groups, 1, 1);
-
-                cpass.set_pipeline(&self.finalize_merge_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups(1, 1, 1);
-            }
-        }
-
-        let slot = self.ensure_alive_slot_ready();
-        let alive_buffer = self.copy_state_to_staging(&mut encoder, slot);
-
-        self.queue.submit(Some(encoder.finish()));
-
-        self.kickoff_alive_readback(slot, alive_buffer);
-
-        self.perform_optional_readbacks(do_readbacks);
-
-        // Poll for the alive count readback to complete so agent_count is updated immediately
-        self.device.poll(wgpu::Maintain::Wait);
-        self.process_completed_alive_readbacks();
-
-        // Clear the processed spawn requests from the queue
-        if cpu_spawn_count > 0 {
-            let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue.len());
-            self.cpu_spawn_queue.drain(0..drain_count);
-            self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
-            if self.cpu_spawn_queue.is_empty() {
-                self.pending_spawn_upload = false;
-            }
-        }
     }
 
     pub fn update(&mut self, should_draw: bool) {
@@ -4262,22 +4244,14 @@ impl GpuState {
             .agent_buffer_capacity
             .saturating_sub(self.agent_count as usize);
         let mut cpu_spawn_count = self.cpu_spawn_queue.len().min(2000).min(capacity_left) as u32;
-        if cpu_spawn_count == 0
-            && self.pending_spawn_upload
-            && !self.cpu_spawn_queue.is_empty()
-            && self.spawn_request_count > 0
-        {
-            cpu_spawn_count = self.spawn_request_count.min(2000).min(capacity_left as u32);
-        }
 
         if !self.cpu_spawn_queue.is_empty() && cpu_spawn_count == 0 {
             println!("WARNING: Cannot spawn {} agents - no capacity left! (agent_count: {}, capacity: {}, capacity_left: {})",
                 self.cpu_spawn_queue.len(), self.agent_count, self.agent_buffer_capacity, capacity_left);
         }
 
-        // When paused or no living agents, freeze simulation side-effects.
-        // Approach: don't dispatch simulation kernels at all when paused or no agents alive.
-        let should_run_simulation = !self.is_paused && has_living_agents;
+        // Run simulation when not paused if agents are alive or new spawns queued
+        let should_run_simulation = !self.is_paused && (has_living_agents || !self.cpu_spawn_queue.is_empty());
 
         // Calculate rain values with variation
         let time = self.epoch as f32;
@@ -4422,16 +4396,27 @@ impl GpuState {
             perlin_noise_scale: self.perlin_noise_scale,
             perlin_noise_speed: self.perlin_noise_speed,
             perlin_noise_contrast: self.perlin_noise_contrast,
+            vector_force_power: self.vector_force_power,
+            vector_force_x: self.vector_force_x,
+            vector_force_y: self.vector_force_y,
             _padding: 0.0,
         };
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
-        // Handle CPU spawns - only when not paused (consistent with autospawn)
-        if !self.is_paused && cpu_spawn_count > 0 {
-            // Use the reliable paused spawn path for all manual spawns
-            println!("Using reliable spawn path for {} requests", cpu_spawn_count);
-            self.process_spawn_requests_only(cpu_spawn_count, true);
+        // Upload CPU spawn requests for this frame; main sim path will process them
+        if cpu_spawn_count > 0 {
+            let upload_len = (cpu_spawn_count as usize)
+                .min(self.cpu_spawn_queue.len())
+                .min(2000);
+            if upload_len > 0 {
+                let slice = &self.cpu_spawn_queue[..upload_len];
+                self.queue
+                    .write_buffer(&self.spawn_requests_buffer, 0, bytemuck::cast_slice(slice));
+
+                // Drain exactly the requests we uploaded
+                self.cpu_spawn_queue.drain(0..upload_len);
+            }
         }
 
         let diffusion_interval = self.diffusion_interval.max(1);
@@ -4620,22 +4605,6 @@ impl GpuState {
         let alive_buffer = self.copy_state_to_staging(&mut encoder, slot);
 
         self.queue.submit(Some(encoder.finish()));
-
-        // Debug: check if spawn actually increased the count (readback may not be ready yet)
-        if cpu_spawn_count > 0 && !self.is_paused {
-            // Poll for readback completion
-            self.device.poll(wgpu::Maintain::Poll);
-            self.process_completed_alive_readbacks();
-            println!("  â†’ After spawn: {} agents alive", self.alive_count);
-
-            // Clear the processed spawn requests from the queue
-            let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue.len());
-            self.cpu_spawn_queue.drain(0..drain_count);
-            self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
-            if self.cpu_spawn_queue.is_empty() {
-                self.pending_spawn_upload = false;
-            }
-        }
 
         // Only update counters when simulation is running
         if should_run_simulation {
@@ -5026,10 +4995,9 @@ impl GpuState {
         encoder.copy_buffer_to_buffer(&self.beta_grid, 0, &self.beta_grid_readback, 0, grid_size_bytes);
         encoder.copy_buffer_to_buffer(&self.gamma_grid, 0, &self.gamma_grid_readback, 0, grid_size_bytes);
         
-        // Copy agents from GPU (use current buffer based on ping-pong)
+        // Copy agents from GPU (buffer A always holds current state with ping_pong=false)
         let agents_size_bytes = (std::mem::size_of::<Agent>() * self.agent_buffer_capacity) as u64;
-        let source_buffer = if self.ping_pong { &self.agents_buffer_b } else { &self.agents_buffer_a };
-        encoder.copy_buffer_to_buffer(source_buffer, 0, &self.agents_readback, 0, agents_size_bytes);
+        encoder.copy_buffer_to_buffer(&self.agents_buffer_a, 0, &self.agents_readback, 0, agents_size_bytes);
 
         self.queue.submit(Some(encoder.finish()));
 
@@ -5093,7 +5061,6 @@ impl GpuState {
         self.cpu_spawn_queue.clear();
         self.agent_count = 0;
         self.alive_count = 0;
-        self.spawn_request_count = 0;
         
         // Load snapshot from PNG file
         let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
@@ -5193,9 +5160,6 @@ impl GpuState {
             let spawn_req = agent_snap.to_spawn_request();
             self.cpu_spawn_queue.push(spawn_req);
         }
-        
-        // Update spawn request count so they get processed
-        self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
         
         // Update epoch from snapshot
         self.epoch = snapshot.epoch;
@@ -6120,8 +6084,10 @@ fn main() {
                                     // VSync/Full Speed: always draw
                                     true
                                 };
-                                // Only run simulation when not paused AND there are living agents
-                                let should_run_simulation = !state.is_paused && state.alive_count > 0;
+                                // Run simulation when not paused if agents are alive or new spawns queued
+                                let should_run_simulation =
+                                    !state.is_paused
+                                        && (state.alive_count > 0 || !state.cpu_spawn_queue.is_empty());
 
                                 state.update(should_draw);
 
@@ -6485,6 +6451,9 @@ fn main() {
                                                                         agent_blend_mode: state.agent_blend_mode,
                                                                         agent_color: state.agent_color,
                                                                         agent_color_blend: state.agent_color_blend,
+                                                                        vector_force_power: state.vector_force_power,
+                                                                        vector_force_x: state.vector_force_x,
+                                                                        vector_force_y: state.vector_force_y,
                                                                     };
                                                                     if let Err(err) = settings.save_to_disk(&path) {
                                                                         eprintln!("Failed to save settings: {err:?}");
@@ -6688,8 +6657,6 @@ fn main() {
                                                                 state.selected_agent_index = None;
                                                                 state.selected_agent_data = None;
                                                                 state.cpu_spawn_queue.clear();
-                                                                state.spawn_request_count = 0;
-                                                                state.pending_spawn_upload = false;
                                                                 // Clear pending alive readbacks to prevent GPU overwriting our 0 count
                                                                 for i in 0..2 {
                                                                     state.alive_readback_inflight[i] = false;
@@ -6792,9 +6759,6 @@ fn main() {
                                                                             state.cpu_spawn_queue.push(request);
                                                                         }
 
-                                                                        state.spawn_request_count =
-                                                                            state.cpu_spawn_queue.len() as u32;
-                                                                        state.pending_spawn_upload = true;
                                                                         state.window.request_redraw();
                                                                         println!("Enqueued 100 spawn requests");
                                                                     }
@@ -6908,6 +6872,19 @@ fn main() {
                                                             )
                                                             .text("Obstacle / Terrain Force"),
                                                         );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.vector_force_power, 0.0..=100.0)
+                                                                .text("Vector Force Power"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.vector_force_x, -1.0..=1.0)
+                                                                .text("Vector Force X"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.vector_force_y, -1.0..=1.0)
+                                                                .text("Vector Force Y"),
+                                                        );
+                                                        ui.label("Constant force applied to all agents (wind/gravity effect)");
 
                                                         ui.separator();
                                                         ui.heading("Trail Layer Controls");
@@ -6987,19 +6964,6 @@ fn main() {
                                                         if state.rain_debug_visual {
                                                             ui.label("🟢 Green = Alpha (food) | 🔴 Red = Beta (poison)");
                                                         }
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.perlin_noise_scale, 0.1..=1000.0)
-                                                                .text("Perlin Scale (lower = bigger)"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.perlin_noise_speed, 0.00001..=0.001)
-                                                                .logarithmic(true)
-                                                                .text("Perlin Speed (lower = slower)"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.perlin_noise_contrast, 0.5..=3.0)
-                                                                .text("Perlin Contrast (higher = sharper)"),
-                                                        );
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.chemical_slope_scale_alpha,
