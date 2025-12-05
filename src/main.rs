@@ -42,7 +42,7 @@ const RAIN_THUMB_SIZE: usize = 128;
 
 // Shared genome/body sizing (must stay in sync with shader constants)
 const MAX_BODY_PARTS: usize = 64;
-const GENOME_BYTES: usize = 256; // ASCII bases including padding
+const GENOME_BYTES: usize = 512; // ASCII bases including padding
 const GENOME_WORDS: usize = GENOME_BYTES / std::mem::size_of::<u32>();
 const PACKED_GENOME_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const MIN_GENE_LENGTH: usize = 6;
@@ -1746,7 +1746,7 @@ impl GpuState {
         debug_assert_eq!(std::mem::align_of::<BodyPart>(), 16);
         debug_assert_eq!(
             std::mem::size_of::<Agent>(),
-            2384,
+            3408,
             "Agent layout mismatch for MAX_BODY_PARTS={}",
             MAX_BODY_PARTS
         );
@@ -1756,11 +1756,11 @@ impl GpuState {
         // seed/genome_seed/flags/_pad_seed = 16 bytes total
         // position ([f32;2]) = 8  -> offset 16..24
         // energy (4) + rotation (4) = 8 -> offset 24..32
-        // genome_override ([u32; GENOME_WORDS]) = GENOME_BYTES -> offset 32..288 total
-        // Total size = 288 bytes; alignment = 16 bytes.
+        // genome_override ([u32; GENOME_WORDS]) = GENOME_BYTES -> offset 32..544 total
+        // Total size = 544 bytes; alignment = 16 bytes.
         debug_assert_eq!(
             std::mem::size_of::<SpawnRequest>(),
-            288,
+            544,
             "SpawnRequest size mismatch; update buffer allocations/bindings if this fails"
         );
         debug_assert_eq!(std::mem::align_of::<SpawnRequest>(), 16);
