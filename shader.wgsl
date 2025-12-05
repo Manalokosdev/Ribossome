@@ -371,32 +371,29 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.3;
             props.mass = 0.015;
         }
-    case 1u: { // C - Cysteine - BETA SENSOR - Small, polar (real: can form disulfide bonds)
+    case 1u: { // C - Cysteine - STRUCTURAL (beta sensor requires organ) - Small, polar
             props.segment_length = 10.0;
             props.thickness = 2.5;
-            // Old CSV: Seed Angle = 30°
-            props.base_angle = 0.523599; // 30 deg in radians
-            // CSV mapping: Beta sensor -> Alpha_sense 0°, Beta_sense +20°
+            props.base_angle = 0.523599;
             props.alpha_sensitivity = 0.0;
-            props.beta_sensitivity = 0.349066; // 20 deg in radians
+            props.beta_sensitivity = 0.349066;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(1.0, 0.0, 0.0); // Red (BETA SENSOR)
+            props.color = vec3<f32>(0.7, 0.0, 0.0); // Dark red (structural)
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
-            props.beta_damage = 0.42; // Color value
+            props.beta_damage = 0.42;
             props.energy_storage = 0.0;
-            // Very low sensor energy consumption to favor intelligent agents
-            props.energy_consumption = 0.00005;
+            props.energy_consumption = 0.001;
             props.is_alpha_sensor = false;
-            props.is_beta_sensor = true;
-            props.signal_decay = 0.1;
+            props.is_beta_sensor = false;
+            props.signal_decay = 0.2;
             props.alpha_left_mult = 0.5;
             props.alpha_right_mult = 0.5;
             props.beta_left_mult = 0.5;
             props.beta_right_mult = 0.5;
-            props.mass = 0.05;
+            props.mass = 0.02;
         }
         case 2u: { // D - Aspartic acid - Small, charged (real: acidic, negatively charged)
             props.segment_length = 13.0;
@@ -549,54 +546,52 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.3;
             props.mass = 0.02;
         }
-        case 8u: { // K - Lysine - MOUTH - Long, positively charged (real: long aliphatic + NH3+)
-            props.segment_length = 5.0;
+        case 8u: { // K - Lysine - STRUCTURAL (mouth requires organ) - Long, positively charged
+            props.segment_length = 15.0;
             props.thickness = 3.5;
-            // Old CSV: Seed Angle = 5°
             props.base_angle = 0.0872665;
             props.alpha_sensitivity = 0.6;
             props.beta_sensitivity = -0.16;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(1.0, 1.0, 0.0); // Yellow (MOUTH)
-            props.is_mouth = true;
-            props.energy_absorption_rate = 0.08; // Reduced to nerf simple mouth strategies
-            props.beta_absorption_rate = 0.08; // Matched to alpha rate
-            props.beta_damage = -0.12; // Color value
-            props.energy_storage = 10.0; // Reduced from 20.0
-            props.energy_consumption = 0.025; // Increased to make mouths more costly
-            props.is_alpha_sensor = false;
-            props.is_beta_sensor = false;
-            props.signal_decay = 0.2;
-            props.alpha_left_mult = 1.4;
-            props.alpha_right_mult = -0.4;
-            props.beta_left_mult = 1.3;
-            props.beta_right_mult = -0.3;
-            props.mass = 0.05;
-        }
-        case 9u: { // L - Leucine - CHIRAL FLIPPER - Flips angles of all following amino acids
-            props.segment_length = 3.0; // Very short
-            props.thickness = 10.0; // Very wide
-            // Old CSV: Seed Angle = -10°
-            props.base_angle = -0.174533;
-            props.alpha_sensitivity = -0.3332;
-            props.beta_sensitivity = 0.1;
-            props.is_propeller = false;
-            props.thrust_force = 0.0;
-            props.color = vec3<f32>(1.0, 0.0, 1.0); // Cyan
+            props.color = vec3<f32>(0.8, 0.8, 0.2); // Pale yellow (structural)
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
-            props.beta_damage = 0.95; // Color value
+            props.beta_damage = -0.12;
             props.energy_storage = 0.0;
             props.energy_consumption = 0.001;
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
             props.signal_decay = 0.2;
-            props.alpha_left_mult = -0.3;
-            props.alpha_right_mult = 1.3;
-            props.beta_left_mult = -0.2;
-            props.beta_right_mult = 1.2;
+            props.alpha_left_mult = 0.7;
+            props.alpha_right_mult = 0.3;
+            props.beta_left_mult = 0.65;
+            props.beta_right_mult = 0.35;
+            props.mass = 0.03;
+        }
+        case 9u: { // L - Leucine - STRUCTURAL (propeller/displacer requires organ)
+            props.segment_length = 13.0;
+            props.thickness = 10.0;
+            props.base_angle = -0.174533;
+            props.alpha_sensitivity = -0.3332;
+            props.beta_sensitivity = 0.1;
+            props.is_propeller = false;
+            props.thrust_force = 0.0;
+            props.color = vec3<f32>(0.6, 0.0, 0.6); // Dark magenta (structural)
+            props.is_mouth = false;
+            props.energy_absorption_rate = 0.0;
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.95;
+            props.energy_storage = 0.0;
+            props.energy_consumption = 0.001;
+            props.is_alpha_sensor = false;
+            props.is_beta_sensor = false;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.35;
+            props.alpha_right_mult = 0.65;
+            props.beta_left_mult = 0.4;
+            props.beta_right_mult = 0.6;
             props.mass = 0.02;
         }
         case 10u: { // M - Methionine - START CODON - Medium, sulfur-containing (real: linear thioether)
@@ -727,139 +722,131 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 1.3;
             props.mass = 0.04;
         }
-    case 15u: { // S - Serine - ALPHA SENSOR - Small, polar (real: hydroxyl group, similar to T)
+    case 15u: { // S - Serine - STRUCTURAL (alpha sensor requires organ) - Small, polar
             props.segment_length = 10.5;
             props.thickness = 2.5;
-            // Old CSV: Seed Angle = -20°
             props.base_angle = -0.349066;
-            // CSV mapping: Alpha sensor -> Alpha_sense -20°, Beta_sense 0°
-            props.alpha_sensitivity = -0.349066; // -20 deg in radians
+            props.alpha_sensitivity = -0.349066;
             props.beta_sensitivity = 0.0;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.0, 1.0, 0.0); // Green (ALPHA SENSOR)
+            props.color = vec3<f32>(0.0, 0.7, 0.0); // Medium green (structural)
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.2;
-            props.beta_damage = 0.71; // Color value
-            props.energy_storage = 0.0;
-            // Very low sensor energy consumption to favor intelligent agents
-            props.energy_consumption = 0.00005;
-            props.is_alpha_sensor = true;
-            props.is_beta_sensor = false;
-            props.signal_decay = 0.1;
-            props.alpha_left_mult = 0.5;
-            props.alpha_right_mult = 0.5;
-            props.beta_left_mult = 0.5;
-            props.beta_right_mult = 0.5;
-            props.mass = 0.05;
-        }
-        case 16u: { // T - Threonine - ENERGY SENSOR - Small, polar (real: beta-branched hydroxyl)
-            props.segment_length = 10.5;
-            props.thickness = 3.5;
-            // Old CSV: Seed Angle = 90°
-            props.base_angle = 1.570796;
-            props.alpha_sensitivity = 0.1;
-            props.beta_sensitivity = -0.5;
-            props.is_propeller = false;
-            props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.6, 0.2, 0.8); // Purple (energy indicator)
-            props.is_mouth = false;
-            props.energy_absorption_rate = 0.0;
-            props.beta_absorption_rate = 0.2;
-            props.beta_damage = -0.66; // Color value
-            props.energy_storage = 0.0;
-            // Very low sensor energy consumption to favor intelligent agents
-            props.energy_consumption = 0.00005;
-            props.is_alpha_sensor = false;
-            props.is_beta_sensor = false;
-            props.is_energy_sensor = true;
-            props.signal_decay = 0.2;
-            props.alpha_left_mult = 0.9;
-            props.alpha_right_mult = 0.1;
-            props.beta_left_mult = 1.0;
-            props.beta_right_mult = 0.0;
-            props.mass = 0.05;
-        }
-        case 17u: { // V - Valine - DISPLACER - Cyan, short and fat, displaces environment
-            props.segment_length = 12.0;
-            props.thickness = 8.0;
-            // Old CSV: Seed Angle = 0°
-            props.base_angle = 0.0;
-            props.alpha_sensitivity = -0.3;
-            props.beta_sensitivity = 0.73;
-            props.is_propeller = false;
-            props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.0, 1.0, 1.0); // Cyan (DISPLACER)
-            props.is_mouth = false;
-            props.energy_absorption_rate = 0.0;
-            props.beta_absorption_rate = 0.3;
-            props.beta_damage = 0.36; // Color value
-            props.energy_storage = 0.0;
-            props.energy_consumption = 0.007; // Slightly higher energy cost
-            props.is_alpha_sensor = false;
-            props.is_beta_sensor = false;
-            props.signal_decay = 0.2;
-            props.alpha_left_mult = -0.3;
-            props.alpha_right_mult = 1.3;
-            props.beta_left_mult = 1.2;
-            props.beta_right_mult = -0.2;
-            props.mass = 0.15; // Heavier due to displacement mechanism
-            props.is_displacer = true;
-        }
-        case 18u: { // W - Tryptophan - STORAGE - Largest, bulky aromatic (real: indole ring, massive)
-            props.segment_length = 16.0;
-            props.thickness = 22.0;             // Widest (was 10.0)
-            // Old CSV: Seed Angle = 20°
-            props.base_angle = 0.349066;
-            props.alpha_sensitivity = 0.31;
-            props.beta_sensitivity = -0.1;
-            props.is_propeller = false;
-            props.thrust_force = 0.0;
-            props.color = vec3<f32>(1.0, 0.5, 0.0); // Orange (STORAGE)
-            props.is_mouth = false;
-            props.energy_absorption_rate = 0.0;
-            props.beta_absorption_rate = 0.4;
-            props.beta_damage = -0.84; // Color value
-            props.energy_storage = 100.0;        // 5x mouth storage (was 12.0)
-            props.energy_consumption = 0.001;   // Reduced 10x (was 0.005)
-            props.is_alpha_sensor = false;
-            props.is_beta_sensor = false;
-            props.signal_decay = 0.15;
-            props.alpha_left_mult = 0.55;
-            props.alpha_right_mult = 0.45;
-            props.beta_left_mult = 0.6;
-            props.beta_right_mult = 0.4;
-            props.mass = 1.3;
-        }
-        case 19u: { // Y - Tyrosine - ALPHA CONDENSER - Absorbs, stores, and discharges alpha signals
-            props.segment_length = 11.5;
-            props.thickness = 4.0;
-            // Old CSV: Seed Angle = -30°
-            props.base_angle = -0.523599;
-            props.alpha_sensitivity = -0.2;
-            props.beta_sensitivity = 0.52;
-            props.is_propeller = false;
-            props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.0, 0.4, 0.0); // Dark green for condenser
-            props.is_mouth = false;
-            props.energy_absorption_rate = 0.0;
-            props.beta_absorption_rate = 0.3;
-            props.beta_damage = 0.08; // Color value
+            props.beta_damage = 0.71;
             props.energy_storage = 0.0;
             props.energy_consumption = 0.001;
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
             props.signal_decay = 0.2;
-            props.alpha_left_mult = -0.5;
-            props.alpha_right_mult = 1.5;
-            props.beta_left_mult = -0.4;
-            props.beta_right_mult = 1.4;
+            props.alpha_left_mult = 0.5;
+            props.alpha_right_mult = 0.5;
+            props.beta_left_mult = 0.5;
+            props.beta_right_mult = 0.5;
+            props.mass = 0.02;
+        }
+        case 16u: { // T - Threonine - STRUCTURAL (energy sensor requires organ) - Small, polar
+            props.segment_length = 10.5;
+            props.thickness = 3.5;
+            props.base_angle = 1.570796;
+            props.alpha_sensitivity = 0.1;
+            props.beta_sensitivity = -0.5;
+            props.is_propeller = false;
+            props.thrust_force = 0.0;
+            props.color = vec3<f32>(0.45, 0.15, 0.6); // Dark purple (structural)
+            props.is_mouth = false;
+            props.energy_absorption_rate = 0.0;
+            props.beta_absorption_rate = 0.2;
+            props.beta_damage = -0.66;
+            props.energy_storage = 0.0;
+            props.energy_consumption = 0.001;
+            props.is_alpha_sensor = false;
+            props.is_beta_sensor = false;
+            props.is_energy_sensor = false;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.6;
+            props.alpha_right_mult = 0.4;
+            props.beta_left_mult = 0.7;
+            props.beta_right_mult = 0.3;
+            props.mass = 0.02;
+        }
+        case 17u: { // V - Valine - STRUCTURAL (displacer requires organ) - Short and fat
+            props.segment_length = 12.0;
+            props.thickness = 8.0;
+            props.base_angle = 0.0;
+            props.alpha_sensitivity = -0.3;
+            props.beta_sensitivity = 0.73;
+            props.is_propeller = false;
+            props.thrust_force = 0.0;
+            props.color = vec3<f32>(0.0, 0.7, 0.7); // Dark cyan (structural)
+            props.is_mouth = false;
+            props.energy_absorption_rate = 0.0;
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.36;
+            props.energy_storage = 0.0;
+            props.energy_consumption = 0.001;
+            props.is_alpha_sensor = false;
+            props.is_beta_sensor = false;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.35;
+            props.alpha_right_mult = 0.65;
+            props.beta_left_mult = 0.6;
+            props.beta_right_mult = 0.4;
             props.mass = 0.04;
-            props.is_condenser = true;
+            props.is_displacer = false;
+        }
+        case 18u: { // W - Tryptophan - STRUCTURAL (storage requires organ) - Largest, bulky
+            props.segment_length = 16.0;
+            props.thickness = 22.0;
+            props.base_angle = 0.349066;
+            props.alpha_sensitivity = 0.31;
+            props.beta_sensitivity = -0.1;
+            props.is_propeller = false;
+            props.thrust_force = 0.0;
+            props.color = vec3<f32>(0.6, 0.3, 0.0); // Dark orange (structural)
+            props.is_mouth = false;
+            props.energy_absorption_rate = 0.0;
+            props.beta_absorption_rate = 0.4;
+            props.beta_damage = -0.84;
+            props.energy_storage = 0.0;
+            props.energy_consumption = 0.001;
+            props.is_alpha_sensor = false;
+            props.is_beta_sensor = false;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.55;
+            props.alpha_right_mult = 0.45;
+            props.beta_left_mult = 0.6;
+            props.beta_right_mult = 0.4;
+            props.mass = 0.1;
+        }
+        case 19u: { // Y - Tyrosine - STRUCTURAL (condenser requires organ) - Aromatic, polar
+            props.segment_length = 11.5;
+            props.thickness = 4.0;
+            props.base_angle = -0.523599;
+            props.alpha_sensitivity = -0.2;
+            props.beta_sensitivity = 0.52;
+            props.is_propeller = false;
+            props.thrust_force = 0.0;
+            props.color = vec3<f32>(0.26, 0.26, 0.26); // Grey (structural)
+            props.is_mouth = false;
+            props.energy_absorption_rate = 0.0;
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.08;
+            props.energy_storage = 0.0;
+            props.energy_consumption = 0.001;
+            props.is_alpha_sensor = false;
+            props.is_beta_sensor = false;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.25;
+            props.alpha_right_mult = 0.75;
+            props.beta_left_mult = 0.3;
+            props.beta_right_mult = 0.7;
+            props.mass = 0.03;
+            props.is_condenser = false;
         }
         case 20u: { // MOUTH ORGAN (2-codon: P + modifier 0-6)
-            props.segment_length = 5.0;
+            props.segment_length = 8.0;
             props.thickness = 3.5;
             props.base_angle = 0.0872665;
             props.alpha_sensitivity = 0.6;
@@ -1003,6 +990,24 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = -0.4;
             props.beta_right_mult = 1.4;
             props.mass = 0.04;
+        }
+        case 28u: { // STORAGE ORGAN (2-codon: H + modifier 0-6)
+            props.segment_length = 16.0;
+            props.thickness = 22.0;
+            props.base_angle = 0.349066;
+            props.alpha_sensitivity = 0.31;
+            props.beta_sensitivity = -0.1;
+            props.color = vec3<f32>(1.0, 0.5, 0.0); // Orange
+            props.beta_absorption_rate = 0.4;
+            props.beta_damage = -0.84;
+            props.energy_storage = 100.0;
+            props.energy_consumption = 0.001;
+            props.signal_decay = 0.15;
+            props.alpha_left_mult = 0.55;
+            props.alpha_right_mult = 0.45;
+            props.beta_left_mult = 0.6;
+            props.beta_right_mult = 0.4;
+            props.mass = 1.3;
         }
         default: { // Fallback (should never happen)
             props.segment_length = 8.0;
