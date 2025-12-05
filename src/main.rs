@@ -1504,9 +1504,9 @@ impl GpuState {
             gamma_debug_visual: self.gamma_debug_visual,
             slope_debug_visual: self.slope_debug_visual,
             rain_debug_visual: self.rain_debug_visual,
-            perlin_noise_scale: self.perlin_noise_scale,
-            perlin_noise_speed: self.perlin_noise_speed,
-            perlin_noise_contrast: self.perlin_noise_contrast,
+            vector_force_power: self.vector_force_power,
+            vector_force_x: self.vector_force_x,
+            vector_force_y: self.vector_force_y,
             gamma_hidden: self.gamma_hidden,
             debug_per_segment: self.debug_per_segment,
             gamma_vis_min: self.gamma_vis_min,
@@ -2103,9 +2103,9 @@ impl GpuState {
             agent_color_b: 1.0,
             agent_color_blend: 0.0,
             epoch: 0,
-            perlin_noise_scale: 0.5,
-            perlin_noise_speed: 0.00005,
-            perlin_noise_contrast: 1.2,
+            vector_force_power: 0.0,
+            vector_force_x: 0.0,
+            vector_force_y: 0.0,
             _padding: 0.0,
         };
 
@@ -3177,9 +3177,9 @@ impl GpuState {
             gamma_debug_visual: settings.gamma_debug_visual,
             slope_debug_visual: settings.slope_debug_visual,
             rain_debug_visual: settings.rain_debug_visual,
-            perlin_noise_scale: settings.perlin_noise_scale,
-            perlin_noise_speed: settings.perlin_noise_speed,
-            perlin_noise_contrast: settings.perlin_noise_contrast,
+            vector_force_power: settings.vector_force_power,
+            vector_force_x: settings.vector_force_x,
+            vector_force_y: settings.vector_force_y,
             prop_wash_strength: settings.prop_wash_strength,
             gamma_hidden: settings.gamma_hidden,
             gamma_vis_min: settings.gamma_vis_min,
@@ -3819,9 +3819,9 @@ impl GpuState {
             gamma_debug_visual: self.gamma_debug_visual,
             slope_debug_visual: self.slope_debug_visual,
             rain_debug_visual: self.rain_debug_visual,
-            perlin_noise_scale: self.perlin_noise_scale,
-            perlin_noise_speed: self.perlin_noise_speed,
-            perlin_noise_contrast: self.perlin_noise_contrast,
+            vector_force_power: self.vector_force_power,
+            vector_force_x: self.vector_force_x,
+            vector_force_y: self.vector_force_y,
             gamma_hidden: self.gamma_hidden,
             debug_per_segment: self.debug_per_segment,
             gamma_vis_min: self.gamma_vis_min,
@@ -6442,9 +6442,9 @@ fn main() {
                                                                         gamma_debug_visual: state.gamma_debug_visual,
                                                                         slope_debug_visual: state.slope_debug_visual,
                                                                         rain_debug_visual: state.rain_debug_visual,
-                                                                        perlin_noise_scale: state.perlin_noise_scale,
-                                                                        perlin_noise_speed: state.perlin_noise_speed,
-                                                                        perlin_noise_contrast: state.perlin_noise_contrast,
+                                                                        vector_force_power: state.vector_force_power,
+                                                                        vector_force_x: state.vector_force_x,
+                                                                        vector_force_y: state.vector_force_y,
                                                                         gamma_hidden: state.gamma_hidden,
                                                                         debug_per_segment: state.debug_per_segment,
                                                                         gamma_vis_min: state.gamma_vis_min,
@@ -6983,22 +6983,21 @@ fn main() {
                                                             egui::Slider::new(&mut state.alpha_multiplier, 0.0..=0.001)
                                                                 .text("Rain Probability"),
                                                         );
-                                                        ui.checkbox(&mut state.rain_debug_visual, "🎨 Show Perlin Rain Pattern");
+                                                        ui.checkbox(&mut state.rain_debug_visual, "🎨 Show Rain Pattern");
                                                         if state.rain_debug_visual {
                                                             ui.label("🟢 Green = Alpha (food) | 🔴 Red = Beta (poison)");
                                                         }
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.perlin_noise_scale, 0.1..=1000.0)
-                                                                .text("Perlin Scale (lower = bigger)"),
+                                                            egui::Slider::new(&mut state.vector_force_power, 0.0..=10.0)
+                                                                .text("Vector Force Power"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.perlin_noise_speed, 0.00001..=0.001)
-                                                                .logarithmic(true)
-                                                                .text("Perlin Speed (lower = slower)"),
+                                                            egui::Slider::new(&mut state.vector_force_x, -1.0..=1.0)
+                                                                .text("Vector Force X"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.perlin_noise_contrast, 0.5..=3.0)
-                                                                .text("Perlin Contrast (higher = sharper)"),
+                                                            egui::Slider::new(&mut state.vector_force_y, -1.0..=1.0)
+                                                                .text("Vector Force Y"),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(
