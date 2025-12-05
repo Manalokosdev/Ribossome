@@ -494,7 +494,6 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 0.5;
             props.beta_right_mult = 0.5;
             props.mass = 0.02;
-            props.is_condenser = false;
         }
         case 6u: { // H - Histidine - Aromatic, charged (real: imidazole ring, pH-sensitive)
             props.segment_length = 9.0;
@@ -820,7 +819,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.4;
             props.mass = 0.1;
         }
-        case 19u: { // Y - Tyrosine - STRUCTURAL (condenser requires organ) - Aromatic, polar
+        case 19u: { // Y - Tyrosine - STRUCTURAL - Aromatic, polar
             props.segment_length = 11.5;
             props.thickness = 4.0;
             props.base_angle = -0.523599;
@@ -843,9 +842,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 0.3;
             props.beta_right_mult = 0.7;
             props.mass = 0.03;
-            props.is_condenser = false;
         }
-        case 20u: { // MOUTH ORGAN (2-codon: P + modifier 0-6)
+        case 20u: { // MOUTH ORGAN (2-codon: P + modifier 0-9)
             props.segment_length = 8.0;
             props.thickness = 3.5;
             props.base_angle = 0.0872665;
@@ -956,7 +954,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = -0.2;
             props.mass = 0.15;
         }
-        case 26u: { // ENABLER ORGAN (2-codon: P + modifier 14-19)
+        case 26u: { // ENABLER ORGAN (2-codon: P + modifier 10-19)
             props.segment_length = 6.0;
             props.thickness = 6.0;
             props.base_angle = 0.785398;
@@ -973,25 +971,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.5;
             props.mass = 0.05;
         }
-        case 27u: { // CONDENSER ORGAN (2-codon: P + modifier 7-13, or H + any)
-            props.segment_length = 11.5;
-            props.thickness = 4.0;
-            props.base_angle = -0.523599;
-            props.alpha_sensitivity = -0.2;
-            props.beta_sensitivity = 0.52;
-            props.color = vec3<f32>(0.0, 0.4, 0.0); // Dark green
-            props.beta_absorption_rate = 0.3;
-            props.beta_damage = 0.08;
-            props.energy_consumption = 0.001;
-            props.is_condenser = true;
-            props.signal_decay = 0.2;
-            props.alpha_left_mult = -0.5;
-            props.alpha_right_mult = 1.5;
-            props.beta_left_mult = -0.4;
-            props.beta_right_mult = 1.4;
-            props.mass = 0.04;
-        }
-        case 28u: { // STORAGE ORGAN (2-codon: H + modifier 0-6)
+        case 28u: { // STORAGE ORGAN (2-codon: H + modifier 0-19)
             props.segment_length = 16.0;
             props.thickness = 22.0;
             props.base_angle = 0.349066;
@@ -2291,9 +2271,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 // P (Proline, 12) = ENERGY FAMILY
                 else if (amino_type == 12u) {
-                    if (modifier < 7u) { organ_base_type = 20u; } // 0-6: Mouth
-                    else if (modifier < 14u) { organ_base_type = 27u; } // 7-13: Condenser (storage)
-                    else { organ_base_type = 26u; } // 14-19: Enabler (protection)
+                    if (modifier < 10u) { organ_base_type = 20u; } // 0-9: Mouth
+                    else { organ_base_type = 26u; } // 10-19: Enabler
                 }
                 // Q (Glutamine, 13) = SENSORS FAMILY
                 else if (amino_type == 13u) {
@@ -2303,9 +2282,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 // H (Histidine, 6) = OTHERS FAMILY
                 else if (amino_type == 6u) {
-                    // Future: sine wave, other special functions
-                    // For now, all create condensers as placeholder
-                    organ_base_type = 27u; // Condenser
+                    organ_base_type = 28u; // 0-19: Storage (all modifiers)
                 }
 
                 if (organ_base_type >= 20u) {
