@@ -196,9 +196,6 @@ struct SimParams {
     agent_color_b: f32,
     agent_color_blend: f32,   // Blend factor: 0.0=amino color only, 1.0=agent color only
     epoch: u32,               // Current simulation epoch for time-based effects
-    perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
-    perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
-    perlin_noise_contrast: f32,  // Contrast of Perlin noise (higher = sharper)
     vector_force_power: f32,  // Global force multiplier (0.0 = off)
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
     vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
@@ -448,32 +445,33 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.45;
             props.mass = 10.0; // Very heavy - slows agent down significantly
         }
-        case 4u: { // F - Phenylalanine - STRUCTURAL (poison resistance requires organ)
+        case 4u: { // F - Phenylalanine - )
             props.segment_length = 18.5;
             props.thickness = 3.0;
+            // Old CSV: Seed Angle = 30°
             props.base_angle = 0.523599;
             props.alpha_sensitivity = 0.2;
             props.beta_sensitivity = -0.33;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.2, 0.2, 0.2); // Dark grey (structural)
+            props.color = vec3<f32>(0.2, 0.2, 0.2); // Dark grey
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
-            props.beta_damage = 0.17;
+            props.beta_damage = 0.17; // Color value
             props.energy_storage = 0.0;
             props.energy_consumption = 0.001;
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
             props.signal_decay = 0.2;
-            props.alpha_left_mult = 0.7;
-            props.alpha_right_mult = 0.3;
-            props.beta_left_mult = 0.65;
-            props.beta_right_mult = 0.35;
-            props.mass = 0.02;
+            props.alpha_left_mult = 1.4;
+            props.alpha_right_mult = -0.4;
+            props.beta_left_mult = 1.3;
+            props.beta_right_mult = -0.3;
+            props.mass = 0.01;
         }
         case 5u: { // G - Glycine - Structural (smallest amino acid, flexible)
-            props.segment_length = 10.0;
+            props.segment_length = 4.0;
             props.thickness = 0.75;
             // Old CSV: Seed Angle = -20°
             props.base_angle = -0.349066;
@@ -496,7 +494,6 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 0.5;
             props.beta_right_mult = 0.5;
             props.mass = 0.02;
-            props.is_condenser = false;
         }
         case 6u: { // H - Histidine - Aromatic, charged (real: imidazole ring, pH-sensitive)
             props.segment_length = 9.0;
@@ -621,19 +618,20 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 1.1;
             props.mass = 0.02;
         }
-    case 11u: { // N - Asparagine - STRUCTURAL (enabler requires organ) - Medium, polar
+    case 11u: { // N - ENABLER (was INHIBITOR) - Increases power of nearby propellers, displacers, and mouths up to 40 units
             props.segment_length = 6.0;
             props.thickness = 6.0;
+            // Old CSV: Seed Angle = 45°
             props.base_angle = 0.785398;
             props.alpha_sensitivity = 0.2;
             props.beta_sensitivity = 0.3;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.47, 0.63, 0.47); // Light green (structural)
+            props.color = vec3<f32>(1.0, 1.0, 1.0); // White
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
-            props.beta_absorption_rate = 0.3;
-            props.beta_damage = 0.24;
+            props.beta_absorption_rate = 0.0;
+            props.beta_damage = 0.24; // Color value
             props.energy_storage = 0.0;
             props.energy_consumption = 0.001;
             props.is_alpha_sensor = false;
@@ -645,32 +643,33 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 0.5;
             props.beta_right_mult = 0.5;
             props.is_displacer = false;
-            props.is_inhibitor = false;
-            props.mass = 0.03;
+            props.is_inhibitor = true; // reused flag; treated as enabler in simulation
+            props.mass = 0.15;
         }
-        case 12u: { // P - Proline - STRUCTURAL (propeller requires organ) - Rigid cyclic
+        case 12u: { // P - Proline - PROPELLER - Rigid cyclic (real: backbone constraint, helix breaker)
             props.segment_length = 16.0;
             props.thickness = 8.0;
+            // Old CSV: Seed Angle = -30°
             props.base_angle = -0.523599;
             props.alpha_sensitivity = 0.5;
             props.beta_sensitivity = -0.1;
-            props.is_propeller = false;
-            props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.0, 0.39, 1.0); // Light blue (structural)
+            props.is_propeller = true;
+            props.thrust_force = 2.5; // Reduced by 4x (was 10.0)
+            props.color = vec3<f32>(0.0, 0.0, 1); // Deep blue (PROPELLER)
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
-            props.beta_damage = -0.77;
+            props.beta_damage = -0.77; // Color value
             props.energy_storage = 0.0;
-            props.energy_consumption = 0.001;
+            props.energy_consumption = 0.01; // Reduced 10x (was 0.05)
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
             props.signal_decay = 0.2;
-            props.alpha_left_mult = 0.75;
-            props.alpha_right_mult = 0.25;
-            props.beta_left_mult = 0.7;
-            props.beta_right_mult = 0.3;
-            props.mass = 0.03;
+            props.alpha_left_mult = 1.5;
+            props.alpha_right_mult = -0.5;
+            props.beta_left_mult = 1.4;
+            props.beta_right_mult = -0.4;
+            props.mass = 0.05;
         }
         case 13u: { // Q - Glutamine - Medium, polar (real: amide side chain, similar to E)
             props.segment_length = 8.5;
@@ -820,7 +819,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.4;
             props.mass = 0.1;
         }
-        case 19u: { // Y - Tyrosine - STRUCTURAL (condenser requires organ) - Aromatic, polar
+        case 19u: { // Y - Tyrosine - STRUCTURAL - Aromatic, polar
             props.segment_length = 11.5;
             props.thickness = 4.0;
             props.base_angle = -0.523599;
@@ -843,9 +842,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_left_mult = 0.3;
             props.beta_right_mult = 0.7;
             props.mass = 0.03;
-            props.is_condenser = false;
         }
-        case 20u: { // MOUTH ORGAN (2-codon: P + modifier 0-6)
+        case 20u: { // MOUTH ORGAN (2-codon: K/C + modifier 0-6)
             props.segment_length = 8.0;
             props.thickness = 3.5;
             props.base_angle = 0.0872665;
@@ -865,7 +863,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = -0.3;
             props.mass = 0.05;
         }
-        case 21u: { // PROPELLER ORGAN (2-codon: L + modifier 0-9)
+        case 21u: { // PROPELLER ORGAN (2-codon: L/P + modifier 0-9)
             props.segment_length = 16.0;
             props.thickness = 8.0;
             props.base_angle = -0.523599;
@@ -884,7 +882,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.5;
             props.mass = 0.05;
         }
-        case 22u: { // ALPHA SENSOR ORGAN (2-codon: Q + modifier 0-6)
+        case 22u: { // ALPHA SENSOR ORGAN (2-codon: V/N + modifier 0-9)
             props.segment_length = 10.5;
             props.thickness = 2.5;
             props.base_angle = -0.349066;
@@ -902,7 +900,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.5;
             props.mass = 0.05;
         }
-        case 23u: { // BETA SENSOR ORGAN (2-codon: Q + modifier 7-13)
+        case 23u: { // BETA SENSOR ORGAN (2-codon: V/N + modifier 10-17)
             props.segment_length = 10.0;
             props.thickness = 2.5;
             props.base_angle = 0.523599;
@@ -920,7 +918,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.5;
             props.mass = 0.05;
         }
-        case 24u: { // ENERGY SENSOR ORGAN (2-codon: Q + modifier 14-19)
+        case 24u: { // ENERGY SENSOR ORGAN (2-codon: V/N + modifier 18-19)
             props.segment_length = 10.5;
             props.thickness = 3.5;
             props.base_angle = 1.570796;
@@ -938,7 +936,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.15;
             props.mass = 0.05;
         }
-        case 25u: { // DISPLACER ORGAN (2-codon: L + modifier 10-19)
+        case 25u: { // DISPLACER ORGAN (2-codon: L/P + modifier 10-19)
             props.segment_length = 12.0;
             props.thickness = 8.0;
             props.base_angle = 0.0;
@@ -956,7 +954,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = -0.2;
             props.mass = 0.15;
         }
-        case 26u: { // ENABLER ORGAN (2-codon: P + modifier 14-19)
+        case 26u: { // ENABLER ORGAN (2-codon: K/C + modifier 7-19)
             props.segment_length = 6.0;
             props.thickness = 6.0;
             props.base_angle = 0.785398;
@@ -973,25 +971,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.5;
             props.mass = 0.05;
         }
-        case 27u: { // CONDENSER ORGAN (2-codon: P + modifier 7-13)
-            props.segment_length = 11.5;
-            props.thickness = 4.0;
-            props.base_angle = -0.523599;
-            props.alpha_sensitivity = -0.2;
-            props.beta_sensitivity = 0.52;
-            props.color = vec3<f32>(0.0, 0.4, 0.0); // Dark green
-            props.beta_absorption_rate = 0.3;
-            props.beta_damage = 0.08;
-            props.energy_consumption = 0.001;
-            props.is_condenser = true;
-            props.signal_decay = 0.2;
-            props.alpha_left_mult = -0.5;
-            props.alpha_right_mult = 1.5;
-            props.beta_left_mult = -0.4;
-            props.beta_right_mult = 1.4;
-            props.mass = 0.04;
-        }
-        case 28u: { // STORAGE ORGAN (2-codon: H + modifier 0-6)
+        case 28u: { // STORAGE ORGAN (2-codon: H/Q + modifier 0-6)
             props.segment_length = 16.0;
             props.thickness = 22.0;
             props.base_angle = 0.349066;
@@ -1009,7 +989,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.4;
             props.mass = 1.3;
         }
-        case 29u: { // POISON RESISTANCE ORGAN (2-codon: H + modifier 7-13)
+        case 29u: { // POISON RESISTANCE ORGAN (2-codon: H/Q + modifier 7-13)
             props.segment_length = 16.0;
             props.thickness = 30.0;
             props.base_angle = -1.047198;
@@ -1026,7 +1006,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_right_mult = 0.45;
             props.mass = 10.0;
         }
-        case 30u: { // CHIRAL FLIPPER ORGAN (2-codon: H + modifier 14-19)
+        case 30u: { // CHIRAL FLIPPER ORGAN (2-codon: H/Q + modifier 14-19)
             props.segment_length = 13.0;
             props.thickness = 10.0;
             props.base_angle = -0.174533;
@@ -2225,7 +2205,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         start_byte = start;
 
     // Count codons starting from the first valid codon until stop codon (UAA, UAG, UGA) or limits
-    // 2-CODON ORGAN SYSTEM: 2 promoters per family consume 2 codons
+    // 2-CODON ORGAN SYSTEM: 8 promoters (2 per family) that consume 2 codons
     // PROPELLING: L(9), P(12)
     // ENERGY: K(8), C(1)
     // SENSORS: V(17), N(10)
@@ -3097,8 +3077,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed effects and amplification to the rates themselves
-            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier;//*amplification;
-            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier;//*amplification;
+            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier * amplification;
+            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier * amplification;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
@@ -3170,6 +3150,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 beta_grid[idx] = min(beta_grid[idx] + beta_per_part, 1.0);
                 alpha_grid[idx] = min(alpha_grid[idx] + alpha_per_part, 1.0);
             }
+        }
+        
+        // If this was the selected agent, transfer selection to a random nearby agent
+        if (agent.is_selected == 1u) {
+            let transfer_hash = hash(agent_id * 2654435761u + params.random_seed);
+            let target_id = transfer_hash % params.agent_count;
+            if (target_id < params.agent_count && agents_in[target_id].alive == 1u) {
+                agents_out[target_id].is_selected = 1u;
+            }
+            agent.is_selected = 0u;
         }
         
         agent.alive = 0u;
@@ -4585,37 +4575,8 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Beta grid constrained to 0..1
     var final_beta = clamp(new_beta - beta_flux * kernel_scale, 0.0, 1.0);
-    
-    // Apply rain maps as stochastic probability
-    let rain_value = rain_map[idx];
-    
-    // Use grid position and random_seed for random number generation
-    let seed = idx ^ params.random_seed;
-    var rng = seed;
-    rng ^= rng << 13u;
-    rng ^= rng >> 17u;
-    rng ^= rng << 5u;
-    let rain_chance = f32(rng) / 4294967295.0; // Normalize to 0..1
-    
-    // Rain map value (0..1) × multiplier gives probability
-    let alpha_probability = rain_value.x * params.alpha_multiplier * 0.05;
-    let beta_probability = rain_value.y * params.beta_multiplier * 0.05;
-    
-    // Stochastic rain: if random < probability, spawn full rain drop
-    if (rain_chance < alpha_probability) {
-        final_alpha = 1.0;
-    }
-    
-    // Use different random value for beta
-    rng ^= rng << 13u;
-    rng ^= rng >> 17u;
-    rng ^= rng << 5u;
-    let beta_rain_chance = f32(rng) / 4294967295.0;
-    
-    if (beta_rain_chance < beta_probability) {
-        final_beta = 1.0;
-    }
-    
+
+    // Apply the diffused values (rain maps are loaded separately via GPU texture upload)
     alpha_grid[idx] = final_alpha;
     beta_grid[idx] = final_beta;
     // Gamma also switched to 0..1
@@ -4807,28 +4768,6 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             let green = slope.y * 100.0 + 0.5;
             base_color = vec3<f32>(red, green, 0.0);
         }
-    } else if (params.debug_mode == 2u) {
-        // Rain probability visualization mode
-        // Show the same alpha/beta rain PROBABILITIES that the compute pass uses
-        let base_time = f32(params.epoch) * params.perlin_noise_speed;
-
-        // Use grid coordinates for consistency with actual deposit calculation
-        let grid_coord_norm = vec2<f32>(world_pos.x, world_pos.y) / params.grid_size;
-
-        // Alpha noise and probability
-        let alpha_time = base_time + 1000.0; // Match deposit time offset
-        let alpha_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, alpha_time);
-        let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
-        let alpha_probability = clamp(params.alpha_multiplier * 0.05 * alpha_perlin, 0.0, 1.0);
-
-        // Beta noise and probability
-        let beta_time = base_time + 5000.0; // Match deposit time offset
-        let beta_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, beta_time);
-        let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
-        let beta_probability = clamp(params.beta_multiplier * 0.05 * beta_perlin, 0.0, 1.0);
-
-        // Visualize: green for alpha (food), red for beta (poison), yellow for overlap
-        base_color = vec3<f32>(beta_probability, alpha_probability, 0.0);
     } else {
         // New visualization system: composite channels with blend modes
         
@@ -5391,24 +5330,19 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let world_span = f32(SIM_SIZE);
-    // Mix in epoch to decorrelate batches across frames/uploads
-    let epoch_mix = params.epoch * 0x85EBCA6Bu;
-    var base_seed   = hash(request.seed ^ (request_id * 0x9E3779B9u) ^ epoch_mix);
-    var genome_seed = hash(request.genome_seed ^ (request_id * 0x7F4A7C15u) ^ (epoch_mix ^ 0xC2B2AE35u)); // fully independent
+    var base_seed = request.seed ^ (request_id * 747796405u);
+    var genome_seed = request.genome_seed ^ (request_id * 2891336453u);
 
-    // Position randomness - only uses base_seed
     var spawn_pos = vec2<f32>(request.position);
     if (spawn_pos.x == 0.0 && spawn_pos.y == 0.0) {
-        // Hash the seed first to ensure full avalanche, then XOR different constants
-        let hashed_base = hash(base_seed);
-        let rx = hash_f32(hashed_base ^ 0xA3C59ACBu);
-        let ry = hash_f32(hashed_base ^ 0x1B56C4E9u);
+        let rx = hash_f32(base_seed ^ 0xA3C59ACBu);
+        let ry = hash_f32(base_seed ^ 0x1B56C4E9u);
         spawn_pos = vec2<f32>(rx * world_span, ry * world_span);
     }
 
     var rotation = request.rotation;
     if (rotation == 0.0) {
-        rotation = hash_f32(hash(base_seed) ^ 0xDEADBEEFu) * 6.28318530718;
+        rotation = hash_f32(base_seed ^ 0xDEADBEEFu) * 6.28318530718;
     }
 
     var agent: Agent;
@@ -5434,20 +5368,19 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
             agent.genome[w] = override_word;
         }
     } else {
-        // Create centered variable-length genome with 'X' padding on both sides
-        // Length in [MIN_GENE_LENGTH, GENOME_LENGTH]
-        // Genome generation - ONLY uses genome_seed, never touches base_seed
-        var genome_rng = genome_seed;  // clean, independent RNG state
-        let gene_span = GENOME_LENGTH - MIN_GENE_LENGTH;
-        let gene_len = MIN_GENE_LENGTH + (hash(genome_rng) % (gene_span + 1u));
+    // Create centered variable-length genome with 'X' padding on both sides
+    // Length in [MIN_GENE_LENGTH, GENOME_LENGTH]
+        genome_seed = hash(genome_seed ^ base_seed);
+    let gene_span = GENOME_LENGTH - MIN_GENE_LENGTH;
+    let gene_len = MIN_GENE_LENGTH + (hash(genome_seed) % (gene_span + 1u));
         var bytes: array<u32, GENOME_LENGTH>;
         for (var i = 0u; i < GENOME_LENGTH; i++) { bytes[i] = 88u; } // 'X'
         let left_pad = (GENOME_LENGTH - gene_len) / 2u;
         for (var k = 0u; k < gene_len; k++) {
-            genome_rng = hash(genome_rng);  // advance independently
-            bytes[left_pad + k] = get_random_rna_base(genome_rng);
+            genome_seed = hash(genome_seed ^ (k * 1664525u + 1013904223u));
+            bytes[left_pad + k] = get_random_rna_base(genome_seed);
         }
-        // Write into u32 words (ASCII)
+        // Write into 16 u32 words (ASCII)
         for (var w = 0u; w < GENOME_WORDS; w++) {
             let b0 = bytes[w * 4u + 0u] & 0xFFu;
             let b1 = bytes[w * 4u + 1u] & 0xFFu;
@@ -5557,32 +5490,5 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
         beta_grid[idx] = output_value;
     } else if (mode == 3u) {
         gamma_grid[idx] = output_value;
-    }
-}
-
-// ========== AGENT SELECTION ==========
-// Clear all selection flags (called before setting a new selection)
-// Note: With ping_pong=false, current agents are in buffer A.
-// We use compute_bind_group_b for selection, where buffer A is bound as agents_out (read-write).
-// We read and write the same buffer (agents_out) to avoid needing data from agents_in.
-@compute @workgroup_size(256)
-fn clear_selections(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let agent_id = global_id.x;
-    if (agent_id >= params.max_agents) { return; }
-    // Read current agent state from agents_out and clear selection
-    if (agents_out[agent_id].alive != 0u) {
-        agents_out[agent_id].is_selected = 0u;
-    }
-}
-
-// Set selection flag for a specific agent index
-// Dispatched with workgroup_size(1), params.selected_agent_index determines which agent
-@compute @workgroup_size(1)
-fn set_selection(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let target_index = params.selected_agent_index;
-    if (target_index == 0xFFFFFFFFu || target_index >= params.agent_count) { return; }
-    // Set selection flag on the target agent in agents_out
-    if (agents_out[target_index].alive != 0u) {
-        agents_out[target_index].is_selected = 1u;
     }
 }
