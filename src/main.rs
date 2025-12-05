@@ -41,9 +41,10 @@ const AUTO_SNAPSHOT_INTERVAL: u64 = 10000; // Save every 10,000 epochs
 const RAIN_THUMB_SIZE: usize = 128;
 
 // Shared genome/body sizing (must stay in sync with shader constants)
-const MAX_BODY_PARTS: usize = 64;
 const GENOME_BYTES: usize = 512; // ASCII bases including padding
 const GENOME_WORDS: usize = GENOME_BYTES / std::mem::size_of::<u32>();
+// MAX_BODY_PARTS capped at 128 due to bytemuck Pod/Zeroable trait limits on array sizes
+const MAX_BODY_PARTS: usize = 128; // Would be GENOME_BYTES/3=170, but capped at 128
 const PACKED_GENOME_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const MIN_GENE_LENGTH: usize = 6;
 const MAX_SPAWN_REQUESTS: usize = 2000;
@@ -1746,7 +1747,7 @@ impl GpuState {
         debug_assert_eq!(std::mem::align_of::<BodyPart>(), 16);
         debug_assert_eq!(
             std::mem::size_of::<Agent>(),
-            3408,
+            5520,
             "Agent layout mismatch for MAX_BODY_PARTS={}",
             MAX_BODY_PARTS
         );

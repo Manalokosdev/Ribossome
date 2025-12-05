@@ -11,10 +11,10 @@
 
 const GRID_SIZE: u32 = 2048u;          // Environment grid resolution (original)
 const SIM_SIZE: u32 = 30720u;          // Simulation world size
-const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 512u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
 const GENOME_WORDS: u32 = GENOME_BYTES / 4u;
+const MAX_BODY_PARTS: u32 = 128u; // Capped at 128 (GENOME_BYTES/3 would be 170)
 const PACKED_GENOME_WORDS: u32 = GENOME_BYTES / 16u;
 const PACKED_BASES_PER_WORD: u32 = 16u;
 const MIN_GENE_LENGTH: u32 = 6u;
