@@ -14,7 +14,7 @@ const SIM_SIZE: u32 = 30720u;          // Simulation world size
 const GENOME_BYTES: u32 = 512u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
 const GENOME_WORDS: u32 = GENOME_BYTES / 4u;
-const MAX_BODY_PARTS: u32 = 128u; // Capped at 128 (GENOME_BYTES/3 would be 170)
+const MAX_BODY_PARTS: u32 = 64u; // Reduced from 128 to avoid GPU storage buffer limits
 const PACKED_GENOME_WORDS: u32 = GENOME_BYTES / 16u;
 const PACKED_BASES_PER_WORD: u32 = 16u;
 const MIN_GENE_LENGTH: u32 = 6u;
@@ -59,17 +59,6 @@ struct BodyPart {
 // Extract base type from encoded part_type (0-19 for amino acids, 20+ for organs)
 fn get_base_part_type(part_type: u32) -> u32 {
     return part_type & 0xFFu;
-}
-
-// Calculate rendered size from part properties
-fn get_part_size(part_type: u32) -> f32 {
-    let props = get_amino_acid_properties(get_base_part_type(part_type));
-    var rendered_size = props.thickness * 0.5;
-    let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor;
-    if (is_sensor) {
-        rendered_size *= 2.0; // Sensors render larger for readability
-    }
-    return rendered_size;
 }
 
 // Extract organ parameter from encoded part_type (0-255)
@@ -1064,6 +1053,17 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     return props;
 }
 
+// Calculate rendered size from part properties
+fn get_part_size(part_type: u32) -> f32 {
+    let props = get_amino_acid_properties(get_base_part_type(part_type));
+    var rendered_size = props.thickness * 0.5;
+    let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor;
+    if (is_sensor) {
+        rendered_size *= 2.0; // Sensors render larger for readability
+    }
+    return rendered_size;
+}
+
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
@@ -1831,7 +1831,7 @@ fn render_body_part_inspector(
     
     // 1. STRUCTURAL RENDERING: Base segment line
     if (!in_debug_mode) {
-        let thickness = part.size * 0.5;
+        let thickness = get_part_size(part.part_type) * 0.5;
         let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_thick_line_ctx(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
         if (!is_single && (is_first || is_last)) {
@@ -1847,7 +1847,7 @@ fn render_body_part_inspector(
         let g = max(a, 0.0);
         let bl = max(max(-a, 0.0), max(-b, 0.0));
         let dbg_color = vec4<f32>(r, g, bl, 1.0);
-        let thickness_dbg = max(part.size * 0.25, 0.5);
+        let thickness_dbg = max(get_part_size(part.part_type) * 0.25, 0.5);
         draw_thick_line_ctx(segment_start_world, world_pos, thickness_dbg, dbg_color, ctx);
         if (!is_single && (is_first || is_last)) {
             draw_filled_circle_ctx(world_pos, thickness_dbg, dbg_color, ctx);
@@ -1872,17 +1872,17 @@ fn render_body_part_inspector(
         let perp_local = vec2<f32>(-axis_local.y, axis_local.x);
         let perp_world = apply_agent_rotation(perp_local, agent_rotation);
         
-        let half_length = part.size * 0.8;
+        let half_length = get_part_size(part.part_type) * 0.8;
         let p1 = world_pos - perp_world * half_length;
         let p2 = world_pos + perp_world * half_length;
-        let perp_thickness = part.size * 0.3;
+        let perp_thickness = get_part_size(part.part_type) * 0.3;
         let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_thick_line_ctx(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0), ctx);
     }
     
     // 4. ORGAN: Condenser (charge storage/discharge) - SIMPLIFIED for inspector
     if (amino_props.is_condenser) {
-        let radius = max(part.size * 0.5, 3.0);
+        let radius = max(get_part_size(part.part_type) * 0.5, 3.0);
         
         // Just draw a simple filled circle - skip complex rendering to avoid stack overflow
         let blended_color_cond = mix(amino_props.color, agent_color, params.agent_color_blend);
@@ -1894,7 +1894,7 @@ fn render_body_part_inspector(
     
     // 5. ORGAN: Sensor cloud
     if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor || amino_props.is_energy_sensor) {
-        let sensor_radius = part.size * 2.0;
+        let sensor_radius = get_part_size(part.part_type) * 2.0;
         let sensor_seed = part_index * 500u + part_index * 13u;
         let blended_color_sensor = mix(amino_props.color, agent_color, params.agent_color_blend);
         let sensor_color = vec4<f32>(blended_color_sensor * 0.6, 0.5);
@@ -1903,12 +1903,12 @@ fn render_body_part_inspector(
     
     // 6. ORGAN: Mouth indicator (yellow asterisk)
     if (amino_props.is_mouth && !in_debug_mode) {
-        draw_asterisk_ctx(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
+        draw_asterisk_ctx(world_pos, get_part_size(part.part_type) * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
     }
     
     // 7. ORGAN: Displacer indicator (diamond shape)
     if (amino_props.is_displacer && !in_debug_mode) {
-        let square_size = part.size * 2.0;
+        let square_size = get_part_size(part.part_type) * 2.0;
         let top = world_pos + vec2<f32>(0.0, -square_size);
         let right = world_pos + vec2<f32>(square_size, 0.0);
         let bottom = world_pos + vec2<f32>(0.0, square_size);
@@ -1971,7 +1971,7 @@ fn render_body_part_ctx(
     
     // 1. STRUCTURAL RENDERING: Base segment line
     if (!in_debug_mode) {
-        let thickness = part.size * 0.5;
+        let thickness = get_part_size(part.part_type) * 0.5;
         let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_thick_line_ctx(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
         if (!is_single && (is_first || is_last)) {
@@ -1987,7 +1987,7 @@ fn render_body_part_ctx(
         let g = max(a, 0.0);
         let bl = max(max(-a, 0.0), max(-b, 0.0));
         let dbg_color = vec4<f32>(r, g, bl, 1.0);
-        let thickness_dbg = max(part.size * 0.25, 0.5);
+        let thickness_dbg = max(get_part_size(part.part_type) * 0.25, 0.5);
         draw_thick_line_ctx(segment_start_world, world_pos, thickness_dbg, dbg_color, ctx);
         if (!is_single && (is_first || is_last)) {
             draw_filled_circle_ctx(world_pos, thickness_dbg, dbg_color, ctx);
@@ -2012,10 +2012,10 @@ fn render_body_part_ctx(
         let perp_local = vec2<f32>(-axis_local.y, axis_local.x);
         let perp_world = apply_agent_rotation(perp_local, agent_rotation);
         
-        let half_length = part.size * 0.8;
+        let half_length = get_part_size(part.part_type) * 0.8;
         let p1 = world_pos - perp_world * half_length;
         let p2 = world_pos + perp_world * half_length;
-        let perp_thickness = part.size * 0.3;
+        let perp_thickness = get_part_size(part.part_type) * 0.3;
         let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_thick_line_ctx(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0), ctx);
     }
@@ -2031,7 +2031,7 @@ fn render_body_part_ctx(
         let is_alpha_discharging = (signed_alpha_charge > 0.0);
         let is_beta_discharging = (signed_beta_charge > 0.0);
         
-        let radius = max(part.size * 0.5, 3.0);
+        let radius = max(get_part_size(part.part_type) * 0.5, 3.0);
         
         var fill_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         if (is_alpha_discharging || is_beta_discharging) {
@@ -2116,7 +2116,7 @@ fn render_body_part_ctx(
     
     // 7. ORGAN: Sensor cloud
     if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor || amino_props.is_energy_sensor) {
-        let sensor_radius = part.size * 2.0;
+        let sensor_radius = get_part_size(part.part_type) * 2.0;
         let sensor_seed = agent_id * 500u + part_index * 13u;
         let blended_color_sensor = mix(amino_props.color, agent_color, params.agent_color_blend);
         let sensor_color = vec4<f32>(blended_color_sensor * 0.6, 0.5);
@@ -2125,12 +2125,12 @@ fn render_body_part_ctx(
     
     // 8. ORGAN: Mouth indicator (yellow asterisk)
     if (amino_props.is_mouth && !in_debug_mode) {
-        draw_asterisk_ctx(world_pos, part.size * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
+        draw_asterisk_ctx(world_pos, get_part_size(part.part_type) * 4.0, vec4<f32>(1.0, 1.0, 0.0, 1.0), ctx);
     }
     
     // 9. ORGAN: Displacer indicator (diamond shape)
     if (amino_props.is_displacer && !in_debug_mode) {
-        let square_size = part.size * 2.0;
+        let square_size = get_part_size(part.part_type) * 2.0;
         let top = world_pos + vec2<f32>(0.0, -square_size);
         let right = world_pos + vec2<f32>(square_size, 0.0);
         let bottom = world_pos + vec2<f32>(0.0, square_size);

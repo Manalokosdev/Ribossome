@@ -43,8 +43,8 @@ const RAIN_THUMB_SIZE: usize = 128;
 // Shared genome/body sizing (must stay in sync with shader constants)
 const GENOME_BYTES: usize = 512; // ASCII bases including padding
 const GENOME_WORDS: usize = GENOME_BYTES / std::mem::size_of::<u32>();
-// MAX_BODY_PARTS capped at 128 due to bytemuck Pod/Zeroable trait limits on array sizes
-const MAX_BODY_PARTS: usize = 128; // Would be GENOME_BYTES/3=170, but capped at 128
+// MAX_BODY_PARTS reduced to 64 to avoid GPU storage buffer element count limits
+const MAX_BODY_PARTS: usize = 64; // Reduced from 128 for GPU compatibility
 const PACKED_GENOME_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const MIN_GENE_LENGTH: usize = 6;
 const MAX_SPAWN_REQUESTS: usize = 2000;
@@ -1747,7 +1747,7 @@ impl GpuState {
         debug_assert_eq!(std::mem::align_of::<BodyPart>(), 16);
         debug_assert_eq!(
             std::mem::size_of::<Agent>(),
-            4688,
+            2640,
             "Agent layout mismatch for MAX_BODY_PARTS={}",
             MAX_BODY_PARTS
         );
@@ -1791,7 +1791,7 @@ impl GpuState {
         profiler.mark("egui renderer");
 
         // Initialize agents with minimal data - GPU will generate genome and build body
-        let max_agents = 20_000usize; // Limited by 128MB WebGPU buffer size (~4.7 KB/agent with MAX_BODY_PARTS=128)
+        let max_agents = 20_000usize; // Limited by GPU storage buffer limits (~2.6 KB/agent with MAX_BODY_PARTS=64)
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
