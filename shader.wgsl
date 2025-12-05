@@ -4726,28 +4726,6 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             let green = slope.y * 100.0 + 0.5;
             base_color = vec3<f32>(red, green, 0.0);
         }
-    } else if (params.debug_mode == 2u) {
-        // Rain probability visualization mode
-        // Show the same alpha/beta rain PROBABILITIES that the compute pass uses
-        let base_time = f32(params.epoch) * params.perlin_noise_speed;
-
-        // Use grid coordinates for consistency with actual deposit calculation
-        let grid_coord_norm = vec2<f32>(world_pos.x, world_pos.y) / params.grid_size;
-
-        // Alpha noise and probability
-        let alpha_time = base_time + 1000.0; // Match deposit time offset
-        let alpha_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, alpha_time);
-        let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
-        let alpha_probability = clamp(params.alpha_multiplier * 0.05 * alpha_perlin, 0.0, 1.0);
-
-        // Beta noise and probability
-        let beta_time = base_time + 5000.0; // Match deposit time offset
-        let beta_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, beta_time);
-        let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
-        let beta_probability = clamp(params.beta_multiplier * 0.05 * beta_perlin, 0.0, 1.0);
-
-        // Visualize: green for alpha (food), red for beta (poison), yellow for overlap
-        base_color = vec3<f32>(beta_probability, alpha_probability, 0.0);
     } else {
         // New visualization system: composite channels with blend modes
         
