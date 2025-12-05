@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.6576,
+  "camera_zoom": 1.7481631,
   "spawn_probability": 0.3,
   "death_probability": 0.001,
   "mutation_rate": 0.001,
@@ -43,7 +43,7 @@
   "slope_lighting_strength": 5.0,
   "trail_diffusion": 0.0,
   "trail_decay": 0.999,
-  "trail_opacity": 1.0,
+  "trail_opacity": 0.0,
   "trail_show": false,
   "interior_isotropic": true,
   "ignore_stop_codons": false,

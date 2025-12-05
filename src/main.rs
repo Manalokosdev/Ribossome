@@ -42,7 +42,7 @@ const RAIN_THUMB_SIZE: usize = 128;
 
 // Shared genome/body sizing (must stay in sync with shader constants)
 const MAX_BODY_PARTS: usize = 64;
-const GENOME_BYTES: usize = 128; // ASCII bases including padding
+const GENOME_BYTES: usize = 256; // ASCII bases including padding
 const GENOME_WORDS: usize = GENOME_BYTES / std::mem::size_of::<u32>();
 const PACKED_GENOME_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const MIN_GENE_LENGTH: usize = 6;
@@ -814,9 +814,9 @@ struct SimParams {
     agent_color_b: f32,
     agent_color_blend: f32,   // Blend factor: 0.0=amino only, 1.0=agent only
     epoch: u32,               // Current simulation epoch for time-based effects
-    perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
-    perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
-    perlin_noise_contrast: f32,  // Contrast of Perlin noise (higher = sharper)
+    vector_force_power: f32,  // Global force multiplier (0.0 = off)
+    vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
+    vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
     _padding: f32,  // Ensure 16-byte alignment
 }
 
@@ -935,10 +935,10 @@ struct SimulationSettings {
     render_interval: u32,
     gamma_debug_visual: bool,
     slope_debug_visual: bool,
-    rain_debug_visual: bool,  // Visualization mode for Perlin rain patterns
-    perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
-    perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
-    perlin_noise_contrast: f32,  // Contrast of Perlin noise (higher = sharper)
+    rain_debug_visual: bool,  // Visualization mode for rain patterns
+    vector_force_power: f32,  // Global force multiplier (0.0 = off)
+    vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
+    vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
     gamma_hidden: bool,
     debug_per_segment: bool,
     gamma_vis_min: f32,
@@ -1018,9 +1018,9 @@ impl Default for SimulationSettings {
             gamma_debug_visual: false,
             slope_debug_visual: false,
             rain_debug_visual: false,
-            perlin_noise_scale: 0.5,    // Bigger patterns (lower scale)
-            perlin_noise_speed: 0.00005, // Slower evolution
-            perlin_noise_contrast: 1.2,  // Default contrast
+            vector_force_power: 0.0,  // Disabled by default
+            vector_force_x: 0.0,
+            vector_force_y: -1.0,     // Downward gravity when enabled
             gamma_hidden: false,
             debug_per_segment: false,
             gamma_vis_min: 0.0,
@@ -1423,9 +1423,9 @@ struct GpuState {
     gamma_debug_visual: bool,
     slope_debug_visual: bool,
     rain_debug_visual: bool,
-    perlin_noise_scale: f32,
-    perlin_noise_speed: f32,
-    perlin_noise_contrast: f32,
+    vector_force_power: f32,
+    vector_force_x: f32,
+    vector_force_y: f32,
     prop_wash_strength: f32,
     gamma_hidden: bool,
     gamma_vis_min: f32,
@@ -4419,9 +4419,9 @@ impl GpuState {
             agent_color_b: self.agent_color[2],
             agent_color_blend: self.agent_color_blend,
             epoch: self.epoch as u32,
-            perlin_noise_scale: self.perlin_noise_scale,
-            perlin_noise_speed: self.perlin_noise_speed,
-            perlin_noise_contrast: self.perlin_noise_contrast,
+            vector_force_power: self.vector_force_power,
+            vector_force_x: self.vector_force_x,
+            vector_force_y: self.vector_force_y,
             _padding: 0.0,
         };
         self.queue
