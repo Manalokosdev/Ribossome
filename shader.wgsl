@@ -1,4 +1,4 @@
-﻿// Ribossome - GPU-Accelerated Artificial Life Simulator
+// Ribossome - GPU-Accelerated Artificial Life Simulator
 // Copyright (c) 2025 Filipe da Veiga Ventura Alves
 // Licensed under MIT License
 
@@ -4898,53 +4898,129 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
     let amino_height = 20u;
     let amino_y_start = genome_y_start - amino_height - 2u;  // 2px gap above genome
     let amino_y_end = amino_y_start + amino_height;
+    let signal_height = 10u;  // Height for each signal bar
+    let alpha_y_start = amino_y_start - signal_height - 2u;  // 2px gap above amino
+    let alpha_y_end = alpha_y_start + signal_height;
+    let beta_y_start = alpha_y_start - signal_height - 1u;  // 1px gap above alpha
+    let beta_y_end = beta_y_start + signal_height;
     
     let in_genome_bar = y >= genome_y_start && y < genome_y_end && x >= preview_x_start && x < preview_x_end;
     let in_amino_bar = y >= amino_y_start && y < amino_y_end && x >= preview_x_start && x < preview_x_end;
+    let in_alpha_bar = y >= alpha_y_start && y < alpha_y_end && x >= preview_x_start && x < preview_x_end;
+    let in_beta_bar = y >= beta_y_start && y < beta_y_end && x >= preview_x_start && x < preview_x_end;
     
-    // Draw full genome bar (all nucleotides from start)
+    // Draw full genome bar (all nucleotides from first non-X triplet)
     if (in_genome_bar) {
         let genome = selected_agent_buffer[0].genome;
+        let body_count = selected_agent_buffer[0].body_count;
         let genome_pixel_x = x - preview_x_start;
         
-        // Find start position using same logic as genome translation
-        var start_byte = 0xFFFFFFFFu;
+        // Always start from first non-X triplet (gene start)
+        let gene_start = genome_find_first_coding_triplet(genome);
+        
+        // Find translation start to know where active region begins
+        var translation_start = 0xFFFFFFFFu;
         if (params.require_start_codon == 1u) {
-            start_byte = genome_find_start_codon(genome);
+            translation_start = genome_find_start_codon(genome);
         } else {
-            start_byte = genome_find_first_coding_triplet(genome);
+            translation_start = gene_start;
         }
         
-        if (start_byte != 0xFFFFFFFFu && genome_pixel_x < GENOME_LENGTH - start_byte) {
-            let base_index = start_byte + genome_pixel_x;
-            if (base_index < GENOME_LENGTH) {
-                // Default base coloring
-                let base_ascii = genome_get_base_ascii(genome, base_index);
-                if (base_ascii == 65u) {  // 'A'
-                    color = vec4<f32>(0.0, 1.0, 0.0, 1.0);
-                } else if (base_ascii == 85u) {  // 'U'
-                    color = vec4<f32>(0.0, 0.5, 1.0, 1.0);
-                } else if (base_ascii == 71u) {  // 'G'
-                    color = vec4<f32>(1.0, 1.0, 0.0, 1.0);
-                } else if (base_ascii == 67u) {  // 'C'
-                    color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+        // Find stop codon position by simulating translation
+        var stop_codon_end = 0xFFFFFFFFu;
+        if (gene_start != 0xFFFFFFFFu && translation_start != 0xFFFFFFFFu) {
+            var pos_b = translation_start;
+            var part_count = 0u;
+            let offset_bases = translation_start - gene_start;
+            var cumulative_bases = offset_bases;
+            
+            for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+                if (pos_b + 2u >= GENOME_LENGTH) { break; }
+                
+                // Check for 'X'
+                let b0 = genome_get_base_ascii(genome, pos_b);
+                let b1 = genome_get_base_ascii(genome, pos_b + 1u);
+                let b2 = genome_get_base_ascii(genome, pos_b + 2u);
+                if (b0 == 88u || b1 == 88u || b2 == 88u) { break; }
+                
+                // Check stop codon
+                let is_stop = genome_is_stop_codon_at(genome, pos_b);
+                let should_stop = params.ignore_stop_codons == 0u && is_stop;
+                
+                if (part_count >= body_count) {
+                    if (should_stop) {
+                        stop_codon_end = gene_start + cumulative_bases + 3u;
+                    }
+                    break;
                 }
-
-                // Overlay special colors for start/stop codons (3-base windows)
-                let rel = base_index - start_byte;
-                let codon_start = start_byte + (rel / 3u) * 3u;
-                if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(genome, codon_start)) {
-                    // Stop codon: black
-                    color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-                } else {
-                    // Start codon: AUG -> purple
-                    let s0 = genome_get_base_ascii(genome, codon_start);
-                    let s1 = genome_get_base_ascii(genome, codon_start + 1u);
-                    let s2 = genome_get_base_ascii(genome, codon_start + 2u);
-                    if (s0 == 65u && s1 == 85u && s2 == 71u) {
-                        color = vec4<f32>(0.7, 0.0, 0.7, 1.0);
+                
+                let codon = genome_get_codon_ascii(genome, pos_b);
+                let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
+                let is_promoter = (amino_type == 9u || amino_type == 12u ||
+                                  amino_type == 8u || amino_type == 1u ||
+                                  amino_type == 17u || amino_type == 10u ||
+                                  amino_type == 6u || amino_type == 13u);
+                
+                var bases_consumed = 3u;
+                if (is_promoter && pos_b + 5u < GENOME_LENGTH) {
+                    let b3 = genome_get_base_ascii(genome, pos_b + 3u);
+                    let b4 = genome_get_base_ascii(genome, pos_b + 4u);
+                    let b5 = genome_get_base_ascii(genome, pos_b + 5u);
+                    let second_codon_has_x = (b3 == 88u || b4 == 88u || b5 == 88u);
+                    
+                    if (!second_codon_has_x) {
+                        bases_consumed = 6u;
                     }
                 }
+                
+                pos_b += bases_consumed;
+                cumulative_bases += bases_consumed;
+                part_count += 1u;
+                
+                if (should_stop) {
+                    stop_codon_end = gene_start + cumulative_bases + 3u;
+                    break;
+                }
+            }
+        }
+        
+        // Find first 'X' position to limit drawing width
+        var first_x_position = GENOME_LENGTH;
+        if (gene_start != 0xFFFFFFFFu) {
+            for (var scan_pos = gene_start; scan_pos < GENOME_LENGTH; scan_pos++) {
+                let scan_ascii = genome_get_base_ascii(genome, scan_pos);
+                if (scan_ascii == 88u) {
+                    first_x_position = scan_pos;
+                    break;
+                }
+            }
+        }
+        
+        if (gene_start != 0xFFFFFFFFu && genome_pixel_x < GENOME_LENGTH - gene_start) {
+            let base_index = gene_start + genome_pixel_x;
+            // Only draw if before first 'X'
+            if (base_index < first_x_position && base_index < GENOME_LENGTH) {
+                let base_ascii = genome_get_base_ascii(genome, base_index);
+                
+                var base_color = vec3<f32>(0.5, 0.5, 0.5);
+                if (base_ascii == 65u) {  // 'A'
+                    base_color = vec3<f32>(0.0, 1.0, 0.0);
+                } else if (base_ascii == 85u) {  // 'U'
+                    base_color = vec3<f32>(0.0, 0.5, 1.0);
+                } else if (base_ascii == 71u) {  // 'G'
+                    base_color = vec3<f32>(1.0, 1.0, 0.0);
+                } else if (base_ascii == 67u) {  // 'C'
+                    base_color = vec3<f32>(1.0, 0.0, 0.0);
+                }
+                
+                // Dim inactive parts (before translation start or after stop codon) by 75%
+                if (translation_start != 0xFFFFFFFFu && base_index < translation_start) {
+                    base_color *= 0.25;
+                } else if (stop_codon_end != 0xFFFFFFFFu && base_index >= stop_codon_end) {
+                    base_color *= 0.25;
+                }
+                
+                color = vec4<f32>(base_color, 1.0);
             }
         }
     }
@@ -4955,24 +5031,51 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
         let body_count = selected_agent_buffer[0].body_count;
         let genome_pixel_x = x - preview_x_start;
         
-        // Find start position using same logic as genome translation
-        var start_byte = 0xFFFFFFFFu;
+        // Gene always starts at first non-X triplet
+        let gene_start = genome_find_first_coding_triplet(genome);
+        
+        // Translation starts at AUG (if required) or gene start
+        var translation_start = 0xFFFFFFFFu;
         if (params.require_start_codon == 1u) {
-            start_byte = genome_find_start_codon(genome);
+            translation_start = genome_find_start_codon(genome);
         } else {
-            start_byte = genome_find_first_coding_triplet(genome);
+            translation_start = gene_start;
         }
         
-        if (start_byte != 0xFFFFFFFFu) {
+        if (gene_start != 0xFFFFFFFFu && translation_start != 0xFFFFFFFFu) {
+            // Calculate offset from gene start to translation start (in bases)
+            let offset_bases = translation_start - gene_start;
+            
             // Walk through genome following translation logic in base space
-            var cumulative_bases = 0u;  // how many bases from start_byte
-            var pos_b = start_byte;
+            var cumulative_bases = offset_bases;  // start accounting from gene_start
+            var pos_b = translation_start;
             var part_count = 0u;
             
             for (var i = 0u; i < MAX_BODY_PARTS; i++) {
-                if (part_count >= body_count) { break; }
                 if (pos_b + 2u >= GENOME_LENGTH) { break; }
-                if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(genome, pos_b)) { break; }
+                
+                // Stop if any base in the current codon is 'X'
+                let b0 = genome_get_base_ascii(genome, pos_b);
+                let b1 = genome_get_base_ascii(genome, pos_b + 1u);
+                let b2 = genome_get_base_ascii(genome, pos_b + 2u);
+                if (b0 == 88u || b1 == 88u || b2 == 88u) { break; }  // 'X'
+                
+                // Check if this is a stop codon
+                let is_stop = genome_is_stop_codon_at(genome, pos_b);
+                let should_stop = params.ignore_stop_codons == 0u && is_stop;
+                
+                // If we've drawn all body parts, stop (don't draw stop codon as a body part)
+                if (part_count >= body_count) { 
+                    // But if this IS a stop codon and we want to visualize it, draw it
+                    if (should_stop) {
+                        let span_start = cumulative_bases;
+                        let span_end = cumulative_bases + 3u;  // stop codon is 3 bases
+                        if (genome_pixel_x >= span_start && genome_pixel_x < span_end) {
+                            color = vec4<f32>(0.0, 0.0, 0.0, 1.0);  // black
+                        }
+                    }
+                    break; 
+                }
                 
                 let codon = genome_get_codon_ascii(genome, pos_b);
                 let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
@@ -4988,6 +5091,12 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                 var is_organ = false;
                 
                 if (is_promoter && pos_b + 5u < GENOME_LENGTH) {
+                    // Check if second codon contains 'X'
+                    let b3 = genome_get_base_ascii(genome, pos_b + 3u);
+                    let b4 = genome_get_base_ascii(genome, pos_b + 4u);
+                    let b5 = genome_get_base_ascii(genome, pos_b + 5u);
+                    let second_codon_has_x = (b3 == 88u || b4 == 88u || b5 == 88u);
+                    
                     let codon2 = genome_get_codon_ascii(genome, pos_b + 3u);
                     let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
                     var organ_base_type = 0u;
@@ -5006,11 +5115,20 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                         else { organ_base_type = 30u; }
                     }
                     
-                    if (organ_base_type >= 20u) {
+                    if (organ_base_type >= 20u && !second_codon_has_x) {
                         base_type = organ_base_type;
                         is_organ = true;
+                        bases_consumed = 6u;  // promoters consume 2 codons when forming organ
+                    } else if (!second_codon_has_x) {
+                        // Promoter didn't become organ, but second codon is valid
+                        bases_consumed = 6u;  // still consume both codons
+                    } else {
+                        // Second codon has 'X', only consume first codon
+                        bases_consumed = 3u;
                     }
-                    bases_consumed = 6u;  // promoters always consume 2 codons
+                } else {
+                    // Not a promoter or not enough bases for second codon
+                    bases_consumed = 3u;
                 }
 
                 // Map genome_pixel_x (in bases) into this part's span
@@ -5019,30 +5137,165 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (genome_pixel_x >= span_start && genome_pixel_x < span_end) {
                     var draw_color = vec3<f32>(0.5, 0.5, 0.5);
 
-                    // Special colors for start/stop amino acids
-                    if (params.ignore_stop_codons == 0u && genome_is_stop_codon_at(genome, pos_b)) {
-                        // Stop amino acid: black
-                        draw_color = vec3<f32>(0.0, 0.0, 0.0);
+                    // Check if this is the first amino acid and it's AUG (start codon)
+                    let is_start_codon = (b0 == 65u && b1 == 85u && b2 == 71u);  // AUG
+                    
+                    if (part_count == 0u && is_start_codon) {
+                        // First amino acid and it's AUG: purple
+                        draw_color = vec3<f32>(0.7, 0.0, 0.7);
                     } else {
-                        let s0 = genome_get_base_ascii(genome, pos_b);
-                        let s1 = genome_get_base_ascii(genome, pos_b + 1u);
-                        let s2 = genome_get_base_ascii(genome, pos_b + 2u);
-                        if (s0 == 65u && s1 == 85u && s2 == 71u) {
-                            // Start amino acid: purple
-                            draw_color = vec3<f32>(0.7, 0.0, 0.7);
-                        } else {
-                            let props = get_amino_acid_properties(base_type);
-                            draw_color = props.color;
-                        }
+                        // Regular amino acid or organ color
+                        let props = get_amino_acid_properties(base_type);
+                        draw_color = props.color;
                     }
 
-                    // If organ, stretch color over full 6-base span; amino acids still per-base but same color
                     color = vec4<f32>(draw_color, 1.0);
                 }
 
                 pos_b += bases_consumed;
                 cumulative_bases += bases_consumed;
                 part_count += 1u;
+                
+                // Stop after drawing this part if it was before a stop codon
+                if (should_stop) { 
+                    // Draw the stop codon after this part
+                    let stop_start = cumulative_bases;
+                    let stop_end = cumulative_bases + 3u;
+                    if (genome_pixel_x >= stop_start && genome_pixel_x < stop_end) {
+                        color = vec4<f32>(0.0, 0.0, 0.0, 1.0);  // black
+                    }
+                    break; 
+                }
+                
+                // Stop if we've rendered beyond the visible area
+                if (cumulative_bases > 280u) { break; }
+            }
+        }
+    }
+    
+    // Draw alpha signal bar (shows alpha signal for each body part)
+    if (in_alpha_bar || in_beta_bar) {
+        let genome = selected_agent_buffer[0].genome;
+        let body_count = selected_agent_buffer[0].body_count;
+        let genome_pixel_x = x - preview_x_start;
+        
+        // Gene always starts at first non-X triplet
+        let gene_start = genome_find_first_coding_triplet(genome);
+        
+        // Translation starts at AUG (if required) or gene start
+        var translation_start = 0xFFFFFFFFu;
+        if (params.require_start_codon == 1u) {
+            translation_start = genome_find_start_codon(genome);
+        } else {
+            translation_start = gene_start;
+        }
+        
+        if (gene_start != 0xFFFFFFFFu && translation_start != 0xFFFFFFFFu) {
+            // Calculate offset from gene start to translation start (in bases)
+            let offset_bases = translation_start - gene_start;
+            
+            // Walk through genome following translation logic in base space
+            var cumulative_bases = offset_bases;  // start accounting from gene_start
+            var pos_b = translation_start;
+            var part_count = 0u;
+            
+            for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+                if (pos_b + 2u >= GENOME_LENGTH) { break; }
+                
+                // Stop if any base in the current codon is 'X'
+                let b0 = genome_get_base_ascii(genome, pos_b);
+                let b1 = genome_get_base_ascii(genome, pos_b + 1u);
+                let b2 = genome_get_base_ascii(genome, pos_b + 2u);
+                if (b0 == 88u || b1 == 88u || b2 == 88u) { break; }  // 'X'
+                
+                // Check if this is a stop codon
+                let is_stop = genome_is_stop_codon_at(genome, pos_b);
+                let should_stop = params.ignore_stop_codons == 0u && is_stop;
+                
+                // If we've drawn all body parts, stop
+                if (part_count >= body_count) { 
+                    break; 
+                }
+                
+                let codon = genome_get_codon_ascii(genome, pos_b);
+                let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
+                
+                // Check if this is a promoter (can become an organ)
+                let is_promoter = (amino_type == 9u || amino_type == 12u ||
+                                  amino_type == 8u || amino_type == 1u ||
+                                  amino_type == 17u || amino_type == 10u ||
+                                  amino_type == 6u || amino_type == 13u);
+                
+                var base_type = amino_type;
+                var bases_consumed = 3u;  // default: 1 codon
+                
+                if (is_promoter && pos_b + 5u < GENOME_LENGTH) {
+                    // Check if second codon contains 'X'
+                    let b3 = genome_get_base_ascii(genome, pos_b + 3u);
+                    let b4 = genome_get_base_ascii(genome, pos_b + 4u);
+                    let b5 = genome_get_base_ascii(genome, pos_b + 5u);
+                    let second_codon_has_x = (b3 == 88u || b4 == 88u || b5 == 88u);
+                    
+                    let codon2 = genome_get_codon_ascii(genome, pos_b + 3u);
+                    let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
+                    var organ_base_type = 0u;
+                    
+                    if (amino_type == 9u || amino_type == 12u) {
+                        organ_base_type = select(25u, 21u, modifier < 10u);
+                    } else if (amino_type == 8u || amino_type == 1u) {
+                        organ_base_type = select(26u, 20u, modifier < 7u);
+                    } else if (amino_type == 17u || amino_type == 10u) {
+                        if (modifier < 10u) { organ_base_type = 22u; }
+                        else if (modifier < 18u) { organ_base_type = 23u; }
+                        else { organ_base_type = 24u; }
+                    } else if (amino_type == 6u || amino_type == 13u) {
+                        if (modifier < 7u) { organ_base_type = 28u; }
+                        else if (modifier < 14u) { organ_base_type = 29u; }
+                        else { organ_base_type = 30u; }
+                    }
+                    
+                    if (organ_base_type >= 20u && !second_codon_has_x) {
+                        base_type = organ_base_type;
+                        bases_consumed = 6u;  // promoters consume 2 codons when forming organ
+                    } else if (!second_codon_has_x) {
+                        // Promoter didn't become organ, but second codon is valid
+                        bases_consumed = 6u;  // still consume both codons
+                    } else {
+                        // Second codon has 'X', only consume first codon
+                        bases_consumed = 3u;
+                    }
+                } else {
+                    // Not a promoter or not enough bases for second codon
+                    bases_consumed = 3u;
+                }
+
+                // Map genome_pixel_x (in bases) into this part's span
+                let span_start = cumulative_bases;
+                let span_end = cumulative_bases + bases_consumed;
+                if (genome_pixel_x >= span_start && genome_pixel_x < span_end) {
+                    // Get signals from actual body part
+                    if (part_count < body_count) {
+                        let part = selected_agent_buffer[0].body[part_count];
+                        let a = part.alpha_signal;
+                        let b = part.beta_signal;
+                        
+                        // Debug mode color scheme: r=+beta, g=+alpha, blue=-alpha OR -beta
+                        let r = max(b, 0.0);
+                        let g = max(a, 0.0);
+                        let bl = max(max(-a, 0.0), max(-b, 0.0));
+                        
+                        color = vec4<f32>(r, g, bl, 1.0);
+                    }
+                }
+
+                pos_b += bases_consumed;
+                cumulative_bases += bases_consumed;
+                part_count += 1u;
+                
+                // Stop after drawing this part if it was before a stop codon
+                if (should_stop) { 
+                    break; 
+                }
                 
                 // Stop if we've rendered beyond the visible area
                 if (cumulative_bases > 280u) { break; }
