@@ -12,7 +12,7 @@
 const GRID_SIZE: u32 = 2048u;          // Environment grid resolution (original)
 const SIM_SIZE: u32 = 30720u;          // Simulation world size
 const MAX_BODY_PARTS: u32 = 64u;
-const GENOME_BYTES: u32 = 128u;
+const GENOME_BYTES: u32 = 256u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
 const GENOME_WORDS: u32 = GENOME_BYTES / 4u;
 const PACKED_GENOME_WORDS: u32 = GENOME_BYTES / 16u;
@@ -196,9 +196,9 @@ struct SimParams {
     agent_color_b: f32,
     agent_color_blend: f32,   // Blend factor: 0.0=amino color only, 1.0=agent color only
     epoch: u32,               // Current simulation epoch for time-based effects
-    perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
-    perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
-    perlin_noise_contrast: f32,  // Contrast of Perlin noise (higher = sharper)
+    vector_force_power: f32,  // Global force multiplier (0.0 = off)
+    vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
+    vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
     _padding: f32,
 }
 
@@ -4528,42 +4528,8 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Beta grid constrained to 0..1
     var final_beta = clamp(new_beta - beta_flux * kernel_scale, 0.0, 1.0);
-    
-    // Perlin noise rain that evolves through 3D noise (time is Z axis)
-    // Time evolution: use epoch counter for deterministic animation
-    let base_time = f32(params.epoch) * params.perlin_noise_speed;
 
-    // Alpha rain: 3D Perlin noise evolving through time
-    // Use grid coordinates normalized to 0..1 for consistency with visualization
-    let grid_coord_norm = vec2<f32>(f32(x), f32(y)) / params.grid_size;
-    let alpha_time = base_time + 1000.0; // Offset alpha time evolution
-    // Scale is applied via perlin_noise_scale: lower = bigger features
-    let alpha_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, alpha_time);
-    let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
-    let alpha_probability = params.alpha_multiplier * 0.05 * alpha_perlin;
-
-    // Beta rain: Independent 3D Perlin noise with different seed and time offset
-    let beta_time = base_time + 5000.0; // Different time offset for independent evolution
-    let beta_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, beta_time);
-    let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
-    let beta_probability = params.beta_multiplier * 0.05 * beta_perlin;
-    
-    // Stochastic sampling: compare against hash-based random value
-    let cell_seed = idx * 2654435761u + params.random_seed;
-    let rain_chance = f32(hash(cell_seed)) / 4294967295.0;
-    
-    if (rain_chance < alpha_probability) {
-        final_alpha = 1.0;
-    }
-
-    // Beta uses different hash offset for independence
-    let beta_seed = cell_seed * 1103515245u;
-    let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
-    if (beta_rain_chance < beta_probability) {
-        final_beta = 1.0;
-    }
-    
-    // Apply the blurred + rain values
+    // Apply the diffused values (rain maps are loaded separately via GPU texture upload)
     alpha_grid[idx] = final_alpha;
     beta_grid[idx] = final_beta;
     // Gamma also switched to 0..1
