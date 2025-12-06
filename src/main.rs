@@ -740,6 +740,9 @@ struct SimParams {
     camera_zoom: f32,
     camera_pan_x: f32,
     camera_pan_y: f32,
+    prev_camera_pan_x: f32, // Previous frame camera position for motion blur
+    prev_camera_pan_y: f32, // Previous frame camera position for motion blur
+    follow_mode: u32,       // 1 if following an agent, 0 otherwise
     window_width: f32,
     window_height: f32,
     alpha_blur: f32,
@@ -1287,6 +1290,7 @@ struct GpuState {
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_trails_pipeline: wgpu::ComputePipeline,
     clear_visual_pipeline: wgpu::ComputePipeline,
+    motion_blur_pipeline: wgpu::ComputePipeline,
     clear_agent_grid_pipeline: wgpu::ComputePipeline,
     render_inspector_pipeline: wgpu::ComputePipeline,
     draw_inspector_agent_pipeline: wgpu::ComputePipeline,
@@ -1312,6 +1316,7 @@ struct GpuState {
     alive_count: u32, // Number of living agents
     camera_zoom: f32,
     camera_pan: [f32; 2],
+    prev_camera_pan: [f32; 2], // Previous frame camera position for motion blur
 
     // Agent management
     agents_cpu: Vec<Agent>,
@@ -2033,6 +2038,9 @@ impl GpuState {
             camera_zoom: 1.0,
             camera_pan_x: SIM_SIZE / 2.0,
             camera_pan_y: SIM_SIZE / 2.0,
+            prev_camera_pan_x: SIM_SIZE / 2.0, // Initialize to same as camera_pan
+            prev_camera_pan_y: SIM_SIZE / 2.0, // Initialize to same as camera_pan
+            follow_mode: 0,
             window_width: surface_config.width as f32,
             window_height: surface_config.height as f32,
             alpha_blur: 0.002,
@@ -2718,6 +2726,17 @@ impl GpuState {
             });
         profiler.mark("clear visual pipeline");
 
+        let motion_blur_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Motion Blur Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "apply_motion_blur",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("motion blur pipeline");
+
         let clear_agent_grid_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Clear Agent Grid Pipeline"),
@@ -3071,6 +3090,7 @@ impl GpuState {
             diffuse_pipeline,
             diffuse_trails_pipeline,
             clear_visual_pipeline,
+            motion_blur_pipeline,
             clear_agent_grid_pipeline,
             render_inspector_pipeline,
             draw_inspector_agent_pipeline,
@@ -3092,6 +3112,7 @@ impl GpuState {
             alive_count: initial_agents as u32,
             camera_zoom: settings.camera_zoom,
             camera_pan: [SIM_SIZE / 2.0, SIM_SIZE / 2.0],
+            prev_camera_pan: [SIM_SIZE / 2.0, SIM_SIZE / 2.0], // Initialize to same as camera_pan
             agents_cpu: agents,
             agent_buffer_capacity: max_agents,
             cpu_spawn_queue: Vec::new(),
@@ -4174,27 +4195,17 @@ impl GpuState {
     }
 
     pub fn update(&mut self, should_draw: bool) {
-        // Smooth camera following with spring-damper interpolation
+        // Smooth camera following with continuous integration
         if self.follow_selected_agent {
-            // Spring-damper system parameters
-            let spring_stiffness = 8.0; // How quickly camera accelerates toward target
-            let damping = 0.85; // How much velocity is reduced each frame (0-1, higher = more damping)
+            // Store previous camera position for motion blur
+            self.prev_camera_pan = self.camera_pan;
             
-            // Calculate spring force toward target
-            let dx = self.camera_target[0] - self.camera_pan[0];
-            let dy = self.camera_target[1] - self.camera_pan[1];
+            // Continuous integration factor (lower = smoother, more lag)
+            let integration_factor = 0.01;
             
-            // Apply spring acceleration
-            self.camera_velocity[0] += dx * spring_stiffness * 0.016; // Assume ~60fps
-            self.camera_velocity[1] += dy * spring_stiffness * 0.016;
-            
-            // Apply damping
-            self.camera_velocity[0] *= damping;
-            self.camera_velocity[1] *= damping;
-            
-            // Update camera position
-            self.camera_pan[0] += self.camera_velocity[0];
-            self.camera_pan[1] += self.camera_velocity[1];
+            // Smoothly integrate target position into camera position
+            self.camera_pan[0] += (self.camera_target[0] - self.camera_pan[0]) * integration_factor;
+            self.camera_pan[1] += (self.camera_target[1] - self.camera_pan[1]) * integration_factor;
             
             // Clamp to world bounds
             self.camera_pan[0] = self.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
@@ -4339,6 +4350,9 @@ impl GpuState {
             camera_zoom: self.camera_zoom,
             camera_pan_x: self.camera_pan[0],
             camera_pan_y: self.camera_pan[1],
+            prev_camera_pan_x: self.prev_camera_pan[0],
+            prev_camera_pan_y: self.prev_camera_pan[1],
+            follow_mode: if self.follow_selected_agent { 1 } else { 0 },
             window_width: self.surface_config.width as f32,
             window_height: self.surface_config.height as f32,
             alpha_blur: self.alpha_blur,
@@ -4506,6 +4520,11 @@ impl GpuState {
                     (self.surface_config.width + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
                 let height_workgroups =
                     (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
+                cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+
+                // Apply motion blur if following an agent
+                cpass.set_pipeline(&self.motion_blur_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
 
                 // Clear agent grid for agent rendering
