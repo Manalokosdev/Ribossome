@@ -2259,20 +2259,20 @@ fn render_body_part_ctx(
         }
     }
 
-    // 5. ORGAN: Enabler field visualization (debug only)
-    if (amino_props.is_inhibitor && params.camera_zoom > 5.0 && params.debug_mode > 0u) {
+    // 5. ORGAN: Enabler field visualization
+    if (amino_props.is_inhibitor && params.camera_zoom > 5.0) {
         let radius = 20.0;
         let segments = 32u;
         let zoom = params.camera_zoom;
         let fade = clamp((zoom - 5.0) / 10.0, 0.0, 1.0);
-        let alpha = 0.02 * fade;
-        let color = vec4<f32>(0.15, 0.2, 0.15, alpha);
+        let alpha = 0.15 * fade;
+        let color = vec4<f32>(0.2, 0.3, 0.2, alpha);
         var prev = world_pos + vec2<f32>(radius, 0.0);
         for (var s = 1u; s <= segments; s++) {
             let t = f32(s) / f32(segments);
             let ang = t * 6.28318530718;
             let p = world_pos + vec2<f32>(cos(ang)*radius, sin(ang)*radius);
-            draw_thick_line_ctx(prev, p, 0.25, color, ctx);
+            draw_thick_line_ctx(prev, p, 1.5, color, ctx);
             prev = p;
         }
         let blended_color_enabler = mix(amino_props.color, agent_color, params.agent_color_blend);
@@ -2713,8 +2713,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         var amp = 0.0;
         for (var e = 0u; e < enabler_count; e++) {
             let d = length(part_pos - enabler_positions[e]);
-            if (d < 40.0) {
-                amp += max(0.0, 1.0 - d / 40.0);
+            if (d < 20.0) {
+                amp += max(0.0, 1.0 - d / 20.0);
             }
         }
         amplification_per_part[i] = min(amp, 1.0);
@@ -5408,8 +5408,8 @@ fn clear_agent_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Skip clearing the inspector area (rightmost 300px) to preserve it across frames
-    if (x >= width - INSPECTOR_WIDTH) {
+    // Skip clearing the inspector area only when an agent is selected (to preserve inspector UI)
+    if (params.selected_agent_index != 0xFFFFFFFFu && x >= width - INSPECTOR_WIDTH) {
         return;
     }
 
@@ -5741,6 +5741,29 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                             // Modulate brightness: 0.5 to 1.5 range based on signal
                             let brightness = 1.0 + clock_signal * 0.5;
                             base_color = base_color * brightness;
+                        }
+
+                        // For organs that need amplification (propeller, displacer, mouth), calculate and apply
+                        if (part_count < body_count && (props.is_propeller || props.is_displacer || props.is_mouth)) {
+                            let part_pos = selected_agent_buffer[0].body[part_count].pos;
+                            
+                            // Calculate amplification from nearby enablers
+                            var amp = 0.0;
+                            for (var e = 0u; e < body_count; e++) {
+                                let e_base_type = get_base_part_type(selected_agent_buffer[0].body[e].part_type);
+                                let e_props = get_amino_acid_properties(e_base_type);
+                                if (e_props.is_inhibitor) { // enabler flag
+                                    let enabler_pos = selected_agent_buffer[0].body[e].pos;
+                                    let d = length(part_pos - enabler_pos);
+                                    if (d < 20.0) {
+                                        amp += max(0.0, 1.0 - d / 20.0);
+                                    }
+                                }
+                            }
+                            let amplification = min(amp, 1.0);
+                            
+                            // Multiply color by amplification (brighter = more amplification)
+                            base_color = base_color * (1.0 + amplification);
                         }
 
                         color = vec4<f32>(base_color, 1.0);
