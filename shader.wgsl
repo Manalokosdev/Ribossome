@@ -10,6 +10,7 @@
 // ============================================================================
 
 const ENV_GRID_SIZE: u32 = 1024u;      // Environment grid resolution (alpha/beta/gamma)
+const GRID_SIZE: u32 = ENV_GRID_SIZE;  // Alias for backward compatibility
 const SPATIAL_GRID_SIZE: u32 = 512u;   // Spatial hash grid for agent collision detection
 const SIM_SIZE: u32 = 15360u;          // Simulation world size (reduced to half)
 const MAX_BODY_PARTS: u32 = 64u;
@@ -238,7 +239,7 @@ struct EnvironmentInitParams {
 // ============================================================================
 
 @group(0) @binding(0)
-var<storage, read> agents_in: array<Agent>;
+var<storage, read_write> agents_in: array<Agent>;
 
 @group(0) @binding(1)
 var<storage, read_write> agents_out: array<Agent>;
@@ -315,6 +316,8 @@ struct AminoAcidProperties {
     is_alpha_sensor: bool,
     is_beta_sensor: bool,
     is_energy_sensor: bool,
+    is_agent_alpha_sensor: bool,
+    is_agent_beta_sensor: bool,
     signal_decay: f32,
     alpha_left_mult: f32,
     alpha_right_mult: f32,
@@ -350,6 +353,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     props.is_alpha_sensor = false;
     props.is_beta_sensor = false;
     props.is_energy_sensor = false;
+    props.is_agent_alpha_sensor = false;
+    props.is_agent_beta_sensor = false;
     props.is_clock = false;
     props.signal_decay = 0.2;
     props.alpha_left_mult = 0.5;
@@ -463,17 +468,17 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 10.0; // Very heavy - slows agent down significantly
             props.parameter1 = -0.058;
         }
-        case 4u: { // F - Phenylalanine - )
+        case 4u: { // F - Phenylalanine - VAMPIRE MOUTH
             props.segment_length = 18.5;
-            props.thickness = 3.0;
+            props.thickness = 8.0; // Bigger
             // Old CSV: Seed Angle = 30-?
             props.base_angle = 0.03;
             props.alpha_sensitivity = 0.2;
             props.beta_sensitivity = -0.33;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.2, 0.2, 0.2); // Dark grey
-            props.is_mouth = false;
+            props.color = vec3<f32>(1.0, 0.0, 0.0); // Bright red
+            props.is_mouth = true; // VAMPIRE
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
             props.beta_damage = 0.17; // Color value
@@ -489,17 +494,17 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.01;
             props.parameter1 = 0.17;
         }
-        case 5u: { // G - Glycine - Structural (smallest amino acid, flexible)
+        case 5u: { // G - Glycine - VAMPIRE MOUTH
             props.segment_length = 4.0;
-            props.thickness = 3.0;
+            props.thickness = 8.0; // Bigger
             // Old CSV: Seed Angle = -20-?
             props.base_angle = -0.06;
             props.alpha_sensitivity = 0.7;
             props.beta_sensitivity = 0.1;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.4, 0.4, 0.4); // Grey (structural)
-            props.is_mouth = false;
+            props.color = vec3<f32>(1.0, 0.0, 0.0); // Bright red
+            props.is_mouth = true; // VAMPIRE
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.0;
             props.beta_damage = 0.88; // Color value
@@ -515,17 +520,17 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.02;
             props.parameter1 = 0.88;
         }
-        case 6u: { // H - Histidine - Aromatic, charged (real: imidazole ring, pH-sensitive)
+        case 6u: { // H - Histidine - VAMPIRE MOUTH
             props.segment_length = 9.0;
-            props.thickness = 6.0;
+            props.thickness = 8.0; // Bigger
             // Old CSV: Seed Angle = -10-?
             props.base_angle = -0.07;
             props.alpha_sensitivity = 0.2;
             props.beta_sensitivity = -0.61;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.28, 0.28, 0.28); // Dark grey
-            props.is_mouth = false;
+            props.color = vec3<f32>(1.0, 0.0, 0.0); // Bright red
+            props.is_mouth = true; // VAMPIRE
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
             props.beta_damage = -0.35; // Color value
@@ -592,7 +597,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.03;
             props.parameter1 = -0.12;
         }
-        case 9u: { // L - Leucine - STRUCTURAL (propeller/displacer requires organ)
+        case 9u: { // L - Leucine - Agent Alpha Sensor
             props.segment_length = 13.0;
             props.thickness = 10.0;
             props.base_angle = -0.24;
@@ -600,7 +605,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_sensitivity = 0.1;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.2, 0.0, 0.2); // Dark magenta (structural)
+            props.color = vec3<f32>(0.2, 0.0, 0.2); // Dark magenta
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
@@ -609,6 +614,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.energy_consumption = 0.001;
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
+            props.is_agent_alpha_sensor = true;
+            props.is_agent_beta_sensor = false;
             props.signal_decay = 0.2;
             props.alpha_left_mult = 0.35;
             props.alpha_right_mult = 0.65;
@@ -852,7 +859,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.01;
             props.parameter1 = -0.84;
         }
-        case 19u: { // Y - Tyrosine - STRUCTURAL - Aromatic, polar
+        case 19u: { // Y - Tyrosine - Agent Beta Sensor - Aromatic, polar
             props.segment_length = 11.5;
             props.thickness = 4.0;
             props.base_angle = -0.523599;
@@ -860,7 +867,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_sensitivity = 0.52;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.26, 0.26, 0.26); // Grey (structural)
+            props.color = vec3<f32>(0.26, 0.26, 0.26); // Grey
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
@@ -869,6 +876,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.energy_consumption = 0.001;
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
+            props.is_agent_alpha_sensor = false;
+            props.is_agent_beta_sensor = true;
             props.signal_decay = 0.2;
             props.alpha_left_mult = 0.25;
             props.alpha_right_mult = 0.75;
@@ -2318,9 +2327,11 @@ fn render_body_part_ctx(
 
     // 7. ORGAN: Mouth (feeding organ) - asterisk marker
     if (amino_props.is_mouth) {
-        let blended_color_mouth = mix(amino_props.color, agent_color, params.agent_color_blend);
-        let mouth_radius = max(part.size * 1.5, 4.0);
-        draw_asterisk_ctx(world_pos, mouth_radius, vec4<f32>(blended_color_mouth, 0.9), ctx);
+        // Vampire mouths (F/G/H) get special big red 8-point asterisks
+        let is_vampire = (base_type == 4u || base_type == 5u || base_type == 6u);
+        let mouth_radius = select(max(part.size * 1.5, 4.0), max(part.size * 3.0, 8.0), is_vampire);
+        let mouth_color = select(mix(amino_props.color, agent_color, params.agent_color_blend), vec3<f32>(1.0, 0.0, 0.0), is_vampire);
+        draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
     }
 
     // 8. ORGAN: Displacer (repulsion field) - diamond marker
@@ -2441,6 +2452,164 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
 
 // ============================================================================
 // UNIFIED AGENT KERNEL - Does everything in one pass
+// ============================================================================
+// ENERGY DRAIN KERNEL - Runs BEFORE process_agents
+// Vampire mouths drain energy from nearby living agents
+// ============================================================================
+
+@compute @workgroup_size(256)
+fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let agent_id = gid.x;
+    if (agent_id >= params.agent_count) {
+        return;
+    }
+
+    let agent = agents_in[agent_id];
+
+    // Skip dead agents
+    if (agent.alive == 0u || agent.energy <= 0.0) {
+        return;
+    }
+
+    // Check if this agent has any vampire mouth organs (F=4u, G=5u, H=6u)
+    let body_count = agent.body_count;
+    var has_vampire_mouth = false;
+    
+    for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+        if (i >= body_count) { break; }
+        let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
+        if (base_type == 4u || base_type == 5u || base_type == 6u) {
+            has_vampire_mouth = true;
+            break;
+        }
+    }
+    
+    if (!has_vampire_mouth) {
+        return;
+    }
+
+    // Collect nearby agents using spatial grid
+    let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
+    let my_grid_x = u32(clamp(agents_in[agent_id].position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    let my_grid_y = u32(clamp(agents_in[agent_id].position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    
+    var neighbor_count = 0u;
+    var neighbor_ids: array<u32, 64>;
+    
+    for (var dy: i32 = -10; dy <= 10; dy++) {
+        for (var dx: i32 = -10; dx <= 10; dx++) {
+            if (dx == 0 && dy == 0) { continue; }
+            
+            let check_x = i32(my_grid_x) + dx;
+            let check_y = i32(my_grid_y) + dy;
+            
+            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && 
+                check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                
+                let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                let neighbor_id = agent_spatial_grid[check_idx];
+                
+                if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
+                    let neighbor = agents_in[neighbor_id];
+                    
+                    if (neighbor.alive != 0u && neighbor.energy > 0.0) {
+                        if (neighbor_count < 64u) {
+                            neighbor_ids[neighbor_count] = neighbor_id;
+                            neighbor_count++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // No neighbors to drain
+    if (neighbor_count == 0u) {
+        return;
+    }
+
+    // Process each vampire mouth organ (F=4u, G=5u, H=6u)
+    var total_energy_gained = 0.0;
+    
+    // Simple enabler check: count enablers in the agent (using fixed loops)
+    var has_enabler_nearby = false;
+    for (var e = 0u; e < MAX_BODY_PARTS; e++) {
+        if (e >= body_count) { break; }
+        let e_part = agents_in[agent_id].body[e];
+        let e_base = get_base_part_type(e_part.part_type);
+        let e_props = get_amino_acid_properties(e_base);
+        if (e_props.is_inhibitor) {
+            has_enabler_nearby = true;
+            break;
+        }
+    }
+    
+    // Vampire mouths are active when NO enablers present (inverted logic)
+    let global_mouth_activity = select(1.0, 0.0, has_enabler_nearby);
+    
+    if (global_mouth_activity > 0.01) {
+        for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+            if (i >= body_count) { break; }
+            let part = agents_in[agent_id].body[i];
+            let base_type = get_base_part_type(part.part_type);
+            
+            // Check if this is a vampire mouth (F, G, or H)
+            if (base_type == 4u || base_type == 5u || base_type == 6u) {
+                // Get mouth world position
+                let part_pos = part.pos;
+                let rotated_pos = apply_agent_rotation(part_pos, agents_in[agent_id].rotation);
+                let mouth_world_pos = agents_in[agent_id].position + rotated_pos;
+                
+                // Find closest victim within drain range
+                var closest_victim_id = 0xFFFFFFFFu;
+                var closest_dist = 999999.0;
+                let max_drain_distance = 40.0;
+                
+                for (var n = 0u; n < neighbor_count; n++) {
+                    let victim_id = neighbor_ids[n];
+                    let victim = agents_in[victim_id];
+                    
+                    // Distance from mouth to victim center
+                    let delta = mouth_world_pos - victim.position;
+                    let dist = length(delta);
+                    
+                    if (dist < max_drain_distance && dist < closest_dist) {
+                        closest_dist = dist;
+                        closest_victim_id = victim_id;
+                    }
+                }
+                
+                // Drain from closest victim only
+                if (closest_victim_id != 0xFFFFFFFFu) {
+                    let victim = agents_in[closest_victim_id];
+                    
+                    // Distance-based drain: linear inverse proportion
+                    // At distance 0: drain 50% of victim's energy
+                    // At distance 40: drain 0%
+                    let distance_factor = 1.0 - (closest_dist / max_drain_distance);
+                    
+                    // Divide by neighbor_count to mitigate race conditions
+                    // (multiple vampires might target same victim)
+                    let drain_divisor = max(f32(neighbor_count), 1.0);
+                    let drain_amount = (global_mouth_activity * distance_factor * victim.energy * 0.5) / drain_divisor;
+                    
+                    // Check if victim has enough energy
+                    if (victim.energy >= drain_amount && drain_amount > 0.001) {
+                        // Apply drain to victim (write to agents_in)
+                        agents_in[closest_victim_id].energy -= drain_amount;
+                        total_energy_gained += drain_amount;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Add gained energy to this agent
+    if (total_energy_gained > 0.0) {
+        agents_in[agent_id].energy += total_energy_gained;
+    }
+}
+
 // ============================================================================
 
 @compute @workgroup_size(256)
@@ -2592,7 +2761,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Update size
             var rendered_size = props.thickness * 0.5;
-            let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor;
+            let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor || props.is_agent_alpha_sensor || props.is_agent_beta_sensor;
             if (is_sensor) {
                 rendered_size *= 2.0;
             }
@@ -2702,6 +2871,39 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (props.is_inhibitor) { // enabler role
             enabler_positions[enabler_count] = part_i.pos;
             enabler_count += 1u;
+        }
+    }
+
+    // ====== COLLECT NEARBY AGENTS ONCE (for sensors and physics) ======
+    let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
+    let my_grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    let my_grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    
+    var neighbor_count = 0u;
+    var neighbor_ids: array<u32, 64>; // Store up to 64 nearby agents
+    
+    for (var dy: i32 = -10; dy <= 10; dy++) {
+        for (var dx: i32 = -10; dx <= 10; dx++) {
+            let check_x = i32(my_grid_x) + dx;
+            let check_y = i32(my_grid_y) + dy;
+            
+            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && 
+                check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                
+                let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                let neighbor_id = agent_spatial_grid[check_idx];
+                
+                if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
+                    let neighbor = agents_in[neighbor_id];
+                    
+                    if (neighbor.alive != 0u && neighbor.energy > 0.0) {
+                        if (neighbor_count < 64u) {
+                            neighbor_ids[neighbor_count] = neighbor_id;
+                            neighbor_count++;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2831,6 +3033,68 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
             // Add sensor contribution to diffused signal (instead of mixing)
             new_beta = new_beta + nonlinear_value;
+        }
+
+        // AGENT ALPHA SENSOR (L - Leucine)
+        if (amino_props.is_agent_alpha_sensor) {
+            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
+            let sensor_world_pos = agent.position + rotated_pos;
+            
+            // Get sensor orientation (perpendicular to organ, rotated 90 degrees)
+            let axis_local = normalize(agents_out[agent_id].body[i].pos);
+            let perpendicular_local = normalize(vec2<f32>(-axis_local.y, axis_local.x));
+            let sensor_direction = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
+            
+            var agent_signal = 0.0;
+            
+            // Use pre-collected neighbor list
+            for (var n = 0u; n < neighbor_count; n++) {
+                let neighbor = agents_in[neighbor_ids[n]];
+                
+                let delta = neighbor.position - sensor_world_pos;
+                let dist = length(delta);
+                
+                if (dist > 0.1 && dist < 100.0) {
+                    let direction_to_neighbor = normalize(delta);
+                    let dot_product = dot(sensor_direction, direction_to_neighbor);
+                    
+                    // Signal = (1 / distance) * dot_product
+                    agent_signal += (dot_product / dist);
+                }
+            }
+            
+            new_alpha += agent_signal;
+        }
+
+        // AGENT BETA SENSOR (Y - Tyrosine)
+        if (amino_props.is_agent_beta_sensor) {
+            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
+            let sensor_world_pos = agent.position + rotated_pos;
+            
+            // Get sensor orientation (perpendicular to organ, rotated 90 degrees)
+            let axis_local = normalize(agents_out[agent_id].body[i].pos);
+            let perpendicular_local = normalize(vec2<f32>(-axis_local.y, axis_local.x));
+            let sensor_direction = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
+            
+            var agent_signal = 0.0;
+            
+            // Use pre-collected neighbor list
+            for (var n = 0u; n < neighbor_count; n++) {
+                let neighbor = agents_in[neighbor_ids[n]];
+                
+                let delta = neighbor.position - sensor_world_pos;
+                let dist = length(delta);
+                
+                if (dist > 0.1 && dist < 100.0) {
+                    let direction_to_neighbor = normalize(delta);
+                    let dot_product = dot(sensor_direction, direction_to_neighbor);
+                    
+                    // Signal = (1 / distance) * dot_product
+                    agent_signal += (dot_product / dist);
+                }
+            }
+            
+            new_beta += agent_signal;
         }
 
     // Energy sensor contribution rate (now 1.0 as requested)
@@ -2971,48 +3235,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var force = vec2<f32>(0.0);
     var torque = 0.0;
 
-    // ====== COLLECT NEARBY AGENTS ONCE (for repulsion forces) ======
-    let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
-    let my_grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-    let my_grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-    
-    // Collect neighbor IDs (max 441 cells in 21x21 grid, but most will be empty)
-    var neighbor_count = 0u;
-    var neighbor_ids: array<u32, 64>; // Store up to 64 nearby agents
-    
-    for (var dy: i32 = -10; dy <= 10; dy++) {
-        for (var dx: i32 = -10; dx <= 10; dx++) {
-            // Skip own cell to prevent self-collision
-            if (dx == 0 && dy == 0) { continue; }
-            
-            let check_x = i32(my_grid_x) + dx;
-            let check_y = i32(my_grid_y) + dy;
-            
-            // Bounds check
-            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && 
-                check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                
-                let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                let neighbor_id = agent_spatial_grid[check_idx];
-                
-                // Valid neighbor found (not empty, not self)
-                if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
-                    let neighbor = agents_out[neighbor_id];
-                    
-                    // Skip dead neighbors
-                    if (neighbor.alive != 0u && neighbor.energy > 0.0) {
-                        // Store this neighbor if we have space
-                        if (neighbor_count < 64u) {
-                            neighbor_ids[neighbor_count] = neighbor_id;
-                            neighbor_count++;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Now calculate forces using the updated morphology
+    // Now calculate forces using the updated morphology (using pre-collected neighbors)
     var chirality_flip_physics = 1.0; // Track cumulative chirality for propeller direction
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
@@ -4218,7 +4441,21 @@ fn draw_star(center: vec2<f32>, radius: f32, color: vec4<f32>) {
     }
 }
 
-// Helper: draw an asterisk (*) with 6 crossing lines (vertical, horizontal, 2 diagonals)
+// Helper: draw an 8-point asterisk for vampire mouths
+fn draw_asterisk_8_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: InspectorContext) {
+    let angle_step = 0.39269908; // PI / 8 = 22.5 degrees
+    
+    for (var i = 0u; i < 4u; i++) {
+        let angle = f32(i) * angle_step * 2.0;
+        let dx = cos(angle) * radius;
+        let dy = sin(angle) * radius;
+        let start = center - vec2<f32>(dx, dy);
+        let end = center + vec2<f32>(dx, dy);
+        draw_thick_line_ctx(start, end, 1.5, color, ctx);
+    }
+}
+
+// Helper: draw an asterisk (*) with 4 crossing lines (vertical, horizontal, 2 diagonals)
 fn draw_asterisk(center: vec2<f32>, radius: f32, color: vec4<f32>) {
     draw_asterisk_ctx(center, radius, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
 }

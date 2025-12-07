@@ -1314,6 +1314,7 @@ struct GpuState {
     generate_map_pipeline: wgpu::ComputePipeline, // Generate specific map (flat/noise)
     clear_agent_spatial_grid_pipeline: wgpu::ComputePipeline, // Clear agent spatial grid
     populate_agent_spatial_grid_pipeline: wgpu::ComputePipeline, // Populate agent spatial grid
+    drain_energy_pipeline: wgpu::ComputePipeline, // Vampire mouths drain energy from neighbors
     render_pipeline: wgpu::RenderPipeline,
 
     // Bind groups
@@ -2338,7 +2339,7 @@ impl GpuState {
                         binding: 0,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            ty: wgpu::BufferBindingType::Storage { read_only: false }, // Changed to allow drain_energy kernel to write
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2891,6 +2892,17 @@ impl GpuState {
             });
         profiler.mark("populate agent spatial grid pipeline");
 
+        let drain_energy_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Drain Energy Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "drain_energy",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("drain energy pipeline");
+
         // Create render bind group layout
         let render_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -3139,6 +3151,7 @@ impl GpuState {
             generate_map_pipeline,
             clear_agent_spatial_grid_pipeline,
             populate_agent_spatial_grid_pipeline,
+            drain_energy_pipeline,
             render_pipeline,
             compute_bind_group_a,
             compute_bind_group_b,
@@ -4576,6 +4589,12 @@ impl GpuState {
 
                 // Populate agent spatial grid with agent positions - workgroup_size(256)
                 cpass.set_pipeline(&self.populate_agent_spatial_grid_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                // Drain energy from neighbors (vampire mouths) - workgroup_size(256)
+                // Must run BEFORE process_agents so agents see the drained energy
+                cpass.set_pipeline(&self.drain_energy_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
 

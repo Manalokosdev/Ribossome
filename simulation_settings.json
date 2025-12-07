@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.48443377,
+  "camera_zoom": 1.4098376,
   "spawn_probability": 0.3,
   "death_probability": 0.001,
   "mutation_rate": 0.005,
@@ -11,8 +11,8 @@
   "gamma_blur": 0.00005,
   "alpha_slope_bias": -0.1,
   "beta_slope_bias": 1.0,
-  "alpha_multiplier": 0.0002,
-  "beta_multiplier": 0.00015,
+  "alpha_multiplier": 0.00005,
+  "beta_multiplier": 0.00005,
   "alpha_rain_map_path": null,
   "beta_rain_map_path": null,
   "chemical_slope_scale_alpha": 0.1,
@@ -23,7 +23,7 @@
   "pairing_cost": 0.2,
   "prop_wash_strength": 0.05,
   "repulsion_strength": 0.0,
-  "agent_repulsion_strength": 10.0,
+  "agent_repulsion_strength": 0.1,
   "limit_fps": false,
   "limit_fps_25": false,
   "render_interval": 50,
@@ -153,7 +153,7 @@
   ],
   "agent_color_blend": 0.0,
   "alpha_noise_scale": 10.0,
-  "beta_noise_scale": 10.0,
+  "beta_noise_scale": 1.0,
   "gamma_noise_scale": 0.5,
   "noise_power": 1.0
 }
