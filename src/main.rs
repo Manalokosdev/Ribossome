@@ -495,13 +495,13 @@ fn paint_cloud(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: 
     // Draw multiple overlapping circles to create a fluffy cloud appearance - matching GPU shader
     // GPU draws 8 puffs + 1 central circle
     let num_puffs = 8;
-    
+
     // Helper to generate a pseudo-random float from seed
     let hash_f32 = |s: u64| -> f32 {
         let h = s.wrapping_mul(2654435761u64);
         ((h ^ (h >> 32)) & 0xFFFFFFFF) as f32 / 4294967295.0
     };
-    
+
     // Draw outer puffs
     for i in 0..num_puffs {
         let angle = (i as f32) * std::f32::consts::TAU / (num_puffs as f32);
@@ -523,7 +523,7 @@ fn paint_asterisk(painter: &egui::Painter, center: egui::Pos2, radius: f32, colo
     // GPU uses fixed thickness of 1.0 world units, we'll use 1.0 screen pixels for consistency
     let line_thickness = 1.0;
     let d = radius * 0.70710678; // radius / sqrt(2)
-    
+
     // Vertical line
     painter.line_segment(
         [
@@ -684,7 +684,7 @@ impl BodyPart {
     fn base_type(&self) -> u32 {
         self.part_type & 0xFF
     }
-    
+
     /// Extract organ parameter from encoded part_type (0-255)
     fn organ_param(&self) -> u32 {
         (self.part_type >> 8) & 0xFF
@@ -710,8 +710,8 @@ struct Agent {
     total_mass: f32,                           // 4 bytes (64-67) - computed each frame after morphology
     poison_resistant_count: u32,               // 4 bytes (68-71) - number of poison-resistant organs
     genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases) - 72 to 327
-    _pad_genome_align: [u32; 6],               // 24 bytes - padding to align body array to 16-byte boundary
-    body: [BodyPart; MAX_BODY_PARTS],
+    _pad_genome_align: [u32; 6],               // 24 bytes (328-351) - padding to align body to 16-byte boundary
+    body: [BodyPart; MAX_BODY_PARTS],          // starts at byte 352 (16-byte aligned)
 }
 
 // SAFETY: Agent is repr(C) with explicit padding, matching shader layout exactly
@@ -879,7 +879,7 @@ impl AutoDifficultyParam {
         if !self.enabled || self.difficulty_level == 0 {
             return base_value;
         }
-        
+
         let factor = self.adjustment_percent / 100.0;
         let multiplier = if harder_increases {
             // Positive difficulty makes value higher
@@ -888,7 +888,7 @@ impl AutoDifficultyParam {
             // Positive difficulty makes value lower
             1.0 - (self.difficulty_level as f32 * factor)
         };
-        
+
         base_value * multiplier.max(0.01) // Prevent going to zero or negative
     }
 }
@@ -1105,7 +1105,7 @@ impl From<&Agent> for AgentSnapshot {
         for word in &agent.genome {
             genome_bytes.extend_from_slice(&word.to_le_bytes());
         }
-        
+
         Self {
             position: agent.position,
             rotation: agent.rotation,
@@ -1124,7 +1124,7 @@ impl AgentSnapshot {
                 genome_override[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             }
         }
-        
+
         SpawnRequest {
             seed: 0,
             genome_seed: 0,
@@ -1151,12 +1151,12 @@ struct SimulationSnapshot {
 impl SimulationSnapshot {
     fn new(epoch: u64, agents: &[Agent], settings: SimulationSettings) -> Self {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        
+
         // agents should already be filtered for alive != 0 by caller
         // Randomly sample up to 5000 agents if there are more
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
-        
+
         let sampled_agents: Vec<&Agent> = if agents.len() <= 5000 {
             // Keep all agents
             agents.iter().collect()
@@ -1164,14 +1164,14 @@ impl SimulationSnapshot {
             // Sample 5000 random agents
             agents.iter().collect::<Vec<_>>().choose_multiple(&mut rng, 5000).copied().collect()
         };
-        
+
         let agent_snapshots: Vec<AgentSnapshot> = sampled_agents
             .iter()
             .map(|a| AgentSnapshot::from(*a))
             .collect();
-        
+
         println!("Snapshot created with {} agents (from {} living)", agent_snapshots.len(), agents.len());
-        
+
         Self {
             version: "1.0".to_string(),
             timestamp,
@@ -1283,7 +1283,7 @@ struct GpuState {
     spawn_counter: wgpu::Buffer,   // Count of spawned agents
     spawn_readback: wgpu::Buffer,  // Readback for spawn count
     spawn_requests_buffer: wgpu::Buffer, // CPU spawn requests seeds
-    
+
     // Grid readback buffers for snapshot save
     alpha_grid_readback: wgpu::Buffer,
     beta_grid_readback: wgpu::Buffer,
@@ -1359,7 +1359,7 @@ struct GpuState {
     // Epoch tracking for speed display
     last_epoch_update: std::time::Instant,
     last_epoch_count: u64,
-    
+
     // Inspector refresh throttling (update at ~25fps to save GPU time)
     inspector_frame_counter: u32,
     epochs_per_second: f32,
@@ -1371,7 +1371,7 @@ struct GpuState {
     epoch_sample_interval: u64,   // Sample every N epochs (1000)
     last_sample_epoch: u64,       // Last epoch when we sampled
     max_history_points: usize,    // Maximum data points (5000)
-    
+
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
 
@@ -1466,7 +1466,7 @@ struct GpuState {
     ignore_stop_codons: bool,
     require_start_codon: bool,
     asexual_reproduction: bool,
-    
+
     // Visualization controls
     background_color: [f32; 3],
     alpha_blend_mode: u32, // 0=additive, 1=multiply
@@ -1484,7 +1484,7 @@ struct GpuState {
     agent_blend_mode: u32, // 0=comp, 1=add, 2=subtract, 3=multiply
     agent_color: [f32; 3],
     agent_color_blend: f32,
-    
+
     settings_path: PathBuf,
     last_saved_settings: SimulationSettings,
     destroyed: bool,
@@ -1650,14 +1650,14 @@ impl GpuState {
         self.agent_blend_mode = settings.agent_blend_mode;
         self.agent_color = settings.agent_color;
         self.agent_color_blend = settings.agent_color_blend;
-        
+
         if let Some(path) = &self.alpha_rain_map_path.clone() {
              let _ = self.load_alpha_rain_map(path);
         }
         if let Some(path) = &self.beta_rain_map_path.clone() {
              let _ = self.load_beta_rain_map(path);
         }
-        
+
         Ok(())
     }
 
@@ -1684,7 +1684,7 @@ impl GpuState {
             gamma_noise_scale: self.gamma_noise_scale,
             noise_power: self.noise_power,
         };
-        
+
         self.queue.write_buffer(
             &self.environment_init_params_buffer,
             0,
@@ -1708,17 +1708,17 @@ impl GpuState {
             } else {
                 pass.set_bind_group(0, &self.compute_bind_group_a, &[]);
             }
-            
+
             let workgroups = (GRID_DIM_U32 + 15) / 16;
             pass.dispatch_workgroups(workgroups, workgroups, 1);
         }
-        
+
         self.queue.submit(Some(encoder.finish()));
     }
 
     async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
-        
+
         // Create instance and adapter
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -2264,24 +2264,24 @@ impl GpuState {
         // Initialize spawn_counter to 0 to avoid undefined first-frame content
         queue.write_buffer(&spawn_counter, 0, bytemuck::bytes_of(&0u32));
         profiler.mark("Counters and readbacks");
-        
+
         // Grid readback buffers for snapshot save
         let grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
-        
+
         let alpha_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Alpha Grid Readback"),
             size: grid_size_bytes,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        
+
         let beta_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Beta Grid Readback"),
             size: grid_size_bytes,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        
+
         let gamma_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Gamma Grid Readback"),
             size: grid_size_bytes,
@@ -3449,12 +3449,12 @@ impl GpuState {
     fn load_alpha_rain_map<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let path = path.as_ref();
         let (alpha_values, thumbnail) = Self::read_rain_map(path)?;
-        
+
         // Update alpha values in CPU-side data (even indices)
         for i in 0..GRID_CELL_COUNT {
             self.rain_map_data[i * 2] = alpha_values[i];
         }
-        
+
         // Upload to GPU
         self.queue.write_buffer(
             &self.rain_map_buffer,
@@ -3470,12 +3470,12 @@ impl GpuState {
     fn load_beta_rain_map<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let path = path.as_ref();
         let (beta_values, thumbnail) = Self::read_rain_map(path)?;
-        
+
         // Update beta values in CPU-side data (odd indices)
         for i in 0..GRID_CELL_COUNT {
             self.rain_map_data[i * 2 + 1] = beta_values[i];
         }
-        
+
         // Upload to GPU
         self.queue.write_buffer(
             &self.rain_map_buffer,
@@ -3493,7 +3493,7 @@ impl GpuState {
         for i in 0..GRID_CELL_COUNT {
             self.rain_map_data[i * 2] = 1.0;
         }
-        
+
         // Upload to GPU
         self.queue.write_buffer(
             &self.rain_map_buffer,
@@ -3510,7 +3510,7 @@ impl GpuState {
         for i in 0..GRID_CELL_COUNT {
             self.rain_map_data[i * 2 + 1] = 1.0;
         }
-        
+
         // Upload to GPU
         self.queue.write_buffer(
             &self.rain_map_buffer,
@@ -4108,7 +4108,7 @@ impl GpuState {
                     let agent_bytes = &selected_data[..std::mem::size_of::<Agent>()];
                     let agent: Agent = bytemuck::pod_read_unaligned(agent_bytes);
                     self.selected_agent_data = Some(agent);
-                    
+
                     // Update camera target if following this agent
                     if self.follow_selected_agent {
                         self.camera_target = agent.position;
@@ -4216,26 +4216,26 @@ impl GpuState {
         if self.follow_selected_agent {
             // Store previous camera position for motion blur
             self.prev_camera_pan = self.camera_pan;
-            
+
             // Frame-rate independent integration factor using exponential decay
             let clamped_dt = frame_dt.clamp(0.001, 0.1);
-            let damping_rate = 1.25; // Faster follow (~2% step at 60fps: 1 - exp(-1.25*0.016) ≈ 0.02)
+            let damping_rate = 8.0; // Much faster follow (~12% step at 60fps: 1 - exp(-8.0*0.016) ≈ 0.12)
             let integration_factor = 1.0 - (-damping_rate * clamped_dt).exp();
-            
+
             // Smoothly integrate target position into camera position
             self.camera_pan[0] += (self.camera_target[0] - self.camera_pan[0]) * integration_factor;
             self.camera_pan[1] += (self.camera_target[1] - self.camera_pan[1]) * integration_factor;
-            
+
             // Clamp to world bounds
             self.camera_pan[0] = self.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
             self.camera_pan[1] = self.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
         }
-        
+
         // Auto Difficulty Logic
         if !self.is_paused {
             let pop = self.alive_count as f32;
             let current_epoch = self.epoch;
-            
+
             // Helper macro to avoid repetition
             macro_rules! adjust_param {
                 ($param_struct:expr, $is_harder_increase:expr) => {
@@ -4251,7 +4251,7 @@ impl GpuState {
                                 $param_struct.difficulty_level -= 1;
                                 adjusted = true;
                             }
-                            
+
                             if adjusted {
                                 $param_struct.last_adjustment_epoch = current_epoch;
                             }
@@ -4315,22 +4315,22 @@ impl GpuState {
 
         // Calculate rain values with variation
         let time = self.epoch as f32;
-        
+
         let alpha_var = self.alpha_rain_variation;
         let beta_var = self.beta_rain_variation;
-        
+
         let alpha_freq = self.alpha_rain_freq / 1000.0;
         let alpha_phase = self.alpha_rain_phase;
         let alpha_sin = (time * alpha_freq * 2.0 * std::f32::consts::PI + alpha_phase).sin();
-        
+
         let beta_freq = self.beta_rain_freq / 1000.0;
         let beta_phase = self.beta_rain_phase;
         let beta_sin = (time * beta_freq * 2.0 * std::f32::consts::PI + beta_phase).sin();
-        
+
         // Apply difficulty adjustments to base values, then apply rain variation
         let base_alpha = self.difficulty.alpha_rain.apply_to(self.alpha_multiplier, false);
         let base_beta = self.difficulty.beta_rain.apply_to(self.beta_multiplier, true);
-        
+
         let current_alpha = base_alpha * (1.0 + alpha_sin * alpha_var).max(0.0);
         let current_beta = base_beta * (1.0 + beta_sin * beta_var).max(0.0);
 
@@ -4560,7 +4560,7 @@ impl GpuState {
                 // Update every 2-3 frames depending on main loop speed
                 let should_update_inspector = self.inspector_frame_counter % 2 == 0;
                 self.inspector_frame_counter = self.inspector_frame_counter.wrapping_add(1);
-                
+
                 if should_update_inspector {
                     // Render inspector panel background if an agent is selected
                     cpass.set_pipeline(&self.render_inspector_pipeline);
@@ -4647,7 +4647,7 @@ impl GpuState {
                 let height_workgroups =
                     (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-                
+
                 // Inspector panel is now drawn by the selected agent during simulation
             }
         }
@@ -5089,7 +5089,7 @@ impl GpuState {
         encoder.copy_buffer_to_buffer(&self.alpha_grid, 0, &self.alpha_grid_readback, 0, grid_size_bytes);
         encoder.copy_buffer_to_buffer(&self.beta_grid, 0, &self.beta_grid_readback, 0, grid_size_bytes);
         encoder.copy_buffer_to_buffer(&self.gamma_grid, 0, &self.gamma_grid_readback, 0, grid_size_bytes);
-        
+
         // Copy agents from GPU (use current buffer based on ping-pong)
         let agents_size_bytes = (std::mem::size_of::<Agent>() * self.agent_buffer_capacity) as u64;
         let source_buffer = if self.ping_pong { &self.agents_buffer_b } else { &self.agents_buffer_a };
@@ -5134,9 +5134,9 @@ impl GpuState {
             .into_iter()
             .filter(|a| a.alive != 0)
             .collect();
-        
+
         println!("Saving snapshot with {} living agents", living_agents.len());
-        
+
         // Create snapshot from living agents with current settings
         let current_settings = self.current_settings();
         let snapshot = SimulationSnapshot::new(self.epoch, &living_agents, current_settings);
@@ -5151,25 +5151,25 @@ impl GpuState {
         // Reset simulation state before loading to prevent crashes on subsequent loads
         // Clear alive counter
         self.queue.write_buffer(&self.alive_counter, 0, bytemuck::bytes_of(&0u32));
-        
+
         // Clear spawn counter
         self.queue.write_buffer(&self.spawn_counter, 0, bytemuck::bytes_of(&0u32));
-        
+
         // Zero out all agent buffers
         let zero_agents = vec![Agent::zeroed(); self.agent_buffer_capacity];
         self.queue.write_buffer(&self.agents_buffer_a, 0, bytemuck::cast_slice(&zero_agents));
         self.queue.write_buffer(&self.agents_buffer_b, 0, bytemuck::cast_slice(&zero_agents));
-        
+
         // Clear CPU-side state
         self.agents_cpu.clear();
         self.cpu_spawn_queue.clear();
         self.agent_count = 0;
         self.alive_count = 0;
         self.spawn_request_count = 0;
-        
+
         // Load snapshot from PNG file
         let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
-        
+
         // Apply loaded settings only if they exist in the snapshot (backwards compatibility)
         if let Some(settings) = &snapshot.settings {
             self.camera_zoom = settings.camera_zoom;
@@ -5245,7 +5245,7 @@ impl GpuState {
             self.agent_blend_mode = settings.agent_blend_mode;
             self.agent_color = settings.agent_color;
             self.agent_color_blend = settings.agent_color_blend;
-            
+
             if let Some(path) = &settings.alpha_rain_map_path {
                  let _ = self.load_alpha_rain_map(path);
             }
@@ -5255,32 +5255,32 @@ impl GpuState {
         } else {
             println!("ΓÜá Loaded snapshot without settings (old format) - using current settings");
         }
-        
+
         // Upload grids to GPU
         self.queue.write_buffer(&self.alpha_grid, 0, bytemuck::cast_slice(&alpha_grid));
         self.queue.write_buffer(&self.beta_grid, 0, bytemuck::cast_slice(&beta_grid));
         self.queue.write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_grid));
-        
+
         // Queue agents from snapshot for spawning
         for agent_snap in snapshot.agents.iter() {
             let spawn_req = agent_snap.to_spawn_request();
             self.cpu_spawn_queue.push(spawn_req);
         }
-        
+
         // Update spawn request count so they get processed
         self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
-        
+
         // Update epoch from snapshot
         self.epoch = snapshot.epoch;
-        
+
         // Immediately save to autosave to ensure continuity
         let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
         if let Err(e) = self.save_snapshot_to_file(autosave_path) {
             eprintln!("ΓÜá Failed to update autosave after loading snapshot: {:?}", e);
         }
-        
+
         println!("Γ£ô Loaded settings and queued {} agents from snapshot", self.cpu_spawn_queue.len());
-        
+
         Ok(())
     }
 
@@ -5674,7 +5674,7 @@ fn render_splash_screen(
                     vec2<f32>(1.0, -1.0),   // Bottom-right
                     vec2<f32>(1.0, 1.0)     // Top-right
                 );
-                
+
                 var uv = array<vec2<f32>, 6>(
                     vec2<f32>(0.0, 1.0),
                     vec2<f32>(1.0, 1.0),
@@ -5683,7 +5683,7 @@ fn render_splash_screen(
                     vec2<f32>(1.0, 1.0),
                     vec2<f32>(1.0, 0.0)
                 );
-                
+
                 out.position = vec4<f32>(pos[vertex_index], 0.0, 1.0);
                 out.tex_coords = uv[vertex_index];
                 return out;
@@ -5836,7 +5836,7 @@ fn save_simulation_snapshot(
     snapshot: &SimulationSnapshot,
 ) -> anyhow::Result<()> {
     use std::io::BufWriter;
-    
+
     // 1. Create RGB image from grids
     let mut img_data = vec![0u8; GRID_CELL_COUNT * 3];
     for i in 0..GRID_CELL_COUNT {
@@ -5844,26 +5844,26 @@ fn save_simulation_snapshot(
         img_data[i * 3 + 1] = (alpha_grid[i].clamp(0.0, 1.0) * 255.0) as u8;  // G = alpha (food)
         img_data[i * 3 + 2] = (gamma_grid[i].clamp(0.0, 1.0) * 255.0) as u8;  // B = gamma (terrain)
     }
-    
+
     // 2. Serialize and compress metadata
     let json = serde_json::to_string(snapshot)?;
     let compressed = zstd::encode_all(json.as_bytes(), 3)?;
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&compressed);
-    
+
     // 3. Write PNG with custom text chunk
     let file = std::fs::File::create(path)?;
     let w = BufWriter::new(file);
     let mut encoder = png::Encoder::new(w, GRID_DIM_U32, GRID_DIM_U32);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
-    
+
     // Add metadata as uncompressed text chunk
     encoder.add_text_chunk("RibossomeSnapshot".to_string(), encoded)?;
-    
+
     let mut writer = encoder.write_header()?;
     writer.write_image_data(&img_data)?;
-    
+
     println!("Γ£ô Saved snapshot: {} agents, epoch {}", snapshot.agents.len(), snapshot.epoch);
     Ok(())
 }
@@ -5872,31 +5872,31 @@ fn load_simulation_snapshot(
     path: &Path,
 ) -> anyhow::Result<(Vec<f32>, Vec<f32>, Vec<f32>, SimulationSnapshot)> {
     use std::io::BufReader;
-    
+
     let file = std::fs::File::open(path)?;
     let decoder = png::Decoder::new(BufReader::new(file));
     let mut reader = decoder.read_info()?;
-    
+
     // Read image data
     let mut buf = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf)?;
-    
+
     if info.width != GRID_DIM_U32 || info.height != GRID_DIM_U32 {
-        anyhow::bail!("Invalid snapshot size: {}x{}, expected {}x{}", 
+        anyhow::bail!("Invalid snapshot size: {}x{}, expected {}x{}",
             info.width, info.height, GRID_DIM_U32, GRID_DIM_U32);
     }
-    
+
     // Extract grids from RGB channels
     let mut alpha_grid = vec![0.0f32; GRID_CELL_COUNT];
     let mut beta_grid = vec![0.0f32; GRID_CELL_COUNT];
     let mut gamma_grid = vec![0.0f32; GRID_CELL_COUNT];
-    
+
     for i in 0..GRID_CELL_COUNT {
         beta_grid[i] = buf[i * 3 + 0] as f32 / 255.0;  // R = beta (poison)
         alpha_grid[i] = buf[i * 3 + 1] as f32 / 255.0; // G = alpha (food)
         gamma_grid[i] = buf[i * 3 + 2] as f32 / 255.0; // B = gamma (terrain)
     }
-    
+
     // Extract metadata from text chunks
     let text_chunks = reader.info().uncompressed_latin1_text.clone();
     for chunk in text_chunks.iter() {
@@ -5905,14 +5905,14 @@ fn load_simulation_snapshot(
             let compressed = base64::engine::general_purpose::STANDARD.decode(&chunk.text)?;
             let json = zstd::decode_all(&compressed[..])?;
             let snapshot: SimulationSnapshot = serde_json::from_slice(&json)?;
-            
-            println!("Γ£ô Loaded snapshot: {} agents, epoch {}, saved {}", 
+
+            println!("Γ£ô Loaded snapshot: {} agents, epoch {}, saved {}",
                 snapshot.agents.len(), snapshot.epoch, snapshot.timestamp);
-            
+
             return Ok((alpha_grid, beta_grid, gamma_grid, snapshot));
         }
     }
-    
+
     anyhow::bail!("No RibossomeSnapshot metadata found in PNG")
 }
 
@@ -6003,7 +6003,7 @@ fn main() {
                         }
                     }
                 }
-                
+
                 state = Some(loaded_state);
                 window.set_title("GPU Artificial Life Simulator");
                 let _ = window.request_inner_size(winit::dpi::LogicalSize::new(1600, 800));
@@ -6161,14 +6161,14 @@ fn main() {
                                     MouseScrollDelta::LineDelta(_, y) => y * 0.1,
                                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
                                 };
-                                
+
                                 // Check if mouse is over inspector area (rightmost 300px)
                                 let mouse_over_inspector = if let Some(mouse_pos) = state.last_mouse_pos {
                                     mouse_pos[0] > (state.surface_config.width as f32 - 300.0)
                                 } else {
                                     false
                                 };
-                                
+
                                 if mouse_over_inspector {
                                     // Zoom inspector
                                     state.inspector_zoom *= 1.0 + zoom_delta;
@@ -6230,7 +6230,7 @@ fn main() {
                                 // Only increment epoch and update stats when simulation is running
                                 if should_run_simulation {
                                     state.epoch += 1;
-                                    
+
                                     // Auto-snapshot every AUTO_SNAPSHOT_INTERVAL epochs
                                     if state.epoch > 0 && state.epoch % AUTO_SNAPSHOT_INTERVAL == 0 && state.epoch != state.last_autosave_epoch {
                                         state.last_autosave_epoch = state.epoch;
@@ -6288,39 +6288,39 @@ fn main() {
                                                         if ui.button("Spawn 20000 Agents").clicked() && !state.is_paused {
                                                             state.queue_random_spawns(20000);
                                                         }
-                                                        
+
                                                         if ui.button("Load Agent & Spawn 100...").clicked() && !state.is_paused {
                                                             match load_agent_via_dialog() {
                                                                 Ok(genome) => {
                                                                     println!("Successfully loaded genome, spawning 100 clones...");
-                                                                    
+
                                                                     for _ in 0..100 {
                                                                         state.rng_state = state.rng_state
                                                                             .wrapping_mul(6364136223846793005u64)
                                                                             .wrapping_add(1442695040888963407u64);
                                                                         let seed = (state.rng_state >> 32) as u32;
-                                                                        
+
                                                                         state.rng_state = state.rng_state
                                                                             .wrapping_mul(6364136223846793005u64)
                                                                             .wrapping_add(1442695040888963407u64);
                                                                         let genome_seed = (state.rng_state >> 32) as u32;
-                                                                        
+
                                                                         state.rng_state = state.rng_state
                                                                             .wrapping_mul(6364136223846793005u64)
                                                                             .wrapping_add(1442695040888963407u64);
                                                                         let rx = (state.rng_state >> 32) as f32 / u32::MAX as f32;
-                                                                        
+
                                                                         state.rng_state = state.rng_state
                                                                             .wrapping_mul(6364136223846793005u64)
                                                                             .wrapping_add(1442695040888963407u64);
                                                                         let ry = (state.rng_state >> 32) as f32 / u32::MAX as f32;
-                                                                        
+
                                                                         state.rng_state = state.rng_state
                                                                             .wrapping_mul(6364136223846793005u64)
                                                                             .wrapping_add(1442695040888963407u64);
                                                                         let rotation = ((state.rng_state >> 32) as f32 / u32::MAX as f32)
                                                                             * std::f32::consts::TAU;
-                                                                        
+
                                                                         let request = SpawnRequest {
                                                                             seed,
                                                                             genome_seed,
@@ -6331,7 +6331,7 @@ fn main() {
                                                                             rotation,
                                                                             genome_override: genome,
                                                                         };
-                                                                        
+
                                                                         state.cpu_spawn_queue.push(request);
                                                                     }
                                                                     println!("Queued 100 clones for spawning.");
@@ -6339,7 +6339,7 @@ fn main() {
                                                                 Err(err) => eprintln!("Load canceled or failed: {err:?}"),
                                                             }
                                                         }
-                                                        
+
                                                         if ui.button("Save Selected Agent").clicked() {
                                                             if let Some(agent) = state.selected_agent_data {
                                                                 if let Err(err) = save_agent_via_dialog(&agent) {
@@ -6368,7 +6368,7 @@ fn main() {
                                                         state.set_speed_mode(1);
                                                     }
                                                 }
-                                                
+
                                                 ui.separator();
                                                 if ui.button("≡ƒÆ╛ Save Snapshot").clicked() {
                                                     state.snapshot_save_requested = true;
@@ -6465,7 +6465,7 @@ fn main() {
                                                     let button = egui::Button::new(*name)
                                                         .fill(if is_selected { *color } else { egui::Color32::from_rgb(40, 40, 40) })
                                                         .stroke(egui::Stroke::new(1.0, if is_selected { egui::Color32::WHITE } else { *color }));
-                                                    
+
                                                     if ui.add(button).clicked() {
                                                         state.ui_tab = idx;
                                                     }
@@ -6664,7 +6664,7 @@ fn main() {
                                                                         state.alpha_gamma_adjust = settings.alpha_gamma_adjust;
                                                                         state.beta_gamma_adjust = settings.beta_gamma_adjust;
                                                                         state.gamma_gamma_adjust = settings.gamma_gamma_adjust;
-                                                                        
+
                                                                         if let Some(path) = &settings.alpha_rain_map_path {
                                                                             let _ = state.load_alpha_rain_map(path);
                                                                         }
@@ -7329,10 +7329,10 @@ fn main() {
                                                     // Evolution tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Rain Cycling");
-                                                        
+
                                                         let current_alpha = state.alpha_rain_history.back().copied().unwrap_or(state.alpha_multiplier);
                                                         let current_beta = state.beta_rain_history.back().copied().unwrap_or(state.beta_multiplier);
-                                                        
+
                                                         ui.separator();
                                                         ui.heading("Alpha Rain");
                                                         ui.label(egui::RichText::new(format!("Current Alpha Rain: {:.6}", current_alpha)).color(Color32::GREEN));
@@ -7342,7 +7342,7 @@ fn main() {
                                                         }
                                                         ui.add(egui::Slider::new(&mut state.alpha_rain_phase, 0.0..=std::f32::consts::PI * 2.0).text("Phase"));
                                                         ui.add(egui::Slider::new(&mut state.alpha_rain_freq, 0.0..=10.0).text("Freq (cycles/1k)"));
-                                                        
+
                                                         ui.separator();
                                                         ui.heading("Beta Rain");
                                                         ui.label(egui::RichText::new(format!("Current Beta Rain: {:.6}", current_beta)).color(Color32::RED));
@@ -7352,14 +7352,14 @@ fn main() {
                                                         }
                                                         ui.add(egui::Slider::new(&mut state.beta_rain_phase, 0.0..=std::f32::consts::PI * 2.0).text("Phase"));
                                                         ui.add(egui::Slider::new(&mut state.beta_rain_freq, 0.0..=10.0).text("Freq (cycles/1k)"));
-                                                        
+
                                                         ui.separator();
                                                         ui.heading("Rain Projection (Future)");
-                                                        
+
                                                         // Apply difficulty to base values for accurate projection
                                                         let base_alpha = state.difficulty.alpha_rain.apply_to(state.alpha_multiplier, false);
                                                         let base_beta = state.difficulty.beta_rain.apply_to(state.beta_multiplier, true);
-                                                        
+
                                                         let time = state.epoch as f64;
                                                         let points = 500;
                                                         let alpha_points: PlotPoints = (0..points).map(|i| {
@@ -7370,7 +7370,7 @@ fn main() {
                                                             let val = base_alpha as f64 * (1.0 + sin_val * state.alpha_rain_variation as f64).max(0.0);
                                                             [i as f64, val]
                                                         }).collect();
-                                                        
+
                                                         let beta_points: PlotPoints = (0..points).map(|i| {
                                                             let t = time + i as f64;
                                                             let freq = state.beta_rain_freq as f64 / 1000.0;
@@ -7379,7 +7379,7 @@ fn main() {
                                                             let val = base_beta as f64 * (1.0 + sin_val * state.beta_rain_variation as f64).max(0.0);
                                                             [i as f64, val]
                                                         }).collect();
-                                                        
+
                                                         Plot::new("rain_plot_future")
                                                             .view_aspect(2.0)
                                                             .auto_bounds([false, true].into())
@@ -7395,7 +7395,7 @@ fn main() {
                                                         ui.heading("Auto Difficulty Settings");
                                                         ui.label("Automatically adjust parameters based on population count.");
                                                         ui.label(format!("Current Population: {}", state.alive_count));
-                                                        
+
                                                         if ui.button("Reset All Difficulty Levels").clicked() {
                                                             state.difficulty.food_power.difficulty_level = 0;
                                                             state.difficulty.food_power.last_adjustment_epoch = 0;
@@ -7410,7 +7410,7 @@ fn main() {
                                                             state.difficulty.beta_rain.difficulty_level = 0;
                                                             state.difficulty.beta_rain.last_adjustment_epoch = 0;
                                                         }
-                                                        
+
                                                         let current_epoch = state.epoch;
                                                         let draw_param = |ui: &mut egui::Ui, param: &mut AutoDifficultyParam, name: &str, current_val: f32, current_epoch: u64| {
                                                             ui.separator();
@@ -7420,7 +7420,7 @@ fn main() {
                                                                 ui.label(egui::RichText::new(format!("Level: {}", param.difficulty_level)).strong());
                                                                 ui.label(format!("Current Val: {:.5}", current_val));
                                                             });
-                                                            
+
                                                             if param.enabled {
                                                                 ui.horizontal(|ui| {
                                                                     ui.label("Min Pop:");
@@ -7436,7 +7436,7 @@ fn main() {
                                                                     ui.label("Cooldown (epochs):");
                                                                     ui.add(egui::DragValue::new(&mut param.cooldown_epochs));
                                                                 });
-                                                                
+
                                                                 let epochs_passed = current_epoch.saturating_sub(param.last_adjustment_epoch);
                                                                 if epochs_passed < param.cooldown_epochs {
                                                                     let remaining = param.cooldown_epochs - epochs_passed;
@@ -7466,7 +7466,7 @@ fn main() {
                                                     // Visualization tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Visualization Settings");
-                                                        
+
                                                         ui.separator();
                                                         ui.label("Grid Interpolation");
                                                         ui.horizontal(|ui| {
@@ -7474,7 +7474,7 @@ fn main() {
                                                             ui.radio_value(&mut state.grid_interpolation, 1, "Bilinear (Smooth)");
                                                             ui.radio_value(&mut state.grid_interpolation, 2, "Bicubic (Smoothest)");
                                                         });
-                                                        
+
                                                         ui.separator();
                                                         ui.label("Background");
                                                         ui.horizontal(|ui| {
@@ -7492,7 +7492,7 @@ fn main() {
                                                                 ];
                                                             }
                                                         });
-                                                        
+
                                                         ui.separator();
                                                         ui.heading("Slope Lighting");
                                                         ui.checkbox(&mut state.slope_lighting, "Enable Slope Lighting");
@@ -7523,7 +7523,7 @@ fn main() {
                                                                     .text("Light Z")
                                                             );
                                                         }
-                                                        
+
                                                         ui.separator();
                                                         ui.heading("Alpha Channel");
                                                         ui.checkbox(&mut state.alpha_show, "Show Alpha");
@@ -7552,7 +7552,7 @@ fn main() {
                                                                 .text("Gamma Adjustment")
                                                                 .logarithmic(true)
                                                         );
-                                                        
+
                                                         ui.separator();
                                                         ui.heading("Beta Channel");
                                                         ui.checkbox(&mut state.beta_show, "Show Beta");
@@ -7581,7 +7581,7 @@ fn main() {
                                                                 .text("Gamma Adjustment")
                                                                 .logarithmic(true)
                                                         );
-                                                        
+
                                                         ui.separator();
                                                         ui.heading("Gamma Channel");
                                                         ui.checkbox(&mut state.gamma_show, "Show Gamma");
@@ -7610,7 +7610,7 @@ fn main() {
                                                                 .text("Gamma Adjustment")
                                                                 .logarithmic(true)
                                                         );
-                                                        
+
                                                         ui.separator();
                                                         ui.heading("Agents");
                                                         ui.label("Blend Mode:");
@@ -7687,11 +7687,11 @@ fn main() {
                                 reset_simulation_state(&mut state, &window, &mut egui_state);
                                 window.request_redraw();
                             }
-                            
+
                             if let Some(gpu_state) = &mut state {
                                 if gpu_state.snapshot_save_requested {
                                     gpu_state.snapshot_save_requested = false;
-                                    
+
                                     // Open file dialog
                                     if let Some(path) = rfd::FileDialog::new()
                                         .add_filter("PNG Image", &["png"])
@@ -7704,10 +7704,10 @@ fn main() {
                                         }
                                     }
                                 }
-                                
+
                                 if gpu_state.snapshot_load_requested {
                                     gpu_state.snapshot_load_requested = false;
-                                    
+
                                     // Open file dialog
                                     if let Some(path) = rfd::FileDialog::new()
                                         .add_filter("PNG Image", &["png"])
@@ -7798,14 +7798,14 @@ fn main() {
                                             if ui.button("Spawn 5000 Random Agents").clicked() && !state.is_paused {
                                                 state.queue_random_spawns(5000);
                                             }
-                                            
+
                                             ui.separator();
                                             ui.heading("Snapshot");
                                             if ui.button("≡ƒÆ╛ Save Snapshot (PNG)").clicked() {
                                                 state.snapshot_save_requested = true;
                                             }
                                             ui.label("Saves environment + up to 5000 agents (random sample)");
-                                            
+
                                             ui.label(format!("World: {}x{}", SIM_SIZE as u32, SIM_SIZE as u32));
                                             ui.label("Grid: 2048x2048");
                                             ui.label(
@@ -7847,15 +7847,15 @@ fn main() {
                                                 ui.label("Rain Cycling");
                                                 ui.add(egui::Slider::new(&mut state.alpha_rain_variation, 0.0..=1.0).text("Alpha Var %"));
                                                 ui.add(egui::Slider::new(&mut state.beta_rain_variation, 0.0..=1.0).text("Beta Var %"));
-                                                
+
                                                 ui.label("Alpha Cycle");
                                                 ui.add(egui::Slider::new(&mut state.alpha_rain_phase, 0.0..=std::f32::consts::PI * 2.0).text("Phase"));
                                                 ui.add(egui::Slider::new(&mut state.alpha_rain_freq, 0.0..=100.0).text("Freq (cycles/1k)"));
-                                                
+
                                                 ui.label("Beta Cycle");
                                                 ui.add(egui::Slider::new(&mut state.beta_rain_phase, 0.0..=std::f32::consts::PI * 2.0).text("Phase"));
                                                 ui.add(egui::Slider::new(&mut state.beta_rain_freq, 0.0..=100.0).text("Freq (cycles/1k)"));
-                                                
+
                                                 ui.label("Rain Projection (Future)");
                                                 let time = state.epoch as f64;
                                                 let points = 500;
@@ -7867,7 +7867,7 @@ fn main() {
                                                     let val = state.alpha_multiplier as f64 * (1.0 + sin_val * state.alpha_rain_variation as f64).max(0.0);
                                                     [i as f64, val]
                                                 }).collect();
-                                                
+
                                                 let beta_points: PlotPoints = (0..points).map(|i| {
                                                     let t = time + i as f64;
                                                     let freq = state.beta_rain_freq as f64 / 1000.0;
@@ -7876,7 +7876,7 @@ fn main() {
                                                     let val = state.beta_multiplier as f64 * (1.0 + sin_val * state.beta_rain_variation as f64).max(0.0);
                                                     [i as f64, val]
                                                 }).collect();
-                                                
+
                                                 Plot::new("rain_plot")
                                                     .view_aspect(2.0)
                                                     .show(ui, |plot_ui| {

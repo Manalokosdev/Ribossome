@@ -1,4 +1,4 @@
-// Ribossome - GPU-Accelerated Artificial Life Simulator
+﻿// Ribossome - GPU-Accelerated Artificial Life Simulator
 // Copyright (c) 2025 Filipe da Veiga Ventura Alves
 // Licensed under MIT License
 
@@ -468,20 +468,19 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 10.0; // Very heavy - slows agent down significantly
             props.parameter1 = -0.058;
         }
-        case 4u: { // F - Phenylalanine - VAMPIRE MOUTH
-            props.segment_length = 18.5;
-            props.thickness = 8.0; // Bigger
-            // Old CSV: Seed Angle = 30-?
+        case 4u: { // F - Phenylalanine - STRUCTURAL - Large aromatic
+            props.segment_length = 13.0;
+            props.thickness = 4.5;
             props.base_angle = 0.03;
             props.alpha_sensitivity = 0.2;
             props.beta_sensitivity = -0.33;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(1.0, 0.0, 0.0); // Bright red
-            props.is_mouth = true; // VAMPIRE
+            props.color = vec3<f32>(0.6, 0.3, 0.0); // Brown
+            props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
-            props.beta_damage = 0.17; // Color value
+            props.beta_damage = 0.17;
             props.energy_storage = 0.0;
             props.energy_consumption = 0.001;
             props.is_alpha_sensor = false;
@@ -494,17 +493,17 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.01;
             props.parameter1 = 0.17;
         }
-        case 5u: { // G - Glycine - VAMPIRE MOUTH
+        case 5u: { // G - Glycine - STRUCTURAL - Smallest amino acid
             props.segment_length = 4.0;
-            props.thickness = 8.0; // Bigger
+            props.thickness = 3.0;
             // Old CSV: Seed Angle = -20-?
             props.base_angle = -0.06;
             props.alpha_sensitivity = 0.7;
             props.beta_sensitivity = 0.1;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(1.0, 0.0, 0.0); // Bright red
-            props.is_mouth = true; // VAMPIRE
+            props.color = vec3<f32>(0.9, 0.9, 0.9); // White/grey
+            props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.0;
             props.beta_damage = 0.88; // Color value
@@ -520,17 +519,17 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.02;
             props.parameter1 = 0.88;
         }
-        case 6u: { // H - Histidine - VAMPIRE MOUTH
+        case 6u: { // H - Histidine - STRUCTURAL - Positively charged at pH 6
             props.segment_length = 9.0;
-            props.thickness = 8.0; // Bigger
+            props.thickness = 4.0;
             // Old CSV: Seed Angle = -10-?
             props.base_angle = -0.07;
             props.alpha_sensitivity = 0.2;
             props.beta_sensitivity = -0.61;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(1.0, 0.0, 0.0); // Bright red
-            props.is_mouth = true; // VAMPIRE
+            props.color = vec3<f32>(0.3, 0.5, 0.8); // Light blue
+            props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
             props.beta_damage = -0.35; // Color value
@@ -599,13 +598,13 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
         }
         case 9u: { // L - Leucine - Agent Alpha Sensor
             props.segment_length = 13.0;
-            props.thickness = 10.0;
+            props.thickness = 4.5;
             props.base_angle = -0.24;
             props.alpha_sensitivity = -0.3332;
             props.beta_sensitivity = 0.1;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.2, 0.0, 0.2); // Dark magenta
+            props.color = vec3<f32>(0.6, 0.5, 0.2); // Yellow-brown
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
@@ -614,7 +613,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.energy_consumption = 0.001;
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
-            props.is_agent_alpha_sensor = true;
+            props.is_agent_alpha_sensor = false;
             props.is_agent_beta_sensor = false;
             props.signal_decay = 0.2;
             props.alpha_left_mult = 0.35;
@@ -859,7 +858,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.01;
             props.parameter1 = -0.84;
         }
-        case 19u: { // Y - Tyrosine - Agent Beta Sensor - Aromatic, polar
+        case 19u: { // Y - Tyrosine - STRUCTURAL - Aromatic, polar
             props.segment_length = 11.5;
             props.thickness = 4.0;
             props.base_angle = -0.523599;
@@ -867,7 +866,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.beta_sensitivity = 0.52;
             props.is_propeller = false;
             props.thrust_force = 0.0;
-            props.color = vec3<f32>(0.26, 0.26, 0.26); // Grey
+            props.color = vec3<f32>(0.5, 0.6, 0.4); // Olive green
             props.is_mouth = false;
             props.energy_absorption_rate = 0.0;
             props.beta_absorption_rate = 0.3;
@@ -877,7 +876,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.is_alpha_sensor = false;
             props.is_beta_sensor = false;
             props.is_agent_alpha_sensor = false;
-            props.is_agent_beta_sensor = true;
+            props.is_agent_beta_sensor = false;
             props.signal_decay = 0.2;
             props.alpha_left_mult = 0.25;
             props.alpha_right_mult = 0.75;
@@ -1113,6 +1112,81 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             props.mass = 0.05;
             props.parameter1 = 0.6; // Base multiplier for signal strength
         }
+        case 33u: { // VAMPIRE MOUTH ORGAN (2-codon: K/C + F/G/H modifiers)
+            props.segment_length = 18.5;
+            props.thickness = 8.0;
+            props.base_angle = 0.03;
+            props.alpha_sensitivity = 0.2;
+            props.beta_sensitivity = -0.33;
+            props.is_propeller = false;
+            props.thrust_force = 0.0;
+            props.color = vec3<f32>(1.0, 0.0, 0.0); // Bright red
+            props.is_mouth = false; // Not a food mouth
+            props.energy_absorption_rate = 0.0; // Doesn't absorb from terrain
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.17;
+            props.energy_storage = 20.0;
+            props.energy_consumption = 0.002;
+            props.is_alpha_sensor = false;
+            props.is_beta_sensor = false;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 1.4;
+            props.alpha_right_mult = -0.4;
+            props.beta_left_mult = 1.3;
+            props.beta_right_mult = -0.3;
+            props.mass = 0.015;
+            props.parameter1 = 0.17; // Will be modified by F/G/H
+        }
+        case 34u: { // AGENT ALPHA SENSOR ORGAN (2-codon: V/M + L modifier)
+            props.segment_length = 13.0;
+            props.thickness = 10.0;
+            props.base_angle = -0.24;
+            props.alpha_sensitivity = -0.3332;
+            props.beta_sensitivity = 0.1;
+            props.is_propeller = false;
+            props.thrust_force = 0.0;
+            props.color = vec3<f32>(0.2, 0.0, 0.2); // Dark magenta
+            props.is_mouth = false;
+            props.energy_absorption_rate = 0.0;
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.95;
+            props.energy_storage = 0.0;
+            props.energy_consumption = 0.0015;
+            props.is_alpha_sensor = false;
+            props.is_beta_sensor = false;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.35;
+            props.alpha_right_mult = 0.65;
+            props.beta_left_mult = 0.4;
+            props.beta_right_mult = 0.6;
+            props.mass = 0.025;
+            props.parameter1 = 0.95;
+        }
+        case 35u: { // AGENT BETA SENSOR ORGAN (2-codon: V/M + Y modifier)
+            props.segment_length = 11.5;
+            props.thickness = 9.0;
+            props.base_angle = -0.523599;
+            props.alpha_sensitivity = -0.2;
+            props.beta_sensitivity = 0.52;
+            props.is_propeller = false;
+            props.thrust_force = 0.0;
+            props.color = vec3<f32>(0.26, 0.26, 0.26); // Grey
+            props.is_mouth = false;
+            props.energy_absorption_rate = 0.0;
+            props.beta_absorption_rate = 0.3;
+            props.beta_damage = 0.08;
+            props.energy_storage = 0.0;
+            props.energy_consumption = 0.0015;
+            props.is_alpha_sensor = false;
+            props.is_beta_sensor = false;
+            props.signal_decay = 0.2;
+            props.alpha_left_mult = 0.25;
+            props.alpha_right_mult = 0.75;
+            props.beta_left_mult = 0.3;
+            props.beta_right_mult = 0.7;
+            props.mass = 0.03;
+            props.parameter1 = 0.08;
+        }
         default: { // Fallback (should never happen)
             props.segment_length = 8.0;
             props.thickness = 3.0;
@@ -1214,6 +1288,9 @@ fn get_part_name(part_type: u32) -> PartName {
         case 30u:{ name = PartName(array<u32,6>(70u,76u,73u,80u,32u,32u), 4u); } // FLIP
         case 31u:{ name = PartName(array<u32,6>(67u,76u,79u,67u,75u,32u), 5u); } // CLOCK
         case 32u:{ name = PartName(array<u32,6>(83u,76u,79u,80u,69u,32u), 5u); } // SLOPE
+        case 33u:{ name = PartName(array<u32,6>(86u,77u,80u,82u,69u,32u), 5u); } // VMPRE
+        case 34u:{ name = PartName(array<u32,6>(65u,71u,83u,78u,65u,32u), 5u); } // AGSNA
+        case 35u:{ name = PartName(array<u32,6>(65u,71u,83u,78u,66u,32u), 5u); } // AGSNB
         default: { }
     }
 
@@ -1514,6 +1591,63 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
 
     let raw_value = select(0.0, weighted_sum / weight_total, weight_total > 0.0);
     return raw_value * signal_polarity; // Apply polarity flip if combined_param < 0
+}
+
+// Stochastic trail sampling for agent sensors
+// Samples trail layer and computes color difference from agent color, weighted by direction
+fn sample_stochastic_trail(center: vec2<f32>, base_radius: f32, seed: u32, debug_mode: bool, sensor_perpendicular: vec2<f32>, agent_color: vec3<f32>) -> f32 {
+    let sample_count = 14u;
+    let radius = base_radius;
+
+    var weighted_sum = 0.0;
+    var weight_total = 0.0;
+
+    for (var i = 0u; i < sample_count; i++) {
+        // Generate random offset using hash
+        let h1 = hash_f32(seed * 1000u + i * 17u);
+        let h2 = hash_f32(seed * 1000u + i * 23u + 13u);
+
+        // Random angle and distance (square root for uniform disk sampling)
+        let angle = h1 * 6.28318530718; // 2*PI
+        let dist = sqrt(h2) * radius;
+
+        let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
+        let sample_pos = center + offset;
+        let idx = grid_index(sample_pos);
+
+        // Distance-based gaussian weight: exp(-d^2 / (2*sigma^2))
+        let sigma = radius * 0.15;
+        let distance_weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
+
+        // Directional weight: dot product of sensor perpendicular and sample direction
+        let direction = select(vec2<f32>(0.0), normalize(offset), dist > 1e-5);
+        let directional_weight = dot(sensor_perpendicular, direction);
+
+        // Combined weight: distance falloff * directional alignment
+        let weight = distance_weight * directional_weight;
+
+        // Sample trail color
+        let trail_color = trail_grid[idx].xyz;
+
+        // Calculate color difference (Euclidean distance in RGB space)
+        let color_diff_vec = trail_color - agent_color;
+        let color_difference = length(color_diff_vec);
+
+        // Debug visualization
+        if (debug_mode) {
+            let dot_val = directional_weight;
+            let red_intensity = clamp(dot_val, 0.0, 1.0);
+            let blue_intensity = clamp(-dot_val, 0.0, 1.0);
+            let debug_color = vec4<f32>(red_intensity, 0.0, blue_intensity, 0.7);
+            let sample_size = clamp(radius * 0.03, 2.0, 8.0);
+            draw_filled_circle(sample_pos, sample_size, debug_color);
+        }
+
+        weighted_sum += color_difference * weight;
+        weight_total += weight;
+    }
+
+    return select(0.0, weighted_sum / weight_total, weight_total > 0.0);
 }
 
 // Perlin-like noise function
@@ -1840,6 +1974,37 @@ fn genome_read_word(genome: array<u32, GENOME_WORDS>, index: u32) -> u32 {
         case 30u: { return genome[30u]; }
         case 31u: { return genome[31u]; }
         case 32u: { return genome[32u]; }
+        case 33u: { return genome[33u]; }
+        case 34u: { return genome[34u]; }
+        case 35u: { return genome[35u]; }
+        case 36u: { return genome[36u]; }
+        case 37u: { return genome[37u]; }
+        case 38u: { return genome[38u]; }
+        case 39u: { return genome[39u]; }
+        case 40u: { return genome[40u]; }
+        case 41u: { return genome[41u]; }
+        case 42u: { return genome[42u]; }
+        case 43u: { return genome[43u]; }
+        case 44u: { return genome[44u]; }
+        case 45u: { return genome[45u]; }
+        case 46u: { return genome[46u]; }
+        case 47u: { return genome[47u]; }
+        case 48u: { return genome[48u]; }
+        case 49u: { return genome[49u]; }
+        case 50u: { return genome[50u]; }
+        case 51u: { return genome[51u]; }
+        case 52u: { return genome[52u]; }
+        case 53u: { return genome[53u]; }
+        case 54u: { return genome[54u]; }
+        case 55u: { return genome[55u]; }
+        case 56u: { return genome[56u]; }
+        case 57u: { return genome[57u]; }
+        case 58u: { return genome[58u]; }
+        case 59u: { return genome[59u]; }
+        case 60u: { return genome[60u]; }
+        case 61u: { return genome[61u]; }
+        case 62u: { return genome[62u]; }
+        case 63u: { return genome[63u]; }
         default:  { return genome[GENOME_WORDS - 1u]; }
     }
 }
@@ -2033,40 +2198,55 @@ fn translate_codon_step(
             let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
             var organ_base_type = 0u;
 
-            // Determine organ type based on promoter + modifier combination
-            if (amino_type == 9u || amino_type == 12u) {  // L or P
-                organ_base_type = select(25u, 21u, modifier < 10u);  // Displacer(25) or Propeller(21)
-            } else if (amino_type == 8u || amino_type == 1u) {  // K or C
-                if (modifier < 7u) { organ_base_type = 20u; }        // Mouth
-                else if (modifier < 10u) { organ_base_type = 26u; }  // Enabler (G/H/I)
-                else if (modifier < 14u) { organ_base_type = 32u; }  // Slope Sensor (M/N/P/Q)
-                else { organ_base_type = 31u; }                      // KC-Clock (modifiers R/S or 14-19)
-            } else if (amino_type == 17u || amino_type == 10u) {  // V or M
-                if (modifier < 10u) { organ_base_type = 22u; }       // Alpha Sensor
-                else if (modifier < 18u) { organ_base_type = 23u; }  // Beta Sensor
-                else { organ_base_type = 24u; }                      // Energy Sensor
-            } else if (amino_type == 6u || amino_type == 13u) {  // H or Q
-                if (modifier < 7u) { organ_base_type = 28u; }        // Storage
-                else if (modifier < 14u) { organ_base_type = 29u; }  // Poison Resistance
-                else { organ_base_type = 30u; }                      // Chiral Flipper
+            // Organ creation based on PROMOTER + MODIFIER combination
+            // Promoters: V(17), M(10), L(9), P(12), K(8), C(1), H(6), Q(13)
+
+            // V/M promoters: Alpha Sensors (0-8), Agent Alpha Sensor (9), Beta Sensors (10-18), Agent Beta Sensor (19)
+            if (amino_type == 17u || amino_type == 10u) {  // V or M
+                if (modifier == 9u) { organ_base_type = 34u; }       // Agent Alpha Sensor (L: 9)
+                else if (modifier == 19u) { organ_base_type = 35u; } // Agent Beta Sensor (Y: 19)
+                else if (modifier < 10u) { organ_base_type = 22u; }  // Alpha Sensors (A-K: 0-8)
+                else { organ_base_type = 23u; }                      // Beta Sensors (M-W: 10-18)
+            }
+            // L/P promoters: Always Propellers (0-9) or Displacers (10-19)
+            else if (amino_type == 9u || amino_type == 12u) {  // L or P
+                if (modifier < 10u) { organ_base_type = 21u; }       // Propellers (A-L: 0-9)
+                else { organ_base_type = 25u; }                      // Displacers (M-Y: 10-19)
+            }
+            // K/C promoters: Mouths, Vampire Mouths, Enablers, Slope Sensors, Clocks, Sine Generators
+            else if (amino_type == 8u || amino_type == 1u) {  // K or C
+                if (modifier < 4u) { organ_base_type = 20u; }        // Mouths (A-E: 0-3)
+                else if (modifier < 7u) { organ_base_type = 33u; }   // Vampire Mouths (F-H: 4-6)
+                else if (modifier < 10u) { organ_base_type = 26u; }  // Enablers (I-L: 7-9)
+                else if (modifier < 14u) { organ_base_type = 32u; }  // Slope Sensors (M-Q: 10-13)
+                else if (modifier < 16u) { organ_base_type = 31u; }  // Clocks (R-S: 14-15)
+                else { organ_base_type = 31u; }                      // Sine Wave Generators (T-Y: 16-19) - same as clocks
+            }
+            // H/Q promoters: Storage, Poison Resistance, Chiral Flippers
+            else if (amino_type == 6u || amino_type == 13u) {  // H or Q
+                if (modifier < 7u) { organ_base_type = 28u; }        // Storage (A-H: 0-6)
+                else if (modifier < 14u) { organ_base_type = 29u; }  // Poison Resistance (M-Q: 10-13, skips I-L)
+                else { organ_base_type = 30u; }                      // Chiral Flippers (R-Y: 14-19)
             }
 
             if (organ_base_type >= 20u) {
                 // Encode organ with parameter
                 var param_value = u32((f32(modifier) / 19.0) * 255.0);
 
-                // For slope sensors and clocks, encode promoter type in high bit (K=0, C=1)
+                // For slope sensors and clocks, encode promoter type in high bit
+                // K promoter = alpha emitter (bit 7 = 0), C promoter = beta emitter (bit 7 = 1)
                 if (organ_base_type == 31u || organ_base_type == 32u) {
+                    param_value = param_value & 127u;  // Clear bit 7 first
                     let is_C_promoter = (amino_type == 1u);  // C=1, K=8
                     if (is_C_promoter) {
-                        param_value = param_value | 128u;  // Set bit 7 to indicate C promoter
+                        param_value = param_value | 128u;  // Set bit 7 for C promoter
                     }
                 }
 
                 final_part_type = encode_part_type(organ_base_type, param_value);
                 bases_consumed = 6u;  // Consume both codons
             } else {
-                // Promoter didn't form organ, just use amino acid
+                // Not a promoter or didn't form organ, just use amino acid
                 bases_consumed = 6u;  // Still consume both codons
             }
         }
@@ -2327,11 +2507,42 @@ fn render_body_part_ctx(
 
     // 7. ORGAN: Mouth (feeding organ) - asterisk marker
     if (amino_props.is_mouth) {
-        // Vampire mouths (F/G/H) get special big red 8-point asterisks
-        let is_vampire = (base_type == 4u || base_type == 5u || base_type == 6u);
-        let mouth_radius = select(max(part.size * 1.5, 4.0), max(part.size * 3.0, 8.0), is_vampire);
-        let mouth_color = select(mix(amino_props.color, agent_color, params.agent_color_blend), vec3<f32>(1.0, 0.0, 0.0), is_vampire);
+        // Regular mouths get small yellow asterisk
+        let mouth_radius = max(part.size * 1.5, 4.0);
+        let mouth_color = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
+    }
+
+    // Vampire mouths (organ 33) get special big red 8-point asterisks
+    if (base_type == 33u) {
+        let mouth_radius = max(part.size * 3.0, 8.0);
+
+        // Draw blinking white asterisk when draining energy (_pad.y stores drain amount)
+        let drain_amount = part._pad.y;
+
+        // DEBUG: Show drain amount as brightness - even tiny amounts show up
+        let has_any_drain = drain_amount > 0.0000001;
+
+        if (has_any_drain) {
+            // Blink white using epoch-based animation
+            let blink_speed = 0.3; // Faster blinking
+            let blink_phase = fract(f32(params.epoch) * blink_speed);
+            let blink_on = blink_phase < 0.5; // 50% duty cycle
+
+            if (blink_on) {
+                let mouth_color = vec3<f32>(1.0, 1.0, 1.0); // Bright white when vampiring
+                draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 1.0), ctx);
+            } else {
+                // Show amount as green intensity during off phase
+                let intensity = min(drain_amount * 100.0, 1.0);
+                let mouth_color = vec3<f32>(0.0, intensity, 0.0); // Green based on drain amount
+                draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
+            }
+        } else {
+            // Not draining - show normal red asterisk
+            let mouth_color = vec3<f32>(1.0, 0.0, 0.0); // Bright red
+            draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
+        }
     }
 
     // 8. ORGAN: Displacer (repulsion field) - diamond marker
@@ -2401,6 +2612,27 @@ fn render_body_part_ctx(
         }
     }
 
+    // 9a. ORGAN: Agent Alpha/Beta Sensors (types 34, 35) - dark purple pentagon
+    if (base_type == 34u || base_type == 35u) {
+        let pentagon_size = max(part.size * 2.0, 6.0);
+        let dark_purple = vec3<f32>(0.3, 0.0, 0.5); // Dark purple
+        let blended_color = mix(dark_purple, agent_color, params.agent_color_blend * 0.3);
+
+        // Draw pentagon using 5 points
+        let num_sides = 5u;
+        let angle_offset = -1.5708; // -90 degrees to point upward
+        for (var i = 0u; i < num_sides; i++) {
+            let angle1 = angle_offset + (f32(i) / f32(num_sides)) * 6.28318530718;
+            let angle2 = angle_offset + (f32(i + 1u) / f32(num_sides)) * 6.28318530718;
+            let p1 = world_pos + vec2<f32>(cos(angle1) * pentagon_size, sin(angle1) * pentagon_size);
+            let p2 = world_pos + vec2<f32>(cos(angle2) * pentagon_size, sin(angle2) * pentagon_size);
+            // Draw edges
+            draw_thick_line_ctx(p1, p2, 1.5, vec4<f32>(blended_color, 0.9), ctx);
+            // Fill from center
+            draw_thick_line_ctx(world_pos, p1, pentagon_size * 0.5, vec4<f32>(blended_color, 0.6), ctx);
+        }
+    }
+
     // 10. ORGAN: Sine Wave Clock - large pulsating circle
     if (amino_props.is_clock) {
         // Get clock signal from _pad.x (stored during signal update pass)
@@ -2410,13 +2642,14 @@ fn render_body_part_ctx(
         let organ_param = get_organ_param(part.part_type);
         let is_C_promoter = ((organ_param & 128u) != 0u);
 
-        // Dark green for K promoter (alpha), dark red for C promoter (beta)
-        let clock_color = select(vec3<f32>(0.0, 0.5, 0.0), vec3<f32>(0.5, 0.0, 0.0), is_C_promoter);
+        // Bright green for K promoter (alpha), bright red for C promoter (beta)
+        let clock_color = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), is_C_promoter);
 
         // Pulsate size based on signal output
-        // Map sine output (-1 to +1) to size multiplier (0.7 to 1.3)
-        let size_multiplier = 1.0 + clock_signal *5.0;
-        let pulsating_size = part.size * size_multiplier;
+        // Base size is larger (3x part size), then pulsate ±30%
+        let base_size = part.size * 3.0;
+        let size_multiplier = 1.0 + clock_signal * 0.3;
+        let pulsating_size = base_size * size_multiplier;
 
         // Draw large filled circle with full opacity
         draw_filled_circle_ctx(world_pos, pulsating_size, vec4<f32>(clock_color, 1.0), ctx);
@@ -2471,19 +2704,19 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Check if this agent has any vampire mouth organs (F=4u, G=5u, H=6u)
+    // Check if this agent has any vampire mouth organs (type 33)
     let body_count = agent.body_count;
     var has_vampire_mouth = false;
-    
+
     for (var i = 0u; i < MAX_BODY_PARTS; i++) {
         if (i >= body_count) { break; }
         let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
-        if (base_type == 4u || base_type == 5u || base_type == 6u) {
+        if (base_type == 33u) {
             has_vampire_mouth = true;
             break;
         }
     }
-    
+
     if (!has_vampire_mouth) {
         return;
     }
@@ -2492,26 +2725,26 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
     let my_grid_x = u32(clamp(agents_in[agent_id].position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
     let my_grid_y = u32(clamp(agents_in[agent_id].position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-    
+
     var neighbor_count = 0u;
     var neighbor_ids: array<u32, 64>;
-    
+
     for (var dy: i32 = -10; dy <= 10; dy++) {
         for (var dx: i32 = -10; dx <= 10; dx++) {
             if (dx == 0 && dy == 0) { continue; }
-            
+
             let check_x = i32(my_grid_x) + dx;
             let check_y = i32(my_grid_y) + dy;
-            
-            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && 
+
+            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) &&
                 check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                
+
                 let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
                 let neighbor_id = agent_spatial_grid[check_idx];
-                
+
                 if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
                     let neighbor = agents_in[neighbor_id];
-                    
+
                     if (neighbor.alive != 0u && neighbor.energy > 0.0) {
                         if (neighbor_count < 64u) {
                             neighbor_ids[neighbor_count] = neighbor_id;
@@ -2522,7 +2755,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
-    
+
     // No neighbors to drain
     if (neighbor_count == 0u) {
         return;
@@ -2530,7 +2763,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Process each vampire mouth organ (F=4u, G=5u, H=6u)
     var total_energy_gained = 0.0;
-    
+
     // Simple enabler check: count enablers in the agent (using fixed loops)
     var has_enabler_nearby = false;
     for (var e = 0u; e < MAX_BODY_PARTS; e++) {
@@ -2543,67 +2776,75 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
             break;
         }
     }
-    
+
     // Vampire mouths are active when NO enablers present (inverted logic)
     let global_mouth_activity = select(1.0, 0.0, has_enabler_nearby);
-    
+
     if (global_mouth_activity > 0.01) {
         for (var i = 0u; i < MAX_BODY_PARTS; i++) {
             if (i >= body_count) { break; }
             let part = agents_in[agent_id].body[i];
             let base_type = get_base_part_type(part.part_type);
-            
-            // Check if this is a vampire mouth (F, G, or H)
-            if (base_type == 4u || base_type == 5u || base_type == 6u) {
+
+            // Check if this is a vampire mouth organ (type 33)
+            if (base_type == 33u) {
                 // Get mouth world position
                 let part_pos = part.pos;
                 let rotated_pos = apply_agent_rotation(part_pos, agents_in[agent_id].rotation);
                 let mouth_world_pos = agents_in[agent_id].position + rotated_pos;
-                
+
                 // Find closest victim within drain range
                 var closest_victim_id = 0xFFFFFFFFu;
                 var closest_dist = 999999.0;
-                let max_drain_distance = 40.0;
-                
+                let max_drain_distance = 100.0;
+
                 for (var n = 0u; n < neighbor_count; n++) {
                     let victim_id = neighbor_ids[n];
                     let victim = agents_in[victim_id];
-                    
+
                     // Distance from mouth to victim center
                     let delta = mouth_world_pos - victim.position;
                     let dist = length(delta);
-                    
+
                     if (dist < max_drain_distance && dist < closest_dist) {
                         closest_dist = dist;
                         closest_victim_id = victim_id;
                     }
                 }
-                
+
                 // Drain from closest victim only
                 if (closest_victim_id != 0xFFFFFFFFu) {
                     let victim = agents_in[closest_victim_id];
-                    
+
                     // Distance-based drain: linear inverse proportion
-                    // At distance 0: drain 50% of victim's energy
-                    // At distance 40: drain 0%
+                    // At distance 0: drain ALL of victim's energy (instant kill)
+                    // At distance 100: drain 0%
                     let distance_factor = 1.0 - (closest_dist / max_drain_distance);
-                    
-                    // Divide by neighbor_count to mitigate race conditions
-                    // (multiple vampires might target same victim)
-                    let drain_divisor = max(f32(neighbor_count), 1.0);
-                    let drain_amount = (global_mouth_activity * distance_factor * victim.energy * 0.5) / drain_divisor;
-                    
-                    // Check if victim has enough energy
-                    if (victim.energy >= drain_amount && drain_amount > 0.001) {
-                        // Apply drain to victim (write to agents_in)
-                        agents_in[closest_victim_id].energy -= drain_amount;
-                        total_energy_gained += drain_amount;
+
+                    // Instant kill mode: drain all available energy from victim
+                    let drain_amount = distance_factor * victim.energy;
+
+                    // Check if victim has any energy and we're in range
+                    if (victim.energy > 0.0001 && drain_amount > 0.0001) {
+                        // Drain ALL energy from victim (instant kill)
+                        agents_in[closest_victim_id].energy = 0.0;
+
+                        // Vampire absorbs at least 30% of victim's total energy
+                        let absorbed_energy = max(drain_amount, victim.energy * 0.3);
+                        total_energy_gained += absorbed_energy;
+
+                        // Store drain amount in _pad.y for visualization
+                        agents_in[agent_id].body[i]._pad.y = drain_amount;
+                    } else {
+                        agents_in[agent_id].body[i]._pad.y = 0.0;
                     }
+                } else {
+                    agents_in[agent_id].body[i]._pad.y = 0.0;
                 }
             }
         }
     }
-    
+
     // Add gained energy to this agent
     if (total_energy_gained > 0.0) {
         agents_in[agent_id].energy += total_energy_gained;
@@ -2697,7 +2938,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Use poison resistance count from previous frame (stored in struct)
         // This value only changes when morphology changes, so it's safe to use the stored value
-        let signal_angle_multiplier = pow(0.75, f32(agents_out[agent_id].poison_resistant_count));
+        let signal_angle_multiplier = pow(0.5, f32(agents_out[agent_id].poison_resistant_count));
 
         // Dynamic chain build - angles modulated by alpha/beta signals
         var current_pos = vec2<f32>(0.0);
@@ -2710,6 +2951,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         total_mass_morphology = 0.0;
         color_sum_morphology = 0.0;
         var poison_resistant_count = 0u;
+        var vampiric_mouth_count = 0u;
 
         // Loop through existing body parts and rebuild positions
         for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
@@ -2725,6 +2967,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Count poison-resistant organs (type 29) for signal angle modulation
             if (base_type == 29u) {
                 poison_resistant_count += 1u;
+            }
+
+            // Count vampiric mouth organs (type 33) for normal mouth reduction
+            if (base_type == 33u) {
+                vampiric_mouth_count += 1u;
             }
 
             let props = get_amino_acid_properties(base_type);
@@ -2878,24 +3125,24 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
     let my_grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
     let my_grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-    
+
     var neighbor_count = 0u;
     var neighbor_ids: array<u32, 64>; // Store up to 64 nearby agents
-    
+
     for (var dy: i32 = -10; dy <= 10; dy++) {
         for (var dx: i32 = -10; dx <= 10; dx++) {
             let check_x = i32(my_grid_x) + dx;
             let check_y = i32(my_grid_y) + dy;
-            
-            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && 
+
+            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) &&
                 check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                
+
                 let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
                 let neighbor_id = agent_spatial_grid[check_idx];
-                
+
                 if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
                     let neighbor = agents_in[neighbor_id];
-                    
+
                     if (neighbor.alive != 0u && neighbor.energy > 0.0) {
                         if (neighbor_count < 64u) {
                             neighbor_ids[neighbor_count] = neighbor_id;
@@ -2986,7 +3233,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Extract promoter and modifier parameter1 values
             // The part_type encodes the modifier (0-19) as parameter (0-255)
-            let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
             let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
 
             // Convert organ_param (0-255) back to modifier index (0-19)
@@ -3015,7 +3261,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sensor_seed = agent_id * 1000u + i * 13u;
 
             // Extract promoter and modifier parameter1 values
-            let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
             let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
 
             // Convert organ_param (0-255) back to modifier index (0-19)
@@ -3035,66 +3280,42 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             new_beta = new_beta + nonlinear_value;
         }
 
-        // AGENT ALPHA SENSOR (L - Leucine)
-        if (amino_props.is_agent_alpha_sensor) {
+        // AGENT ALPHA SENSOR - Organ type 34 (V/M + L)
+        // Samples trail layer and measures color difference from agent's color
+        if (base_type == 34u) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let sensor_world_pos = agent.position + rotated_pos;
-            
+
             // Get sensor orientation (perpendicular to organ, rotated 90 degrees)
             let axis_local = normalize(agents_out[agent_id].body[i].pos);
             let perpendicular_local = normalize(vec2<f32>(-axis_local.y, axis_local.x));
-            let sensor_direction = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
-            
-            var agent_signal = 0.0;
-            
-            // Use pre-collected neighbor list
-            for (var n = 0u; n < neighbor_count; n++) {
-                let neighbor = agents_in[neighbor_ids[n]];
-                
-                let delta = neighbor.position - sensor_world_pos;
-                let dist = length(delta);
-                
-                if (dist > 0.1 && dist < 100.0) {
-                    let direction_to_neighbor = normalize(delta);
-                    let dot_product = dot(sensor_direction, direction_to_neighbor);
-                    
-                    // Signal = (1 / distance) * dot_product
-                    agent_signal += (dot_product / dist);
-                }
-            }
-            
-            new_alpha += agent_signal;
+            let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
+
+            // Use agent_color calculated from color_sum_morphology
+            let sensor_seed = agent_id * 1000u + i * 13u;
+            let sensed_value = sample_stochastic_trail(sensor_world_pos, sensor_radius, sensor_seed, params.debug_mode != 0u, perpendicular_world, agent_color);
+
+            // Add trail difference signal to alpha
+            new_alpha += sensed_value;
         }
 
-        // AGENT BETA SENSOR (Y - Tyrosine)
-        if (amino_props.is_agent_beta_sensor) {
+        // AGENT BETA SENSOR - Organ type 35 (V/M + Y)
+        // Samples trail layer and measures color difference from agent's color
+        if (base_type == 35u) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let sensor_world_pos = agent.position + rotated_pos;
-            
+
             // Get sensor orientation (perpendicular to organ, rotated 90 degrees)
             let axis_local = normalize(agents_out[agent_id].body[i].pos);
             let perpendicular_local = normalize(vec2<f32>(-axis_local.y, axis_local.x));
-            let sensor_direction = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
-            
-            var agent_signal = 0.0;
-            
-            // Use pre-collected neighbor list
-            for (var n = 0u; n < neighbor_count; n++) {
-                let neighbor = agents_in[neighbor_ids[n]];
-                
-                let delta = neighbor.position - sensor_world_pos;
-                let dist = length(delta);
-                
-                if (dist > 0.1 && dist < 100.0) {
-                    let direction_to_neighbor = normalize(delta);
-                    let dot_product = dot(sensor_direction, direction_to_neighbor);
-                    
-                    // Signal = (1 / distance) * dot_product
-                    agent_signal += (dot_product / dist);
-                }
-            }
-            
-            new_beta += agent_signal;
+            let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
+
+            // Use agent_color calculated from color_sum_morphology
+            let sensor_seed = agent_id * 1000u + i * 13u;
+            let sensed_value = sample_stochastic_trail(sensor_world_pos, sensor_radius, sensor_seed, params.debug_mode != 0u, perpendicular_world, agent_color);
+
+            // Add trail difference signal to beta
+            new_beta += sensed_value;
         }
 
     // Energy sensor contribution rate (now 1.0 as requested)
@@ -3273,29 +3494,29 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Agent-agent repulsion force per amino acid (using pre-collected neighbors)
         var collision_force = vec2<f32>(0.0);
-        
+
         for (var n = 0u; n < neighbor_count; n++) {
             let neighbor = agents_out[neighbor_ids[n]];
-            
+
             let delta = world_pos - neighbor.position;
             let dist = length(delta);
-            
+
             // Distance-based repulsion force (inverse square law with cutoff)
             let max_repulsion_distance = 500.0;
-            
+
             if (dist < max_repulsion_distance && dist > 0.1) {
                 // Inverse square repulsion: F = k / (d^2)
                 let base_strength = params.agent_repulsion_strength * 100000.0;
                 let force_magnitude = base_strength / (dist * dist);
-                
+
                 // Clamp to prevent extreme forces at very small distances
                 let clamped_force = min(force_magnitude, 5000.0);
-                
+
                 let direction = delta / dist; // Normalize
                 collision_force += direction * clamped_force * part_mass;
             }
         }
-        
+
         // Apply collision force
         force += collision_force;
         torque += (r_com.x * collision_force.y - r_com.y * collision_force.x);
@@ -3576,8 +3797,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let capacity = agents_out[agent_id].energy_capacity;
 
     // poison_resistant_count stored in agent struct during morphology
-    // Each poison-resistant organ reduces poison/radiation damage by 25%
-    let poison_multiplier = pow(0.75, f32(agents_out[agent_id].poison_resistant_count));
+    // Each poison-resistant organ reduces poison/radiation damage by 50%
+    let poison_multiplier = pow(0.5, f32(agents_out[agent_id].poison_resistant_count));
 
     // Calculate speed-dependent absorption multiplier for mouths
     // Exponential decay: 1.0x at rest, sharp falloff exp(-8)
@@ -3652,7 +3873,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Apply alpha consumption - energy gain now uses base food_power (speed already in consumption)
                 if (consumed_alpha > 0.0) {
                     alpha_grid[idx] = clamp(available_alpha - consumed_alpha, 0.0, available_alpha);
-                    agent.energy += consumed_alpha * params.food_power;
+                    // Reduce energy gain exponentially per vampiric mouth: 1 mouth = 50%, 2 mouths = 25%, 3 mouths = 12.5%
+                    // Calculate vampiric mouth count on the fly
+                    var vampiric_count = 0u;
+                    for (var j = 0u; j < min(agents_out[agent_id].body_count, MAX_BODY_PARTS); j++) {
+                        if (get_base_part_type(agents_out[agent_id].body[j].part_type) == 33u) {
+                            vampiric_count += 1u;
+                        }
+                    }
+                    let vampiric_multiplier = pow(0.5, f32(vampiric_count));
+                    agent.energy += consumed_alpha * params.food_power * vampiric_multiplier;
                     total_consumed_alpha += consumed_alpha;
                 }
 
@@ -4444,7 +4674,7 @@ fn draw_star(center: vec2<f32>, radius: f32, color: vec4<f32>) {
 // Helper: draw an 8-point asterisk for vampire mouths
 fn draw_asterisk_8_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: InspectorContext) {
     let angle_step = 0.39269908; // PI / 8 = 22.5 degrees
-    
+
     for (var i = 0u; i < 4u; i++) {
         let angle = f32(i) * angle_step * 2.0;
         let dx = cos(angle) * radius;
@@ -5681,7 +5911,7 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         let grid_y = u32(clamp(world_y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
         let grid_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
         let agent_id = agent_spatial_grid[grid_idx];
-        
+
         // If cell contains an agent, tint it
         if (agent_id != 0xFFFFFFFFu) {
             // Hash the agent ID to get a unique color per agent
@@ -5690,7 +5920,7 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             let g = f32((hash >> 8u) & 0xFFu) / 255.0;
             let b = f32((hash >> 16u) & 0xFFu) / 255.0;
             let debug_color = vec3<f32>(r, g, b);
-            
+
             // Blend debug color with base color (50% opacity)
             base_color = mix(base_color, debug_color, 0.5);
             visual_grid[visual_idx] = vec4<f32>(base_color, 1.0);
@@ -5850,7 +6080,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Gene bars: y between 300 and 800
     let bar_anchor_x = 5u;
-    let bar_anchor_y = 300u;  // Start at y=300
+    let bar_anchor_y = 300u;  // Start at y=300 to avoid overlapping preview window
     let bar_available_height = 500u;  // Height from 300 to 800
     let bars = calculate_bar_layout(bar_anchor_x, bar_anchor_y, bar_available_height);
 
@@ -5896,7 +6126,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
         let body_count = selected_agent_buffer[0].body_count;
         let available_height = bars.bars_y_end - bars.bars_y_start;
         let genome_pixel_y = flipped_y - bars.bars_y_start;  // Pixel position in bar (0 to available_height)
-        let pixels_per_base = 4u;  // 4 pixels per base (2x taller for readability)
+        let pixels_per_base = 2u;  // 2 pixels per base
         let base_index = genome_pixel_y / pixels_per_base;  // Which base are we displaying
 
         // Always start from first non-X triplet (gene start)
@@ -5943,12 +6173,15 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        // Find first 'X' position to limit drawing height
+        // Find first run of 3+ consecutive 'X's to mark end of gene
         var first_x_position = GENOME_LENGTH;
         if (gene_start != 0xFFFFFFFFu) {
-            for (var scan_pos = gene_start; scan_pos < GENOME_LENGTH; scan_pos++) {
-                let scan_ascii = genome_get_base_ascii(genome, scan_pos);
-                if (scan_ascii == 88u) {
+            for (var scan_pos = gene_start; scan_pos < GENOME_LENGTH - 2u; scan_pos++) {
+                let ascii0 = genome_get_base_ascii(genome, scan_pos);
+                let ascii1 = genome_get_base_ascii(genome, scan_pos + 1u);
+                let ascii2 = genome_get_base_ascii(genome, scan_pos + 2u);
+                // Found 3 consecutive X's
+                if (ascii0 == 88u && ascii1 == 88u && ascii2 == 88u) {
                     first_x_position = scan_pos;
                     break;
                 }
@@ -5990,7 +6223,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
         let body_count = selected_agent_buffer[0].body_count;
         let available_height = bars.bars_y_end - bars.bars_y_start;
         let genome_pixel_y = flipped_y - bars.bars_y_start;  // Pixel position in bar
-        let pixels_per_base = 4u;  // 4 pixels per base (2x taller for readability)
+        let pixels_per_base = 2u;  // 2 pixels per base
         let base_index_in_bar = genome_pixel_y / pixels_per_base;
 
         // Gene always starts at first non-X triplet
@@ -6066,10 +6299,11 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                             base_color = base_color * brightness;
                         }
 
-                        // For organs that need amplification (propeller, displacer, mouth), calculate and apply
-                        if (part_count < body_count && (props.is_propeller || props.is_displacer || props.is_mouth)) {
+                        // For organs that need amplification (propeller, displacer, mouth, vampire mouth, agent sensors), calculate and apply
+                        let needs_amplification = props.is_propeller || props.is_displacer || props.is_mouth || base_type == 33u || base_type == 34u || base_type == 35u;
+                        if (part_count < body_count && needs_amplification) {
                             let part_pos = selected_agent_buffer[0].body[part_count].pos;
-                            
+
                             // Calculate amplification from nearby enablers
                             var amp = 0.0;
                             for (var e = 0u; e < body_count; e++) {
@@ -6084,7 +6318,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 }
                             }
                             let amplification = min(amp, 1.0);
-                            
+
                             // Multiply color by amplification (brighter = more amplification)
                             base_color = base_color * (1.0 + amplification);
                         }
@@ -6197,7 +6431,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
         let body_count = selected_agent_buffer[0].body_count;
         let available_height = bars.bars_y_end - bars.bars_y_start;
         let genome_pixel_y = flipped_y - bars.bars_y_start;  // Pixel position in bar
-        let pixels_per_base = 4u;  // 4 pixels per base (2x taller for readability)
+        let pixels_per_base = 2u;  // 2 pixels per base (must match amino bar)
 
         // Gene always starts at first non-X triplet
         let gene_start = genome_find_first_coding_triplet(genome);
@@ -6446,6 +6680,9 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
                 case 30u: { letter = 67u; }  // 'C' = Chiral Flipper
                 case 31u: { letter = 88u; }  // 'X' = Clock
                 case 32u: { letter = 47u; }  // '/' = Slope Sensor
+                case 33u: { letter = 86u; }  // 'V' = Vampire mouth
+                case 34u: { letter = 60u; }  // '<' = Agent alpha sensor
+                case 35u: { letter = 62u; }  // '>' = Agent beta sensor
                 default: { letter = 63u; }   // '?' = unknown
             }
         }
@@ -6912,11 +7149,11 @@ fn apply_motion_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn clear_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
-    
+
     if (x >= SPATIAL_GRID_SIZE || y >= SPATIAL_GRID_SIZE) {
         return;
     }
-    
+
     let idx = y * SPATIAL_GRID_SIZE + x;
     agent_spatial_grid[idx] = 0xFFFFFFFFu; // Empty marker
 }
@@ -6925,24 +7162,24 @@ fn clear_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(256)
 fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
-    
+
     if (agent_id >= params.agent_count) {
         return;
     }
-    
+
     let agent = agents_out[agent_id];
-    
+
     // Skip dead agents
     if (agent.alive == 0u || agent.energy <= 0.0) {
         return;
     }
-    
+
     // Convert agent position (in SIM_SIZE space) to grid coordinates (SPATIAL_GRID_SIZE resolution)
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
     let grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
     let grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
     let grid_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
-    
+
     // Write agent index to grid (simple overwrite - last agent wins if multiple per cell)
     agent_spatial_grid[grid_idx] = agent_id;
 }

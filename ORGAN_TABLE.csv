@@ -1,0 +1,21 @@
+Modifier,Modifier_AA,V_Valine,M_Methionine,L_Leucine,P_Proline,K_Lysine,C_Cysteine,H_Histidine,Q_Glutamine
+0,A,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Mouth,Mouth,Storage,Storage
+1,C,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Mouth,Mouth,Storage,Storage
+2,D,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Mouth,Mouth,Storage,Storage
+3,E,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Mouth,Mouth,Storage,Storage
+4,F,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Vampire Mouth,Vampire Mouth,Storage,Storage
+5,G,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Vampire Mouth,Vampire Mouth,Storage,Storage
+6,H,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Vampire Mouth,Vampire Mouth,Storage,Storage
+7,I,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Enabler,Enabler,,
+8,K,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Enabler,Enabler,,
+9,L,Agent Alpha Sensor,Agent Alpha Sensor,Propeller,Propeller,Enabler,Enabler,,
+10,M,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
+11,N,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
+12,P,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
+13,Q,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
+14,R,Beta Sensor,Beta Sensor,Displacer,Displacer,Clock (alpha/green),Clock (beta/red),Chiral Flipper,Chiral Flipper
+15,S,Beta Sensor,Beta Sensor,Displacer,Displacer,Clock (alpha/green),Clock (beta/red),Chiral Flipper,Chiral Flipper
+16,T,Beta Sensor,Beta Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
+17,V,Beta Sensor,Beta Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
+18,W,Energy Sensor,Energy Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
+19,Y,Agent Beta Sensor,Agent Beta Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
