@@ -767,6 +767,7 @@ struct SimParams {
     visual_stride: u32,        // pixels per row in visual_grid buffer (padded)
     selected_agent_index: u32, // Index of selected agent for debug visualization (u32::MAX if none)
     repulsion_strength: f32,
+    agent_repulsion_strength: f32,
     gamma_strength: f32,
     prop_wash_strength: f32,
     gamma_vis_min: f32,
@@ -941,6 +942,7 @@ struct SimulationSettings {
     pairing_cost: f32,
     prop_wash_strength: f32,
     repulsion_strength: f32,
+    agent_repulsion_strength: f32,
     limit_fps: bool,
     limit_fps_25: bool,
     render_interval: u32,
@@ -1023,6 +1025,7 @@ impl Default for SimulationSettings {
             pairing_cost: 0.1,
             prop_wash_strength: 1.0,
             repulsion_strength: 10.0,
+            agent_repulsion_strength: 1.0,
             limit_fps: true,
             limit_fps_25: false,
             render_interval: 100, // Draw every 100 steps in fast mode
@@ -1224,6 +1227,7 @@ impl SimulationSettings {
         self.pairing_cost = self.pairing_cost.clamp(0.0, 1.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         self.repulsion_strength = self.repulsion_strength.clamp(0.0, 100.0);
+        self.agent_repulsion_strength = self.agent_repulsion_strength.clamp(0.0, 10.0);
         self.render_interval = self.render_interval.clamp(1, 10_000);
         self.gamma_vis_min = self.gamma_vis_min.clamp(0.0, 1.0);
         self.gamma_vis_max = self.gamma_vis_max.clamp(0.0, 1.0);
@@ -1256,6 +1260,7 @@ struct GpuState {
     alpha_grid: wgpu::Buffer,
     beta_grid: wgpu::Buffer,
     rain_map_buffer: wgpu::Buffer,
+    agent_spatial_grid_buffer: wgpu::Buffer,
     gamma_grid: wgpu::Buffer,
     trail_grid: wgpu::Buffer,
     visual_grid_buffer: wgpu::Buffer,
@@ -1272,8 +1277,6 @@ struct GpuState {
     agents_readback: wgpu::Buffer, // Readback for agent inspection
     selected_agent_buffer: wgpu::Buffer, // GPU buffer for selected agent
     selected_agent_readback: wgpu::Buffer, // CPU readback for selected agent
-    debug_parts_buffer: wgpu::Buffer, // Built parts debug buffer (GPU)
-    debug_parts_readback: wgpu::Buffer, // Readback for built parts debug
     new_agents_buffer: wgpu::Buffer, // Buffer for spawned agents
     spawn_counter: wgpu::Buffer,   // Count of spawned agents
     spawn_readback: wgpu::Buffer,  // Readback for spawn count
@@ -1307,6 +1310,8 @@ struct GpuState {
     initialize_dead_pipeline: wgpu::ComputePipeline, // Sanitize unused agent slots
     environment_init_pipeline: wgpu::ComputePipeline, // Fill alpha/beta/gamma/trails on GPU
     generate_map_pipeline: wgpu::ComputePipeline, // Generate specific map (flat/noise)
+    clear_agent_spatial_grid_pipeline: wgpu::ComputePipeline, // Clear agent spatial grid
+    populate_agent_spatial_grid_pipeline: wgpu::ComputePipeline, // Populate agent spatial grid
     render_pipeline: wgpu::RenderPipeline,
 
     // Bind groups
@@ -1377,7 +1382,6 @@ struct GpuState {
     follow_selected_agent: bool, // New field
     camera_target: [f32; 2], // Target position for smooth camera following
     camera_velocity: [f32; 2], // Current camera velocity for smooth interpolation
-    debug_parts_data: Option<(u32, [u32; MAX_BODY_PARTS])>,
     inspector_zoom: f32, // Zoom level for inspector preview (1.0 = default)
 
     // RNG state for per-frame randomness
@@ -1435,6 +1439,7 @@ struct GpuState {
 
     // Physics controls
     repulsion_strength: f32,
+    agent_repulsion_strength: f32,
     gamma_debug_visual: bool,
     slope_debug_visual: bool,
     rain_debug_visual: bool,
@@ -1513,6 +1518,7 @@ impl GpuState {
             pairing_cost: self.pairing_cost,
             prop_wash_strength: self.prop_wash_strength,
             repulsion_strength: self.repulsion_strength,
+            agent_repulsion_strength: self.agent_repulsion_strength,
             limit_fps: self.limit_fps,
             limit_fps_25: self.limit_fps_25,
             render_interval: self.render_interval,
@@ -1596,6 +1602,7 @@ impl GpuState {
         self.pairing_cost = settings.pairing_cost;
         self.prop_wash_strength = settings.prop_wash_strength;
         self.repulsion_strength = settings.repulsion_strength;
+        self.agent_repulsion_strength = settings.agent_repulsion_strength;
         self.limit_fps = settings.limit_fps;
         self.limit_fps_25 = settings.limit_fps_25;
         self.render_interval = settings.render_interval;
@@ -1954,6 +1961,16 @@ impl GpuState {
         );
         profiler.mark("Rain map buffer");
 
+        // Agent spatial grid for neighbor detection (u32 per cell at GRID_SIZE resolution)
+        let agent_spatial_grid_size = (grid_size * std::mem::size_of::<u32>()) as u64;
+        let agent_spatial_grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Agent Spatial Grid"),
+            size: agent_spatial_grid_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        profiler.mark("Agent spatial grid buffer");
+
         // Gamma grid packs height + 2 slope components per cell (3 floats)
         let gamma_buffer_size = (grid_size * 3 * std::mem::size_of::<f32>()) as u64;
         let gamma_grid = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2071,6 +2088,7 @@ impl GpuState {
             visual_stride: visual_stride_pixels,
             selected_agent_index: u32::MAX,
             repulsion_strength: 10.0,
+            agent_repulsion_strength: 1.0,
             gamma_strength: 10.0 * TERRAIN_FORCE_SCALE,
             prop_wash_strength: 1.0,
             gamma_vis_min: 0.0,
@@ -2202,22 +2220,6 @@ impl GpuState {
         let selected_agent_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Selected Agent Readback"),
             size: std::mem::size_of::<Agent>() as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Debug parts buffers: [0]=count, [1..MAX_BODY_PARTS]=types
-        let debug_parts_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Parts Buffer"),
-            size: ((1 + MAX_BODY_PARTS) * std::mem::size_of::<u32>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_parts_readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Parts Readback"),
-            size: ((1 + MAX_BODY_PARTS) * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -2484,7 +2486,7 @@ impl GpuState {
                         binding: 15,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2494,7 +2496,7 @@ impl GpuState {
                         binding: 16,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2504,7 +2506,7 @@ impl GpuState {
                         binding: 17,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2573,23 +2575,23 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: debug_parts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 14,
                     resource: gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 15,
+                    binding: 14,
                     resource: trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 16,
+                    binding: 15,
                     resource: environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 17,
+                    binding: 16,
                     resource: rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: agent_spatial_grid_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -2652,23 +2654,23 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: debug_parts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 14,
                     resource: gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 15,
+                    binding: 14,
                     resource: trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 16,
+                    binding: 15,
                     resource: environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 17,
+                    binding: 16,
                     resource: rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: agent_spatial_grid_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -2865,6 +2867,28 @@ impl GpuState {
             });
         profiler.mark("generate map pipeline");
 
+        let clear_agent_spatial_grid_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Clear Agent Spatial Grid Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "clear_agent_spatial_grid",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("clear agent spatial grid pipeline");
+
+        let populate_agent_spatial_grid_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Populate Agent Spatial Grid Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "populate_agent_spatial_grid",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("populate agent spatial grid pipeline");
+
         // Create render bind group layout
         let render_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2982,7 +3006,6 @@ impl GpuState {
             &alive_counter,
             &debug_counter,
             &spawn_counter,
-            &debug_parts_buffer,
             &selected_agent_buffer,
             &visual_grid_buffer,
         ] {
@@ -3068,6 +3091,7 @@ impl GpuState {
             alpha_grid,
             beta_grid,
             rain_map_buffer,
+            agent_spatial_grid_buffer,
             gamma_grid,
             trail_grid,
             visual_grid_buffer,
@@ -3084,8 +3108,6 @@ impl GpuState {
             agents_readback,
             selected_agent_buffer,
             selected_agent_readback,
-            debug_parts_buffer,
-            debug_parts_readback,
             new_agents_buffer,
             spawn_counter,
             spawn_readback,
@@ -3113,6 +3135,8 @@ impl GpuState {
             initialize_dead_pipeline,
             environment_init_pipeline,
             generate_map_pipeline,
+            clear_agent_spatial_grid_pipeline,
+            populate_agent_spatial_grid_pipeline,
             render_pipeline,
             compute_bind_group_a,
             compute_bind_group_b,
@@ -3163,7 +3187,6 @@ impl GpuState {
             follow_selected_agent: false, // Initialize to false
             camera_target: [SIM_SIZE / 2.0, SIM_SIZE / 2.0], // Initialize to center
             camera_velocity: [0.0, 0.0], // Initialize velocity to zero
-            debug_parts_data: None,
             inspector_zoom: 1.0,
             rng_state: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3211,6 +3234,7 @@ impl GpuState {
             slope_counter: 0,
             mutation_rate: settings.mutation_rate,
             repulsion_strength: settings.repulsion_strength,
+            agent_repulsion_strength: settings.agent_repulsion_strength,
             gamma_debug_visual: settings.gamma_debug_visual,
             slope_debug_visual: settings.slope_debug_visual,
             rain_debug_visual: settings.rain_debug_visual,
@@ -3649,23 +3673,23 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: self.debug_parts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 14,
                     resource: self.gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 15,
+                    binding: 14,
                     resource: self.trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 16,
+                    binding: 15,
                     resource: self.environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 17,
+                    binding: 16,
                     resource: self.rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: self.agent_spatial_grid_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -3727,23 +3751,23 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: self.debug_parts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 14,
                     resource: self.gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 15,
+                    binding: 14,
                     resource: self.trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 16,
+                    binding: 15,
                     resource: self.environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 17,
+                    binding: 16,
                     resource: self.rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: self.agent_spatial_grid_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -3850,6 +3874,7 @@ impl GpuState {
             pairing_cost: self.pairing_cost,
             prop_wash_strength: self.prop_wash_strength,
             repulsion_strength: self.repulsion_strength,
+            agent_repulsion_strength: self.agent_repulsion_strength,
             limit_fps: self.limit_fps,
             limit_fps_25: self.limit_fps_25,
             render_interval: self.render_interval,
@@ -3955,6 +3980,7 @@ impl GpuState {
         self.alpha_grid.destroy();
         self.beta_grid.destroy();
         self.rain_map_buffer.destroy();
+        self.agent_spatial_grid_buffer.destroy();
         self.gamma_grid.destroy();
         self.trail_grid.destroy();
         self.visual_grid_buffer.destroy();
@@ -3969,8 +3995,6 @@ impl GpuState {
         self.agents_readback.destroy();
         self.selected_agent_buffer.destroy();
         self.selected_agent_readback.destroy();
-        self.debug_parts_buffer.destroy();
-        self.debug_parts_readback.destroy();
         self.new_agents_buffer.destroy();
         self.spawn_counter.destroy();
         self.spawn_readback.destroy();
@@ -3982,7 +4006,6 @@ impl GpuState {
         self.spawn_request_count = 0;
         self.selected_agent_index = None;
         self.selected_agent_data = None;
-        self.debug_parts_data = None;
 
         self.destroyed = true;
     }
@@ -4020,14 +4043,6 @@ impl GpuState {
             &self.selected_agent_readback,
             0,
             std::mem::size_of::<Agent>() as u64,
-        );
-
-        encoder.copy_buffer_to_buffer(
-            &self.debug_parts_buffer,
-            0,
-            &self.debug_parts_readback,
-            0,
-            ((1 + 32) * 4) as u64,
         );
 
         alive_buffer
@@ -4087,31 +4102,6 @@ impl GpuState {
             }
             self.selected_agent_readback.unmap();
         }
-
-        let dbg_slice = self.debug_parts_readback.slice(..);
-        dbg_slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::Maintain::Wait);
-        {
-            let data = dbg_slice.get_mapped_range();
-            let required_bytes = (1 + MAX_BODY_PARTS) * std::mem::size_of::<u32>();
-            if data.len() >= required_bytes {
-                let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                let mut types = [0u32; MAX_BODY_PARTS];
-                for i in 0..MAX_BODY_PARTS {
-                    let base = 4 + i * 4;
-                    types[i] = u32::from_le_bytes([
-                        data[base],
-                        data[base + 1],
-                        data[base + 2],
-                        data[base + 3],
-                    ]);
-                }
-                self.debug_parts_data = Some((count.min(MAX_BODY_PARTS as u32), types));
-            } else {
-                self.debug_parts_data = None;
-            }
-        }
-        self.debug_parts_readback.unmap();
     }
 
     fn process_spawn_requests_only(&mut self, cpu_spawn_count: u32, do_readbacks: bool) {
@@ -4400,6 +4390,7 @@ impl GpuState {
                 .map(|i| i as u32)
                 .unwrap_or(u32::MAX),
             repulsion_strength: self.repulsion_strength,
+            agent_repulsion_strength: self.agent_repulsion_strength,
             gamma_strength: self.repulsion_strength * TERRAIN_FORCE_SCALE,
             prop_wash_strength: self.prop_wash_strength,
             gamma_vis_min,
@@ -4575,6 +4566,17 @@ impl GpuState {
 
             // Run simulation compute passes, but skip everything when paused or no living agents
             if should_run_simulation {
+                // Clear agent spatial grid for neighbor detection - workgroup_size(16,16)
+                let grid_workgroups = (GRID_DIM_U32 + 15) / 16;
+                cpass.set_pipeline(&self.clear_agent_spatial_grid_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(grid_workgroups, grid_workgroups, 1);
+
+                // Populate agent spatial grid with agent positions - workgroup_size(256)
+                cpass.set_pipeline(&self.populate_agent_spatial_grid_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
                 // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(256)
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
@@ -5177,6 +5179,7 @@ impl GpuState {
             self.pairing_cost = settings.pairing_cost;
             self.prop_wash_strength = settings.prop_wash_strength;
             self.repulsion_strength = settings.repulsion_strength;
+            self.agent_repulsion_strength = settings.agent_repulsion_strength;
             self.limit_fps = settings.limit_fps;
             self.limit_fps_25 = settings.limit_fps_25;
             self.render_interval = settings.render_interval;
@@ -5416,19 +5419,23 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: self.debug_parts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 13,
                     resource: self.gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 14,
+                    binding: 13,
                     resource: self.trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 15,
+                    binding: 14,
                     resource: self.environment_init_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: self.rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: self.agent_spatial_grid_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -5460,14 +5467,18 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: self.params_buffer.as_entire_binding(),
+                    resource: self.agent_grid_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: self.alive_counter.as_entire_binding(),
+                    resource: self.params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
+                    resource: self.alive_counter.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
                     resource: self.debug_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
@@ -5488,19 +5499,23 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: self.debug_parts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 13,
                     resource: self.gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 14,
+                    binding: 13,
                     resource: self.trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 15,
+                    binding: 14,
                     resource: self.environment_init_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: self.rain_map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: self.agent_spatial_grid_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -6503,6 +6518,7 @@ fn main() {
                                                                         pairing_cost: state.pairing_cost,
                                                                         prop_wash_strength: state.prop_wash_strength,
                                                                         repulsion_strength: state.repulsion_strength,
+                                                                        agent_repulsion_strength: state.agent_repulsion_strength,
                                                                         limit_fps: state.limit_fps,
                                                                         limit_fps_25: state.limit_fps_25,
                                                                         render_interval: state.render_interval,
@@ -6974,6 +6990,20 @@ fn main() {
                                                                 0.0..=100.0,
                                                             )
                                                             .text("Obstacle / Terrain Force"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.agent_repulsion_strength,
+                                                                0.0..=10.0,
+                                                            )
+                                                            .text("Agent-Agent Repulsion"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.agent_repulsion_strength,
+                                                                0.0..=10.0,
+                                                            )
+                                                            .text("Agent-Agent Repulsion"),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.vector_force_power, 0.0..=100.0)

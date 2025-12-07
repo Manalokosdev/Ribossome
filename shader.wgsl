@@ -9,7 +9,7 @@
 // CONSTANTS
 // ============================================================================
 
-const GRID_SIZE: u32 = 1024u;          // Environment grid resolution (reduced to half)
+const GRID_SIZE: u32 = 512u;           // Spatial grid resolution (coarser for wider search)
 const SIM_SIZE: u32 = 15360u;          // Simulation world size (reduced to half)
 const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 256u;
@@ -146,6 +146,7 @@ struct SimParams {
     visual_stride: u32,
     selected_agent_index: u32,  // Index of selected agent for debug visualization (u32::MAX if none)
     repulsion_strength: f32,
+    agent_repulsion_strength: f32,
     gamma_strength: f32,
     prop_wash_strength: f32,
     gamma_vis_min: f32,
@@ -275,20 +276,20 @@ var<storage, read> spawn_requests: array<SpawnRequest>;
 var<storage, read_write> selected_agent_buffer: array<Agent>;  // Buffer to hold the selected agent for CPU readback
 
 @group(0) @binding(13)
-var<storage, read_write> debug_parts_buffer: array<u32>; // [0]=count, [1..MAX_BODY_PARTS]=part types (u32 each)
-
-@group(0) @binding(14)
 var<storage, read_write> gamma_grid: array<f32>; // Terrain height field + slope components
 
-@group(0) @binding(15)
+@group(0) @binding(14)
 // NOTE: Use vec4 for std430-friendly 16-byte stride to match host buffer layout
 var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGBA (A unused)
 
-@group(0) @binding(16)
+@group(0) @binding(15)
 var<uniform> environment_init: EnvironmentInitParams;
 
-@group(0) @binding(17)
+@group(0) @binding(16)
 var<storage, read> rain_map: array<vec2<f32>>; // x=alpha, y=beta
+
+@group(0) @binding(17)
+var<storage, read_write> agent_spatial_grid: array<u32>; // Agent index per grid cell (SIM_SIZE x SIM_SIZE)
 
 // ============================================================================
 // AMINO ACID PROPERTIES
@@ -3005,7 +3006,66 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         force += slope_force;
         torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
 
-        // Cached amplification for this part (organs will use it, others may ignore)
+        // Agent-agent repulsion force per amino acid
+        // Check nearby agents using spatial grid for neighbor detection
+        let scale = f32(GRID_SIZE) / f32(SIM_SIZE);
+        let my_grid_x = u32(clamp(world_pos.x * scale, 0.0, f32(GRID_SIZE - 1u)));
+        let my_grid_y = u32(clamp(world_pos.y * scale, 0.0, f32(GRID_SIZE - 1u)));
+        
+        var collision_force = vec2<f32>(0.0);
+        
+        // Check neighborhood for nearby agents
+        for (var dy: i32 = -10; dy <= 10; dy++) {
+            for (var dx: i32 = -10; dx <= 10; dx++) {
+                // Skip own cell to prevent self-collision
+                if (dx == 0 && dy == 0) { continue; }
+                
+                let check_x = i32(my_grid_x) + dx;
+                let check_y = i32(my_grid_y) + dy;
+                
+                // Bounds check
+                if (check_x >= 0 && check_x < i32(GRID_SIZE) && 
+                    check_y >= 0 && check_y < i32(GRID_SIZE)) {
+                    
+                    let check_idx = u32(check_y) * GRID_SIZE + u32(check_x);
+                    let neighbor_id = agent_spatial_grid[check_idx];
+                    
+                    // Valid neighbor found (not empty, not self)
+                    if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
+                        let neighbor = agents_out[neighbor_id];
+                        
+                        // Skip dead neighbors
+                        if (neighbor.alive == 0u || neighbor.energy <= 0.0) {
+                            continue;
+                        }
+                        
+                        let delta = world_pos - neighbor.position;
+                        let dist = length(delta);
+                        
+                        // Distance-based repulsion force (inverse square law with cutoff)
+                        let max_repulsion_distance = 500.0;
+                        
+                        if (dist < max_repulsion_distance && dist > 0.1) {
+                            // Inverse square repulsion: F = k / (d^2)
+                            let base_strength = params.agent_repulsion_strength * 100000.0;
+                            let force_magnitude = base_strength / (dist * dist);
+                            
+                            // Clamp to prevent extreme forces at very small distances
+                            let clamped_force = min(force_magnitude, 5000.0);
+                            
+                            let direction = delta / dist; // Normalize
+                            collision_force += direction * clamped_force * part_mass;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Apply collision force
+        force += collision_force;
+        torque += (r_com.x * collision_force.y - r_com.y * collision_force.x);
+
+        // Cached amplification for this part (organs will use it, organs may ignore)
         let amplification = amplification_per_part[i];
 
         let part_weight = part_mass / total_mass;
@@ -3831,16 +3891,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Always write selected agent to readback buffer for inspector (even when drawing disabled)
     if (agent.is_selected == 1u) {
-        // Dedicated debug buffer: write full built list (count + up to MAX_BODY_PARTS types)
-        debug_parts_buffer[0] = body_count;
-        // Zero out to be safe when body_count shrinks
-        for (var i = 0u; i < MAX_BODY_PARTS; i++) {
-            debug_parts_buffer[1u + i] = 0u;
-        }
-        for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-            debug_parts_buffer[1u + i] = agents_out[agent_id].body[i].part_type;
-        }
-
         // Publish an unrotated copy for inspector preview
         var unrotated_agent = agents_out[agent_id];
         unrotated_agent.rotation = 0.0;
@@ -5374,6 +5424,30 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Write base color (motion blur will be applied in separate pass)
     visual_grid[visual_idx] = vec4<f32>(base_color, 1.0);
 
+    // ====== SPATIAL GRID DEBUG VISUALIZATION ======
+    // Show which grid cells contain agents (when debug mode is enabled)
+    if (params.debug_mode != 0u) {
+        let scale = f32(GRID_SIZE) / f32(SIM_SIZE);
+        let grid_x = u32(clamp(world_x * scale, 0.0, f32(GRID_SIZE - 1u)));
+        let grid_y = u32(clamp(world_y * scale, 0.0, f32(GRID_SIZE - 1u)));
+        let grid_idx = grid_y * GRID_SIZE + grid_x;
+        let agent_id = agent_spatial_grid[grid_idx];
+        
+        // If cell contains an agent, tint it
+        if (agent_id != 0xFFFFFFFFu) {
+            // Hash the agent ID to get a unique color per agent
+            let hash = agent_id * 2654435761u;
+            let r = f32((hash >> 0u) & 0xFFu) / 255.0;
+            let g = f32((hash >> 8u) & 0xFFu) / 255.0;
+            let b = f32((hash >> 16u) & 0xFFu) / 255.0;
+            let debug_color = vec3<f32>(r, g, b);
+            
+            // Blend debug color with base color (50% opacity)
+            base_color = mix(base_color, debug_color, 0.5);
+            visual_grid[visual_idx] = vec4<f32>(base_color, 1.0);
+        }
+    }
+
     // ====== RGB TRAIL OVERLAY ======
     // Sample trail grid and blend onto the visual output
     let trail_color = clamp(trail_grid[grid_index(world_pos)].xyz, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -6578,4 +6652,48 @@ fn apply_motion_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
         let final_color = color_sum / f32(sample_count + 1);
         visual_grid[visual_idx] = vec4<f32>(final_color, 1.0);
     }
+}
+
+// ============================================================================
+// AGENT SPATIAL GRID - For neighbor detection and collisions
+// ============================================================================
+
+// Clear the agent spatial grid (mark all cells as empty)
+@compute @workgroup_size(16, 16)
+fn clear_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    
+    if (x >= GRID_SIZE || y >= GRID_SIZE) {
+        return;
+    }
+    
+    let idx = y * GRID_SIZE + x;
+    agent_spatial_grid[idx] = 0xFFFFFFFFu; // Empty marker
+}
+
+// Populate the agent spatial grid with agent indices
+@compute @workgroup_size(256)
+fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let agent_id = gid.x;
+    
+    if (agent_id >= params.agent_count) {
+        return;
+    }
+    
+    let agent = agents_out[agent_id];
+    
+    // Skip dead agents
+    if (agent.alive == 0u || agent.energy <= 0.0) {
+        return;
+    }
+    
+    // Convert agent position (in SIM_SIZE space) to grid coordinates (GRID_SIZE resolution)
+    let scale = f32(GRID_SIZE) / f32(SIM_SIZE);
+    let grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(GRID_SIZE - 1u)));
+    let grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(GRID_SIZE - 1u)));
+    let grid_idx = grid_y * GRID_SIZE + grid_x;
+    
+    // Write agent index to grid (simple overwrite - last agent wins if multiple per cell)
+    agent_spatial_grid[grid_idx] = agent_id;
 }
