@@ -9,7 +9,8 @@
 // CONSTANTS
 // ============================================================================
 
-const GRID_SIZE: u32 = 512u;           // Spatial grid resolution (coarser for wider search)
+const ENV_GRID_SIZE: u32 = 1024u;      // Environment grid resolution (alpha/beta/gamma)
+const SPATIAL_GRID_SIZE: u32 = 512u;   // Spatial hash grid for agent collision detection
 const SIM_SIZE: u32 = 15360u;          // Simulation world size (reduced to half)
 const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 256u;
@@ -1149,13 +1150,13 @@ fn clamp_position(pos: vec2<f32>) -> vec2<f32> {
 fn grid_index(pos: vec2<f32>) -> u32 {
     // Clamp world pos into [0, SIM_SIZE]
     let clamped = clamp_position(pos);
-    // Scale down from SIM_SIZE to GRID_SIZE for environment grids
-    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+    // Scale down from SIM_SIZE to ENV_GRID_SIZE for environment grids
+    let scale = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
     var x: i32 = i32(clamped.x / scale);
     var y: i32 = i32(clamped.y / scale);
-    x = clamp(x, 0, i32(GRID_SIZE) - 1);
-    y = clamp(y, 0, i32(GRID_SIZE) - 1);
-    return u32(y) * GRID_SIZE + u32(x);
+    x = clamp(x, 0, i32(ENV_GRID_SIZE) - 1);
+    y = clamp(y, 0, i32(ENV_GRID_SIZE) - 1);
+    return u32(y) * ENV_GRID_SIZE + u32(x);
 }
 
 struct PartName {
@@ -2971,9 +2972,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var torque = 0.0;
 
     // ====== COLLECT NEARBY AGENTS ONCE (for repulsion forces) ======
-    let scale = f32(GRID_SIZE) / f32(SIM_SIZE);
-    let my_grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(GRID_SIZE - 1u)));
-    let my_grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(GRID_SIZE - 1u)));
+    let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
+    let my_grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    let my_grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
     
     // Collect neighbor IDs (max 441 cells in 21x21 grid, but most will be empty)
     var neighbor_count = 0u;
@@ -2988,10 +2989,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let check_y = i32(my_grid_y) + dy;
             
             // Bounds check
-            if (check_x >= 0 && check_x < i32(GRID_SIZE) && 
-                check_y >= 0 && check_y < i32(GRID_SIZE)) {
+            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && 
+                check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
                 
-                let check_idx = u32(check_y) * GRID_SIZE + u32(check_x);
+                let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
                 let neighbor_id = agent_spatial_grid[check_idx];
                 
                 // Valid neighbor found (not empty, not self)
@@ -5438,10 +5439,10 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ====== SPATIAL GRID DEBUG VISUALIZATION ======
     // Show which grid cells contain agents (when debug mode is enabled)
     if (params.debug_mode != 0u) {
-        let scale = f32(GRID_SIZE) / f32(SIM_SIZE);
-        let grid_x = u32(clamp(world_x * scale, 0.0, f32(GRID_SIZE - 1u)));
-        let grid_y = u32(clamp(world_y * scale, 0.0, f32(GRID_SIZE - 1u)));
-        let grid_idx = grid_y * GRID_SIZE + grid_x;
+        let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
+        let grid_x = u32(clamp(world_x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+        let grid_y = u32(clamp(world_y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+        let grid_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
         let agent_id = agent_spatial_grid[grid_idx];
         
         // If cell contains an agent, tint it
@@ -6675,11 +6676,11 @@ fn clear_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
     
-    if (x >= GRID_SIZE || y >= GRID_SIZE) {
+    if (x >= SPATIAL_GRID_SIZE || y >= SPATIAL_GRID_SIZE) {
         return;
     }
     
-    let idx = y * GRID_SIZE + x;
+    let idx = y * SPATIAL_GRID_SIZE + x;
     agent_spatial_grid[idx] = 0xFFFFFFFFu; // Empty marker
 }
 
@@ -6699,11 +6700,11 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     
-    // Convert agent position (in SIM_SIZE space) to grid coordinates (GRID_SIZE resolution)
-    let scale = f32(GRID_SIZE) / f32(SIM_SIZE);
-    let grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(GRID_SIZE - 1u)));
-    let grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(GRID_SIZE - 1u)));
-    let grid_idx = grid_y * GRID_SIZE + grid_x;
+    // Convert agent position (in SIM_SIZE space) to grid coordinates (SPATIAL_GRID_SIZE resolution)
+    let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
+    let grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    let grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    let grid_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
     
     // Write agent index to grid (simple overwrite - last agent wins if multiple per cell)
     agent_spatial_grid[grid_idx] = agent_id;

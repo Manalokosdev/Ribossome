@@ -23,9 +23,11 @@ use winit::{
     window::Window,
 };
 
-const GRID_DIM: usize = 1024; // Reduced to half resolution
+const GRID_DIM: usize = 1024; // Environment grid resolution (alpha/beta/gamma)
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
+const SPATIAL_GRID_DIM: usize = 512; // Spatial hash grid for agent collision detection
+const SPATIAL_GRID_CELL_COUNT: usize = SPATIAL_GRID_DIM * SPATIAL_GRID_DIM;
 const SIM_SIZE: f32 = 15360.0; // World size (must match shader SIM_SIZE)
 const DIFFUSE_WG_SIZE_X: u32 = 16;
 const DIFFUSE_WG_SIZE_Y: u32 = 16;
@@ -1961,8 +1963,8 @@ impl GpuState {
         );
         profiler.mark("Rain map buffer");
 
-        // Agent spatial grid for neighbor detection (u32 per cell at GRID_SIZE resolution)
-        let agent_spatial_grid_size = (grid_size * std::mem::size_of::<u32>()) as u64;
+        // Agent spatial grid for neighbor detection (u32 per cell at SPATIAL_GRID_DIM resolution)
+        let agent_spatial_grid_size = (SPATIAL_GRID_CELL_COUNT * std::mem::size_of::<u32>()) as u64;
         let agent_spatial_grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Agent Spatial Grid"),
             size: agent_spatial_grid_size,
@@ -4567,10 +4569,10 @@ impl GpuState {
             // Run simulation compute passes, but skip everything when paused or no living agents
             if should_run_simulation {
                 // Clear agent spatial grid for neighbor detection - workgroup_size(16,16)
-                let grid_workgroups = (GRID_DIM_U32 + 15) / 16;
+                let spatial_grid_workgroups = (SPATIAL_GRID_DIM as u32 + 15) / 16;
                 cpass.set_pipeline(&self.clear_agent_spatial_grid_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(grid_workgroups, grid_workgroups, 1);
+                cpass.dispatch_workgroups(spatial_grid_workgroups, spatial_grid_workgroups, 1);
 
                 // Populate agent spatial grid with agent positions - workgroup_size(256)
                 cpass.set_pipeline(&self.populate_agent_spatial_grid_pipeline);
