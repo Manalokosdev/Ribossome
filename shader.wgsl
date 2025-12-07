@@ -2970,6 +2970,47 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var force = vec2<f32>(0.0);
     var torque = 0.0;
 
+    // ====== COLLECT NEARBY AGENTS ONCE (for repulsion forces) ======
+    let scale = f32(GRID_SIZE) / f32(SIM_SIZE);
+    let my_grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(GRID_SIZE - 1u)));
+    let my_grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(GRID_SIZE - 1u)));
+    
+    // Collect neighbor IDs (max 441 cells in 21x21 grid, but most will be empty)
+    var neighbor_count = 0u;
+    var neighbor_ids: array<u32, 64>; // Store up to 64 nearby agents
+    
+    for (var dy: i32 = -10; dy <= 10; dy++) {
+        for (var dx: i32 = -10; dx <= 10; dx++) {
+            // Skip own cell to prevent self-collision
+            if (dx == 0 && dy == 0) { continue; }
+            
+            let check_x = i32(my_grid_x) + dx;
+            let check_y = i32(my_grid_y) + dy;
+            
+            // Bounds check
+            if (check_x >= 0 && check_x < i32(GRID_SIZE) && 
+                check_y >= 0 && check_y < i32(GRID_SIZE)) {
+                
+                let check_idx = u32(check_y) * GRID_SIZE + u32(check_x);
+                let neighbor_id = agent_spatial_grid[check_idx];
+                
+                // Valid neighbor found (not empty, not self)
+                if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
+                    let neighbor = agents_out[neighbor_id];
+                    
+                    // Skip dead neighbors
+                    if (neighbor.alive != 0u && neighbor.energy > 0.0) {
+                        // Store this neighbor if we have space
+                        if (neighbor_count < 64u) {
+                            neighbor_ids[neighbor_count] = neighbor_id;
+                            neighbor_count++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Now calculate forces using the updated morphology
     var chirality_flip_physics = 1.0; // Track cumulative chirality for propeller direction
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
@@ -3006,58 +3047,28 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         force += slope_force;
         torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
 
-        // Agent-agent repulsion force per amino acid
-        // Check nearby agents using spatial grid for neighbor detection
-        let scale = f32(GRID_SIZE) / f32(SIM_SIZE);
-        let my_grid_x = u32(clamp(world_pos.x * scale, 0.0, f32(GRID_SIZE - 1u)));
-        let my_grid_y = u32(clamp(world_pos.y * scale, 0.0, f32(GRID_SIZE - 1u)));
-        
+        // Agent-agent repulsion force per amino acid (using pre-collected neighbors)
         var collision_force = vec2<f32>(0.0);
         
-        // Check neighborhood for nearby agents
-        for (var dy: i32 = -10; dy <= 10; dy++) {
-            for (var dx: i32 = -10; dx <= 10; dx++) {
-                // Skip own cell to prevent self-collision
-                if (dx == 0 && dy == 0) { continue; }
+        for (var n = 0u; n < neighbor_count; n++) {
+            let neighbor = agents_out[neighbor_ids[n]];
+            
+            let delta = world_pos - neighbor.position;
+            let dist = length(delta);
+            
+            // Distance-based repulsion force (inverse square law with cutoff)
+            let max_repulsion_distance = 500.0;
+            
+            if (dist < max_repulsion_distance && dist > 0.1) {
+                // Inverse square repulsion: F = k / (d^2)
+                let base_strength = params.agent_repulsion_strength * 100000.0;
+                let force_magnitude = base_strength / (dist * dist);
                 
-                let check_x = i32(my_grid_x) + dx;
-                let check_y = i32(my_grid_y) + dy;
+                // Clamp to prevent extreme forces at very small distances
+                let clamped_force = min(force_magnitude, 5000.0);
                 
-                // Bounds check
-                if (check_x >= 0 && check_x < i32(GRID_SIZE) && 
-                    check_y >= 0 && check_y < i32(GRID_SIZE)) {
-                    
-                    let check_idx = u32(check_y) * GRID_SIZE + u32(check_x);
-                    let neighbor_id = agent_spatial_grid[check_idx];
-                    
-                    // Valid neighbor found (not empty, not self)
-                    if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
-                        let neighbor = agents_out[neighbor_id];
-                        
-                        // Skip dead neighbors
-                        if (neighbor.alive == 0u || neighbor.energy <= 0.0) {
-                            continue;
-                        }
-                        
-                        let delta = world_pos - neighbor.position;
-                        let dist = length(delta);
-                        
-                        // Distance-based repulsion force (inverse square law with cutoff)
-                        let max_repulsion_distance = 500.0;
-                        
-                        if (dist < max_repulsion_distance && dist > 0.1) {
-                            // Inverse square repulsion: F = k / (d^2)
-                            let base_strength = params.agent_repulsion_strength * 100000.0;
-                            let force_magnitude = base_strength / (dist * dist);
-                            
-                            // Clamp to prevent extreme forces at very small distances
-                            let clamped_force = min(force_magnitude, 5000.0);
-                            
-                            let direction = delta / dist; // Normalize
-                            collision_force += direction * clamped_force * part_mass;
-                        }
-                    }
-                }
+                let direction = delta / dist; // Normalize
+                collision_force += direction * clamped_force * part_mass;
             }
         }
         
