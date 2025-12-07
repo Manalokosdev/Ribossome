@@ -23,10 +23,10 @@ use winit::{
     window::Window,
 };
 
-const GRID_DIM: usize = 2048; // Original resolution
+const GRID_DIM: usize = 1024; // Reduced to half resolution
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
-const SIM_SIZE: f32 = 30720.0; // World size (must match shader SIM_SIZE)
+const SIM_SIZE: f32 = 15360.0; // World size (must match shader SIM_SIZE)
 const DIFFUSE_WG_SIZE_X: u32 = 16;
 const DIFFUSE_WG_SIZE_Y: u32 = 16;
 const CLEAR_WG_SIZE_X: u32 = 16;
@@ -731,6 +731,7 @@ struct SpawnRequest {
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct SimParams {
     dt: f32,
+    frame_dt: f32,
     drag: f32,
     energy_cost: f32,
     amino_maintenance_cost: f32,
@@ -824,7 +825,10 @@ struct SimParams {
     vector_force_power: f32,  // Global force multiplier (0.0 = off)
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
     vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
-    _padding: f32,  // Ensure 16-byte alignment
+    inspector_zoom: f32,      // Inspector preview zoom level (1.0 = default)
+    _padding0: f32,           // Padding for alignment
+    _padding1: f32,
+    _padding2: f32,
 }
 
 #[repr(C)]
@@ -1143,25 +1147,25 @@ impl SimulationSnapshot {
     fn new(epoch: u64, agents: &[Agent], settings: SimulationSettings) -> Self {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         
-        // Collect all living agents
-        let living_agents: Vec<&Agent> = agents
-            .iter()
-            .filter(|a| a.alive != 0)
-            .collect();
-        
-        // Randomly sample up to 5000 agents
+        // agents should already be filtered for alive != 0 by caller
+        // Randomly sample up to 5000 agents if there are more
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
-        let sampled: Vec<&Agent> = if living_agents.len() <= 5000 {
-            living_agents
+        
+        let sampled_agents: Vec<&Agent> = if agents.len() <= 5000 {
+            // Keep all agents
+            agents.iter().collect()
         } else {
-            living_agents.choose_multiple(&mut rng, 5000).copied().collect()
+            // Sample 5000 random agents
+            agents.iter().collect::<Vec<_>>().choose_multiple(&mut rng, 5000).copied().collect()
         };
         
-        let agent_snapshots: Vec<AgentSnapshot> = sampled
+        let agent_snapshots: Vec<AgentSnapshot> = sampled_agents
             .iter()
             .map(|a| AgentSnapshot::from(*a))
             .collect();
+        
+        println!("Snapshot created with {} agents (from {} living)", agent_snapshots.len(), agents.len());
         
         Self {
             version: "1.0".to_string(),
@@ -1374,6 +1378,7 @@ struct GpuState {
     camera_target: [f32; 2], // Target position for smooth camera following
     camera_velocity: [f32; 2], // Current camera velocity for smooth interpolation
     debug_parts_data: Option<(u32, [u32; MAX_BODY_PARTS])>,
+    inspector_zoom: f32, // Zoom level for inspector preview (1.0 = default)
 
     // RNG state for per-frame randomness
     rng_state: u64,
@@ -1382,6 +1387,7 @@ struct GpuState {
     window: Arc<Window>,
     egui_renderer: egui_wgpu::Renderer,
     ui_tab: usize, // 0=Simulation, 1=Agents, 2=Environment
+    ui_visible: bool, // Toggle control panel visibility with spacebar
     // Debug
     debug_per_segment: bool,
     is_paused: bool,
@@ -2029,6 +2035,7 @@ impl GpuState {
 
         let params = SimParams {
             dt: 0.016,
+            frame_dt: 0.016,
             drag: 0.1,
             energy_cost: 0.0, // Disabled energy depletion for now
             amino_maintenance_cost: 0.001,
@@ -2118,7 +2125,10 @@ impl GpuState {
             vector_force_power: 0.0,
             vector_force_x: 0.0,
             vector_force_y: 0.0,
-            _padding: 0.0,
+            inspector_zoom: 1.0,
+            _padding0: 0.0,
+            _padding1: 0.0,
+            _padding2: 0.0,
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3154,6 +3164,7 @@ impl GpuState {
             camera_target: [SIM_SIZE / 2.0, SIM_SIZE / 2.0], // Initialize to center
             camera_velocity: [0.0, 0.0], // Initialize velocity to zero
             debug_parts_data: None,
+            inspector_zoom: 1.0,
             rng_state: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -3161,6 +3172,7 @@ impl GpuState {
             window: window_clone,
             egui_renderer,
             ui_tab: 0, // Start on Simulation tab
+            ui_visible: true, // Control panel visible by default
             debug_per_segment: settings.debug_per_segment,
             is_paused: false,
             snapshot_save_requested: false,
@@ -4194,14 +4206,16 @@ impl GpuState {
         }
     }
 
-    pub fn update(&mut self, should_draw: bool) {
+    pub fn update(&mut self, should_draw: bool, frame_dt: f32) {
         // Smooth camera following with continuous integration
         if self.follow_selected_agent {
             // Store previous camera position for motion blur
             self.prev_camera_pan = self.camera_pan;
             
-            // Continuous integration factor (lower = smoother, more lag)
-            let integration_factor = 0.01;
+            // Frame-rate independent integration factor using exponential decay
+            let clamped_dt = frame_dt.clamp(0.001, 0.1);
+            let damping_rate = 1.25; // Faster follow (~2% step at 60fps: 1 - exp(-1.25*0.016) ≈ 0.02)
+            let integration_factor = 1.0 - (-damping_rate * clamped_dt).exp();
             
             // Smoothly integrate target position into camera position
             self.camera_pan[0] += (self.camera_target[0] - self.camera_pan[0]) * integration_factor;
@@ -4341,6 +4355,7 @@ impl GpuState {
 
         let params = SimParams {
             dt: effective_dt,
+            frame_dt,
             drag: 0.1,
             energy_cost: 0.0, // Disabled energy depletion for now
             amino_maintenance_cost: self.amino_maintenance_cost,
@@ -4440,7 +4455,10 @@ impl GpuState {
             vector_force_power: self.vector_force_power,
             vector_force_x: self.vector_force_x,
             vector_force_y: self.vector_force_y,
-            _padding: 0.0,
+            inspector_zoom: self.inspector_zoom,
+            _padding0: 0.0,
+            _padding1: 0.0,
+            _padding2: 0.0,
         };
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
@@ -5088,9 +5106,17 @@ impl GpuState {
         self.gamma_grid_readback.unmap();
         self.agents_readback.unmap();
 
-        // Create snapshot from GPU agents with current settings
+        // Filter only living agents before creating snapshot
+        let living_agents: Vec<Agent> = agents_gpu
+            .into_iter()
+            .filter(|a| a.alive != 0)
+            .collect();
+        
+        println!("Saving snapshot with {} living agents", living_agents.len());
+        
+        // Create snapshot from living agents with current settings
         let current_settings = self.current_settings();
-        let snapshot = SimulationSnapshot::new(self.epoch, &agents_gpu, current_settings);
+        let snapshot = SimulationSnapshot::new(self.epoch, &living_agents, current_settings);
 
         // Save to PNG
         save_simulation_snapshot(path, &alpha_grid, &beta_grid, &gamma_grid, &snapshot)?;
@@ -6022,7 +6048,7 @@ fn main() {
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::Space) => {
-                                            state.is_paused = !state.is_paused;
+                                            state.ui_visible = !state.ui_visible;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyF) => {
                                             // Toggle follow mode
@@ -6099,8 +6125,23 @@ fn main() {
                                     MouseScrollDelta::LineDelta(_, y) => y * 0.1,
                                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
                                 };
-                                state.camera_zoom *= 1.0 + zoom_delta;
-                                state.camera_zoom = state.camera_zoom.clamp(0.1, 2000.0);
+                                
+                                // Check if mouse is over inspector area (rightmost 300px)
+                                let mouse_over_inspector = if let Some(mouse_pos) = state.last_mouse_pos {
+                                    mouse_pos[0] > (state.surface_config.width as f32 - 300.0)
+                                } else {
+                                    false
+                                };
+                                
+                                if mouse_over_inspector {
+                                    // Zoom inspector
+                                    state.inspector_zoom *= 1.0 + zoom_delta;
+                                    state.inspector_zoom = state.inspector_zoom.clamp(0.1, 10.0);
+                                } else {
+                                    // Zoom camera
+                                    state.camera_zoom *= 1.0 + zoom_delta;
+                                    state.camera_zoom = state.camera_zoom.clamp(0.1, 2000.0);
+                                }
                                 window.request_redraw();
                             }
                         }
@@ -6130,7 +6171,9 @@ fn main() {
                                         std::thread::sleep(target_frame_time - elapsed);
                                     }
                                 }
-                                state.last_frame_time = std::time::Instant::now();
+                                let now = std::time::Instant::now();
+                                let frame_dt = (now - state.last_frame_time).as_secs_f32().clamp(0.001, 0.1);
+                                state.last_frame_time = now;
 
                                 // Run one simulation step per frame
                                 let should_draw = if state.is_paused {
@@ -6146,7 +6189,7 @@ fn main() {
                                 // Only run simulation when not paused AND there are living agents
                                 let should_run_simulation = !state.is_paused && state.alive_count > 0;
 
-                                state.update(should_draw);
+                                state.update(should_draw, frame_dt);
 
                                 // Only increment epoch and update stats when simulation is running
                                 if should_run_simulation {
@@ -6191,7 +6234,8 @@ fn main() {
                                 // Build egui UI
                                 let raw_input = egui_state.take_egui_input(&window);
                                 let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
-                                    // Left side panel for simulation controls
+                                    // Left side panel for simulation controls (only show if ui_visible)
+                                    if state.ui_visible {
                                     egui::SidePanel::left("simulation_controls")
                                         .default_width(350.0)
                                         .resizable(true)
@@ -7553,7 +7597,7 @@ fn main() {
                                             }
                             });
 
-                                   
+                                   } // End ui_visible check
                                 });
 
                                 // Handle platform output
@@ -7670,9 +7714,11 @@ fn main() {
                                         std::thread::sleep(target_frame_time - elapsed);
                                     }
                                 }
-                                state.last_frame_time = std::time::Instant::now();
+                                let now = std::time::Instant::now();
+                                let frame_dt = (now - state.last_frame_time).as_secs_f32().clamp(0.001, 0.1);
+                                state.last_frame_time = now;
 
-                                state.update(true); // Always do readbacks when not in fast mode
+                                state.update(true, frame_dt); // Always do readbacks when not in fast mode
 
                                 // Build egui UI
                                 let raw_input = egui_state.take_egui_input(&window);
