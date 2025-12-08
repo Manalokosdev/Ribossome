@@ -4977,7 +4977,18 @@ fn compute_gamma_slope(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dy = dy_cardinal + dy_diagonal;
 
     let inv_cell_size = f32(GRID_SIZE) / params.grid_size;
-    let gradient = vec2<f32>(dx, dy) * inv_cell_size;
+    var gradient = vec2<f32>(dx, dy) * inv_cell_size;
+    
+    // Add global vector force (gravity/wind) to slope gradient
+    // This makes slope sensors respond to both terrain slope AND gravity direction
+    if (params.vector_force_power > 0.0) {
+        let gravity_vector = vec2<f32>(
+            params.vector_force_x * params.vector_force_power,
+            params.vector_force_y * params.vector_force_power
+        );
+        gradient += gravity_vector;
+    }
+    
     write_gamma_slope(idx, gradient);
 }
 
