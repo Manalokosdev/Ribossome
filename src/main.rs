@@ -831,7 +831,7 @@ struct SimParams {
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
     vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
     inspector_zoom: f32,      // Inspector preview zoom level (1.0 = default)
-    _padding0: f32,           // Padding for alignment
+    agent_trail_decay: f32,   // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
     _padding1: f32,
     _padding2: f32,
 }
@@ -1001,6 +1001,7 @@ struct SimulationSettings {
     beta_noise_scale: f32,
     gamma_noise_scale: f32,
     noise_power: f32,
+    agent_trail_decay: f32,  // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
 }
 
 impl Default for SimulationSettings {
@@ -1085,6 +1086,7 @@ impl Default for SimulationSettings {
             beta_noise_scale: 1.0,
             gamma_noise_scale: 1.0,
             noise_power: 1.0,
+            agent_trail_decay: 1.0,  // Default to instant clear (original behavior)
         }
     }
 }
@@ -1390,6 +1392,7 @@ struct GpuState {
     camera_target: [f32; 2], // Target position for smooth camera following
     camera_velocity: [f32; 2], // Current camera velocity for smooth interpolation
     inspector_zoom: f32, // Zoom level for inspector preview (1.0 = default)
+    agent_trail_decay: f32, // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
 
     // RNG state for per-frame randomness
     rng_state: u64,
@@ -1577,6 +1580,7 @@ impl GpuState {
             agent_blend_mode: self.agent_blend_mode,
             agent_color: self.agent_color,
             agent_color_blend: self.agent_color_blend,
+            agent_trail_decay: self.agent_trail_decay,
         };
         settings.save_to_disk(path)
     }
@@ -1657,6 +1661,7 @@ impl GpuState {
         self.agent_blend_mode = settings.agent_blend_mode;
         self.agent_color = settings.agent_color;
         self.agent_color_blend = settings.agent_color_blend;
+        self.agent_trail_decay = settings.agent_trail_decay;
 
         if let Some(path) = &self.alpha_rain_map_path.clone() {
              let _ = self.load_alpha_rain_map(path);
@@ -2155,7 +2160,7 @@ impl GpuState {
             vector_force_x: 0.0,
             vector_force_y: 0.0,
             inspector_zoom: 1.0,
-            _padding0: 0.0,
+            agent_trail_decay: 1.0,  // Default to instant clear (original behavior)
             _padding1: 0.0,
             _padding2: 0.0,
         };
@@ -3211,6 +3216,7 @@ impl GpuState {
             camera_target: [SIM_SIZE / 2.0, SIM_SIZE / 2.0], // Initialize to center
             camera_velocity: [0.0, 0.0], // Initialize velocity to zero
             inspector_zoom: 1.0,
+            agent_trail_decay: settings.agent_trail_decay,
             rng_state: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -3949,6 +3955,7 @@ impl GpuState {
             agent_blend_mode: self.agent_blend_mode,
             agent_color: self.agent_color,
             agent_color_blend: self.agent_color_blend,
+            agent_trail_decay: self.agent_trail_decay,
         }
     }
 
@@ -4473,7 +4480,7 @@ impl GpuState {
             vector_force_x: self.vector_force_x,
             vector_force_y: self.vector_force_y,
             inspector_zoom: self.inspector_zoom,
-            _padding0: 0.0,
+            agent_trail_decay: self.agent_trail_decay,
             _padding1: 0.0,
             _padding2: 0.0,
         };
@@ -4701,7 +4708,7 @@ impl GpuState {
             // Poll for readback completion
             self.device.poll(wgpu::Maintain::Poll);
             self.process_completed_alive_readbacks();
-            println!("  ├óΓÇáΓÇÖ After spawn: {} agents alive", self.alive_count);
+            println!("  -> After spawn: {} agents alive", self.alive_count);
 
             // Clear the processed spawn requests from the queue
             let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue.len());
@@ -6007,10 +6014,10 @@ fn main() {
                 if autosave_path.exists() {
                     match loaded_state.load_snapshot_from_file(autosave_path) {
                         Ok(_) => {
-                            println!("Γ£ô Auto-loaded previous session from epoch {}", loaded_state.epoch);
+                            println!("✓ Auto-loaded previous session from epoch {}", loaded_state.epoch);
                         }
                         Err(e) => {
-                            eprintln!("ΓÜá Failed to auto-load snapshot: {:?}", e);
+                            eprintln!("❌ Failed to auto-load snapshot: {:?}", e);
                         }
                     }
                 }
@@ -6200,8 +6207,8 @@ fn main() {
                                     reset_simulation_state(&mut state, &window, &mut egui_state);
                                     if let Some(gpu_state) = state.as_mut() {
                                         match gpu_state.load_snapshot_from_file(&path) {
-                                            Ok(_) => println!("Γ£ô Snapshot loaded from: {}", path.display()),
-                                            Err(e) => eprintln!("Γ£ù Failed to load snapshot: {}", e),
+                                            Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
+                                            Err(e) => eprintln!("❌ Failed to load snapshot: {}", e),
                                         }
                                     }
                                 }
@@ -6601,6 +6608,7 @@ fn main() {
                                                                         agent_blend_mode: state.agent_blend_mode,
                                                                         agent_color: state.agent_color,
                                                                         agent_color_blend: state.agent_color_blend,
+                                                                        agent_trail_decay: state.agent_trail_decay,
                                                                     };
                                                                     if let Err(err) = settings.save_to_disk(&path) {
                                                                         eprintln!("Failed to save settings: {err:?}");
@@ -7659,6 +7667,14 @@ fn main() {
                                                                 .text("Color Blend")
                                                                 .clamp_to_range(true)
                                                         ).on_hover_text("0.0 = amino acid colors only, 1.0 = agent color only");
+                                                        
+                                                        ui.separator();
+                                                        ui.label("Motion Blur / Trail:");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.agent_trail_decay, 0.0..=1.0)
+                                                                .text("Trail Decay")
+                                                                .clamp_to_range(true)
+                                                        ).on_hover_text("0.0 = persistent trail, 1.0 = instant clear (no trail)");
                                                     });
                                                 }
                                                 _ => {}
@@ -7716,8 +7732,8 @@ fn main() {
                                         .save_file()
                                     {
                                         match gpu_state.save_snapshot_to_file(&path) {
-                                            Ok(_) => println!("Γ£ô Snapshot saved to: {}", path.display()),
-                                            Err(e) => eprintln!("Γ£ù Failed to save snapshot: {}", e),
+                                            Ok(_) => println!("✓ Snapshot saved to: {}", path.display()),
+                                            Err(e) => eprintln!("❌ Failed to save snapshot: {}", e),
                                         }
                                     }
                                 }
@@ -7734,8 +7750,8 @@ fn main() {
                                         reset_simulation_state(&mut state, &window, &mut egui_state);
                                         if let Some(gpu_state) = state.as_mut() {
                                             match gpu_state.load_snapshot_from_file(&path) {
-                                                Ok(_) => println!("Γ£ô Snapshot loaded from: {}", path.display()),
-                                                Err(e) => eprintln!("Γ£ù Failed to load snapshot: {}", e),
+                                                Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
+                                                Err(e) => eprintln!("❌ Failed to load snapshot: {}", e),
                                             }
                                         }
                                     }
@@ -7818,7 +7834,7 @@ fn main() {
 
                                             ui.separator();
                                             ui.heading("Snapshot");
-                                            if ui.button("≡ƒÆ╛ Save Snapshot (PNG)").clicked() {
+                                            if ui.button("💾 Save Snapshot (PNG)").clicked() {
                                                 state.snapshot_save_requested = true;
                                             }
                                             ui.label("Saves environment + up to 5000 agents (random sample)");

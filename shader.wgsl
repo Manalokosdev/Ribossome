@@ -210,7 +210,7 @@ struct SimParams {
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
     vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
     inspector_zoom: f32,      // Inspector preview zoom level (1.0 = default)
-    _padding0: f32,
+    agent_trail_decay: f32,   // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
     _padding1: f32,
     _padding2: f32,
 }
@@ -715,9 +715,9 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
     // Combine promoter and modifier parameter1 values
     let combined_param = promoter_param1 + modifier_param1;
 
-    // Vary radius: combined_param * 100 (range: -2.0 to 2.0 becomes -200 to +200 units)
-    let radius_variation = combined_param * 100.0;
-    let radius = abs(base_radius + radius_variation); // Use absolute value to allow full range
+    // Use abs(combined_param) as radius multiplier: 500 * abs(combined_param)
+    // Range: 0.0 to ~2.0 becomes 0 to ~1000 units radius
+    let radius = base_radius * abs(combined_param);
 
     // Signal polarity: if combined_param is negative, negate the final signal
     let signal_polarity = select(1.0, -1.0, combined_param < 0.0);
@@ -775,8 +775,8 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
         weight_total += weight;
     }
 
-    let raw_value = select(0.0, weighted_sum / weight_total, weight_total > 0.0);
-    return raw_value * signal_polarity; // Apply polarity flip if combined_param < 0
+    // Return sum of weighted samples instead of average
+    return weighted_sum * signal_polarity; // Apply polarity flip if combined_param < 0
 }
 
 // Stochastic trail sampling for agent sensors
@@ -2503,7 +2503,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Sensors: stochastic gaussian sampling with 50% smoothing
         // Sample radius based on part size (larger radius for better field integration)
-        let sensor_radius = 100.0;
+        let sensor_radius = 500.0;
 
         // Calculate sensor perpendicular orientation (pointing direction)
         var segment_dir = vec2<f32>(0.0);
@@ -5436,8 +5436,9 @@ fn clear_agent_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let agent_idx = y * params.visual_stride + x;
-    // Clear to transparent black
-    agent_grid[agent_idx] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    // Fade the agent trail based on decay rate (1.0 = instant clear, 0.0 = no clear)
+    let current_color = agent_grid[agent_idx];
+    agent_grid[agent_idx] = current_color * (1.0 - params.agent_trail_decay);
 }
 
 // Inspector bar layout configuration
