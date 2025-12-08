@@ -1956,19 +1956,20 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
     }
 
     let radius = max_dist + 5.0; // Add some padding
-    let num_segments = 64u; // Circle segments
-    let color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Yellow circle
+    let color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Yellow crosshair
 
-    // Draw circle as line segments
-    for (var i = 0u; i < num_segments; i++) {
-        let angle1 = f32(i) / f32(num_segments) * 6.28318530718;
-        let angle2 = f32(i + 1u) / f32(num_segments) * 6.28318530718;
-
-        let p1 = center_pos + vec2<f32>(cos(angle1) * radius, sin(angle1) * radius);
-        let p2 = center_pos + vec2<f32>(cos(angle2) * radius, sin(angle2) * radius);
-
-        draw_thick_line(p1, p2, 2.0, color);
-    }
+    // Draw crosshair (4 arms extending from inner to outer radius)
+    let inner = radius;
+    let outer = inner + 15.0;
+    
+    // Top arm
+    draw_line(center_pos + vec2<f32>(0.0, inner), center_pos + vec2<f32>(0.0, outer), color);
+    // Right arm  
+    draw_line(center_pos + vec2<f32>(inner, 0.0), center_pos + vec2<f32>(outer, 0.0), color);
+    // Bottom arm
+    draw_line(center_pos + vec2<f32>(0.0, -inner), center_pos + vec2<f32>(0.0, -outer), color);
+    // Left arm
+    draw_line(center_pos + vec2<f32>(-inner, 0.0), center_pos + vec2<f32>(-outer, 0.0), color);
 }
 
 // ============================================================================
