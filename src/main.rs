@@ -5981,6 +5981,7 @@ fn main() {
 
     // Load GPU state in background using channel
     let (tx, rx) = std::sync::mpsc::channel();
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<f32>();
     let window_clone = window.clone();
     std::thread::spawn(move || {
         let state = pollster::block_on(GpuState::new_with_resources(
@@ -5993,6 +5994,32 @@ fn main() {
         ));
         tx.send(state).unwrap();
     });
+
+    // Animation state for loading screen
+    let loading_start = std::time::Instant::now();
+    let mut last_message_update = std::time::Instant::now();
+    let mut current_message_index = 0;
+    
+    let loading_messages = [
+        "Synthesizing nucleotides...",
+        "Assembling ribosomes...",
+        "Transcribing genetic code...",
+        "Folding proteins...",
+        "Calibrating amino acid properties...",
+        "Preparing primordial soup...",
+        "Initializing alpha field emitters...",
+        "Configuring beta signal receptors...",
+        "Establishing gamma terrain...",
+        "Compiling genetic instruction set...",
+        "Optimizing metabolic pathways...",
+        "Bootstrapping cellular automata...",
+        "Evolving sensor arrays...",
+        "Tuning mutation rates...",
+        "Priming energy gradients...",
+        "Randomizing initial conditions...",
+        "Preparing artificial life substrate...",
+        "Loading biochemical simulation...",
+    ];
 
     let mut state: Option<GpuState> = None;
 
@@ -6007,6 +6034,18 @@ fn main() {
     );
 
     let _ = event_loop.run(move |event, target| {
+        // Animate loading messages while waiting for GPU state
+        if state.is_none() {
+            let now = std::time::Instant::now();
+            if now.duration_since(last_message_update).as_millis() > 200 {
+                current_message_index = (current_message_index + 1) % loading_messages.len();
+                let elapsed = now.duration_since(loading_start).as_secs_f32();
+                let dots = ".".repeat((elapsed * 2.0) as usize % 4);
+                window.set_title(&format!("Ribossome - {}{}", loading_messages[current_message_index], dots));
+                last_message_update = now;
+            }
+        }
+        
         // Check if loading finished
         if state.is_none() {
             if let Ok(mut loaded_state) = rx.try_recv() {
