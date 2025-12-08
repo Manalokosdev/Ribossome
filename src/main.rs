@@ -5572,8 +5572,9 @@ fn reset_simulation_state(
     window: &Arc<Window>,
     egui_state: &mut egui_winit::State,
 ) {
-    if let Some(mut existing) = state.take() {
-        existing.destroy_resources();
+    // Just drop the old state - GPU driver handles cleanup asynchronously
+    // Calling destroy_resources() with device.poll(Wait) can take 50+ seconds!
+    if let Some(existing) = state.take() {
         drop(existing);
     }
 
