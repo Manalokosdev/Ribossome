@@ -1538,62 +1538,62 @@ fn render_body_part_ctx(
     if (!in_debug_mode && base_type < 20u) {
         // Draw zigzag structure for amino acids
         let base_color = mix(amino_props.color, agent_color, params.agent_color_blend);
-        
+
         let seed = base_type * 12345u + 67890u;
         let segment_length = length(world_pos - segment_start_world);
         let organ_width = segment_length * 0.15;
         let line_width = organ_width;
-        
+
         let point_count = 4u + (base_type % 3u);
         var prev_pos = segment_start_world;
-        
+
         for (var i = 1u; i < point_count - 1u; i++) {
             let t = f32(i) / f32(point_count - 1u);
             let base_pos = mix(segment_start_world, world_pos, t);
-            
+
             let offset_seed = seed + i * 9876u;
             let offset_angle = f32(offset_seed % 628u) / 100.0;
             let offset_dist = f32((offset_seed / 628u) % 100u) / 100.0 * organ_width * 3.5;
             let offset = vec2<f32>(cos(offset_angle) * offset_dist, sin(offset_angle) * offset_dist);
             let curr_pos = base_pos + offset;
-            
+
             let dark_color = vec4<f32>(base_color * 0.5, 1.0);
             let light_color = vec4<f32>(base_color, 1.0);
             draw_thick_line_gradient_ctx(prev_pos, curr_pos, line_width, dark_color, light_color, ctx);
             prev_pos = curr_pos;
         }
-        
+
         let dark_color = vec4<f32>(base_color * 0.5, 1.0);
         let light_color = vec4<f32>(base_color, 1.0);
         draw_thick_line_gradient_ctx(prev_pos, world_pos, line_width, dark_color, light_color, ctx);
     } else if (!in_debug_mode) {
         // Organs: same zigzag with gradient
         let base_color = mix(amino_props.color, agent_color, params.agent_color_blend);
-        
+
         let seed = base_type * 12345u + 67890u;
         let segment_length = length(world_pos - segment_start_world);
         let organ_width = segment_length * 0.15;
         let line_width = part.size * 0.5;
-        
+
         let point_count = 4u + (base_type % 3u);
         var prev_pos = segment_start_world;
-        
+
         for (var i = 1u; i < point_count - 1u; i++) {
             let t = f32(i) / f32(point_count - 1u);
             let base_pos = mix(segment_start_world, world_pos, t);
-            
+
             let offset_seed = seed + i * 9876u;
             let offset_angle = f32(offset_seed % 628u) / 100.0;
             let offset_dist = f32((offset_seed / 628u) % 100u) / 100.0 * organ_width * 3.5;
             let offset = vec2<f32>(cos(offset_angle) * offset_dist, sin(offset_angle) * offset_dist);
             let curr_pos = base_pos + offset;
-            
+
             let dark_color = vec4<f32>(base_color * 0.5, 1.0);
             let light_color = vec4<f32>(base_color, 1.0);
             draw_thick_line_gradient_ctx(prev_pos, curr_pos, line_width, dark_color, light_color, ctx);
             prev_pos = curr_pos;
         }
-        
+
         let dark_color = vec4<f32>(base_color * 0.5, 1.0);
         let light_color = vec4<f32>(base_color, 1.0);
         draw_thick_line_gradient_ctx(prev_pos, world_pos, line_width, dark_color, light_color, ctx);
@@ -1913,28 +1913,28 @@ fn render_body_part_ctx(
     if (base_type == 32u) {
         // Get slope signal from _pad.x (stores slope direction/magnitude)
         let slope_signal = part._pad.x; // -1 to +1 indicates slope direction
-        
+
         // Decode promoter type from part_type parameter (bit 7)
         let organ_param = get_organ_param(part.part_type);
         let is_beta_promoter = ((organ_param & 128u) != 0u);
-        
+
         // Cyan for alpha emitter (K), yellow for beta emitter (C)
         let slope_color = select(vec3<f32>(0.0, 0.8, 0.8), vec3<f32>(0.8, 0.8, 0.0), is_beta_promoter);
-        
+
         // Triangle size scales with signal strength
         let signal_strength = abs(slope_signal);
         let triangle_size = part.size * (2.0 + signal_strength);
-        
+
         // Triangle points in slope direction (signal sign determines up/down)
         // Draw isosceles triangle
         let pointing_up = slope_signal > 0.0;
         let tip_y = select(triangle_size, -triangle_size, pointing_up);
         let base_y = select(-triangle_size * 0.5, triangle_size * 0.5, pointing_up);
-        
+
         let tip = world_pos + vec2<f32>(0.0, tip_y);
         let left = world_pos + vec2<f32>(-triangle_size * 0.8, base_y);
         let right = world_pos + vec2<f32>(triangle_size * 0.8, base_y);
-        
+
         // Draw filled triangle
         draw_thick_line_ctx(tip, left, 1.5, vec4<f32>(slope_color, 0.9), ctx);
         draw_thick_line_ctx(left, right, 1.5, vec4<f32>(slope_color, 0.9), ctx);
@@ -1960,10 +1960,10 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
     // Draw crosshair with fixed radius (4 long arms)
     let fixed_radius = 25.0;  // Fixed distance from center
     let arm_length = 30.0;    // Length of each arm
-    
+
     // Top arm
     draw_line(center_pos + vec2<f32>(0.0, fixed_radius), center_pos + vec2<f32>(0.0, fixed_radius + arm_length), color);
-    // Right arm  
+    // Right arm
     draw_line(center_pos + vec2<f32>(fixed_radius, 0.0), center_pos + vec2<f32>(fixed_radius + arm_length, 0.0), color);
     // Bottom arm
     draw_line(center_pos + vec2<f32>(0.0, -fixed_radius), center_pos + vec2<f32>(0.0, -fixed_radius - arm_length), color);
@@ -2122,11 +2122,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (victim.energy > 0.0001 && base_drain > 0.0001) {
                         // Vampire absorbs the drain amount
                         let absorbed_energy = base_drain;
-                        
+
                         // Victim loses 2x the absorbed amount (punishing vampirism)
                         let victim_loss = absorbed_energy * 2.0;
                         agents_in[closest_victim_id].energy = max(0.0, victim.energy - victim_loss);
-                        
+
                         total_energy_gained += absorbed_energy;
 
                         // Store absorbed amount in _pad.y for visualization
@@ -2621,15 +2621,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (base_type == 36u) {
             // Get pairing percentage (0.0 to 1.0)
             let pairing_percentage = f32(agent.pairing_counter) / f32(GENOME_BYTES);
-            
+
             // Extract parameter (0-127) and promoter bit
             let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
             let param_normalized = f32(organ_param & 127u) / 127.0;
             let is_beta_emitter = (organ_param & 128u) != 0u;
-            
+
             // Signal strength = pairing_percentage * param_normalized
             let signal_strength = pairing_percentage * param_normalized;
-            
+
             if (is_beta_emitter) {
                 new_beta += signal_strength;
             } else {
@@ -3776,7 +3776,7 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
             // Distance to capsule axis and gradient position
             var dist_sq: f32;
             var gradient_t: f32;
-            
+
             if (t < 0.0) {
                 // Before p0: distance to p0
                 dist_sq = to_pixel_x * to_pixel_x + to_pixel_y * to_pixel_y;
@@ -3802,35 +3802,35 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
                 let t_clamped = clamp(t, 0.0, len);
                 let axis_point_x = f32(screen_p0.x) + t_clamped * dir_x;
                 let axis_point_y = f32(screen_p0.y) + t_clamped * dir_y;
-                
+
                 // Calculate radial distance from axis
                 let radial_offset_x = pixel_x - axis_point_x;
                 let radial_offset_y = pixel_y - axis_point_y;
                 let radial_dist_sq = radial_offset_x * radial_offset_x + radial_offset_y * radial_offset_y;
                 let radial_factor_sq = radial_dist_sq / (half_thick * half_thick);  // normalized (0 to 1)
-                
+
                 // Calculate z-component for curved cylinder surface (like a sphere cross-section)
                 let z_sq = 1.0 - radial_factor_sq;
                 let z = sqrt(max(z_sq, 0.0));
-                
+
                 // Surface normal with curved profile
                 let surface_normal = normalize(vec3<f32>(radial_offset_x / half_thick, radial_offset_y / half_thick, z));
-                
+
                 // Light direction from params
                 let light_dir = normalize(vec3<f32>(params.light_dir_x, params.light_dir_y, params.light_dir_z));
-                
+
                 // Lambertian diffuse lighting
                 let diffuse = max(dot(surface_normal, light_dir), 0.0);
-                
+
                 // Use material color as base, lighten lit areas (dodge-like)
                 let highlight = diffuse * params.light_power;
                 let lighting = 1.0 + highlight;  // 1.0 = base color, >1.0 = brightened
-                
+
                 let shaded_color = vec4<f32>(
                     color.rgb * lighting,
                     color.a
                 );
-                
+
                 var screen_pos = vec2<i32>(px, py);
                 var idx: u32;
                 var in_bounds = false;
@@ -3884,10 +3884,10 @@ fn draw_thin_line_ctx(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>, ctx: Inspe
     let sx = select(-1, 1, screen_p0.x < screen_p1.x);
     let sy = select(-1, 1, screen_p0.y < screen_p1.y);
     var err = dx - dy;
-    
+
     var x = screen_p0.x;
     var y = screen_p0.y;
-    
+
     // Bresenham's line algorithm
     for (var i = 0; i < 10000; i++) {
         var screen_pos = vec2<i32>(x, y);
@@ -3916,11 +3916,11 @@ fn draw_thin_line_ctx(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>, ctx: Inspe
         if (in_bounds) {
             agent_grid[idx] = color;
         }
-        
+
         if (x == screen_p1.x && y == screen_p1.y) {
             break;
         }
-        
+
         let e2 = 2 * err;
         if (e2 > -dy) {
             err -= dy;
@@ -3934,7 +3934,7 @@ fn draw_thin_line_ctx(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>, ctx: Inspe
 }
 
 // Gradient version: interpolates between start_color and end_color based on position along line
-fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, 
+fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32,
                                  start_color: vec4<f32>, end_color: vec4<f32>, ctx: InspectorContext) {
     // Convert world coordinates to screen coordinates
     var screen_p0: vec2<i32>;
@@ -3953,43 +3953,43 @@ fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32,
         let world_to_screen_scale = params.window_width / (params.grid_size / params.camera_zoom);
         screen_thickness = clamp(i32(thickness * world_to_screen_scale), 0, 50);
     }
-    
+
     let dx = f32(screen_p1.x - screen_p0.x);
     let dy = f32(screen_p1.y - screen_p0.y);
     let len = sqrt(dx * dx + dy * dy);
-    
+
     if (len < 0.5) {
         // Degenerate case: just draw a circle with average color
         let avg_color = mix(start_color, end_color, 0.5);
         draw_filled_circle_optimized(screen_p0, f32(screen_thickness), avg_color, ctx);
         return;
     }
-    
+
     let dir_x = dx / len;
     let dir_y = dy / len;
     let perp_x = -dir_y;
     let perp_y = dir_x;
     let half_thick = f32(screen_thickness);
-    
+
     // Calculate bounding box
     let bbox_min_x = min(screen_p0.x, screen_p1.x) - screen_thickness;
     let bbox_min_y = min(screen_p0.y, screen_p1.y) - screen_thickness;
     let bbox_max_x = max(screen_p0.x, screen_p1.x) + screen_thickness;
     let bbox_max_y = max(screen_p0.y, screen_p1.y) + screen_thickness;
-    
+
     for (var py = bbox_min_y; py <= bbox_max_y; py++) {
         for (var px = bbox_min_x; px <= bbox_max_x; px++) {
             let pixel_x = f32(px);
             let pixel_y = f32(py);
-            
+
             let to_pixel_x = pixel_x - f32(screen_p0.x);
             let to_pixel_y = pixel_y - f32(screen_p0.y);
-            
+
             let t = to_pixel_x * dir_x + to_pixel_y * dir_y;
-            
+
             var dist_sq: f32;
             var gradient_t: f32;
-            
+
             if (t <= 0.0) {
                 dist_sq = to_pixel_x * to_pixel_x + to_pixel_y * to_pixel_y;
                 gradient_t = 0.0;
@@ -4003,40 +4003,40 @@ fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32,
                 dist_sq = perp_dist * perp_dist;
                 gradient_t = t / len;
             }
-            
+
             if (dist_sq <= half_thick * half_thick) {
                 // Interpolate color based on position along line
                 let base_color = mix(start_color, end_color, gradient_t);
-                
+
                 // Cylindrical surface lighting with curved surface
                 // Calculate the point on the cylinder axis closest to this pixel
                 // Clamp t to [0, len] so normals always point perpendicular to cylinder axis
                 let t_clamped = clamp(t, 0.0, len);
                 let axis_point_x = f32(screen_p0.x) + t_clamped * dir_x;
                 let axis_point_y = f32(screen_p0.y) + t_clamped * dir_y;
-                
+
                 // Calculate radial distance from axis
                 let radial_offset_x = pixel_x - axis_point_x;
                 let radial_offset_y = pixel_y - axis_point_y;
                 let radial_dist_sq = radial_offset_x * radial_offset_x + radial_offset_y * radial_offset_y;
                 let radial_factor_sq = radial_dist_sq / (half_thick * half_thick);  // normalized (0 to 1)
-                
+
                 // Calculate z-component for curved cylinder surface (like a sphere cross-section)
                 let z_sq = 1.0 - radial_factor_sq;
                 let z = sqrt(max(z_sq, 0.0));
-                
+
                 // Surface normal with curved profile
                 let surface_normal = normalize(vec3<f32>(radial_offset_x / half_thick, radial_offset_y / half_thick, z));
-                
+
                 let light_dir = normalize(vec3<f32>(params.light_dir_x, params.light_dir_y, params.light_dir_z));
                 let diffuse = max(dot(surface_normal, light_dir), 0.0);
-                
+
                 // Use material color as base, lighten lit areas (dodge-like)
                 let highlight = diffuse * params.light_power;
                 let lighting = 1.0 + highlight;  // 1.0 = base color, >1.0 = brightened
-                
+
                 let color = vec4<f32>(base_color.rgb * lighting, base_color.a);
-                
+
                 var screen_pos = vec2<i32>(px, py);
                 var idx: u32;
                 var in_bounds = false;
@@ -4083,7 +4083,7 @@ fn draw_filled_circle_optimized(center: vec2<i32>, radius: f32, color: vec4<f32>
                     mix(color.rgb, color.rgb * 0.5, dist_factor),  // Interpolate brightness
                     color.a
                 );
-                
+
                 var screen_pos = center + vec2<i32>(dx, dy);
                 var idx: u32;
                 var in_bounds = false;
@@ -4180,28 +4180,28 @@ fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx:
                 // Spherical surface lighting (optimized: avoid extra sqrt)
                 let radius_sq = screen_radius * screen_radius;
                 let dist_factor_sq = dist2 / radius_sq;  // (dist/radius)²
-                
+
                 // Calculate 3D surface normal for a sphere
                 // In 2D view, we see a circle; assume sphere extends in z-direction
                 let z_sq = 1.0 - dist_factor_sq;  // x² + y² + z² = 1
                 let z = sqrt(max(z_sq, 0.0));
                 let surface_normal = normalize(vec3<f32>(offset.x / screen_radius, offset.y / screen_radius, z));
-                
+
                 // Light direction from params
                 let light_dir = normalize(vec3<f32>(params.light_dir_x, params.light_dir_y, params.light_dir_z));
-                
+
                 // Lambertian diffuse lighting
                 let diffuse = max(dot(surface_normal, light_dir), 0.0);
-                
+
                 // Use material color as base, lighten lit areas (dodge-like)
                 let highlight = diffuse * params.light_power;
                 let lighting = 1.0 + highlight;  // 1.0 = base color, >1.0 = brightened
-                
+
                 let shaded_color = vec4<f32>(
                     color.rgb * lighting,
                     color.a
                 );
-                
+
                 var screen_pos = screen_center + vec2<i32>(dx, dy);
                 var idx: u32;
                 var in_bounds = false;
