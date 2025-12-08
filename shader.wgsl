@@ -1955,21 +1955,20 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
         max_dist = max(max_dist, dist);
     }
 
-    let radius = max_dist + 5.0; // Add some padding
     let color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Yellow crosshair
 
-    // Draw crosshair (4 arms extending from inner to outer radius)
-    let inner = radius;
-    let outer = inner + 15.0;
+    // Draw crosshair with fixed radius (4 long arms)
+    let fixed_radius = 25.0;  // Fixed distance from center
+    let arm_length = 30.0;    // Length of each arm
     
     // Top arm
-    draw_line(center_pos + vec2<f32>(0.0, inner), center_pos + vec2<f32>(0.0, outer), color);
+    draw_line(center_pos + vec2<f32>(0.0, fixed_radius), center_pos + vec2<f32>(0.0, fixed_radius + arm_length), color);
     // Right arm  
-    draw_line(center_pos + vec2<f32>(inner, 0.0), center_pos + vec2<f32>(outer, 0.0), color);
+    draw_line(center_pos + vec2<f32>(fixed_radius, 0.0), center_pos + vec2<f32>(fixed_radius + arm_length, 0.0), color);
     // Bottom arm
-    draw_line(center_pos + vec2<f32>(0.0, -inner), center_pos + vec2<f32>(0.0, -outer), color);
+    draw_line(center_pos + vec2<f32>(0.0, -fixed_radius), center_pos + vec2<f32>(0.0, -fixed_radius - arm_length), color);
     // Left arm
-    draw_line(center_pos + vec2<f32>(-inner, 0.0), center_pos + vec2<f32>(-outer, 0.0), color);
+    draw_line(center_pos + vec2<f32>(-fixed_radius, 0.0), center_pos + vec2<f32>(-fixed_radius - arm_length, 0.0), color);
 }
 
 // ============================================================================
