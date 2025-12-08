@@ -4313,21 +4313,64 @@ var<private> FONT_SEGMENTS: array<VecSeg, 160> = array<VecSeg, 160>(
     // '/' slash (1 segments)
     VecSeg(vec2(0.2,0.0), vec2(0.8,1.0)),
 );
-// Offset of first segment for each character (0..46)
-var<private> CHAR_OFFSET: array<u32,47> = array<u32,47>(
-    0, 5, 7, 12, 16, 19, 24, 29, 31, 36,
-    41, 44, 52, 55, 61, 65, 68, 73, 76, 79,
-    82, 85, 87, 91, 94, 98, 103, 108, 114, 119,
-    121, 126, 128, 132, 134, 137, 140, 140, 142, 143,
-    145, 146, 148, 150, 153, 156, 159
-);
-// How many segments each character uses
-var<private> CHAR_COUNT: array<u32,47> = array<u32,47>(
-    5, 2, 5, 4, 3, 5, 5, 2, 5, 5,
-    3, 8, 3, 6, 4, 3, 5, 3, 3, 3,
-    3, 2, 4, 3, 4, 5, 5, 6, 5, 2,
-    5, 2, 4, 2, 3, 3, 0, 2, 1, 2,
-    1, 2, 2, 3, 3, 3, 1
+
+// Compact font character data (offset + count per character)
+struct FontChar {
+    offset: u32,
+    count: u32,
+}
+
+var<private> FONT_CHARS: array<FontChar, 47> = array<FontChar, 47>(
+    // 0–9: digits
+    FontChar(0u,   5u),   // '0'
+    FontChar(5u,   2u),   // '1'
+    FontChar(7u,   5u),   // '2'
+    FontChar(12u,  4u),   // '3'
+    FontChar(16u,  3u),   // '4'
+    FontChar(19u,  5u),   // '5'
+    FontChar(24u,  5u),   // '6'
+    FontChar(29u,  2u),   // '7'
+    FontChar(31u,  5u),   // '8'
+    FontChar(36u,  5u),   // '9'
+    // 10–35: A–Z
+    FontChar(41u,  3u),   // 'A'
+    FontChar(44u,  8u),   // 'B'
+    FontChar(52u,  3u),   // 'C'
+    FontChar(55u,  6u),   // 'D'
+    FontChar(61u,  4u),   // 'E'
+    FontChar(65u,  3u),   // 'F'
+    FontChar(68u,  5u),   // 'G'
+    FontChar(73u,  3u),   // 'H'
+    FontChar(76u,  3u),   // 'I'
+    FontChar(79u,  3u),   // 'J'
+    FontChar(82u,  3u),   // 'K'
+    FontChar(85u,  2u),   // 'L'
+    FontChar(87u,  4u),   // 'M'
+    FontChar(91u,  3u),   // 'N'
+    FontChar(94u,  4u),   // 'O'
+    FontChar(98u,  5u),   // 'P'
+    FontChar(103u, 5u),   // 'Q'
+    FontChar(108u, 6u),   // 'R'
+    FontChar(114u, 5u),   // 'S'
+    FontChar(119u, 2u),   // 'T'
+    FontChar(121u, 5u),   // 'U'
+    FontChar(126u, 2u),   // 'V'
+    FontChar(128u, 4u),   // 'W'
+    FontChar(132u, 2u),   // 'X'
+    FontChar(134u, 3u),   // 'Y'
+    FontChar(137u, 3u),   // 'Z'
+    // 36–46: symbols
+    FontChar(140u, 0u),   // ' ' (space)
+    FontChar(140u, 2u),   // '.'
+    FontChar(142u, 1u),   // ','
+    FontChar(143u, 2u),   // ':'
+    FontChar(145u, 1u),   // '-'
+    FontChar(146u, 2u),   // '+'
+    FontChar(148u, 2u),   // '='
+    FontChar(150u, 3u),   // '%'
+    FontChar(153u, 3u),   // '('
+    FontChar(156u, 3u),   // ')'
+    FontChar(159u, 1u)    // '/'
 );
 fn char_index(c: u32) -> i32 {
     if (c >= 48u && c <= 57u) { return i32(c - 48u); }
@@ -4362,9 +4405,9 @@ fn draw_char_vector(pos: vec2<f32>, c: u32, height: f32, color: vec4<f32>, ctx: 
         return height * 0.4; // fallback spacing for unsupported chars
     }
 
-    let uidx = u32(idx);
-    let base = CHAR_OFFSET[uidx];
-    let seg_count = CHAR_COUNT[uidx];
+    let ch = FONT_CHARS[u32(idx)];
+    let base = ch.offset;
+    let seg_count = ch.count;
     let char_width = get_char_width(c) * height;
 
     // Use ~1px lines (user request)
@@ -4395,9 +4438,9 @@ fn char_vector_mask(local_px: vec2<u32>, c: u32, height: f32) -> bool {
     let idx = char_index(c);
     if (idx < 0) { return false; }
 
-    let uidx = u32(idx);
-    let base = CHAR_OFFSET[uidx];
-    let seg_count = CHAR_COUNT[uidx];
+    let ch = FONT_CHARS[u32(idx)];
+    let base = ch.offset;
+    let seg_count = ch.count;
     let char_width = get_char_width(c) * height;
     let line_thickness = max(1.0, height * 0.1);
     let half_thick = line_thickness * 0.5;
