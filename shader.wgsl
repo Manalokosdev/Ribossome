@@ -4100,219 +4100,42 @@ fn draw_particle_jet_ctx(origin: vec2<f32>, direction: vec2<f32>, length: f32, s
     }
 }
 // ============================================================================
-// VECTOR FONT DATA
+// COMPACT VECTOR FONT DATA (packed u32 format)
+// Each u32 packs 4 coordinates as bytes: (p0.x, p0.y, p1.x, p1.y)
+// Coordinates are scaled 0.0-1.0 → 0-255 (decode with /255.0)
+// Negative values (e.g., comma tail) are clamped to 0
 // ============================================================================
-struct VecSeg { p0: vec2<f32>, p1: vec2<f32> }
 
-var<private> FONT_SEGMENTS: array<VecSeg, 160> = array<VecSeg, 160>(
-    // '0' (5 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.0), vec2(0.8,1.0)),
-    // '1' (2 segments)
-    VecSeg(vec2(0.5,0.0), vec2(0.5,1.0)),
-    VecSeg(vec2(0.5,1.0), vec2(0.3,0.8)),
-    // '2' (5 segments)
-    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.8,0.5)),
-    VecSeg(vec2(0.8,0.5), vec2(0.2,0.5)),
-    VecSeg(vec2(0.2,0.5), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    // '3' (4 segments)
-    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.8,0.5), vec2(0.4,0.5)),
-    // '4' (3 segments)
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.4)),
-    VecSeg(vec2(0.2,0.4), vec2(0.8,0.4)),
-    VecSeg(vec2(0.7,0.0), vec2(0.7,1.0)),
-    // '5' (5 segments)
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.5)),
-    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
-    VecSeg(vec2(0.8,0.5), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.2,0.0)),
-    // '6' (5 segments)
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.8,0.5)),
-    VecSeg(vec2(0.8,0.5), vec2(0.2,0.5)),
-    // '7' (2 segments)
-    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.4,0.0)),
-    // '8' (5 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
-    // '9' (5 segments)
-    VecSeg(vec2(0.8,0.5), vec2(0.2,0.5)),
-    VecSeg(vec2(0.2,0.5), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.2,0.0)),
-    // 'A' (3 segments)
-    VecSeg(vec2(0.1,0.0), vec2(0.5,1.0)),
-    VecSeg(vec2(0.5,1.0), vec2(0.9,0.0)),
-    VecSeg(vec2(0.25,0.4), vec2(0.75,0.4)),
-    // 'B' (8 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.7,1.0)),
-    VecSeg(vec2(0.7,1.0), vec2(0.8,0.75)),
-    VecSeg(vec2(0.8,0.75), vec2(0.7,0.5)),
-    VecSeg(vec2(0.7,0.5), vec2(0.2,0.5)),
-    VecSeg(vec2(0.7,0.5), vec2(0.8,0.25)),
-    VecSeg(vec2(0.8,0.25), vec2(0.7,0.0)),
-    VecSeg(vec2(0.7,0.0), vec2(0.2,0.0)),
-    // 'C' (3 segments)
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    // 'D' (6 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.6,1.0)),
-    VecSeg(vec2(0.6,1.0), vec2(0.8,0.8)),
-    VecSeg(vec2(0.8,0.8), vec2(0.8,0.2)),
-    VecSeg(vec2(0.8,0.2), vec2(0.6,0.0)),
-    VecSeg(vec2(0.6,0.0), vec2(0.2,0.0)),
-    // 'E' (4 segments)
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.5), vec2(0.7,0.5)),
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    // 'F' (3 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.2,0.5), vec2(0.7,0.5)),
-    // 'G' (5 segments)
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.8,0.5)),
-    VecSeg(vec2(0.8,0.5), vec2(0.5,0.5)),
-    // 'H' (3 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
-    // 'I' (3 segments)
-    VecSeg(vec2(0.5,0.0), vec2(0.5,1.0)),
-    VecSeg(vec2(0.3,0.0), vec2(0.7,0.0)),
-    VecSeg(vec2(0.3,1.0), vec2(0.7,1.0)),
-    // 'J' (3 segments)
-    VecSeg(vec2(0.6,1.0), vec2(0.6,0.2)),
-    VecSeg(vec2(0.6,0.2), vec2(0.4,0.0)),
-    VecSeg(vec2(0.4,0.0), vec2(0.2,0.2)),
-    // 'K' (3 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.2,0.5)),
-    VecSeg(vec2(0.2,0.5), vec2(0.8,0.0)),
-    // 'L' (2 segments)
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    // 'M' (4 segments)
-    VecSeg(vec2(0.1,0.0), vec2(0.1,1.0)),
-    VecSeg(vec2(0.1,1.0), vec2(0.5,0.5)),
-    VecSeg(vec2(0.5,0.5), vec2(0.9,1.0)),
-    VecSeg(vec2(0.9,1.0), vec2(0.9,0.0)),
-    // 'N' (3 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
-    // 'O' (4 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
-    // 'P' (5 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.7,1.0)),
-    VecSeg(vec2(0.7,1.0), vec2(0.8,0.75)),
-    VecSeg(vec2(0.8,0.75), vec2(0.7,0.5)),
-    VecSeg(vec2(0.7,0.5), vec2(0.2,0.5)),
-    // 'Q' (5 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.6,0.3), vec2(0.9,-0.1)),
-    // 'R' (6 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.7,1.0)),
-    VecSeg(vec2(0.7,1.0), vec2(0.8,0.75)),
-    VecSeg(vec2(0.8,0.75), vec2(0.7,0.5)),
-    VecSeg(vec2(0.7,0.5), vec2(0.2,0.5)),
-    VecSeg(vec2(0.5,0.5), vec2(0.8,0.0)),
-    // 'S' (5 segments)
-    VecSeg(vec2(0.8,1.0), vec2(0.2,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.5)),
-    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
-    VecSeg(vec2(0.8,0.5), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.2,0.0)),
-    // 'T' (2 segments)
-    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.5,1.0), vec2(0.5,0.0)),
-    // 'U' (5 segments)
-    VecSeg(vec2(0.2,1.0), vec2(0.2,0.2)),
-    VecSeg(vec2(0.2,0.2), vec2(0.3,0.0)),
-    VecSeg(vec2(0.3,0.0), vec2(0.7,0.0)),
-    VecSeg(vec2(0.7,0.0), vec2(0.8,0.2)),
-    VecSeg(vec2(0.8,0.2), vec2(0.8,1.0)),
-    // 'V' (2 segments)
-    VecSeg(vec2(0.1,1.0), vec2(0.5,0.0)),
-    VecSeg(vec2(0.5,0.0), vec2(0.9,1.0)),
-    // 'W' (4 segments)
-    VecSeg(vec2(0.1,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.0), vec2(0.5,0.6)),
-    VecSeg(vec2(0.5,0.6), vec2(0.8,0.0)),
-    VecSeg(vec2(0.8,0.0), vec2(0.9,1.0)),
-    // 'X' (2 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.2,1.0), vec2(0.8,0.0)),
-    // 'Y' (3 segments)
-    VecSeg(vec2(0.2,1.0), vec2(0.5,0.5)),
-    VecSeg(vec2(0.8,1.0), vec2(0.5,0.5)),
-    VecSeg(vec2(0.5,0.5), vec2(0.5,0.0)),
-    // 'Z' (3 segments)
-    VecSeg(vec2(0.2,1.0), vec2(0.8,1.0)),
-    VecSeg(vec2(0.8,1.0), vec2(0.2,0.0)),
-    VecSeg(vec2(0.2,0.0), vec2(0.8,0.0)),
-    // ' ' space (0 segments)
-    // '.' period (2 segments)
-    VecSeg(vec2(0.45,0.0), vec2(0.55,0.0)),
-    VecSeg(vec2(0.45,0.05), vec2(0.55,0.05)),
-    // ',' comma (1 segments)
-    VecSeg(vec2(0.5,0.0), vec2(0.4,-0.2)),
-    // ':' colon (2 segments)
-    VecSeg(vec2(0.45,0.3), vec2(0.55,0.3)),
-    VecSeg(vec2(0.45,0.7), vec2(0.55,0.7)),
-    // '-' dash (1 segments)
-    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
-    // '+' plus (2 segments)
-    VecSeg(vec2(0.5,0.2), vec2(0.5,0.8)),
-    VecSeg(vec2(0.2,0.5), vec2(0.8,0.5)),
-    // '=' equals (2 segments)
-    VecSeg(vec2(0.2,0.4), vec2(0.8,0.4)),
-    VecSeg(vec2(0.2,0.6), vec2(0.8,0.6)),
-    // '%' percent (3 segments)
-    VecSeg(vec2(0.2,0.8), vec2(0.3,0.9)),
-    VecSeg(vec2(0.7,0.1), vec2(0.8,0.2)),
-    VecSeg(vec2(0.2,0.0), vec2(0.8,1.0)),
-    // '(' left paren (3 segments)
-    VecSeg(vec2(0.6,1.0), vec2(0.4,0.7)),
-    VecSeg(vec2(0.4,0.7), vec2(0.4,0.3)),
-    VecSeg(vec2(0.4,0.3), vec2(0.6,0.0)),
-    // ')' right paren (3 segments)
-    VecSeg(vec2(0.4,1.0), vec2(0.6,0.7)),
-    VecSeg(vec2(0.6,0.7), vec2(0.6,0.3)),
-    VecSeg(vec2(0.6,0.3), vec2(0.4,0.0)),
-    // '/' slash (1 segments)
-    VecSeg(vec2(0.2,0.0), vec2(0.8,1.0)),
-);
+var<private> FONT_SEGMENTS: array<u32, 160> = array<u32, 160>(
+    0x00CC0033u,0xFFCC00CCu,0xFF33FFCCu,0x0033FF33u,0xFFCC0033u,0xFF800080u,0xCC4CFF80u,0xFFCCFF33u,
+    0x80CCFFCCu,0x803380CCu,0x00338033u,0x00CC0033u,0xFFCCFF33u,0x00CCFFCCu,0x003300CCu,0x806680CCu,
+    0x6633FF33u,0x66CC6633u,0xFFB200B2u,0xFF33FFCCu,0x8033FF33u,0x80CC8033u,0x00CC80CCu,0x003300CCu,
+    0xFF33FFCCu,0x0033FF33u,0x00CC0033u,0x80CC00CCu,0x803380CCu,0xFFCCFF33u,0x0066FFCCu,0x00CC0033u,
+    0xFFCC00CCu,0xFF33FFCCu,0x0033FF33u,0x80CC8033u,0x803380CCu,0xFF338033u,0xFFCCFF33u,0x00CCFFCCu,
+    0x003300CCu,0xFF80001Au,0x00E6FF80u,0x66BF6640u,0xFF330033u,0xFFB2FF33u,0xBFCCFFB2u,0x80B2BFCCu,
+    0x803380B2u,0x40CC80B2u,0x00B240CCu,0x003300B2u,0xFF33FFCCu,0x0033FF33u,0x00CC0033u,0xFF330033u,
+    0xFF99FF33u,0xCCCCFF99u,0x33CCCCCCu,0x009933CCu,0x00330099u,0xFF33FFCCu,0x0033FF33u,0x80B28033u,
+    0x00CC0033u,0xFF330033u,0xFFCCFF33u,0x80B28033u,0xFF33FFCCu,0x0033FF33u,0x00CC0033u,0x80CC00CCu,
+    0x808080CCu,0xFF330033u,0xFFCC00CCu,0x80CC8033u,0xFF800080u,0x00B2004Cu,0xFFB2FF4Cu,0x3399FF99u,
+    0x00663399u,0x33330066u,0xFF330033u,0x8033FFCCu,0x00CC8033u,0x0033FF33u,0x00CC0033u,0xFF1A001Au,
+    0x8080FF1Au,0xFFE68080u,0x00E6FFE6u,0xFF330033u,0x00CCFF33u,0xFFCC00CCu,0x00CC0033u,0xFFCC00CCu,
+    0xFF33FFCCu,0x0033FF33u,0xFF330033u,0xFFB2FF33u,0xBFCCFFB2u,0x80B2BFCCu,0x803380B2u,0x00CC0033u,
+    0xFFCC00CCu,0xFF33FFCCu,0x0033FF33u,0x00E64C99u,0xFF330033u,0xFFB2FF33u,0xBFCCFFB2u,0x80B2BFCCu,
+    0x803380B2u,0x00CC8080u,0xFF33FFCCu,0x8033FF33u,0x80CC8033u,0x00CC80CCu,0x003300CCu,0xFFCCFF33u,
+    0x0080FF80u,0x3333FF33u,0x004C3333u,0x00B2004Cu,0x33CC00B2u,0xFFCC33CCu,0x0080FF1Au,0xFFE60080u,
+    0x0033FF1Au,0x99800033u,0x00CC9980u,0xFFE600CCu,0xFFCC0033u,0x00CCFF33u,0x8080FF33u,0x8080FFCCu,
+    0x00808080u,0xFFCCFF33u,0x0033FFCCu,0x00CC0033u,0x008C0073u,0x0D8C0D73u,0x00660080u,0x4C8C4C73u,
+    0xB28CB273u,0x80CC8033u,0xCC803380u,0x80CC8033u,0x66CC6633u,0x99CC9933u,0xE64CCC33u,0x33CC1AB2u,
+    0xFFCC0033u,0xB266FF99u,0x4C66B266u,0x00994C66u,0xB299FF66u,0x4C99B299u,0x00664C99u,0xFFCC0033u);
+
+// Decode a packed segment into vec2 coordinates
+fn unpack_segment(packed: u32) -> vec4<f32> {
+    let p0x = f32((packed) & 0xFFu) / 255.0;
+    let p0y = f32((packed >> 8u) & 0xFFu) / 255.0;
+    let p1x = f32((packed >> 16u) & 0xFFu) / 255.0;
+    let p1y = f32((packed >> 24u) & 0xFFu) / 255.0;
+    return vec4<f32>(p0x, p0y, p1x, p1y);
+}
 
 // Compact font character data (offset + count per character)
 struct FontChar {
@@ -4414,10 +4237,10 @@ fn draw_char_vector(pos: vec2<f32>, c: u32, height: f32, color: vec4<f32>, ctx: 
     let line_thickness = max(1.0, height * 0.1);
 
     for (var i = 0u; i < seg_count; i++) {
-        let seg = FONT_SEGMENTS[base + i];
+        let seg = unpack_segment(FONT_SEGMENTS[base + i]);
         // Flip Y so font baseline is at bottom and screen Y grows downward
-        let p0 = pos + vec2<f32>(seg.p0.x * char_width, (1.0 - seg.p0.y) * height);
-        let p1 = pos + vec2<f32>(seg.p1.x * char_width, (1.0 - seg.p1.y) * height);
+        let p0 = pos + vec2<f32>(seg.x * char_width, (1.0 - seg.y) * height);
+        let p1 = pos + vec2<f32>(seg.z * char_width, (1.0 - seg.w) * height);
         draw_thick_line_ctx(p0, p1, line_thickness, color, ctx);
     }
 
@@ -4447,9 +4270,9 @@ fn char_vector_mask(local_px: vec2<u32>, c: u32, height: f32) -> bool {
     let p = vec2<f32>(f32(local_px.x) + 0.5, f32(local_px.y) + 0.5);
 
     for (var i = 0u; i < seg_count; i++) {
-        let seg = FONT_SEGMENTS[base + i];
-        let p0 = vec2<f32>(seg.p0.x * char_width, (1.0 - seg.p0.y) * height);
-        let p1 = vec2<f32>(seg.p1.x * char_width, (1.0 - seg.p1.y) * height);
+        let seg = unpack_segment(FONT_SEGMENTS[base + i]);
+        let p0 = vec2<f32>(seg.x * char_width, (1.0 - seg.y) * height);
+        let p1 = vec2<f32>(seg.z * char_width, (1.0 - seg.w) * height);
         let d = point_segment_distance(p, p0, p1);
         if (d <= half_thick) {
             return true;
