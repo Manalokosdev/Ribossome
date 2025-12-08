@@ -5979,9 +5979,11 @@ fn main() {
     // Render splash screen
     render_splash_screen(&window, &instance, &surface, &adapter, &device, &queue);
 
-    // Load GPU state in background using channel
+    // Load GPU state in background using channel with shared loading message
     let (tx, rx) = std::sync::mpsc::channel();
-    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<f32>();
+    let loading_message = Arc::new(Mutex::new(String::from("Initializing...")));
+    let loading_message_clone = loading_message.clone();
+    
     let window_clone = window.clone();
     std::thread::spawn(move || {
         let state = pollster::block_on(GpuState::new_with_resources(
@@ -6001,27 +6003,46 @@ fn main() {
     let mut current_message_index = 0;
     
     let loading_messages = [
-        "Synthesizing nucleotides...",
-        "Assembling ribosomes...",
-        "Transcribing genetic code...",
-        "Folding proteins...",
-        "Calibrating amino acid properties...",
-        "Preparing primordial soup...",
-        "Initializing alpha field emitters...",
-        "Configuring beta signal receptors...",
-        "Establishing gamma terrain...",
-        "Compiling genetic instruction set...",
-        "Optimizing metabolic pathways...",
-        "Bootstrapping cellular automata...",
-        "Evolving sensor arrays...",
-        "Tuning mutation rates...",
-        "Priming energy gradients...",
-        "Randomizing initial conditions...",
-        "Preparing artificial life substrate...",
-        "Loading biochemical simulation...",
+        "Synthesizing nucleotides",
+        "Assembling ribosomes",
+        "Transcribing genetic code",
+        "Folding proteins",
+        "Calibrating amino acid properties",
+        "Preparing primordial soup",
+        "Initializing alpha field emitters",
+        "Configuring beta signal receptors",
+        "Establishing gamma terrain",
+        "Compiling genetic instruction set",
+        "Optimizing metabolic pathways",
+        "Bootstrapping cellular automata",
+        "Evolving sensor arrays",
+        "Tuning mutation rates",
+        "Priming energy gradients",
+        "Randomizing initial conditions",
+        "Preparing artificial life substrate",
+        "Loading biochemical simulation",
     ];
 
     let mut state: Option<GpuState> = None;
+    
+    // Create surface configuration for splash rendering
+    let size = window.inner_size();
+    let surface_caps = surface.get_capabilities(&adapter);
+    let surface_format = surface_caps.formats[0];
+    let surface_config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: surface_format,
+        width: size.width,
+        height: size.height,
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: surface_caps.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(&device, &surface_config);
+    
+    // Create egui renderer for loading screen
+    let mut loading_egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
 
     // Create egui context and winit state
     let mut egui_state = egui_winit::State::new(
@@ -6034,15 +6055,116 @@ fn main() {
     );
 
     let _ = event_loop.run(move |event, target| {
-        // Animate loading messages while waiting for GPU state
+        // Render loading screen with animated message overlay
         if state.is_none() {
             let now = std::time::Instant::now();
             if now.duration_since(last_message_update).as_millis() > 200 {
                 current_message_index = (current_message_index + 1) % loading_messages.len();
-                let elapsed = now.duration_since(loading_start).as_secs_f32();
-                let dots = ".".repeat((elapsed * 2.0) as usize % 4);
-                window.set_title(&format!("Ribossome - {}{}", loading_messages[current_message_index], dots));
                 last_message_update = now;
+                
+                // Render splash with text overlay
+                if let Ok(frame) = surface.get_current_texture() {
+                    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Loading Screen Encoder"),
+                    });
+                    
+                    // Clear to black
+                    {
+                        let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Loading Clear Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                    }
+                    
+                    // Render egui text overlay
+                    let elapsed = now.duration_since(loading_start).as_secs_f32();
+                    let dots = ".".repeat((elapsed * 2.0) as usize % 4);
+                    let loading_text = format!("{}{}", loading_messages[current_message_index], dots);
+                    
+                    let egui_input = egui_state.take_egui_input(&window);
+                    let egui_ctx = egui_state.egui_ctx().clone();
+                    egui_ctx.begin_frame(egui_input);
+                    
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::none())
+                        .show(&egui_ctx, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(ui.available_height() / 2.0 - 100.0);
+                                
+                                // Large title
+                                ui.heading(egui::RichText::new("RIBOSSOME")
+                                    .size(72.0)
+                                    .color(egui::Color32::from_rgb(100, 200, 255)));
+                                
+                                ui.add_space(20.0);
+                                
+                                // Loading message
+                                ui.label(egui::RichText::new(&loading_text)
+                                    .size(24.0)
+                                    .color(egui::Color32::from_rgb(150, 150, 150)));
+                                
+                                ui.add_space(40.0);
+                                
+                                // Progress indicator (spinning)
+                                let spinner_angle = elapsed * 2.0;
+                                ui.horizontal(|ui| {
+                                    ui.add_space(ui.available_width() / 2.0 - 20.0);
+                                    ui.spinner();
+                                });
+                            });
+                        });
+                    
+                    let full_output = egui_ctx.end_frame();
+                    let paint_jobs = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+                    
+                    let screen_descriptor = ScreenDescriptor {
+                        size_in_pixels: [size.width, size.height],
+                        pixels_per_point: window.scale_factor() as f32,
+                    };
+                    
+                    for (id, image_delta) in &full_output.textures_delta.set {
+                        loading_egui_renderer.update_texture(&device, &queue, *id, image_delta);
+                    }
+                    
+                    loading_egui_renderer.update_buffers(&device, &queue, &mut encoder, &paint_jobs, &screen_descriptor);
+                    
+                    {
+                        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Loading egui Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                        
+                        loading_egui_renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
+                    }
+                    
+                    for id in &full_output.textures_delta.free {
+                        loading_egui_renderer.free_texture(id);
+                    }
+                    
+                    queue.submit(std::iter::once(encoder.finish()));
+                    frame.present();
+                }
             }
         }
         
