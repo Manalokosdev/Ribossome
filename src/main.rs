@@ -5563,7 +5563,9 @@ impl GpuState {
 
 impl Drop for GpuState {
     fn drop(&mut self) {
-        self.destroy_resources();
+        // Don't call destroy_resources() - let GPU driver handle cleanup asynchronously
+        // The slow device.poll(Wait) in destroy_resources takes 50+ seconds
+        // Just let Rust drop all the buffer/texture handles naturally
     }
 }
 
@@ -5981,7 +5983,7 @@ fn main() {
 
     // Load GPU state in background using channel
     let (tx, rx) = std::sync::mpsc::channel();
-    
+
     let window_clone = window.clone();
     std::thread::spawn(move || {
         let state = pollster::block_on(GpuState::new_with_resources(
@@ -5999,7 +6001,7 @@ fn main() {
     let loading_start = std::time::Instant::now();
     let mut last_message_update = std::time::Instant::now();
     let mut current_message_index = 0;
-    
+
     let loading_messages = [
         "Synthesizing nucleotides",
         "Assembling ribosomes",
@@ -6048,7 +6050,7 @@ fn main() {
                 println!("Loading: {}", &message);
             }
         }
-        
+
         // Check if loading finished
         if state.is_none() {
             if let Ok(mut loaded_state) = rx.try_recv() {
@@ -7716,7 +7718,7 @@ fn main() {
                                                                 .text("Color Blend")
                                                                 .clamp_to_range(true)
                                                         ).on_hover_text("0.0 = amino acid colors only, 1.0 = agent color only");
-                                                        
+
                                                         ui.separator();
                                                         ui.label("Motion Blur / Trail:");
                                                         ui.add(
