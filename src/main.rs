@@ -5569,38 +5569,128 @@ impl Drop for GpuState {
     }
 }
 
+impl GpuState {
+    fn fast_reset(&mut self) {
+        // Reset all simulation state without recreating GPU resources
+        
+        // Reset agent count
+        self.agent_count = 0;
+        self.alive_count = 0;
+        self.agents_cpu.clear();
+        self.cpu_spawn_queue.clear();
+        self.spawn_request_count = 0;
+        self.pending_spawn_upload = false;
+        
+        // Reset epoch and timing
+        self.epoch = 0;
+        self.last_sample_epoch = 0;
+        self.last_autosave_epoch = 0;
+        self.last_epoch_count = 0;
+        self.last_epoch_update = std::time::Instant::now();
+        
+        // Reset camera
+        self.camera_zoom = 1.0;
+        self.camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
+        self.prev_camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
+        self.camera_target = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
+        self.camera_velocity = [0.0, 0.0];
+        
+        // Reset selection
+        self.selected_agent_index = None;
+        self.selected_agent_data = None;
+        self.follow_selected_agent = false;
+        
+        // Reset statistics
+        self.population_history.clear();
+        self.alpha_rain_history.clear();
+        self.beta_rain_history.clear();
+        
+        // Reset difficulty levels
+        self.difficulty.food_power.difficulty_level = 0;
+        self.difficulty.food_power.last_adjustment_epoch = 0;
+        self.difficulty.poison_power.difficulty_level = 0;
+        self.difficulty.poison_power.last_adjustment_epoch = 0;
+        self.difficulty.spawn_prob.difficulty_level = 0;
+        self.difficulty.spawn_prob.last_adjustment_epoch = 0;
+        self.difficulty.death_prob.difficulty_level = 0;
+        self.difficulty.death_prob.last_adjustment_epoch = 0;
+        self.difficulty.alpha_rain.difficulty_level = 0;
+        self.difficulty.alpha_rain.last_adjustment_epoch = 0;
+        self.difficulty.beta_rain.difficulty_level = 0;
+        self.difficulty.beta_rain.last_adjustment_epoch = 0;
+        
+        // Update RNG seed
+        use std::time::{SystemTime, UNIX_EPOCH};
+        self.rng_state = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        
+        // Clear and reinitialize GPU buffers using compute shaders
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Reset Encoder"),
+        });
+        
+        // Clear alive counter and spawn counter
+        encoder.clear_buffer(&self.alive_counter, 0, None);
+        encoder.clear_buffer(&self.spawn_counter, 0, None);
+        encoder.clear_buffer(&self.debug_counter, 0, None);
+        
+        // Reinitialize environment grids (alpha, beta, gamma, trails) via GPU compute
+        const CLEAR_WG_SIZE_X: u32 = 16;
+        const CLEAR_WG_SIZE_Y: u32 = 16;
+        let env_groups_x = (GRID_DIM_U32 + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
+        let env_groups_y = (GRID_DIM_U32 + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Environment Init Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.environment_init_pipeline);
+            pass.set_bind_group(0, &self.compute_bind_group_a, &[]);
+            pass.dispatch_workgroups(env_groups_x, env_groups_y, 1);
+        }
+        
+        // Initialize all agent slots as dead
+        let agent_clear_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Initialize Dead Agents A->B"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.initialize_dead_pipeline);
+            pass.set_bind_group(0, &self.compute_bind_group_a, &[]);
+            pass.dispatch_workgroups(agent_clear_groups, 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Initialize Dead Agents B->A"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.initialize_dead_pipeline);
+            pass.set_bind_group(0, &self.compute_bind_group_b, &[]);
+            pass.dispatch_workgroups(agent_clear_groups, 1, 1);
+        }
+        
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+}
+
 fn reset_simulation_state(
     state: &mut Option<GpuState>,
     window: &Arc<Window>,
     egui_state: &mut egui_winit::State,
 ) {
-    // Just drop the old state - GPU driver handles cleanup asynchronously
-    // Calling destroy_resources() with device.poll(Wait) can take 50+ seconds!
-    if let Some(existing) = state.take() {
-        drop(existing);
+    if let Some(gpu_state) = state.as_mut() {
+        // Fast reset: just clear buffers and reset state, keep GPU device
+        gpu_state.fast_reset();
+    } else {
+        // First time initialization - create new state
+        let mut new_state = pollster::block_on(GpuState::new(window.clone()));
+        new_state.selected_agent_index = None;
+        *state = Some(new_state);
     }
-
-    let mut new_state = pollster::block_on(GpuState::new(window.clone()));
-
-    // Clear selected agent on reset to prevent stack overflow in inspector
-    new_state.selected_agent_index = None;
-
-    // Reset difficulty levels to 0 on simulation reset
-    new_state.difficulty.food_power.difficulty_level = 0;
-    new_state.difficulty.food_power.last_adjustment_epoch = 0;
-    new_state.difficulty.poison_power.difficulty_level = 0;
-    new_state.difficulty.poison_power.last_adjustment_epoch = 0;
-    new_state.difficulty.spawn_prob.difficulty_level = 0;
-    new_state.difficulty.spawn_prob.last_adjustment_epoch = 0;
-    new_state.difficulty.death_prob.difficulty_level = 0;
-    new_state.difficulty.death_prob.last_adjustment_epoch = 0;
-    new_state.difficulty.alpha_rain.difficulty_level = 0;
-    new_state.difficulty.alpha_rain.last_adjustment_epoch = 0;
-    new_state.difficulty.beta_rain.difficulty_level = 0;
-    new_state.difficulty.beta_rain.last_adjustment_epoch = 0;
-
-    *state = Some(new_state);
-
+    
     // Recreate egui_winit state to clear all internal texture tracking
     let egui_ctx = egui::Context::default();
     *egui_state =
