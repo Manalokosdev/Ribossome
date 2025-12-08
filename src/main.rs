@@ -6037,7 +6037,7 @@ fn main() {
         // Animate loading messages in window title while waiting for GPU state
         if state.is_none() {
             let now = std::time::Instant::now();
-            if now.duration_since(last_message_update).as_millis() > 200 {
+            if now.duration_since(last_message_update).as_millis() > 1000 {
                 current_message_index = (current_message_index + 1) % loading_messages.len();
                 last_message_update = now;
                 let elapsed = now.duration_since(loading_start).as_secs_f32();
@@ -6259,6 +6259,12 @@ fn main() {
                         }
                         WindowEvent::RedrawRequested => {
                             let mut reset_requested = false;
+
+                            // Render loading screen while state is being initialized
+                            if state.is_none() {
+                                window.request_redraw();
+                                return; // Don't process further until state is ready
+                            }
 
                             if let Some(state) = state.as_mut() {
                                 // Frame rate limiting
