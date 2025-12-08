@@ -1169,87 +1169,11 @@ fn codon_to_amino_index(b0: u32, b1: u32, b2: u32) -> u32 {
 // ============================================================================
 
 fn genome_read_word(genome: array<u32, GENOME_WORDS>, index: u32) -> u32 {
-    switch (index) {
-        case 0u:  { return genome[0u]; }
-        case 1u:  { return genome[1u]; }
-        case 2u:  { return genome[2u]; }
-        case 3u:  { return genome[3u]; }
-        case 4u:  { return genome[4u]; }
-        case 5u:  { return genome[5u]; }
-        case 6u:  { return genome[6u]; }
-        case 7u:  { return genome[7u]; }
-        case 8u:  { return genome[8u]; }
-        case 9u:  { return genome[9u]; }
-        case 10u: { return genome[10u]; }
-        case 11u: { return genome[11u]; }
-        case 12u: { return genome[12u]; }
-        case 13u: { return genome[13u]; }
-        case 14u: { return genome[14u]; }
-        case 15u: { return genome[15u]; }
-        case 16u: { return genome[16u]; }
-        case 17u: { return genome[17u]; }
-        case 18u: { return genome[18u]; }
-        case 19u: { return genome[19u]; }
-        case 20u: { return genome[20u]; }
-        case 21u: { return genome[21u]; }
-        case 22u: { return genome[22u]; }
-        case 23u: { return genome[23u]; }
-        case 24u: { return genome[24u]; }
-        case 25u: { return genome[25u]; }
-        case 26u: { return genome[26u]; }
-        case 27u: { return genome[27u]; }
-        case 28u: { return genome[28u]; }
-        case 29u: { return genome[29u]; }
-        case 30u: { return genome[30u]; }
-        case 31u: { return genome[31u]; }
-        case 32u: { return genome[32u]; }
-        case 33u: { return genome[33u]; }
-        case 34u: { return genome[34u]; }
-        case 35u: { return genome[35u]; }
-        case 36u: { return genome[36u]; }
-        case 37u: { return genome[37u]; }
-        case 38u: { return genome[38u]; }
-        case 39u: { return genome[39u]; }
-        case 40u: { return genome[40u]; }
-        case 41u: { return genome[41u]; }
-        case 42u: { return genome[42u]; }
-        case 43u: { return genome[43u]; }
-        case 44u: { return genome[44u]; }
-        case 45u: { return genome[45u]; }
-        case 46u: { return genome[46u]; }
-        case 47u: { return genome[47u]; }
-        case 48u: { return genome[48u]; }
-        case 49u: { return genome[49u]; }
-        case 50u: { return genome[50u]; }
-        case 51u: { return genome[51u]; }
-        case 52u: { return genome[52u]; }
-        case 53u: { return genome[53u]; }
-        case 54u: { return genome[54u]; }
-        case 55u: { return genome[55u]; }
-        case 56u: { return genome[56u]; }
-        case 57u: { return genome[57u]; }
-        case 58u: { return genome[58u]; }
-        case 59u: { return genome[59u]; }
-        case 60u: { return genome[60u]; }
-        case 61u: { return genome[61u]; }
-        case 62u: { return genome[62u]; }
-        case 63u: { return genome[63u]; }
-        default:  { return genome[GENOME_WORDS - 1u]; }
-    }
+    return genome[min(index, GENOME_WORDS - 1u)];
 }
 
 fn packed_read_word(packed: array<u32, PACKED_GENOME_WORDS>, index: u32) -> u32 {
-    switch (index) {
-        case 0u: { return packed[0u]; }
-        case 1u: { return packed[1u]; }
-        case 2u: { return packed[2u]; }
-        case 3u: { return packed[3u]; }
-        case 4u: { return packed[4u]; }
-        case 5u: { return packed[5u]; }
-        case 6u: { return packed[6u]; }
-        case 7u: { return packed[7u]; }
-        default: { return packed[PACKED_GENOME_WORDS - 1u]; }
-    }
+    return packed[min(index, PACKED_GENOME_WORDS - 1u)];
 }
 
 // Return single RNA base byte (A=65, U=85, G=71, C=67) at byte index [0..GENOME_LENGTH)
