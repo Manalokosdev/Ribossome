@@ -6,8 +6,8 @@ Modifier,Modifier_AA,V_Valine,M_Methionine,L_Leucine,P_Proline,K_Lysine,C_Cystei
 4,F,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Vampire Mouth,Vampire Mouth,Storage,Storage
 5,G,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Vampire Mouth,Vampire Mouth,Storage,Storage
 6,H,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Vampire Mouth,Vampire Mouth,Storage,Storage
-7,I,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Enabler,Enabler,,
-8,K,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Enabler,Enabler,,
+7,I,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Enabler,Enabler,Pairing Sensor,Pairing Sensor
+8,K,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Enabler,Enabler,Pairing Sensor,Pairing Sensor
 9,L,Agent Alpha Sensor,Agent Alpha Sensor,Propeller,Propeller,Enabler,Enabler,,
 10,M,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
 11,N,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance

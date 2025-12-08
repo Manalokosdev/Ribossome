@@ -94,8 +94,9 @@ struct Agent {
     age: u32,                 // age in frames since spawn
     total_mass: f32,          // total mass computed after morphology
     poison_resistant_count: u32, // number of poison-resistant organs (type 29)
+    vampire_drain_cooldown: u32, // cooldown timer for vampire draining (frames) - NOTE: using first pad slot
     genome: array<u32, GENOME_WORDS>,   // GENOME_BYTES bytes genome (ASCII RNA bases)
-    _pad_genome_align: array<u32, 6>, // padding to align body array to 16-byte boundary
+    _pad_genome_align: array<u32, 5>, // padding to align body array to 16-byte boundary (was 6, reduced by 1 for vampire_drain_cooldown)
     body: array<BodyPart, MAX_BODY_PARTS>, // body parts array
 }
 
@@ -198,6 +199,7 @@ struct SimParams {
     light_dir_x: f32,         // Light direction for slope-based lighting
     light_dir_y: f32,
     light_dir_z: f32,
+    light_power: f32,         // Light intensity multiplier for 3D shading
     agent_blend_mode: u32,    // Agent visualization: 0=comp, 1=add, 2=subtract, 3=multiply
     agent_color_r: f32,
     agent_color_g: f32,
@@ -520,56 +522,11 @@ fn get_part_name(part_type: u32) -> PartName {
         case 33u:{ name = PartName(array<u32,6>(86u,77u,80u,82u,69u,32u), 5u); } // VMPRE
         case 34u:{ name = PartName(array<u32,6>(65u,71u,83u,78u,65u,32u), 5u); } // AGSNA
         case 35u:{ name = PartName(array<u32,6>(65u,71u,83u,78u,66u,32u), 5u); } // AGSNB
+        case 36u:{ name = PartName(array<u32,6>(80u,65u,73u,82u,71u,32u), 5u); } // PAIRG
         default: { }
     }
 
     return name;
-}
-
-// Helper to draw a 7x9 character at position (returns true if pixel should be lit)
-fn draw_tiny_char(char_code: u32, pixel_x: u32, pixel_y: u32) -> bool {
-    // 7x9 pixel font bitmap for uppercase letters and some symbols
-    // Each character uses 2 u32s (total 63 bits for 7 columns x 9 rows)
-    var bitmap_low: u32 = 0u;  // Rows 0-4 (5 rows * 7 bits = 35 bits, use lower 35)
-    var bitmap_high: u32 = 0u; // Rows 5-8 (4 rows * 7 bits = 28 bits)
-
-    switch (char_code) {
-        // Simplified 7x9 bitmap - using pattern repetition for clarity
-        case 65u: { bitmap_low = 0x1C22222u; bitmap_high = 0x3E22221Cu; } // A
-        case 66u: { bitmap_low = 0x3E2221Eu; bitmap_high = 0x3E22223Eu; } // B
-        case 67u: { bitmap_low = 0x1C22201Cu; bitmap_high = 0x1C202020u; } // C
-        case 68u: { bitmap_low = 0x3E22223Eu; bitmap_high = 0x3E222222u; } // D
-        case 69u: { bitmap_low = 0x3E20203Eu; bitmap_high = 0x3E202020u; } // E
-        case 70u: { bitmap_low = 0x2020203Eu; bitmap_high = 0x3E202020u; } // F
-        case 71u: { bitmap_low = 0x1E22221Cu; bitmap_high = 0x1C202620u; } // G
-        case 72u: { bitmap_low = 0x2222223Eu; bitmap_high = 0x22222222u; } // H
-        case 73u: { bitmap_low = 0x8080808u; bitmap_high = 0x8080808u; } // I
-        case 75u: { bitmap_low = 0x2224283Cu; bitmap_high = 0x24282422u; } // K
-        case 76u: { bitmap_low = 0x3E202020u; bitmap_high = 0x20202020u; } // L
-        case 77u: { bitmap_low = 0x2222223Au; bitmap_high = 0x2236222u; } // M
-        case 78u: { bitmap_low = 0x2222223Au; bitmap_high = 0x262A3222u; } // N
-        case 79u: { bitmap_low = 0x1C22221Cu; bitmap_high = 0x1C222222u; } // O
-        case 80u: { bitmap_low = 0x2020203Eu; bitmap_high = 0x3E222220u; } // P
-        case 82u: { bitmap_low = 0x2224283Eu; bitmap_high = 0x3E222220u; } // R
-        case 83u: { bitmap_low = 0x1E02021Cu; bitmap_high = 0x1C202020u; } // S
-        case 84u: { bitmap_low = 0x8080808u; bitmap_high = 0x8080808u; } // T
-        case 86u: { bitmap_low = 0x8141422u; bitmap_high = 0x22222222u; } // V
-        case 87u: { bitmap_low = 0x1C2A3622u; bitmap_high = 0x22222222u; } // W
-        case 89u: { bitmap_low = 0x8080814u; bitmap_high = 0x22222222u; } // Y
-        case 32u: { bitmap_low = 0x0u; bitmap_high = 0x0u; } // Space
-        default: { bitmap_low = 0x0u; bitmap_high = 0x0u; } // Unknown: blank
-    }
-
-    // Extract bit at (pixel_x, pixel_y) from the combined bitmap
-    if (pixel_y < 5u) {
-        // Lower 5 rows from bitmap_low
-        let bit_index = pixel_y * 7u + pixel_x;
-        return ((bitmap_low >> bit_index) & 1u) == 1u;
-    } else {
-        // Upper 4 rows from bitmap_high
-        let bit_index = (pixel_y - 5u) * 7u + pixel_x;
-        return ((bitmap_high >> bit_index) & 1u) == 1u;
-    }
 }
 
 // ============================================================================
@@ -1458,10 +1415,11 @@ fn translate_codon_step(
                 else if (modifier < 16u) { organ_base_type = 31u; }  // Clocks (R-S: 14-15)
                 else { organ_base_type = 31u; }                      // Sine Wave Generators (T-Y: 16-19) - same as clocks
             }
-            // H/Q promoters: Storage, Poison Resistance, Chiral Flippers
+            // H/Q promoters: Storage, Pairing Sensors, Poison Resistance, Chiral Flippers
             else if (amino_type == 6u || amino_type == 13u) {  // H or Q
                 if (modifier < 7u) { organ_base_type = 28u; }        // Storage (A-H: 0-6)
-                else if (modifier < 14u) { organ_base_type = 29u; }  // Poison Resistance (M-Q: 10-13, skips I-L)
+                else if (modifier < 9u) { organ_base_type = 36u; }   // Pairing State Sensors (I-K: 7-8)
+                else if (modifier < 14u) { organ_base_type = 29u; }  // Poison Resistance (L-Q: 9-13)
                 else { organ_base_type = 30u; }                      // Chiral Flippers (R-Y: 14-19)
             }
 
@@ -1469,13 +1427,13 @@ fn translate_codon_step(
                 // Encode organ with parameter
                 var param_value = u32((f32(modifier) / 19.0) * 255.0);
 
-                // For slope sensors and clocks, encode promoter type in high bit
-                // K promoter = alpha emitter (bit 7 = 0), C promoter = beta emitter (bit 7 = 1)
-                if (organ_base_type == 31u || organ_base_type == 32u) {
+                // For slope sensors, clocks, and pairing sensors, encode promoter type in high bit
+                // K/H promoter = alpha emitter (bit 7 = 0), C/Q promoter = beta emitter (bit 7 = 1)
+                if (organ_base_type == 31u || organ_base_type == 32u || organ_base_type == 36u) {
                     param_value = param_value & 127u;  // Clear bit 7 first
-                    let is_C_promoter = (amino_type == 1u);  // C=1, K=8
-                    if (is_C_promoter) {
-                        param_value = param_value | 128u;  // Set bit 7 for C promoter
+                    let is_beta_promoter = (amino_type == 1u || amino_type == 13u);  // C=1, Q=13
+                    if (is_beta_promoter) {
+                        param_value = param_value | 128u;  // Set bit 7 for beta promoter
                     }
                 }
 
@@ -1576,17 +1534,70 @@ fn render_body_part_ctx(
     let is_last = part_index == body_count - 1u;
     let is_single = body_count == 1u;
 
-    // 1. STRUCTURAL RENDERING: Base segment line
-    if (!in_debug_mode) {
-        let thickness = part.size * 0.5;
-        let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
-        draw_thick_line_ctx(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
-        if (!is_single && (is_first || is_last)) {
-            draw_filled_circle_ctx(world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
+    // 1. STRUCTURAL RENDERING: Zigzag line with gradient shading
+    if (!in_debug_mode && base_type < 20u) {
+        // Draw zigzag structure for amino acids
+        let base_color = mix(amino_props.color, agent_color, params.agent_color_blend);
+        
+        let seed = base_type * 12345u + 67890u;
+        let segment_length = length(world_pos - segment_start_world);
+        let organ_width = segment_length * 0.15;
+        let line_width = organ_width;
+        
+        let point_count = 4u + (base_type % 3u);
+        var prev_pos = segment_start_world;
+        
+        for (var i = 1u; i < point_count - 1u; i++) {
+            let t = f32(i) / f32(point_count - 1u);
+            let base_pos = mix(segment_start_world, world_pos, t);
+            
+            let offset_seed = seed + i * 9876u;
+            let offset_angle = f32(offset_seed % 628u) / 100.0;
+            let offset_dist = f32((offset_seed / 628u) % 100u) / 100.0 * organ_width * 3.5;
+            let offset = vec2<f32>(cos(offset_angle) * offset_dist, sin(offset_angle) * offset_dist);
+            let curr_pos = base_pos + offset;
+            
+            let dark_color = vec4<f32>(base_color * 0.5, 1.0);
+            let light_color = vec4<f32>(base_color, 1.0);
+            draw_thick_line_gradient_ctx(prev_pos, curr_pos, line_width, dark_color, light_color, ctx);
+            prev_pos = curr_pos;
         }
-    }
-
-    // 2. DEBUG MODE RENDERING: Signal visualization
+        
+        let dark_color = vec4<f32>(base_color * 0.5, 1.0);
+        let light_color = vec4<f32>(base_color, 1.0);
+        draw_thick_line_gradient_ctx(prev_pos, world_pos, line_width, dark_color, light_color, ctx);
+    } else if (!in_debug_mode) {
+        // Organs: same zigzag with gradient
+        let base_color = mix(amino_props.color, agent_color, params.agent_color_blend);
+        
+        let seed = base_type * 12345u + 67890u;
+        let segment_length = length(world_pos - segment_start_world);
+        let organ_width = segment_length * 0.15;
+        let line_width = part.size * 0.5;
+        
+        let point_count = 4u + (base_type % 3u);
+        var prev_pos = segment_start_world;
+        
+        for (var i = 1u; i < point_count - 1u; i++) {
+            let t = f32(i) / f32(point_count - 1u);
+            let base_pos = mix(segment_start_world, world_pos, t);
+            
+            let offset_seed = seed + i * 9876u;
+            let offset_angle = f32(offset_seed % 628u) / 100.0;
+            let offset_dist = f32((offset_seed / 628u) % 100u) / 100.0 * organ_width * 3.5;
+            let offset = vec2<f32>(cos(offset_angle) * offset_dist, sin(offset_angle) * offset_dist);
+            let curr_pos = base_pos + offset;
+            
+            let dark_color = vec4<f32>(base_color * 0.5, 1.0);
+            let light_color = vec4<f32>(base_color, 1.0);
+            draw_thick_line_gradient_ctx(prev_pos, curr_pos, line_width, dark_color, light_color, ctx);
+            prev_pos = curr_pos;
+        }
+        
+        let dark_color = vec4<f32>(base_color * 0.5, 1.0);
+        let light_color = vec4<f32>(base_color, 1.0);
+        draw_thick_line_gradient_ctx(prev_pos, world_pos, line_width, dark_color, light_color, ctx);
+    }    // 2. DEBUG MODE RENDERING: Signal visualization
     if (in_debug_mode) {
         let a = part.alpha_signal;
         let b = part.beta_signal;
@@ -1699,7 +1710,7 @@ fn render_body_part_ctx(
             let t = f32(s) / f32(segments);
             let ang = t * 6.28318530718;
             let p = world_pos + vec2<f32>(cos(ang)*radius, sin(ang)*radius);
-            draw_thick_line_ctx(prev, p, 1.5, color, ctx);
+            draw_thin_line_ctx(prev, p, color, ctx);
             prev = p;
         }
         let blended_color_enabler = mix(amino_props.color, agent_color, params.agent_color_blend);
@@ -1781,6 +1792,13 @@ fn render_body_part_ctx(
         }
     }
 
+    // Pairing state sensors (organ 36) get orange asterisks
+    if (base_type == 36u) {
+        let star_size = max(part.size * 2.0, 6.0);
+        let orange_color = vec3<f32>(1.0, 0.6, 0.0); // Orange
+        draw_asterisk_ctx(world_pos, star_size, vec4<f32>(orange_color, 0.9), ctx);
+    }
+
     // 8. ORGAN: Displacer (repulsion field) - diamond marker
     if (amino_props.is_displacer) {
         let blended_color_displacer = mix(amino_props.color, agent_color, params.agent_color_blend);
@@ -1814,7 +1832,7 @@ fn render_body_part_ctx(
         // Scale visual marker based on sensor radius (normalized to typical range)
         // Typical range: 0-300, so normalize and scale for visibility
         let visual_scale = clamp(sensor_radius / 200.0, 0.3, 4.0);
-        let marker_size = part.size * 1.5 * visual_scale;
+        let marker_size = part.size * 3.0 * visual_scale; // Increased from 1.5x to 3.0x for better visibility
 
         // Choose color based on sensor type and signal polarity
         var sensor_color = vec3<f32>(0.0);
@@ -1827,8 +1845,8 @@ fn render_body_part_ctx(
         }
         let blended_sensor_color = mix(sensor_color, agent_color, params.agent_color_blend * 0.3);
 
-        // Draw circle marker
-        draw_filled_circle_ctx(world_pos, marker_size, vec4<f32>(blended_sensor_color, 0.8), ctx);
+        // Draw circle marker with high opacity to ensure visibility
+        draw_filled_circle_ctx(world_pos, marker_size, vec4<f32>(blended_sensor_color, 1.0), ctx);
 
         // Draw outline circle to indicate sensing range at high zoom
 
@@ -1850,7 +1868,7 @@ fn render_body_part_ctx(
 
     // 9a. ORGAN: Agent Alpha/Beta Sensors (types 34, 35) - dark purple pentagon
     if (base_type == 34u || base_type == 35u) {
-        let pentagon_size = max(part.size * 2.0, 6.0);
+        let pentagon_size = max(part.size * 0.80, 6.0);
         let dark_purple = vec3<f32>(0.3, 0.0, 0.5); // Dark purple
         let blended_color = mix(dark_purple, agent_color, params.agent_color_blend * 0.3);
 
@@ -1878,8 +1896,8 @@ fn render_body_part_ctx(
         let organ_param = get_organ_param(part.part_type);
         let is_C_promoter = ((organ_param & 128u) != 0u);
 
-        // Bright green for K promoter (alpha), bright red for C promoter (beta)
-        let clock_color = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), is_C_promoter);
+        // Bright green for K promoter (alpha), bright blue for C promoter (beta)
+        let clock_color = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.5, 1.0), is_C_promoter);
 
         // Pulsate size based on signal output
         // Base size is larger (3x part size), then pulsate ±30%
@@ -1889,6 +1907,40 @@ fn render_body_part_ctx(
 
         // Draw large filled circle with full opacity
         draw_filled_circle_ctx(world_pos, pulsating_size, vec4<f32>(clock_color, 1.0), ctx);
+    }
+
+    // 11. ORGAN: Slope Sensor (type 32) - cyan triangle pointing in slope direction
+    if (base_type == 32u) {
+        // Get slope signal from _pad.x (stores slope direction/magnitude)
+        let slope_signal = part._pad.x; // -1 to +1 indicates slope direction
+        
+        // Decode promoter type from part_type parameter (bit 7)
+        let organ_param = get_organ_param(part.part_type);
+        let is_beta_promoter = ((organ_param & 128u) != 0u);
+        
+        // Cyan for alpha emitter (K), yellow for beta emitter (C)
+        let slope_color = select(vec3<f32>(0.0, 0.8, 0.8), vec3<f32>(0.8, 0.8, 0.0), is_beta_promoter);
+        
+        // Triangle size scales with signal strength
+        let signal_strength = abs(slope_signal);
+        let triangle_size = part.size * (2.0 + signal_strength);
+        
+        // Triangle points in slope direction (signal sign determines up/down)
+        // Draw isosceles triangle
+        let pointing_up = slope_signal > 0.0;
+        let tip_y = select(triangle_size, -triangle_size, pointing_up);
+        let base_y = select(-triangle_size * 0.5, triangle_size * 0.5, pointing_up);
+        
+        let tip = world_pos + vec2<f32>(0.0, tip_y);
+        let left = world_pos + vec2<f32>(-triangle_size * 0.8, base_y);
+        let right = world_pos + vec2<f32>(triangle_size * 0.8, base_y);
+        
+        // Draw filled triangle
+        draw_thick_line_ctx(tip, left, 1.5, vec4<f32>(slope_color, 0.9), ctx);
+        draw_thick_line_ctx(left, right, 1.5, vec4<f32>(slope_color, 0.9), ctx);
+        draw_thick_line_ctx(right, tip, 1.5, vec4<f32>(slope_color, 0.9), ctx);
+        // Fill center
+        draw_thick_line_ctx(world_pos, tip, triangle_size * 0.7, vec4<f32>(slope_color, 0.7), ctx);
     }
 }
 
@@ -1938,6 +1990,12 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Skip dead agents
     if (agent.alive == 0u || agent.energy <= 0.0) {
         return;
+    }
+
+    // Decrement cooldown timer if active
+    if (agents_in[agent_id].vampire_drain_cooldown > 0u) {
+        agents_in[agent_id].vampire_drain_cooldown -= 1u;
+        return;  // Skip draining while on cooldown
     }
 
     // Check if this agent has any vampire mouth organs (type 33)
@@ -2053,24 +2111,26 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let victim = agents_in[closest_victim_id];
 
                     // Distance-based drain: linear inverse proportion
-                    // At distance 0: drain ALL of victim's energy (instant kill)
+                    // At distance 0: drain more energy
                     // At distance 100: drain 0%
                     let distance_factor = 1.0 - (closest_dist / max_drain_distance);
 
-                    // Instant kill mode: drain all available energy from victim
-                    let drain_amount = distance_factor * victim.energy;
+                    // Calculate base drain amount (up to 50% of victim's energy)
+                    let base_drain = distance_factor * victim.energy * 0.5;
 
                     // Check if victim has any energy and we're in range
-                    if (victim.energy > 0.0001 && drain_amount > 0.0001) {
-                        // Drain ALL energy from victim (instant kill)
-                        agents_in[closest_victim_id].energy = 0.0;
-
-                        // Vampire absorbs at least 30% of victim's total energy
-                        let absorbed_energy = max(drain_amount, victim.energy * 0.3);
+                    if (victim.energy > 0.0001 && base_drain > 0.0001) {
+                        // Vampire absorbs the drain amount
+                        let absorbed_energy = base_drain;
+                        
+                        // Victim loses 2x the absorbed amount (punishing vampirism)
+                        let victim_loss = absorbed_energy * 2.0;
+                        agents_in[closest_victim_id].energy = max(0.0, victim.energy - victim_loss);
+                        
                         total_energy_gained += absorbed_energy;
 
-                        // Store drain amount in _pad.y for visualization
-                        agents_in[agent_id].body[i]._pad.y = drain_amount;
+                        // Store absorbed amount in _pad.y for visualization
+                        agents_in[agent_id].body[i]._pad.y = absorbed_energy;
                     } else {
                         agents_in[agent_id].body[i]._pad.y = 0.0;
                     }
@@ -2084,6 +2144,8 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Add gained energy to this agent
     if (total_energy_gained > 0.0) {
         agents_in[agent_id].energy += total_energy_gained;
+        // Set cooldown period (60 frames = ~1 second at 60fps) to prevent race conditions
+        agents_in[agent_id].vampire_drain_cooldown = 60u;
     }
 }
 
@@ -2552,6 +2614,27 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Add trail difference signal to beta
             new_beta += sensed_value;
+        }
+
+        // PAIRING STATE SENSOR - Organ type 36 (H/Q + I/K)
+        // Emits alpha or beta based on genome pairing completion percentage
+        if (base_type == 36u) {
+            // Get pairing percentage (0.0 to 1.0)
+            let pairing_percentage = f32(agent.pairing_counter) / f32(GENOME_BYTES);
+            
+            // Extract parameter (0-127) and promoter bit
+            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+            let param_normalized = f32(organ_param & 127u) / 127.0;
+            let is_beta_emitter = (organ_param & 128u) != 0u;
+            
+            // Signal strength = pairing_percentage * param_normalized
+            let signal_strength = pairing_percentage * param_normalized;
+            
+            if (is_beta_emitter) {
+                new_beta += signal_strength;
+            } else {
+                new_alpha += signal_strength;
+            }
         }
 
     // Energy sensor contribution rate (now 1.0 as requested)
@@ -3690,24 +3773,64 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
             // Project onto line direction to get position along line (0 to len)
             let t = to_pixel_x * dir_x + to_pixel_y * dir_y;
 
-            // Distance to capsule axis
+            // Distance to capsule axis and gradient position
             var dist_sq: f32;
+            var gradient_t: f32;
+            
             if (t < 0.0) {
                 // Before p0: distance to p0
                 dist_sq = to_pixel_x * to_pixel_x + to_pixel_y * to_pixel_y;
+                gradient_t = 0.0;
             } else if (t > len) {
                 // After p1: distance to p1
                 let to_p1_x = pixel_x - f32(screen_p1.x);
                 let to_p1_y = pixel_y - f32(screen_p1.y);
                 dist_sq = to_p1_x * to_p1_x + to_p1_y * to_p1_y;
+                gradient_t = 1.0;
             } else {
                 // Between p0 and p1: perpendicular distance to line
                 let perp_dist = to_pixel_x * perp_x + to_pixel_y * perp_y;
                 dist_sq = perp_dist * perp_dist;
+                gradient_t = t / len;
             }
 
             // Check if pixel is within capsule radius
             if (dist_sq <= half_thick * half_thick) {
+                // Cylindrical surface lighting with curved surface
+                // Calculate the point on the cylinder axis closest to this pixel
+                // Clamp t to [0, len] so normals always point perpendicular to cylinder axis
+                let t_clamped = clamp(t, 0.0, len);
+                let axis_point_x = f32(screen_p0.x) + t_clamped * dir_x;
+                let axis_point_y = f32(screen_p0.y) + t_clamped * dir_y;
+                
+                // Calculate radial distance from axis
+                let radial_offset_x = pixel_x - axis_point_x;
+                let radial_offset_y = pixel_y - axis_point_y;
+                let radial_dist_sq = radial_offset_x * radial_offset_x + radial_offset_y * radial_offset_y;
+                let radial_factor_sq = radial_dist_sq / (half_thick * half_thick);  // normalized (0 to 1)
+                
+                // Calculate z-component for curved cylinder surface (like a sphere cross-section)
+                let z_sq = 1.0 - radial_factor_sq;
+                let z = sqrt(max(z_sq, 0.0));
+                
+                // Surface normal with curved profile
+                let surface_normal = normalize(vec3<f32>(radial_offset_x / half_thick, radial_offset_y / half_thick, z));
+                
+                // Light direction from params
+                let light_dir = normalize(vec3<f32>(params.light_dir_x, params.light_dir_y, params.light_dir_z));
+                
+                // Lambertian diffuse lighting
+                let diffuse = max(dot(surface_normal, light_dir), 0.0);
+                
+                // Use material color as base, lighten lit areas (dodge-like)
+                let highlight = diffuse * params.light_power;
+                let lighting = 1.0 + highlight;  // 1.0 = base color, >1.0 = brightened
+                
+                let shaded_color = vec4<f32>(
+                    color.rgb * lighting,
+                    color.a
+                );
+                
                 var screen_pos = vec2<i32>(px, py);
                 var idx: u32;
                 var in_bounds = false;
@@ -3736,6 +3859,208 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
                 }
 
                 if (in_bounds) {
+                    agent_grid[idx] = shaded_color;
+                }
+            }
+        }
+    }
+}
+
+// Thin line version: draws 1-pixel wide lines using Bresenham-like algorithm (for technical overlays)
+fn draw_thin_line_ctx(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>, ctx: InspectorContext) {
+    var screen_p0: vec2<i32>;
+    var screen_p1: vec2<i32>;
+
+    if (ctx.use_inspector_coords.x >= 0.0) {
+        screen_p0 = vec2<i32>(i32(ctx.center.x + p0.x * ctx.scale), i32(ctx.center.y + p0.y * ctx.scale));
+        screen_p1 = vec2<i32>(i32(ctx.center.x + p1.x * ctx.scale), i32(ctx.center.y + p1.y * ctx.scale));
+    } else {
+        screen_p0 = world_to_screen(p0);
+        screen_p1 = world_to_screen(p1);
+    }
+
+    let dx = abs(screen_p1.x - screen_p0.x);
+    let dy = abs(screen_p1.y - screen_p0.y);
+    let sx = select(-1, 1, screen_p0.x < screen_p1.x);
+    let sy = select(-1, 1, screen_p0.y < screen_p1.y);
+    var err = dx - dy;
+    
+    var x = screen_p0.x;
+    var y = screen_p0.y;
+    
+    // Bresenham's line algorithm
+    for (var i = 0; i < 10000; i++) {
+        var screen_pos = vec2<i32>(x, y);
+        var idx: u32;
+        var in_bounds = false;
+
+        if (ctx.use_inspector_coords.x >= 0.0) {
+            let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+            if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                buffer_pos.y >= 0 && buffer_pos.y < i32(params.window_height)) {
+                idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                in_bounds = true;
+            }
+        } else {
+            let inspector_active = params.selected_agent_index != 0xFFFFFFFFu;
+            let max_x = select(i32(params.window_width),
+                               i32(params.window_width) - i32(INSPECTOR_WIDTH),
+                               inspector_active);
+            if (screen_pos.x >= 0 && screen_pos.x < max_x &&
+                screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
+                idx = screen_to_grid_index(screen_pos);
+                in_bounds = true;
+            }
+        }
+
+        if (in_bounds) {
+            agent_grid[idx] = color;
+        }
+        
+        if (x == screen_p1.x && y == screen_p1.y) {
+            break;
+        }
+        
+        let e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            x += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+// Gradient version: interpolates between start_color and end_color based on position along line
+fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, 
+                                 start_color: vec4<f32>, end_color: vec4<f32>, ctx: InspectorContext) {
+    // Convert world coordinates to screen coordinates
+    var screen_p0: vec2<i32>;
+    var screen_p1: vec2<i32>;
+    var screen_thickness: i32;
+
+    if (ctx.use_inspector_coords.x >= 0.0) {
+        // Inspector mode: direct coordinate mapping
+        screen_p0 = vec2<i32>(i32(ctx.center.x + p0.x * ctx.scale), i32(ctx.center.y + p0.y * ctx.scale));
+        screen_p1 = vec2<i32>(i32(ctx.center.x + p1.x * ctx.scale), i32(ctx.center.y + p1.y * ctx.scale));
+        screen_thickness = clamp(i32(thickness * ctx.scale), 0, 50);
+    } else {
+        // World mode: use world-to-screen conversion
+        screen_p0 = world_to_screen(p0);
+        screen_p1 = world_to_screen(p1);
+        let world_to_screen_scale = params.window_width / (params.grid_size / params.camera_zoom);
+        screen_thickness = clamp(i32(thickness * world_to_screen_scale), 0, 50);
+    }
+    
+    let dx = f32(screen_p1.x - screen_p0.x);
+    let dy = f32(screen_p1.y - screen_p0.y);
+    let len = sqrt(dx * dx + dy * dy);
+    
+    if (len < 0.5) {
+        // Degenerate case: just draw a circle with average color
+        let avg_color = mix(start_color, end_color, 0.5);
+        draw_filled_circle_optimized(screen_p0, f32(screen_thickness), avg_color, ctx);
+        return;
+    }
+    
+    let dir_x = dx / len;
+    let dir_y = dy / len;
+    let perp_x = -dir_y;
+    let perp_y = dir_x;
+    let half_thick = f32(screen_thickness);
+    
+    // Calculate bounding box
+    let bbox_min_x = min(screen_p0.x, screen_p1.x) - screen_thickness;
+    let bbox_min_y = min(screen_p0.y, screen_p1.y) - screen_thickness;
+    let bbox_max_x = max(screen_p0.x, screen_p1.x) + screen_thickness;
+    let bbox_max_y = max(screen_p0.y, screen_p1.y) + screen_thickness;
+    
+    for (var py = bbox_min_y; py <= bbox_max_y; py++) {
+        for (var px = bbox_min_x; px <= bbox_max_x; px++) {
+            let pixel_x = f32(px);
+            let pixel_y = f32(py);
+            
+            let to_pixel_x = pixel_x - f32(screen_p0.x);
+            let to_pixel_y = pixel_y - f32(screen_p0.y);
+            
+            let t = to_pixel_x * dir_x + to_pixel_y * dir_y;
+            
+            var dist_sq: f32;
+            var gradient_t: f32;
+            
+            if (t <= 0.0) {
+                dist_sq = to_pixel_x * to_pixel_x + to_pixel_y * to_pixel_y;
+                gradient_t = 0.0;
+            } else if (t >= len) {
+                let to_p1_x = pixel_x - f32(screen_p1.x);
+                let to_p1_y = pixel_y - f32(screen_p1.y);
+                dist_sq = to_p1_x * to_p1_x + to_p1_y * to_p1_y;
+                gradient_t = 1.0;
+            } else {
+                let perp_dist = to_pixel_x * perp_x + to_pixel_y * perp_y;
+                dist_sq = perp_dist * perp_dist;
+                gradient_t = t / len;
+            }
+            
+            if (dist_sq <= half_thick * half_thick) {
+                // Interpolate color based on position along line
+                let base_color = mix(start_color, end_color, gradient_t);
+                
+                // Cylindrical surface lighting with curved surface
+                // Calculate the point on the cylinder axis closest to this pixel
+                // Clamp t to [0, len] so normals always point perpendicular to cylinder axis
+                let t_clamped = clamp(t, 0.0, len);
+                let axis_point_x = f32(screen_p0.x) + t_clamped * dir_x;
+                let axis_point_y = f32(screen_p0.y) + t_clamped * dir_y;
+                
+                // Calculate radial distance from axis
+                let radial_offset_x = pixel_x - axis_point_x;
+                let radial_offset_y = pixel_y - axis_point_y;
+                let radial_dist_sq = radial_offset_x * radial_offset_x + radial_offset_y * radial_offset_y;
+                let radial_factor_sq = radial_dist_sq / (half_thick * half_thick);  // normalized (0 to 1)
+                
+                // Calculate z-component for curved cylinder surface (like a sphere cross-section)
+                let z_sq = 1.0 - radial_factor_sq;
+                let z = sqrt(max(z_sq, 0.0));
+                
+                // Surface normal with curved profile
+                let surface_normal = normalize(vec3<f32>(radial_offset_x / half_thick, radial_offset_y / half_thick, z));
+                
+                let light_dir = normalize(vec3<f32>(params.light_dir_x, params.light_dir_y, params.light_dir_z));
+                let diffuse = max(dot(surface_normal, light_dir), 0.0);
+                
+                // Use material color as base, lighten lit areas (dodge-like)
+                let highlight = diffuse * params.light_power;
+                let lighting = 1.0 + highlight;  // 1.0 = base color, >1.0 = brightened
+                
+                let color = vec4<f32>(base_color.rgb * lighting, base_color.a);
+                
+                var screen_pos = vec2<i32>(px, py);
+                var idx: u32;
+                var in_bounds = false;
+
+                if (ctx.use_inspector_coords.x >= 0.0) {
+                    let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                        buffer_pos.y >= 0 && buffer_pos.y < i32(params.window_height)) {
+                        idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                        in_bounds = true;
+                    }
+                } else {
+                    let inspector_active = params.selected_agent_index != 0xFFFFFFFFu;
+                    let max_x = select(i32(params.window_width),
+                                       i32(params.window_width) - i32(INSPECTOR_WIDTH),
+                                       inspector_active);
+                    if (screen_pos.x >= 0 && screen_pos.x < max_x &&
+                        screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
+                        idx = screen_to_grid_index(screen_pos);
+                        in_bounds = true;
+                    }
+                }
+
+                if (in_bounds) {
                     agent_grid[idx] = color;
                 }
             }
@@ -3752,6 +4077,13 @@ fn draw_filled_circle_optimized(center: vec2<i32>, radius: f32, color: vec4<f32>
         for (var dx = -radius_i; dx <= radius_i; dx++) {
             let dist_sq = f32(dx * dx + dy * dy);
             if (dist_sq <= radius_sq) {
+                // Radial gradient shading: lighter at center, darker at edges
+                let dist_factor = sqrt(dist_sq) / radius;  // 0.0 at center, 1.0 at edge
+                let shaded_color = vec4<f32>(
+                    mix(color.rgb, color.rgb * 0.5, dist_factor),  // Interpolate brightness
+                    color.a
+                );
+                
                 var screen_pos = center + vec2<i32>(dx, dy);
                 var idx: u32;
                 var in_bounds = false;
@@ -3777,7 +4109,7 @@ fn draw_filled_circle_optimized(center: vec2<i32>, radius: f32, color: vec4<f32>
                 }
 
                 if (in_bounds) {
-                    agent_grid[idx] = color;
+                    agent_grid[idx] = shaded_color;
                 }
             }
         }
@@ -3845,6 +4177,31 @@ fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx:
             let offset = vec2<f32>(f32(dx), f32(dy));
             let dist2 = dot(offset, offset);
             if (dist2 <= screen_radius * screen_radius) {
+                // Spherical surface lighting (optimized: avoid extra sqrt)
+                let radius_sq = screen_radius * screen_radius;
+                let dist_factor_sq = dist2 / radius_sq;  // (dist/radius)²
+                
+                // Calculate 3D surface normal for a sphere
+                // In 2D view, we see a circle; assume sphere extends in z-direction
+                let z_sq = 1.0 - dist_factor_sq;  // x² + y² + z² = 1
+                let z = sqrt(max(z_sq, 0.0));
+                let surface_normal = normalize(vec3<f32>(offset.x / screen_radius, offset.y / screen_radius, z));
+                
+                // Light direction from params
+                let light_dir = normalize(vec3<f32>(params.light_dir_x, params.light_dir_y, params.light_dir_z));
+                
+                // Lambertian diffuse lighting
+                let diffuse = max(dot(surface_normal, light_dir), 0.0);
+                
+                // Use material color as base, lighten lit areas (dodge-like)
+                let highlight = diffuse * params.light_power;
+                let lighting = 1.0 + highlight;  // 1.0 = base color, >1.0 = brightened
+                
+                let shaded_color = vec4<f32>(
+                    color.rgb * lighting,
+                    color.a
+                );
+                
                 var screen_pos = screen_center + vec2<i32>(dx, dy);
                 var idx: u32;
                 var in_bounds = false;
@@ -3868,7 +4225,15 @@ fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx:
                 }
 
                 if (in_bounds) {
-                    agent_grid[idx] = color;
+                    // Alpha blending: blend new color with existing background
+                    let bg_color = agent_grid[idx];
+                    let src_alpha = shaded_color.a;
+                    let inv_alpha = 1.0 - src_alpha;
+                    let blended = vec4<f32>(
+                        shaded_color.rgb * src_alpha + bg_color.rgb * inv_alpha,
+                        max(shaded_color.a, bg_color.a)
+                    );
+                    agent_grid[idx] = blended;
                 }
             }
         }

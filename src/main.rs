@@ -709,8 +709,9 @@ struct Agent {
     age: u32,                                  // 4 bytes (60-63) - age in frames
     total_mass: f32,                           // 4 bytes (64-67) - computed each frame after morphology
     poison_resistant_count: u32,               // 4 bytes (68-71) - number of poison-resistant organs
-    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases) - 72 to 327
-    _pad_genome_align: [u32; 6],               // 24 bytes (328-351) - padding to align body to 16-byte boundary
+    vampire_drain_cooldown: u32,               // 4 bytes (72-75) - cooldown timer for vampire draining (frames) - NOTE: using first pad slot
+    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases) - 76 to 331
+    _pad_genome_align: [u32; 5],               // 20 bytes (332-351) - padding to align body to 16-byte boundary (was 6, reduced by 1 for vampire_drain_cooldown)
     body: [BodyPart; MAX_BODY_PARTS],          // starts at byte 352 (16-byte aligned)
 }
 
@@ -819,6 +820,7 @@ struct SimParams {
     light_dir_x: f32,         // Light direction for slope-based lighting
     light_dir_y: f32,
     light_dir_z: f32,
+    light_power: f32,         // Light intensity multiplier for 3D shading
     agent_blend_mode: u32,    // Agent visualization blend mode
     agent_color_r: f32,
     agent_color_g: f32,
@@ -991,6 +993,7 @@ struct SimulationSettings {
     beta_gamma_adjust: f32,
     gamma_gamma_adjust: f32,
     light_direction: [f32; 3],  // Light direction for slope-based lighting effects
+    light_power: f32,            // Light intensity for 3D shading (0.0-2.0)
     agent_blend_mode: u32,  // Agent blend mode: 0=comp, 1=add, 2=subtract, 3=multiply
     agent_color: [f32; 3],  // Agent color tint
     agent_color_blend: f32,  // Blend factor between amino acid color (0.0) and agent color (1.0)
@@ -1074,6 +1077,7 @@ impl Default for SimulationSettings {
             beta_gamma_adjust: 1.0,   // Linear (no adjustment)
             gamma_gamma_adjust: 1.0,  // Linear (no adjustment)
             light_direction: [0.5, 0.5, 0.5],  // Default diagonal light
+            light_power: 1.0,                   // Default lighting strength
             agent_blend_mode: 0,  // Comp by default
             agent_color: [1.0, 1.0, 1.0],  // White
             agent_color_blend: 0.0,  // Default: show only amino acid colors (no agent color blend)
@@ -1481,6 +1485,7 @@ struct GpuState {
     beta_gamma_adjust: f32,
     gamma_gamma_adjust: f32,
     light_direction: [f32; 3],
+    light_power: f32,
     agent_blend_mode: u32, // 0=comp, 1=add, 2=subtract, 3=multiply
     agent_color: [f32; 3],
     agent_color_blend: f32,
@@ -1568,6 +1573,7 @@ impl GpuState {
             beta_gamma_adjust: self.beta_gamma_adjust,
             gamma_gamma_adjust: self.gamma_gamma_adjust,
             light_direction: self.light_direction,
+            light_power: self.light_power,
             agent_blend_mode: self.agent_blend_mode,
             agent_color: self.agent_color,
             agent_color_blend: self.agent_color_blend,
@@ -1647,6 +1653,7 @@ impl GpuState {
         self.beta_gamma_adjust = settings.beta_gamma_adjust;
         self.gamma_gamma_adjust = settings.gamma_gamma_adjust;
         self.light_direction = settings.light_direction;
+        self.light_power = settings.light_power;
         self.agent_blend_mode = settings.agent_blend_mode;
         self.agent_color = settings.agent_color;
         self.agent_color_blend = settings.agent_color_blend;
@@ -2137,6 +2144,7 @@ impl GpuState {
             light_dir_x: 0.5,
             light_dir_y: 0.5,
             light_dir_z: 0.5,
+            light_power: 1.0,
             agent_blend_mode: 0,
             agent_color_r: 1.0,
             agent_color_g: 1.0,
@@ -3286,6 +3294,7 @@ impl GpuState {
             beta_gamma_adjust: settings.beta_gamma_adjust,
             gamma_gamma_adjust: settings.gamma_gamma_adjust,
             light_direction: settings.light_direction,
+            light_power: settings.light_power,
             agent_blend_mode: settings.agent_blend_mode,
             agent_color: settings.agent_color,
             agent_color_blend: settings.agent_color_blend,
@@ -3936,6 +3945,7 @@ impl GpuState {
             beta_gamma_adjust: self.beta_gamma_adjust,
             gamma_gamma_adjust: self.gamma_gamma_adjust,
             light_direction: self.light_direction,
+            light_power: self.light_power,
             agent_blend_mode: self.agent_blend_mode,
             agent_color: self.agent_color,
             agent_color_blend: self.agent_color_blend,
@@ -4451,6 +4461,7 @@ impl GpuState {
             gamma_gamma_adjust: self.gamma_gamma_adjust,
             light_dir_x: self.light_direction[0],
             light_dir_y: self.light_direction[1],
+            light_power: self.light_power,
             light_dir_z: self.light_direction[2],
             agent_blend_mode: self.agent_blend_mode,
             agent_color_r: self.agent_color[0],
@@ -6586,6 +6597,7 @@ fn main() {
                                                                         beta_gamma_adjust: state.beta_gamma_adjust,
                                                                         gamma_gamma_adjust: state.gamma_gamma_adjust,
                                                                         light_direction: state.light_direction,
+                                                                        light_power: state.light_power,
                                                                         agent_blend_mode: state.agent_blend_mode,
                                                                         agent_color: state.agent_color,
                                                                         agent_color_blend: state.agent_color_blend,
@@ -7508,21 +7520,26 @@ fn main() {
                                                             ui.radio_value(&mut state.slope_blend_mode, 1, "Hard Light");
                                                             ui.radio_value(&mut state.slope_blend_mode, 2, "Soft Light");
                                                         });
-                                                        if state.slope_blend_mode != 0 {
-                                                            ui.label("Light Direction:");
-                                                            ui.add(
-                                                                egui::Slider::new(&mut state.light_direction[0], -1.0..=1.0)
-                                                                    .text("Light X")
-                                                            );
-                                                            ui.add(
-                                                                egui::Slider::new(&mut state.light_direction[1], -1.0..=1.0)
-                                                                    .text("Light Y")
-                                                            );
-                                                            ui.add(
-                                                                egui::Slider::new(&mut state.light_direction[2], -1.0..=1.0)
-                                                                    .text("Light Z")
-                                                            );
-                                                        }
+
+                                                        ui.separator();
+                                                        ui.heading("3D Shading Light");
+                                                        ui.label("Light Direction:");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.light_direction[0], -1.0..=1.0)
+                                                                .text("Light X")
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.light_direction[1], -1.0..=1.0)
+                                                                .text("Light Y")
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.light_direction[2], -1.0..=1.0)
+                                                                .text("Light Z")
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.light_power, 0.0..=2.0)
+                                                                .text("Light Intensity")
+                                                        );
 
                                                         ui.separator();
                                                         ui.heading("Alpha Channel");
