@@ -6042,7 +6042,10 @@ fn main() {
                 last_message_update = now;
                 let elapsed = now.duration_since(loading_start).as_secs_f32();
                 let dots = ".".repeat((elapsed * 2.0) as usize % 4);
-                window.set_title(&format!("Ribossome - {}{}", loading_messages[current_message_index], dots));
+                let message = format!("{}{}", loading_messages[current_message_index], dots);
+                window.set_title(&format!("Ribossome - {}", &message));
+                // Also print to console so messages are visible
+                println!("Loading: {}", &message);
             }
         }
         
