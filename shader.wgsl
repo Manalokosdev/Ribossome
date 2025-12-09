@@ -94,10 +94,9 @@ struct Agent {
     age: u32,                 // age in frames since spawn
     total_mass: f32,          // total mass computed after morphology
     poison_resistant_count: u32, // number of poison-resistant organs (type 29)
-    vampire_drain_cooldown: u32, // cooldown timer for vampire draining (frames)
     gene_length: u32,        // number of non-X bases in genome (valid gene length)
     genome: array<u32, GENOME_WORDS>,   // GENOME_BYTES bytes genome (ASCII RNA bases)
-    _pad_genome_align: array<u32, 4>, // padding to align body array to 16-byte boundary (was 6, reduced to 4)
+    _pad_genome_align: array<u32, 5>, // padding to align body array to 16-byte boundary
     body: array<BodyPart, MAX_BODY_PARTS>, // body parts array
 }
 
@@ -2002,12 +2001,6 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Decrement cooldown timer if active
-    if (agents_in[agent_id].vampire_drain_cooldown > 0u) {
-        agents_in[agent_id].vampire_drain_cooldown -= 1u;
-        return;  // Skip draining while on cooldown
-    }
-
     // Check if this agent has any vampire mouth organs (type 33)
     let body_count = agent.body_count;
     var has_vampire_mouth = false;
@@ -2171,8 +2164,6 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Add gained energy to this agent
     if (total_energy_gained > 0.0) {
         agents_in[agent_id].energy += total_energy_gained;
-        // Set cooldown period (60 frames = ~1 second at 60fps) to prevent race conditions
-        agents_in[agent_id].vampire_drain_cooldown = 60u;
     }
 }
 

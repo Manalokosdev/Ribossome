@@ -709,10 +709,9 @@ struct Agent {
     age: u32,                                  // 4 bytes (60-63) - age in frames
     total_mass: f32,                           // 4 bytes (64-67) - computed each frame after morphology
     poison_resistant_count: u32,               // 4 bytes (68-71) - number of poison-resistant organs
-    vampire_drain_cooldown: u32,               // 4 bytes (72-75) - cooldown timer for vampire draining (frames)
-    gene_length: u32,                          // 4 bytes (76-79) - number of non-X bases in genome (valid gene length)
-    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases) - 80 to 335
-    _pad_genome_align: [u32; 4],               // 16 bytes (336-351) - padding to align body to 16-byte boundary (was 6, reduced to 4)
+    gene_length: u32,                          // 4 bytes (72-75) - number of non-X bases in genome (valid gene length)
+    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases) - 76 to 331
+    _pad_genome_align: [u32; 5],               // 20 bytes (332-351) - padding to align body to 16-byte boundary
     body: [BodyPart; MAX_BODY_PARTS],          // starts at byte 352 (16-byte aligned)
 }
 
