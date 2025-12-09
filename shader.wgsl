@@ -294,7 +294,11 @@ var<uniform> environment_init: EnvironmentInitParams;
 var<storage, read> rain_map: array<vec2<f32>>; // x=alpha, y=beta
 
 @group(0) @binding(17)
-var<storage, read_write> agent_spatial_grid: array<u32>; // Agent index per grid cell (SIM_SIZE x SIM_SIZE)
+var<storage, read_write> agent_spatial_grid: array<atomic<u32>>; // Agent index per grid cell (atomic for vampire victim claiming)
+
+// Spatial grid special markers
+const SPATIAL_GRID_EMPTY: u32 = 0xFFFFFFFFu;     // No agent in this cell
+const SPATIAL_GRID_CLAIMED: u32 = 0xFFFFFFFEu;   // Cell claimed by vampire (victim being drained)
 
 // ============================================================================
 // AMINO ACID PROPERTIES
@@ -2040,9 +2044,9 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
 
                 let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                let neighbor_id = agent_spatial_grid[check_idx];
+                let neighbor_id = atomicLoad(&agent_spatial_grid[check_idx]);
 
-                if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
+                if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                     let neighbor = agents_in[neighbor_id];
 
                     if (neighbor.alive != 0u && neighbor.energy > 0.0) {
@@ -2114,30 +2118,47 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // Drain from closest victim only
                 if (closest_victim_id != 0xFFFFFFFFu) {
+                    // Try to claim the victim's spatial grid cell atomically
+                    // This prevents multiple vampires from draining the same victim simultaneously
                     let victim = agents_in[closest_victim_id];
+                    let victim_scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
+                    let victim_grid_x = u32(clamp(victim.position.x * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+                    let victim_grid_y = u32(clamp(victim.position.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+                    let victim_grid_idx = victim_grid_y * SPATIAL_GRID_SIZE + victim_grid_x;
 
-                    // Distance-based drain: linear inverse proportion
-                    // At distance 0: drain more energy
-                    // At distance 100: drain 0%
-                    let distance_factor = 1.0 - (closest_dist / max_drain_distance);
+                    // Atomic claim: try to replace victim_id with CLAIMED marker
+                    let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[victim_grid_idx], closest_victim_id, SPATIAL_GRID_CLAIMED);
+                    
+                    // Only proceed if we successfully claimed this victim (we were the first vampire to reach it)
+                    if (claim_result.exchanged) {
+                        // Distance-based drain: linear inverse proportion
+                        // At distance 0: drain more energy
+                        // At distance 100: drain 0%
+                        let distance_factor = 1.0 - (closest_dist / max_drain_distance);
 
-                    // Calculate base drain amount (up to 50% of victim's energy)
-                    let base_drain = distance_factor * victim.energy * 0.5;
+                        // Calculate base drain amount (up to 50% of victim's energy)
+                        let base_drain = distance_factor * victim.energy * 0.5;
 
-                    // Check if victim has any energy and we're in range
-                    if (victim.energy > 0.0001 && base_drain > 0.0001) {
-                        // Vampire absorbs the drain amount
-                        let absorbed_energy = base_drain;
+                        // Check if victim has any energy and we're in range
+                        if (victim.energy > 0.0001 && base_drain > 0.0001) {
+                            // Vampire absorbs the drain amount
+                            let absorbed_energy = base_drain;
 
-                        // Victim loses 2x the absorbed amount (punishing vampirism)
-                        let victim_loss = absorbed_energy * 2.0;
-                        agents_in[closest_victim_id].energy = max(0.0, victim.energy - victim_loss);
+                            // Victim loses 2x the absorbed amount (punishing vampirism)
+                            let victim_loss = absorbed_energy * 2.0;
+                            agents_in[closest_victim_id].energy = max(0.0, victim.energy - victim_loss);
 
-                        total_energy_gained += absorbed_energy;
+                            total_energy_gained += absorbed_energy;
 
-                        // Store absorbed amount in _pad.y for visualization
-                        agents_in[agent_id].body[i]._pad.y = absorbed_energy;
+                            // Store absorbed amount in _pad.y for visualization
+                            agents_in[agent_id].body[i]._pad.y = absorbed_energy;
+                        } else {
+                            agents_in[agent_id].body[i]._pad.y = 0.0;
+                        }
+                        
+                        // Keep cell claimed (cleared next frame) - this prevents other vampires from attacking same victim
                     } else {
+                        // Failed to claim - another vampire got here first
                         agents_in[agent_id].body[i]._pad.y = 0.0;
                     }
                 } else {
@@ -2442,9 +2463,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
 
                 let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                let neighbor_id = agent_spatial_grid[check_idx];
+                let neighbor_id = atomicLoad(&agent_spatial_grid[check_idx]);
 
-                if (neighbor_id != 0xFFFFFFFFu && neighbor_id != agent_id) {
+                if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                     let neighbor = agents_in[neighbor_id];
 
                     if (neighbor.alive != 0u && neighbor.energy > 0.0) {
@@ -5398,10 +5419,10 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         let grid_x = u32(clamp(world_x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
         let grid_y = u32(clamp(world_y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
         let grid_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
-        let agent_id = agent_spatial_grid[grid_idx];
+        let agent_id = atomicLoad(&agent_spatial_grid[grid_idx]);
 
         // If cell contains an agent, tint it
-        if (agent_id != 0xFFFFFFFFu) {
+        if (agent_id != SPATIAL_GRID_EMPTY && agent_id != SPATIAL_GRID_CLAIMED) {
             // Hash the agent ID to get a unique color per agent
             let hash = agent_id * 2654435761u;
             let r = f32((hash >> 0u) & 0xFFu) / 255.0;
@@ -6648,7 +6669,7 @@ fn clear_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let idx = y * SPATIAL_GRID_SIZE + x;
-    agent_spatial_grid[idx] = 0xFFFFFFFFu; // Empty marker
+    atomicStore(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY);
 }
 
 // Populate the agent spatial grid with agent indices
@@ -6673,6 +6694,6 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
     let grid_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
 
-    // Write agent index to grid (simple overwrite - last agent wins if multiple per cell)
-    agent_spatial_grid[grid_idx] = agent_id;
+    // Write agent index to grid atomically (last agent wins if multiple per cell)
+    atomicStore(&agent_spatial_grid[grid_idx], agent_id);
 }
