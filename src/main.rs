@@ -709,9 +709,10 @@ struct Agent {
     age: u32,                                  // 4 bytes (60-63) - age in frames
     total_mass: f32,                           // 4 bytes (64-67) - computed each frame after morphology
     poison_resistant_count: u32,               // 4 bytes (68-71) - number of poison-resistant organs
-    vampire_drain_cooldown: u32,               // 4 bytes (72-75) - cooldown timer for vampire draining (frames) - NOTE: using first pad slot
-    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases) - 76 to 331
-    _pad_genome_align: [u32; 5],               // 20 bytes (332-351) - padding to align body to 16-byte boundary (was 6, reduced by 1 for vampire_drain_cooldown)
+    vampire_drain_cooldown: u32,               // 4 bytes (72-75) - cooldown timer for vampire draining (frames)
+    gene_length: u32,                          // 4 bytes (76-79) - number of non-X bases in genome (valid gene length)
+    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases) - 80 to 335
+    _pad_genome_align: [u32; 4],               // 16 bytes (336-351) - padding to align body to 16-byte boundary (was 6, reduced to 4)
     body: [BodyPart; MAX_BODY_PARTS],          // starts at byte 352 (16-byte aligned)
 }
 
@@ -7823,6 +7824,67 @@ fn main() {
                             });
 
                                    } // End ui_visible check
+
+                                    // Inspector overlay - energy and pairing bars (always visible when agent selected)
+                                    if let Some(agent) = &state.selected_agent_data {
+                                        let screen_width = state.surface_config.width as f32;
+                                        let screen_height = state.surface_config.height as f32;
+                                        let inspector_x = screen_width - 300.0;
+                                        
+                                        // Position bars below the agent preview window
+                                        // Agent preview is 280x280, positioned at (10, screen_height - 280 - 10)
+                                        // Bars should go at (10, screen_height - 280 - 10 + 280 + 10) = (10, screen_height - 10)
+                                        let bars_y = screen_height - 80.0; // 80px from bottom to leave room for bars
+                                        
+                                        egui::Area::new(egui::Id::new("inspector_bars"))
+                                            .fixed_pos(egui::pos2(inspector_x + 10.0, bars_y))
+                                            .show(ctx, |ui| {
+                                                ui.set_width(280.0);
+                                                
+                                                // Energy bar
+                                                ui.vertical(|ui| {
+                                                    let energy_ratio = (agent.energy / agent.energy_capacity).clamp(0.0, 1.0);
+                                                    let energy_color = if energy_ratio > 0.5 {
+                                                        egui::Color32::from_rgb(0, 200, 0)
+                                                    } else if energy_ratio > 0.25 {
+                                                        egui::Color32::from_rgb(200, 200, 0)
+                                                    } else {
+                                                        egui::Color32::from_rgb(200, 0, 0)
+                                                    };
+                                                    
+                                                    ui.label(egui::RichText::new(
+                                                        format!("Energy: {:.1}/{:.1}", agent.energy, agent.energy_capacity)
+                                                    ).color(egui::Color32::WHITE));
+                                                    
+                                                    let progress_bar = egui::ProgressBar::new(energy_ratio)
+                                                        .fill(energy_color)
+                                                        .animate(false);
+                                                    ui.add(progress_bar);
+                                                });
+                                                
+                                                ui.add_space(4.0);
+                                                
+                                                // Pairing state bar
+                                                ui.vertical(|ui| {
+                                                    let full_pairs = agent.gene_length; // Use actual gene length (non-X bases)
+                                                    let pairing_ratio = if full_pairs > 0 {
+                                                        (agent.pairing_counter as f32 / full_pairs as f32).clamp(0.0, 1.0)
+                                                    } else {
+                                                        0.0
+                                                    };
+                                                    let pairing_color = egui::Color32::from_rgb(100, 150, 255);
+                                                    
+                                                    ui.label(egui::RichText::new(
+                                                        format!("Pairing: {}/{}", agent.pairing_counter, full_pairs)
+                                                    ).color(egui::Color32::WHITE));
+                                                    
+                                                    let progress_bar = egui::ProgressBar::new(pairing_ratio)
+                                                        .fill(pairing_color)
+                                                        .animate(false);
+                                                    ui.add(progress_bar);
+                                                });
+                                            });
+                                    }
                                 });
 
                                 // Handle platform output

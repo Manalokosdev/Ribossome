@@ -1,7 +1,13 @@
 [package]
-name = "life_gpu"
+name = "ribossome"
 version = "0.1.0"
 edition = "2021"
+authors = ["Filipe da Veiga Ventura Alves <manalokos@gmail.com>"]
+description = "GPU-accelerated artificial life simulator with evolving creatures"
+license = "MIT"
+repository = "https://github.com/Manalokosdev/Ribossome"
+keywords = ["artificial-life", "gpu", "simulation", "evolution", "rust"]
+categories = ["games", "science", "simulation"]
 
 [dependencies]
 wgpu = "22"

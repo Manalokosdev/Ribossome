@@ -94,9 +94,10 @@ struct Agent {
     age: u32,                 // age in frames since spawn
     total_mass: f32,          // total mass computed after morphology
     poison_resistant_count: u32, // number of poison-resistant organs (type 29)
-    vampire_drain_cooldown: u32, // cooldown timer for vampire draining (frames) - NOTE: using first pad slot
+    vampire_drain_cooldown: u32, // cooldown timer for vampire draining (frames)
+    gene_length: u32,        // number of non-X bases in genome (valid gene length)
     genome: array<u32, GENOME_WORDS>,   // GENOME_BYTES bytes genome (ASCII RNA bases)
-    _pad_genome_align: array<u32, 5>, // padding to align body array to 16-byte boundary (was 6, reduced by 1 for vampire_drain_cooldown)
+    _pad_genome_align: array<u32, 4>, // padding to align body array to 16-byte boundary (was 6, reduced to 4)
     body: array<BodyPart, MAX_BODY_PARTS>, // body parts array
 }
 
@@ -772,10 +773,10 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
         }
 
         weighted_sum += sample_value * weight;
-        weight_total += weight;
+        weight_total += weight; // Allow cancellation between positive and negative weights
     }
 
-    // Return sum of weighted samples instead of average
+    // Return sum of weighted samples (no normalization)
     return weighted_sum * signal_polarity; // Apply polarity flip if combined_param < 0
 }
 
@@ -807,21 +808,25 @@ fn sample_stochastic_trail(center: vec2<f32>, base_radius: f32, seed: u32, debug
 
         // Directional weight: dot product of sensor perpendicular and sample direction
         let direction = select(vec2<f32>(0.0), normalize(offset), dist > 1e-5);
-        let directional_weight = dot(sensor_perpendicular, direction);
+        let directional_alignment = dot(sensor_perpendicular, direction); // Range: -1 to 1
 
-        // Combined weight: distance falloff * directional alignment
-        let weight = distance_weight * directional_weight;
+        // Combined weight: distance falloff * directional alignment (full range -1 to 1)
+        let weight = distance_weight * directional_alignment;
 
         // Sample trail color
         let trail_color = trail_grid[idx].xyz;
 
-        // Calculate color difference (Euclidean distance in RGB space)
-        let color_diff_vec = trail_color - agent_color;
+        // Normalize both colors before comparison
+        let trail_color_normalized = normalize(trail_color + vec3<f32>(1e-6)); // Avoid zero vector
+        let agent_color_normalized = normalize(agent_color + vec3<f32>(1e-6)); // Avoid zero vector
+
+        // Calculate color difference (Euclidean distance in normalized RGB space)
+        let color_diff_vec = trail_color_normalized - agent_color_normalized;
         let color_difference = length(color_diff_vec);
 
         // Debug visualization
         if (debug_mode) {
-            let dot_val = directional_weight;
+            let dot_val = directional_alignment;
             let red_intensity = clamp(dot_val, 0.0, 1.0);
             let blue_intensity = clamp(-dot_val, 0.0, 1.0);
             let debug_color = vec4<f32>(red_intensity, 0.0, blue_intensity, 0.7);
@@ -830,10 +835,11 @@ fn sample_stochastic_trail(center: vec2<f32>, base_radius: f32, seed: u32, debug
         }
 
         weighted_sum += color_difference * weight;
-        weight_total += weight;
+        weight_total += weight; // Allow cancellation between positive and negative weights
     }
 
-    return select(0.0, weighted_sum / weight_total, weight_total > 0.0);
+    // Return sum of weighted samples (no normalization)
+    return weighted_sum;
 }
 
 // Perlin-like noise function
@@ -3684,6 +3690,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Store speed_absorption_multiplier by encoding both into torque_debug as: speed * 1000.0 + multiplier
         // This way inspector can decode: speed = floor(torque_debug / 1000.0), mult = torque_debug % 1000.0
         unrotated_agent.torque_debug = agent_speed * 1000.0 + speed_absorption_multiplier;
+        // Store the calculated gene_length (we already computed it above for reproduction)
+        unrotated_agent.gene_length = gene_length;
         // Copy generation/age/total_mass (already in agents_out) unchanged
         selected_agent_buffer[0] = unrotated_agent;
     }
@@ -6111,8 +6119,11 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_width = 280.0;   // 300 - 20px padding
 
     // Simple top-down layout with explicit Y positions
-    let energy_y = 20.0;     // 20px from top
-    let organs_y = 50.0;     // 50px from top
+    // Bars are at screen_height - 80, so text should start below that
+    // Offset from bottom: bars at -80px, so text starts at -80px + 80px (bar height) = top
+    // Actually place text starting from a safe position below bars
+    let energy_y = f32(window_height) - 280.0 - 10.0 + 280.0 + 90.0;  // Below bars (bars ~80px tall)
+    let organs_y = energy_y + 30.0;  // 30px below energy line
 
     // ENERGY label
     var energy_text: array<u32, 32>;

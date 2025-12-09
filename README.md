@@ -1,71 +1,61 @@
-# GPU Artificial Life Simulator
+# Ribossome
 
-A minimal, high-performance GPU-accelerated artificial life simulator built with Rust, wgpu, and WGSL.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+**Ribossome** is a GPU-accelerated artificial life simulator written in Rust using WebGPU (wgpu). It evolves complex creatures with genetic genomes, morphology, sensors, propellers, mouths (including vampire predators!), and rich ecological interactions—all in a single massive compute shader.
+
+Watch predators emerge, ecosystems balance, and bizarre life forms evolve in real-time at 1000+ FPS on modern GPUs.
 
 ## Features
 
-### Agent Architecture
-- **Agents store genomes**: 64 bytes (16 × u32 array) for genetic information
-- **Agents store body parts**: Up to 32 body parts per agent
-- **Agents draw themselves**: Each agent renders its own body via GPU compute shader
-- Each body part has:
-  - Position (relative to agent center)
-  - Size (radius)
-  - Sensor strength (how strongly it senses environment)
-  - Color (RGB)
-  - Part type (encoded amino acid)
+- Fully GPU-driven simulation (agents, physics, environment diffusion, rendering)
+- Genetic translation with codons → amino acids → body parts and organs
+- Evolving predators with vampire mouths and trail-following
+- Dynamic environment with food/poison rain, terrain, prop wash, and chemical slopes
+- Rich visualization options (lighting, trails, interpolation modes)
+- Snapshot save/load (PNG with embedded metadata)
+- Auto-difficulty, rain cycling, and extensive tuning UI
 
-### Environment
-- **Alpha grid**: 512×512 float grid - environment field A
-- **Beta grid**: 512×512 float grid - environment field B  
-- **Direct modification**: Agents can modify grid values directly by index
-- **Diffusion & decay**: Environment grids diffuse and decay each frame
-- **Rain maps**: Optionally load grayscale alpha/beta textures to locally scale stochastic rain probability, with 128×128 grayscale previews in the Advanced UI tab for quick verification
+## Screenshots / Video
 
-### Energy & Maintenance
-- **Tunable metabolism**: Adjust food/poison power and the per-amino maintenance cost slider in the UI to control how quickly complex organisms burn energy.
+*(Add your own screenshots or a GIF/video link here, e.g., predators evolving!)*
 
-### GPU Performance
-- Ping-pong buffers for agents (no CPU synchronization needed)
-- All operations in compute shaders (@workgroup_size 64)
-- Single WGSL file reduces shader compilation overhead
-- Direct buffer-to-texture copy for visualization
-- Atomic operations for alive counter
+## Building & Running
 
-### Simulation Passes (executed each frame)
-1. `update_agents` - Physics, sensing environment, energy management
-2. `agent_modify_env` - Agents deposit to alpha/beta grids based on body parts
-3. `diffuse_grids` - 3×3 blur + 99% decay on environment grids
-4. `clear_visual` - Clear visual buffer
-5. `draw_agents` - Each agent draws its body parts and connections
-6. Render pass - Display visual grid to screen
+Requirements:
+- Rust toolchain (stable)
+- A GPU with WebGPU support (modern NVIDIA/AMD/Intel, or Vulkan/Metal/DX12)
 
-## Running
-
-```powershell
+```bash
+git clone https://github.com/Manalokosdev/Ribossome.git
+cd ribossome
 cargo run --release
 ```
 
-## Files
+The first run may take 10–60 seconds due to shader compilation (normal for large WGSL shaders). Subsequent runs are instant.
 
-- `Cargo.toml` - Dependencies (wgpu 22, winit 0.30, etc.)
-- `shader.wgsl` - Single unified WGSL shader with all compute/render passes
-- `src/main.rs` - GPU initialization, buffers, pipelines, and event loop
+## Controls
 
-## Current State
+- **WASD**: Pan camera
+- **Mouse wheel**: Zoom
+- **Right-drag**: Pan
+- **Left-click**: Select agent for inspector
+- **Space**: Toggle UI
+- **F**: Follow selected agent
+- **R**: Reset camera
 
-- 100 agents with 3-part bodies
-- Agents move around sensing alpha/beta environment grids
-- Body parts colored red, green, blue
-- Even-typed parts deposit to alpha, odd-typed to beta
-- Energy decreases over time
-- Real-time rendering at high FPS
+## License
 
-## Next Steps
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-- Add reproduction system (spawn offspring when energy > threshold)
-- Implement genome translation (genes → body parts)
-- Add mutation system
-- Dynamic agent count (grow/shrink population)
-- Interactive controls (sliders for parameters)
-- Performance metrics display
+## Contributing
+
+Contributions are welcome! See CONTRIBUTING.md for guidelines.
+
+## Acknowledgments
+
+Built with Rust, wgpu, egui, and a lot of passion for artificial life.
+
+---
+
+Copyright © 2025 Filipe da Veiga Ventura Alves

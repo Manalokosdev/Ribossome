@@ -1608,32 +1608,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "life_gpu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "bytemuck",
- "chrono",
- "egui",
- "egui-wgpu",
- "egui-winit",
- "egui_plot",
- "env_logger",
- "futures-intrusive",
- "image",
- "png",
- "pollster",
- "rand",
- "rfd",
- "serde",
- "serde_json",
- "wgpu",
- "winit",
- "zstd",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2505,6 +2479,32 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "ribossome"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytemuck",
+ "chrono",
+ "egui",
+ "egui-wgpu",
+ "egui-winit",
+ "egui_plot",
+ "env_logger",
+ "futures-intrusive",
+ "image",
+ "png",
+ "pollster",
+ "rand",
+ "rfd",
+ "serde",
+ "serde_json",
+ "wgpu",
+ "winit",
+ "zstd",
 ]
 
 [[package]]
