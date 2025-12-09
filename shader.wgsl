@@ -6692,8 +6692,78 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
     let grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
     let grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-    let grid_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
+    let primary_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
 
-    // Write agent index to grid atomically (last agent wins if multiple per cell)
-    atomicStore(&agent_spatial_grid[grid_idx], agent_id);
+    // Try to claim the primary cell atomically
+    let primary_result = atomicCompareExchangeWeak(&agent_spatial_grid[primary_idx], SPATIAL_GRID_EMPTY, agent_id);
+    
+    if (!primary_result.exchanged) {
+        // Primary cell is occupied - search for nearest empty cell in a spiral pattern
+        // This ensures all agents are findable even in crowded areas
+        var found = false;
+        
+        // Search in expanding square rings up to radius 5 (covers 11x11 area = 121 cells)
+        for (var radius = 1u; radius <= 5u && !found; radius++) {
+            // Top and bottom edges of the square
+            for (var dx: i32 = -i32(radius); dx <= i32(radius) && !found; dx++) {
+                // Top edge
+                let check_x_top = i32(grid_x) + dx;
+                let check_y_top = i32(grid_y) - i32(radius);
+                if (check_x_top >= 0 && check_x_top < i32(SPATIAL_GRID_SIZE) &&
+                    check_y_top >= 0 && check_y_top < i32(SPATIAL_GRID_SIZE)) {
+                    let idx = u32(check_y_top) * SPATIAL_GRID_SIZE + u32(check_x_top);
+                    let result = atomicCompareExchangeWeak(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY, agent_id);
+                    if (result.exchanged) {
+                        found = true;
+                    }
+                }
+                
+                // Bottom edge (skip if radius == 0 to avoid duplicate)
+                if (!found && radius > 0u) {
+                    let check_x_bot = i32(grid_x) + dx;
+                    let check_y_bot = i32(grid_y) + i32(radius);
+                    if (check_x_bot >= 0 && check_x_bot < i32(SPATIAL_GRID_SIZE) &&
+                        check_y_bot >= 0 && check_y_bot < i32(SPATIAL_GRID_SIZE)) {
+                        let idx = u32(check_y_bot) * SPATIAL_GRID_SIZE + u32(check_x_bot);
+                        let result = atomicCompareExchangeWeak(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY, agent_id);
+                        if (result.exchanged) {
+                            found = true;
+                        }
+                    }
+                }
+            }
+            
+            // Left and right edges (excluding corners already covered)
+            for (var dy: i32 = -i32(radius) + 1; dy < i32(radius) && !found; dy++) {
+                // Left edge
+                let check_x_left = i32(grid_x) - i32(radius);
+                let check_y_left = i32(grid_y) + dy;
+                if (check_x_left >= 0 && check_x_left < i32(SPATIAL_GRID_SIZE) &&
+                    check_y_left >= 0 && check_y_left < i32(SPATIAL_GRID_SIZE)) {
+                    let idx = u32(check_y_left) * SPATIAL_GRID_SIZE + u32(check_x_left);
+                    let result = atomicCompareExchangeWeak(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY, agent_id);
+                    if (result.exchanged) {
+                        found = true;
+                    }
+                }
+                
+                // Right edge
+                if (!found) {
+                    let check_x_right = i32(grid_x) + i32(radius);
+                    let check_y_right = i32(grid_y) + dy;
+                    if (check_x_right >= 0 && check_x_right < i32(SPATIAL_GRID_SIZE) &&
+                        check_y_right >= 0 && check_y_right < i32(SPATIAL_GRID_SIZE)) {
+                        let idx = u32(check_y_right) * SPATIAL_GRID_SIZE + u32(check_x_right);
+                        let result = atomicCompareExchangeWeak(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY, agent_id);
+                        if (result.exchanged) {
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If still not found after searching 5 rings, agent won't be in spatial grid this frame
+        // This is acceptable as it will retry next frame - prevents infinite loops
+    }
 }
