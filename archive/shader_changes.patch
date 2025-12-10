@@ -1,0 +1,821 @@
+﻿diff --git a/shader.wgsl b/shader.wgsl
+index d4e67c8..5f4247d 100644
+--- a/shader.wgsl
++++ b/shader.wgsl
+@@ -12,7 +12,7 @@
+ const GRID_SIZE: u32 = 2048u;          // Environment grid resolution (original)
+ const SIM_SIZE: u32 = 30720u;          // Simulation world size
+ const MAX_BODY_PARTS: u32 = 64u;
+-const GENOME_BYTES: u32 = 128u;
++const GENOME_BYTES: u32 = 256u;
+ const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
+ const GENOME_WORDS: u32 = GENOME_BYTES / 4u;
+ const PACKED_GENOME_WORDS: u32 = GENOME_BYTES / 16u;
+@@ -199,6 +199,9 @@ struct SimParams {
+     perlin_noise_scale: f32,  // Scale of Perlin noise (lower = bigger patterns)
+     perlin_noise_speed: f32,  // Speed of Perlin evolution (lower = slower)
+     perlin_noise_contrast: f32,  // Contrast of Perlin noise (higher = sharper)
++    vector_force_power: f32,  // Global force multiplier (0.0 = off)
++    vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
++    vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
+     _padding: f32,
+ }
+ 
+@@ -371,32 +374,29 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
+             props.beta_right_mult = 0.3;
+             props.mass = 0.015;
+         }
+-    case 1u: { // C - Cysteine - BETA SENSOR - Small, polar (real: can form disulfide bonds)
++    case 1u: { // C - Cysteine - STRUCTURAL (beta sensor requires organ) - Small, polar
+             props.segment_length = 10.0;
+             props.thickness = 2.5;
+-            // Old CSV: Seed Angle = 30┬░
+-            props.base_angle = 0.523599; // 30 deg in radians
+-            // CSV mapping: Beta sensor -> Alpha_sense 0┬░, Beta_sense +20┬░
++            props.base_angle = 0.523599;
+             props.alpha_sensitivity = 0.0;
+-            props.beta_sensitivity = 0.349066; // 20 deg in radians
++            props.beta_sensitivity = 0.349066;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(1.0, 0.0, 0.0); // Red (BETA SENSOR)
++            props.color = vec3<f32>(0.7, 0.0, 0.0); // Dark red (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+             props.beta_absorption_rate = 0.3;
+-            props.beta_damage = 0.42; // Color value
++            props.beta_damage = 0.42;
+             props.energy_storage = 0.0;
+-            // Very low sensor energy consumption to favor intelligent agents
+-            props.energy_consumption = 0.00005;
++            props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+-            props.is_beta_sensor = true;
+-            props.signal_decay = 0.1;
++            props.is_beta_sensor = false;
++            props.signal_decay = 0.2;
+             props.alpha_left_mult = 0.5;
+             props.alpha_right_mult = 0.5;
+             props.beta_left_mult = 0.5;
+             props.beta_right_mult = 0.5;
+-            props.mass = 0.05;
++            props.mass = 0.02;
+         }
+         case 2u: { // D - Aspartic acid - Small, charged (real: acidic, negatively charged)
+             props.segment_length = 13.0;
+@@ -448,33 +448,32 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
+             props.beta_right_mult = 0.45;
+             props.mass = 10.0; // Very heavy - slows agent down significantly
+         }
+-        case 4u: { // F - Phenylalanine - )
++        case 4u: { // F - Phenylalanine - STRUCTURAL (poison resistance requires organ)
+             props.segment_length = 18.5;
+             props.thickness = 3.0;
+-            // Old CSV: Seed Angle = 30┬░
+             props.base_angle = 0.523599;
+             props.alpha_sensitivity = 0.2;
+             props.beta_sensitivity = -0.33;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(0.2, 0.2, 0.2); // Dark grey
++            props.color = vec3<f32>(0.2, 0.2, 0.2); // Dark grey (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+             props.beta_absorption_rate = 0.3;
+-            props.beta_damage = 0.17; // Color value
++            props.beta_damage = 0.17;
+             props.energy_storage = 0.0;
+             props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+             props.is_beta_sensor = false;
+             props.signal_decay = 0.2;
+-            props.alpha_left_mult = 1.4;
+-            props.alpha_right_mult = -0.4;
+-            props.beta_left_mult = 1.3;
+-            props.beta_right_mult = -0.3;
+-            props.mass = 0.01;
++            props.alpha_left_mult = 0.7;
++            props.alpha_right_mult = 0.3;
++            props.beta_left_mult = 0.65;
++            props.beta_right_mult = 0.35;
++            props.mass = 0.02;
+         }
+         case 5u: { // G - Glycine - Structural (smallest amino acid, flexible)
+-            props.segment_length = 4.0;
++            props.segment_length = 10.0;
+             props.thickness = 0.75;
+             // Old CSV: Seed Angle = -20┬░
+             props.base_angle = -0.349066;
+@@ -549,54 +548,52 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
+             props.beta_right_mult = 0.3;
+             props.mass = 0.02;
+         }
+-        case 8u: { // K - Lysine - MOUTH - Long, positively charged (real: long aliphatic + NH3+)
+-            props.segment_length = 5.0;
++        case 8u: { // K - Lysine - STRUCTURAL (mouth requires organ) - Long, positively charged
++            props.segment_length = 15.0;
+             props.thickness = 3.5;
+-            // Old CSV: Seed Angle = 5┬░
+             props.base_angle = 0.0872665;
+             props.alpha_sensitivity = 0.6;
+             props.beta_sensitivity = -0.16;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(1.0, 1.0, 0.0); // Yellow (MOUTH)
+-            props.is_mouth = true;
+-            props.energy_absorption_rate = 0.08; // Reduced to nerf simple mouth strategies
+-            props.beta_absorption_rate = 0.08; // Matched to alpha rate
+-            props.beta_damage = -0.12; // Color value
+-            props.energy_storage = 10.0; // Reduced from 20.0
+-            props.energy_consumption = 0.025; // Increased to make mouths more costly
++            props.color = vec3<f32>(0.8, 0.8, 0.2); // Pale yellow (structural)
++            props.is_mouth = false;
++            props.energy_absorption_rate = 0.0;
++            props.beta_absorption_rate = 0.3;
++            props.beta_damage = -0.12;
++            props.energy_storage = 0.0;
++            props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+             props.is_beta_sensor = false;
+             props.signal_decay = 0.2;
+-            props.alpha_left_mult = 1.4;
+-            props.alpha_right_mult = -0.4;
+-            props.beta_left_mult = 1.3;
+-            props.beta_right_mult = -0.3;
+-            props.mass = 0.05;
++            props.alpha_left_mult = 0.7;
++            props.alpha_right_mult = 0.3;
++            props.beta_left_mult = 0.65;
++            props.beta_right_mult = 0.35;
++            props.mass = 0.03;
+         }
+-        case 9u: { // L - Leucine - CHIRAL FLIPPER - Flips angles of all following amino acids
+-            props.segment_length = 3.0; // Very short
+-            props.thickness = 10.0; // Very wide
+-            // Old CSV: Seed Angle = -10┬░
++        case 9u: { // L - Leucine - STRUCTURAL (propeller/displacer requires organ)
++            props.segment_length = 13.0;
++            props.thickness = 10.0;
+             props.base_angle = -0.174533;
+             props.alpha_sensitivity = -0.3332;
+             props.beta_sensitivity = 0.1;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(1.0, 0.0, 1.0); // Cyan
++            props.color = vec3<f32>(0.6, 0.0, 0.6); // Dark magenta (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+             props.beta_absorption_rate = 0.3;
+-            props.beta_damage = 0.95; // Color value
++            props.beta_damage = 0.95;
+             props.energy_storage = 0.0;
+             props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+             props.is_beta_sensor = false;
+             props.signal_decay = 0.2;
+-            props.alpha_left_mult = -0.3;
+-            props.alpha_right_mult = 1.3;
+-            props.beta_left_mult = -0.2;
+-            props.beta_right_mult = 1.2;
++            props.alpha_left_mult = 0.35;
++            props.alpha_right_mult = 0.65;
++            props.beta_left_mult = 0.4;
++            props.beta_right_mult = 0.6;
+             props.mass = 0.02;
+         }
+         case 10u: { // M - Methionine - START CODON - Medium, sulfur-containing (real: linear thioether)
+@@ -624,20 +621,19 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
+             props.beta_right_mult = 1.1;
+             props.mass = 0.02;
+         }
+-    case 11u: { // N - ENABLER (was INHIBITOR) - Increases power of nearby propellers, displacers, and mouths up to 40 units
++    case 11u: { // N - Asparagine - STRUCTURAL (enabler requires organ) - Medium, polar
+             props.segment_length = 6.0;
+             props.thickness = 6.0;
+-            // Old CSV: Seed Angle = 45┬░
+             props.base_angle = 0.785398;
+             props.alpha_sensitivity = 0.2;
+             props.beta_sensitivity = 0.3;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(1.0, 1.0, 1.0); // White
++            props.color = vec3<f32>(0.47, 0.63, 0.47); // Light green (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+-            props.beta_absorption_rate = 0.0;
+-            props.beta_damage = 0.24; // Color value
++            props.beta_absorption_rate = 0.3;
++            props.beta_damage = 0.24;
+             props.energy_storage = 0.0;
+             props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+@@ -649,33 +645,32 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
+             props.beta_left_mult = 0.5;
+             props.beta_right_mult = 0.5;
+             props.is_displacer = false;
+-            props.is_inhibitor = true; // reused flag; treated as enabler in simulation
+-            props.mass = 0.15;
++            props.is_inhibitor = false;
++            props.mass = 0.03;
+         }
+-        case 12u: { // P - Proline - PROPELLER - Rigid cyclic (real: backbone constraint, helix breaker)
++        case 12u: { // P - Proline - STRUCTURAL (propeller requires organ) - Rigid cyclic
+             props.segment_length = 16.0;
+             props.thickness = 8.0;
+-            // Old CSV: Seed Angle = -30┬░
+             props.base_angle = -0.523599;
+             props.alpha_sensitivity = 0.5;
+             props.beta_sensitivity = -0.1;
+-            props.is_propeller = true;
+-            props.thrust_force = 2.5; // Reduced by 4x (was 10.0)
+-            props.color = vec3<f32>(0.0, 0.0, 1); // Deep blue (PROPELLER)
++            props.is_propeller = false;
++            props.thrust_force = 0.0;
++            props.color = vec3<f32>(0.0, 0.39, 1.0); // Light blue (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+             props.beta_absorption_rate = 0.3;
+-            props.beta_damage = -0.77; // Color value
++            props.beta_damage = -0.77;
+             props.energy_storage = 0.0;
+-            props.energy_consumption = 0.01; // Reduced 10x (was 0.05)
++            props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+             props.is_beta_sensor = false;
+             props.signal_decay = 0.2;
+-            props.alpha_left_mult = 1.5;
+-            props.alpha_right_mult = -0.5;
+-            props.beta_left_mult = 1.4;
+-            props.beta_right_mult = -0.4;
+-            props.mass = 0.05;
++            props.alpha_left_mult = 0.75;
++            props.alpha_right_mult = 0.25;
++            props.beta_left_mult = 0.7;
++            props.beta_right_mult = 0.3;
++            props.mass = 0.03;
+         }
+         case 13u: { // Q - Glutamine - Medium, polar (real: amide side chain, similar to E)
+             props.segment_length = 8.5;
+@@ -727,139 +722,131 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
+             props.beta_right_mult = 1.3;
+             props.mass = 0.04;
+         }
+-    case 15u: { // S - Serine - ALPHA SENSOR - Small, polar (real: hydroxyl group, similar to T)
++    case 15u: { // S - Serine - STRUCTURAL (alpha sensor requires organ) - Small, polar
+             props.segment_length = 10.5;
+             props.thickness = 2.5;
+-            // Old CSV: Seed Angle = -20┬░
+             props.base_angle = -0.349066;
+-            // CSV mapping: Alpha sensor -> Alpha_sense -20┬░, Beta_sense 0┬░
+-            props.alpha_sensitivity = -0.349066; // -20 deg in radians
++            props.alpha_sensitivity = -0.349066;
+             props.beta_sensitivity = 0.0;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(0.0, 1.0, 0.0); // Green (ALPHA SENSOR)
++            props.color = vec3<f32>(0.0, 0.7, 0.0); // Medium green (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+             props.beta_absorption_rate = 0.2;
+-            props.beta_damage = 0.71; // Color value
++            props.beta_damage = 0.71;
+             props.energy_storage = 0.0;
+-            // Very low sensor energy consumption to favor intelligent agents
+-            props.energy_consumption = 0.00005;
+-            props.is_alpha_sensor = true;
++            props.energy_consumption = 0.001;
++            props.is_alpha_sensor = false;
+             props.is_beta_sensor = false;
+-            props.signal_decay = 0.1;
++            props.signal_decay = 0.2;
+             props.alpha_left_mult = 0.5;
+             props.alpha_right_mult = 0.5;
+             props.beta_left_mult = 0.5;
+             props.beta_right_mult = 0.5;
+-            props.mass = 0.05;
++            props.mass = 0.02;
+         }
+-        case 16u: { // T - Threonine - ENERGY SENSOR - Small, polar (real: beta-branched hydroxyl)
++        case 16u: { // T - Threonine - STRUCTURAL (energy sensor requires organ) - Small, polar
+             props.segment_length = 10.5;
+             props.thickness = 3.5;
+-            // Old CSV: Seed Angle = 90┬░
+             props.base_angle = 1.570796;
+             props.alpha_sensitivity = 0.1;
+             props.beta_sensitivity = -0.5;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(0.6, 0.2, 0.8); // Purple (energy indicator)
++            props.color = vec3<f32>(0.45, 0.15, 0.6); // Dark purple (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+             props.beta_absorption_rate = 0.2;
+-            props.beta_damage = -0.66; // Color value
++            props.beta_damage = -0.66;
+             props.energy_storage = 0.0;
+-            // Very low sensor energy consumption to favor intelligent agents
+-            props.energy_consumption = 0.00005;
++            props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+             props.is_beta_sensor = false;
+-            props.is_energy_sensor = true;
++            props.is_energy_sensor = false;
+             props.signal_decay = 0.2;
+-            props.alpha_left_mult = 0.9;
+-            props.alpha_right_mult = 0.1;
+-            props.beta_left_mult = 1.0;
+-            props.beta_right_mult = 0.0;
+-            props.mass = 0.05;
++            props.alpha_left_mult = 0.6;
++            props.alpha_right_mult = 0.4;
++            props.beta_left_mult = 0.7;
++            props.beta_right_mult = 0.3;
++            props.mass = 0.02;
+         }
+-        case 17u: { // V - Valine - DISPLACER - Cyan, short and fat, displaces environment
++        case 17u: { // V - Valine - STRUCTURAL (displacer requires organ) - Short and fat
+             props.segment_length = 12.0;
+             props.thickness = 8.0;
+-            // Old CSV: Seed Angle = 0┬░
+             props.base_angle = 0.0;
+             props.alpha_sensitivity = -0.3;
+             props.beta_sensitivity = 0.73;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(0.0, 1.0, 1.0); // Cyan (DISPLACER)
++            props.color = vec3<f32>(0.0, 0.7, 0.7); // Dark cyan (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+             props.beta_absorption_rate = 0.3;
+-            props.beta_damage = 0.36; // Color value
++            props.beta_damage = 0.36;
+             props.energy_storage = 0.0;
+-            props.energy_consumption = 0.007; // Slightly higher energy cost
++            props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+             props.is_beta_sensor = false;
+             props.signal_decay = 0.2;
+-            props.alpha_left_mult = -0.3;
+-            props.alpha_right_mult = 1.3;
+-            props.beta_left_mult = 1.2;
+-            props.beta_right_mult = -0.2;
+-            props.mass = 0.15; // Heavier due to displacement mechanism
+-            props.is_displacer = true;
++            props.alpha_left_mult = 0.35;
++            props.alpha_right_mult = 0.65;
++            props.beta_left_mult = 0.6;
++            props.beta_right_mult = 0.4;
++            props.mass = 0.04;
++            props.is_displacer = false;
+         }
+-        case 18u: { // W - Tryptophan - STORAGE - Largest, bulky aromatic (real: indole ring, massive)
++        case 18u: { // W - Tryptophan - STRUCTURAL (storage requires organ) - Largest, bulky
+             props.segment_length = 16.0;
+-            props.thickness = 22.0;             // Widest (was 10.0)
+-            // Old CSV: Seed Angle = 20┬░
++            props.thickness = 22.0;
+             props.base_angle = 0.349066;
+             props.alpha_sensitivity = 0.31;
+             props.beta_sensitivity = -0.1;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(1.0, 0.5, 0.0); // Orange (STORAGE)
++            props.color = vec3<f32>(0.6, 0.3, 0.0); // Dark orange (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+             props.beta_absorption_rate = 0.4;
+-            props.beta_damage = -0.84; // Color value
+-            props.energy_storage = 100.0;        // 5x mouth storage (was 12.0)
+-            props.energy_consumption = 0.001;   // Reduced 10x (was 0.005)
++            props.beta_damage = -0.84;
++            props.energy_storage = 0.0;
++            props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+             props.is_beta_sensor = false;
+-            props.signal_decay = 0.15;
++            props.signal_decay = 0.2;
+             props.alpha_left_mult = 0.55;
+             props.alpha_right_mult = 0.45;
+             props.beta_left_mult = 0.6;
+             props.beta_right_mult = 0.4;
+-            props.mass = 1.3;
++            props.mass = 0.1;
+         }
+-        case 19u: { // Y - Tyrosine - ALPHA CONDENSER - Absorbs, stores, and discharges alpha signals
++        case 19u: { // Y - Tyrosine - STRUCTURAL (condenser requires organ) - Aromatic, polar
+             props.segment_length = 11.5;
+             props.thickness = 4.0;
+-            // Old CSV: Seed Angle = -30┬░
+             props.base_angle = -0.523599;
+             props.alpha_sensitivity = -0.2;
+             props.beta_sensitivity = 0.52;
+             props.is_propeller = false;
+             props.thrust_force = 0.0;
+-            props.color = vec3<f32>(0.0, 0.4, 0.0); // Dark green for condenser
++            props.color = vec3<f32>(0.26, 0.26, 0.26); // Grey (structural)
+             props.is_mouth = false;
+             props.energy_absorption_rate = 0.0;
+             props.beta_absorption_rate = 0.3;
+-            props.beta_damage = 0.08; // Color value
++            props.beta_damage = 0.08;
+             props.energy_storage = 0.0;
+             props.energy_consumption = 0.001;
+             props.is_alpha_sensor = false;
+             props.is_beta_sensor = false;
+             props.signal_decay = 0.2;
+-            props.alpha_left_mult = -0.5;
+-            props.alpha_right_mult = 1.5;
+-            props.beta_left_mult = -0.4;
+-            props.beta_right_mult = 1.4;
+-            props.mass = 0.04;
+-            props.is_condenser = true;
++            props.alpha_left_mult = 0.25;
++            props.alpha_right_mult = 0.75;
++            props.beta_left_mult = 0.3;
++            props.beta_right_mult = 0.7;
++            props.mass = 0.03;
++            props.is_condenser = false;
+         }
+         case 20u: { // MOUTH ORGAN (2-codon: P + modifier 0-6)
+-            props.segment_length = 5.0;
++            props.segment_length = 8.0;
+             props.thickness = 3.5;
+             props.base_angle = 0.0872665;
+             props.alpha_sensitivity = 0.6;
+@@ -986,7 +973,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
+             props.beta_right_mult = 0.5;
+             props.mass = 0.05;
+         }
+-        case 27u: { // CONDENSER ORGAN (2-codon: P + modifier 7-13, or H + any)
++        case 27u: { // CONDENSER ORGAN (2-codon: P + modifier 7-13)
+             props.segment_length = 11.5;
+             props.thickness = 4.0;
+             props.base_angle = -0.523599;
+@@ -1004,6 +991,58 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
+             props.beta_right_mult = 1.4;
+             props.mass = 0.04;
+         }
++        case 28u: { // STORAGE ORGAN (2-codon: H + modifier 0-6)
++            props.segment_length = 16.0;
++            props.thickness = 22.0;
++            props.base_angle = 0.349066;
++            props.alpha_sensitivity = 0.31;
++            props.beta_sensitivity = -0.1;
++            props.color = vec3<f32>(1.0, 0.5, 0.0); // Orange
++            props.beta_absorption_rate = 0.4;
++            props.beta_damage = -0.84;
++            props.energy_storage = 100.0;
++            props.energy_consumption = 0.001;
++            props.signal_decay = 0.15;
++            props.alpha_left_mult = 0.55;
++            props.alpha_right_mult = 0.45;
++            props.beta_left_mult = 0.6;
++            props.beta_right_mult = 0.4;
++            props.mass = 1.3;
++        }
++        case 29u: { // POISON RESISTANCE ORGAN (2-codon: H + modifier 7-13)
++            props.segment_length = 16.0;
++            props.thickness = 30.0;
++            props.base_angle = -1.047198;
++            props.alpha_sensitivity = 0.1;
++            props.beta_sensitivity = 0.12;
++            props.color = vec3<f32>(1.0, 0.4, 0.7); // Pink
++            props.beta_absorption_rate = 0.3;
++            props.beta_damage = -0.58;
++            props.energy_consumption = 0.003;
++            props.signal_decay = 0.2;
++            props.alpha_left_mult = 0.6;
++            props.alpha_right_mult = 0.4;
++            props.beta_left_mult = 0.55;
++            props.beta_right_mult = 0.45;
++            props.mass = 10.0;
++        }
++        case 30u: { // CHIRAL FLIPPER ORGAN (2-codon: H + modifier 14-19)
++            props.segment_length = 13.0;
++            props.thickness = 10.0;
++            props.base_angle = -0.174533;
++            props.alpha_sensitivity = -0.3332;
++            props.beta_sensitivity = 0.1;
++            props.color = vec3<f32>(1.0, 0.0, 1.0); // Magenta
++            props.beta_absorption_rate = 0.3;
++            props.beta_damage = 0.95;
++            props.energy_consumption = 0.001;
++            props.signal_decay = 0.2;
++            props.alpha_left_mult = -0.3;
++            props.alpha_right_mult = 1.3;
++            props.beta_left_mult = -0.2;
++            props.beta_right_mult = 1.2;
++            props.mass = 0.02;
++        }
+         default: { // Fallback (should never happen)
+             props.segment_length = 8.0;
+             props.thickness = 3.0;
+@@ -2186,7 +2225,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
+         start_byte = start;
+ 
+     // Count codons starting from the first valid codon until stop codon (UAA, UAG, UGA) or limits
+-    // 2-CODON ORGAN SYSTEM: L(9), P(12), Q(13), H(6) are organ promoters that consume 2 codons
++    // 2-CODON ORGAN SYSTEM: 2 promoters per family consume 2 codons
++    // PROPELLING: L(9), P(12)
++    // ENERGY: K(8), C(1)
++    // SENSORS: V(17), N(10)
++    // SPECIAL: H(6), Q(13)
+     var count = 0u;
+     var pos_b = start_byte;
+         for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+@@ -2196,8 +2239,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
+             let codon = genome_get_codon_ascii(agent.genome, pos_b);
+             let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
+ 
+-            // Check if this is an organ promoter: L(9), P(12), Q(13), H(6)
+-            if ((amino_type == 9u || amino_type == 12u || amino_type == 13u || amino_type == 6u) && pos_b + 5u < GENOME_LENGTH) {
++            // Check if this is an organ promoter (8 promoters total: 2 per family)
++            // PROPELLING: L(9), P(12)
++            // ENERGY: K(8), C(1)
++            // SENSORS: V(17), N(10)
++            // SPECIAL: H(6), Q(13)
++            let is_promoter = (amino_type == 9u || amino_type == 12u ||
++                              amino_type == 8u || amino_type == 1u ||
++                              amino_type == 17u || amino_type == 10u ||
++                              amino_type == 6u || amino_type == 13u);
++            if (is_promoter && pos_b + 5u < GENOME_LENGTH) {
+                 // This is a 2-letter organ (promoter + modifier), skip 6 bytes total
+                 count += 1u;
+                 pos_b += 6u;
+@@ -2267,40 +2318,47 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
+             let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
+ 
+             // 2-LETTER ORGAN SYSTEM
+-            // Promoter defines family: L(9)=Propelling, P(12)=Energy, Q(13)=Sensors, H(6)=Others
++            // Promoter defines family (2 redundant promoters per family for moderate probability):
++            // PROPELLING: L(9), P(12)
++            // ENERGY: K(8), C(1)
++            // SENSORS: V(17), N(10)
++            // SPECIAL: H(6), Q(13)
+             // Second amino acid (0-19) defines specific organ within family
+             var final_part_type = amino_type; // Default: structural amino acid
+             var is_organ = false;
+ 
+-            if ((amino_type == 9u || amino_type == 12u || amino_type == 13u || amino_type == 6u) && build_b + 5u < GENOME_LENGTH) {
++            let is_promoter = (amino_type == 9u || amino_type == 12u ||
++                              amino_type == 8u || amino_type == 1u ||
++                              amino_type == 17u || amino_type == 10u ||
++                              amino_type == 6u || amino_type == 13u);
++            if (is_promoter && build_b + 5u < GENOME_LENGTH) {
+                 // Found organ promoter, read second codon
+                 let codon2 = genome_get_codon_ascii(agent.genome, build_b + 3u);
+                 let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
+ 
+                 var organ_base_type = 0u;
+ 
+-                // L (Leucine, 9) = PROPELLING FAMILY
+-                if (amino_type == 9u) {
++                // PROPELLING FAMILY: L(9), P(12)
++                if (amino_type == 9u || amino_type == 12u) {
+                     if (modifier < 10u) { organ_base_type = 21u; } // 0-9: Propeller
+                     else { organ_base_type = 25u; } // 10-19: Displacer
+                 }
+-                // P (Proline, 12) = ENERGY FAMILY
+-                else if (amino_type == 12u) {
++                // ENERGY FAMILY: K(8), C(1)
++                else if (amino_type == 8u || amino_type == 1u) {
+                     if (modifier < 7u) { organ_base_type = 20u; } // 0-6: Mouth
+-                    else if (modifier < 14u) { organ_base_type = 27u; } // 7-13: Condenser (storage)
+-                    else { organ_base_type = 26u; } // 14-19: Enabler (protection)
++                    else { organ_base_type = 26u; } // 7-19: Enabler (protection)
+                 }
+-                // Q (Glutamine, 13) = SENSORS FAMILY
+-                else if (amino_type == 13u) {
+-                    if (modifier < 7u) { organ_base_type = 22u; } // 0-6: Alpha Sensor
+-                    else if (modifier < 14u) { organ_base_type = 23u; } // 7-13: Beta Sensor
+-                    else { organ_base_type = 24u; } // 14-19: Energy Sensor
++                // SENSORS FAMILY: V(17), N(10)
++                else if (amino_type == 17u || amino_type == 10u) {
++                    if (modifier < 10u) { organ_base_type = 22u; } // 0-9: Alpha Sensor
++                    else if (modifier < 18u) { organ_base_type = 23u; } // 10-17: Beta Sensor
++                    else { organ_base_type = 24u; } // 18-19: Energy Sensor
+                 }
+-                // H (Histidine, 6) = OTHERS FAMILY
+-                else if (amino_type == 6u) {
+-                    // Future: sine wave, other special functions
+-                    // For now, all create condensers as placeholder
+-                    organ_base_type = 27u; // Condenser
++                // SPECIAL FUNCTIONS FAMILY: H(6), Q(13)
++                else if (amino_type == 6u || amino_type == 13u) {
++                    if (modifier < 7u) { organ_base_type = 28u; } // 0-6: Storage
++                    else if (modifier < 14u) { organ_base_type = 29u; } // 7-13: Poison Resistance
++                    else { organ_base_type = 30u; } // 14-19: Chiral Flipper
+                 }
+ 
+                 if (organ_base_type >= 20u) {
+@@ -2319,9 +2377,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
+                 build_b += 3u;
+             }
+             
+-            // Check if this amino acid is a chiral flipper (Leucine promoter without valid organ)
+-            // Only flip if it's a raw Leucine (not used as organ promoter)
+-            if (!is_organ && amino_type == 9u) {
++            // Check if this part is a chiral flipper organ (type 30)
++            let base_type = get_base_part_type(final_part_type);
++            if (base_type == 30u) {
+                 chirality_flip = -chirality_flip; // Flip chirality for all following amino acids
+             }
+             
+@@ -2880,6 +2938,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
+     // Persist torque for inspector debugging
+     agents_out[agent_id].torque_debug = torque;
+     
++    // Apply global vector force (wind/gravity)
++    if (params.vector_force_power > 0.0) {
++        let vector_force = vec2<f32>(
++            params.vector_force_x * params.vector_force_power,
++            params.vector_force_y * params.vector_force_power
++        );
++        force += vector_force;
++    }
++    
+     // Apply linear forces - overdamped regime (fluid dynamics at nanoscale)
+     // In viscous fluids at low Reynolds number, velocity is directly proportional to force
+     // No inertia: velocity = force / drag
+@@ -3030,8 +3097,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
+ 
+             // Per-amino capture rates let us tune bite size vs. poison uptake
+             // Apply speed effects and amplification to the rates themselves
+-            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier * amplification;
+-            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier * amplification;
++            let alpha_rate = max(amino_props.energy_absorption_rate, 0.0)  * speed_absorption_multiplier;//*amplification;
++            let beta_rate  = max(amino_props.beta_absorption_rate, 0.0) * speed_absorption_multiplier;//*amplification;
+ 
+             // Total capture budget for this mouth this frame
+             let rate_total = alpha_rate + beta_rate;
+@@ -3105,16 +3172,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
+             }
+         }
+         
+-        // If this was the selected agent, transfer selection to a random nearby agent
+-        if (agent.is_selected == 1u) {
+-            let transfer_hash = hash(agent_id * 2654435761u + params.random_seed);
+-            let target_id = transfer_hash % params.agent_count;
+-            if (target_id < params.agent_count && agents_in[target_id].alive == 1u) {
+-                agents_out[target_id].is_selected = 1u;
+-            }
+-            agent.is_selected = 0u;
+-        }
+-        
+         agent.alive = 0u;
+         agents_out[agent_id] = agent;
+         return;
+@@ -4529,41 +4586,36 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
+     // Beta grid constrained to 0..1
+     var final_beta = clamp(new_beta - beta_flux * kernel_scale, 0.0, 1.0);
+     
+-    // Perlin noise rain that evolves through 3D noise (time is Z axis)
+-    // Time evolution: use epoch counter for deterministic animation
+-    let base_time = f32(params.epoch) * params.perlin_noise_speed;
+-
+-    // Alpha rain: 3D Perlin noise evolving through time
+-    // Use grid coordinates normalized to 0..1 for consistency with visualization
+-    let grid_coord_norm = vec2<f32>(f32(x), f32(y)) / params.grid_size;
+-    let alpha_time = base_time + 1000.0; // Offset alpha time evolution
+-    // Scale is applied via perlin_noise_scale: lower = bigger features
+-    let alpha_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, alpha_time);
+-    let alpha_perlin = layered_noise_3d(alpha_noise_coord, 12345u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
+-    let alpha_probability = params.alpha_multiplier * 0.05 * alpha_perlin;
+-
+-    // Beta rain: Independent 3D Perlin noise with different seed and time offset
+-    let beta_time = base_time + 5000.0; // Different time offset for independent evolution
+-    let beta_noise_coord = vec3<f32>(grid_coord_norm.x, grid_coord_norm.y, beta_time);
+-    let beta_perlin = layered_noise_3d(beta_noise_coord, 67890u, 3u, params.perlin_noise_scale, params.perlin_noise_contrast);
+-    let beta_probability = params.beta_multiplier * 0.05 * beta_perlin;
+-    
+-    // Stochastic sampling: compare against hash-based random value
+-    let cell_seed = idx * 2654435761u + params.random_seed;
+-    let rain_chance = f32(hash(cell_seed)) / 4294967295.0;
++    // Apply rain maps as stochastic probability
++    let rain_value = rain_map[idx];
++    
++    // Use grid position and random_seed for random number generation
++    let seed = idx ^ params.random_seed;
++    var rng = seed;
++    rng ^= rng << 13u;
++    rng ^= rng >> 17u;
++    rng ^= rng << 5u;
++    let rain_chance = f32(rng) / 4294967295.0; // Normalize to 0..1
++    
++    // Rain map value (0..1) ├ù multiplier gives probability
++    let alpha_probability = rain_value.x * params.alpha_multiplier * 0.05;
++    let beta_probability = rain_value.y * params.beta_multiplier * 0.05;
+     
++    // Stochastic rain: if random < probability, spawn full rain drop
+     if (rain_chance < alpha_probability) {
+         final_alpha = 1.0;
+     }
+-
+-    // Beta uses different hash offset for independence
+-    let beta_seed = cell_seed * 1103515245u;
+-    let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
++    
++    // Use different random value for beta
++    rng ^= rng << 13u;
++    rng ^= rng >> 17u;
++    rng ^= rng << 5u;
++    let beta_rain_chance = f32(rng) / 4294967295.0;
++    
+     if (beta_rain_chance < beta_probability) {
+         final_beta = 1.0;
+     }
+     
+-    // Apply the blurred + rain values
+     alpha_grid[idx] = final_alpha;
+     beta_grid[idx] = final_beta;
+     // Gamma also switched to 0..1
+@@ -5339,19 +5391,24 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
+     }
+ 
+     let world_span = f32(SIM_SIZE);
+-    var base_seed = request.seed ^ (request_id * 747796405u);
+-    var genome_seed = request.genome_seed ^ (request_id * 2891336453u);
++    // Mix in epoch to decorrelate batches across frames/uploads
++    let epoch_mix = params.epoch * 0x85EBCA6Bu;
++    var base_seed   = hash(request.seed ^ (request_id * 0x9E3779B9u) ^ epoch_mix);
++    var genome_seed = hash(request.genome_seed ^ (request_id * 0x7F4A7C15u) ^ (epoch_mix ^ 0xC2B2AE35u)); // fully independent
+ 
++    // Position randomness - only uses base_seed
+     var spawn_pos = vec2<f32>(request.position);
+     if (spawn_pos.x == 0.0 && spawn_pos.y == 0.0) {
+-        let rx = hash_f32(base_seed ^ 0xA3C59ACBu);
+-        let ry = hash_f32(base_seed ^ 0x1B56C4E9u);
++        // Hash the seed first to ensure full avalanche, then XOR different constants
++        let hashed_base = hash(base_seed);
++        let rx = hash_f32(hashed_base ^ 0xA3C59ACBu);
++        let ry = hash_f32(hashed_base ^ 0x1B56C4E9u);
+         spawn_pos = vec2<f32>(rx * world_span, ry * world_span);
+     }
+ 
+     var rotation = request.rotation;
+     if (rotation == 0.0) {
+-        rotation = hash_f32(base_seed ^ 0xDEADBEEFu) * 6.28318530718;
++        rotation = hash_f32(hash(base_seed) ^ 0xDEADBEEFu) * 6.28318530718;
+     }
+ 
+     var agent: Agent;
+@@ -5377,19 +5434,20 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
+             agent.genome[w] = override_word;
+         }
+     } else {
+-    // Create centered variable-length genome with 'X' padding on both sides
+-    // Length in [MIN_GENE_LENGTH, GENOME_LENGTH]
+-        genome_seed = hash(genome_seed ^ base_seed);
+-    let gene_span = GENOME_LENGTH - MIN_GENE_LENGTH;
+-    let gene_len = MIN_GENE_LENGTH + (hash(genome_seed) % (gene_span + 1u));
++        // Create centered variable-length genome with 'X' padding on both sides
++        // Length in [MIN_GENE_LENGTH, GENOME_LENGTH]
++        // Genome generation - ONLY uses genome_seed, never touches base_seed
++        var genome_rng = genome_seed;  // clean, independent RNG state
++        let gene_span = GENOME_LENGTH - MIN_GENE_LENGTH;
++        let gene_len = MIN_GENE_LENGTH + (hash(genome_rng) % (gene_span + 1u));
+         var bytes: array<u32, GENOME_LENGTH>;
+         for (var i = 0u; i < GENOME_LENGTH; i++) { bytes[i] = 88u; } // 'X'
+         let left_pad = (GENOME_LENGTH - gene_len) / 2u;
+         for (var k = 0u; k < gene_len; k++) {
+-            genome_seed = hash(genome_seed ^ (k * 1664525u + 1013904223u));
+-            bytes[left_pad + k] = get_random_rna_base(genome_seed);
++            genome_rng = hash(genome_rng);  // advance independently
++            bytes[left_pad + k] = get_random_rna_base(genome_rng);
+         }
+-        // Write into 16 u32 words (ASCII)
++        // Write into u32 words (ASCII)
+         for (var w = 0u; w < GENOME_WORDS; w++) {
+             let b0 = bytes[w * 4u + 0u] & 0xFFu;
+             let b1 = bytes[w * 4u + 1u] & 0xFFu;
+@@ -5501,3 +5559,30 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
+         gamma_grid[idx] = output_value;
+     }
+ }
++
++// ========== AGENT SELECTION ==========
++// Clear all selection flags (called before setting a new selection)
++// Note: With ping_pong=false, current agents are in buffer A.
++// We use compute_bind_group_b for selection, where buffer A is bound as agents_out (read-write).
++// We read and write the same buffer (agents_out) to avoid needing data from agents_in.
++@compute @workgroup_size(256)
++fn clear_selections(@builtin(global_invocation_id) global_id: vec3<u32>) {
++    let agent_id = global_id.x;
++    if (agent_id >= params.max_agents) { return; }
++    // Read current agent state from agents_out and clear selection
++    if (agents_out[agent_id].alive != 0u) {
++        agents_out[agent_id].is_selected = 0u;
++    }
++}
++
++// Set selection flag for a specific agent index
++// Dispatched with workgroup_size(1), params.selected_agent_index determines which agent
++@compute @workgroup_size(1)
++fn set_selection(@builtin(global_invocation_id) global_id: vec3<u32>) {
++    let target_index = params.selected_agent_index;
++    if (target_index == 0xFFFFFFFFu || target_index >= params.agent_count) { return; }
++    // Set selection flag on the target agent in agents_out
++    if (agents_out[target_index].alive != 0u) {
++        agents_out[target_index].is_selected = 1u;
++    }
++}

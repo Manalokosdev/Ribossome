@@ -2338,10 +2338,15 @@ impl GpuState {
         });
         profiler.mark("Sampler");
 
-        // Load shader
+        // Load shader (concatenate shared module + simulation shader)
+        let shader_source = format!(
+            "{}\n{}",
+            include_str!("../shaders/shared.wgsl"),
+            include_str!("../simulation.wgsl")
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
         profiler.mark("Shader compiled");
 
