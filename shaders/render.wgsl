@@ -1330,9 +1330,49 @@ fn u32_to_string(value: u32, out_str: ptr<function, array<u32, 32>>, start: u32)
 
     // Extract digits in reverse order
     while (temp > 0u && digit_count < 10u) {
-
-        visual_grid[visual_idx] = vec4<f32>(blended_color, 1.0);
+        digits[digit_count] = (temp % 10u) + 48u; // Convert to ASCII
+        temp = temp / 10u;
+        digit_count++;
     }
+
+    // Reverse into output string starting at `start`
+    for (var i = 0u; i < digit_count; i++) {
+        (*out_str)[start + i] = digits[digit_count - 1u - i];
+    }
+
+    return digit_count;
+}
+
+// Helper: Convert f32 to string (with 2 decimal places, max 16 chars)
+fn f32_to_string(value: f32, out_str: ptr<function, array<u32, 32>>, start: u32) -> u32 {
+    var pos = start;
+    var val = value;
+
+    // Handle negative
+    if (val < 0.0) {
+        (*out_str)[pos] = 45u; // '-'
+        pos++;
+        val = -val;
+    }
+
+    // Integer part
+    let int_part = u32(floor(val));
+    pos += u32_to_string(int_part, out_str, pos);
+
+    // Decimal point
+    (*out_str)[pos] = 46u; // '.'
+    pos++;
+
+    // Fractional part (2 decimal places)
+    let frac = val - floor(val);
+    let frac_scaled = u32(round(frac * 100.0));
+    let tens = frac_scaled / 10u;
+    let ones = frac_scaled % 10u;
+    (*out_str)[pos] = tens + 48u;
+    (*out_str)[pos + 1u] = ones + 48u;
+    pos += 2u;
+
+    return pos - start;
 }
 
 // ============================================================================
