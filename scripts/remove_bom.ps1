@@ -1,5 +1,5 @@
 # Remove BOM from simulation.wgsl before build
-$shaderPath = "simulation.wgsl"
+$shaderPath = "shaders\simulation.wgsl"
 $bytes = [System.IO.File]::ReadAllBytes($shaderPath)
 
 if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {

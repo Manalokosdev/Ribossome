@@ -2345,7 +2345,7 @@ impl GpuState {
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
             include_str!("../shaders/composite.wgsl"),
-            include_str!("../simulation.wgsl")
+            include_str!("../shaders/simulation.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
