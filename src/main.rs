@@ -671,12 +671,14 @@ fn load_agent_via_dialog() -> anyhow::Result<[u32; GENOME_WORDS]> {
 #[repr(C, align(16))]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct BodyPart {
-    pos: [f32; 2],
-    size: f32,
-    part_type: u32,  // Encoded: bits 0-7 = base type (amino acid or organ), bits 8-15 = organ parameter
-    alpha_signal: f32,
-    beta_signal: f32,
-    pad: [f32; 2],
+    pos: [f32; 2],            // 8 bytes
+    size: f32,                // 4 bytes
+    part_type: u32,           // 4 bytes
+    alpha_signal: f32,        // 4 bytes
+    beta_signal: f32,         // 4 bytes
+    pad: [f32; 2],            // 8 bytes padding to reach 32 bytes (multiple of 16)
+                              // pad[0] stores packed u16 prev_world_pos (bitcast)
+                              // pad[1] stores signal/charge values
 }
 
 impl BodyPart {
@@ -1827,7 +1829,7 @@ impl GpuState {
         profiler.mark("egui renderer");
 
         // Initialize agents with minimal data - GPU will generate genome and build body
-        let max_agents = 50_000usize; // Limited by 128MB WebGPU buffer size (~2.2 KB/agent)
+        let max_agents = 20_000usize; // Lowered to reduce VRAM pressure (3.4 KB/agent => ~68 MB per agent buffer)
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
@@ -5572,7 +5574,7 @@ impl Drop for GpuState {
 impl GpuState {
     fn fast_reset(&mut self) {
         // Reset all simulation state without recreating GPU resources
-        
+
         // Reset agent count
         self.agent_count = 0;
         self.alive_count = 0;
@@ -5580,31 +5582,31 @@ impl GpuState {
         self.cpu_spawn_queue.clear();
         self.spawn_request_count = 0;
         self.pending_spawn_upload = false;
-        
+
         // Reset epoch and timing
         self.epoch = 0;
         self.last_sample_epoch = 0;
         self.last_autosave_epoch = 0;
         self.last_epoch_count = 0;
         self.last_epoch_update = std::time::Instant::now();
-        
+
         // Reset camera
         self.camera_zoom = 1.0;
         self.camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
         self.prev_camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
         self.camera_target = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
         self.camera_velocity = [0.0, 0.0];
-        
+
         // Reset selection
         self.selected_agent_index = None;
         self.selected_agent_data = None;
         self.follow_selected_agent = false;
-        
+
         // Reset statistics
         self.population_history.clear();
         self.alpha_rain_history.clear();
         self.beta_rain_history.clear();
-        
+
         // Reset difficulty levels
         self.difficulty.food_power.difficulty_level = 0;
         self.difficulty.food_power.last_adjustment_epoch = 0;
@@ -5618,24 +5620,24 @@ impl GpuState {
         self.difficulty.alpha_rain.last_adjustment_epoch = 0;
         self.difficulty.beta_rain.difficulty_level = 0;
         self.difficulty.beta_rain.last_adjustment_epoch = 0;
-        
+
         // Update RNG seed
         use std::time::{SystemTime, UNIX_EPOCH};
         self.rng_state = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        
+
         // Clear and reinitialize GPU buffers using compute shaders
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Reset Encoder"),
         });
-        
+
         // Clear alive counter and spawn counter
         encoder.clear_buffer(&self.alive_counter, 0, None);
         encoder.clear_buffer(&self.spawn_counter, 0, None);
         encoder.clear_buffer(&self.debug_counter, 0, None);
-        
+
         // Reinitialize environment grids (alpha, beta, gamma, trails) via GPU compute
         const CLEAR_WG_SIZE_X: u32 = 16;
         const CLEAR_WG_SIZE_Y: u32 = 16;
@@ -5650,7 +5652,7 @@ impl GpuState {
             pass.set_bind_group(0, &self.compute_bind_group_a, &[]);
             pass.dispatch_workgroups(env_groups_x, env_groups_y, 1);
         }
-        
+
         // Initialize all agent slots as dead
         let agent_clear_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
         {
@@ -5671,7 +5673,7 @@ impl GpuState {
             pass.set_bind_group(0, &self.compute_bind_group_b, &[]);
             pass.dispatch_workgroups(agent_clear_groups, 1, 1);
         }
-        
+
         self.queue.submit(std::iter::once(encoder.finish()));
     }
 }
@@ -5690,7 +5692,7 @@ fn reset_simulation_state(
         new_state.selected_agent_index = None;
         *state = Some(new_state);
     }
-    
+
     // Recreate egui_winit state to clear all internal texture tracking
     let egui_ctx = egui::Context::default();
     *egui_state =
@@ -6028,7 +6030,9 @@ fn load_simulation_snapshot(
 }
 
 fn main() {
-    env_logger::init();
+    use env_logger::Env;
+    env_logger::Builder::from_env(Env::default().default_filter_or("error"))
+        .init();
 
     let event_loop = EventLoop::new().unwrap();
     let window = Arc::new(
@@ -7829,17 +7833,17 @@ fn main() {
                                         let screen_width = state.surface_config.width as f32;
                                         let screen_height = state.surface_config.height as f32;
                                         let inspector_x = screen_width - 300.0;
-                                        
+
                                         // Position bars below the agent preview window
                                         // Agent preview is 280x280, positioned at (10, screen_height - 280 - 10)
                                         // Bars should go at (10, screen_height - 280 - 10 + 280 + 10) = (10, screen_height - 10)
                                         let bars_y = screen_height - 80.0; // 80px from bottom to leave room for bars
-                                        
+
                                         egui::Area::new(egui::Id::new("inspector_bars"))
                                             .fixed_pos(egui::pos2(inspector_x + 10.0, bars_y))
                                             .show(ctx, |ui| {
                                                 ui.set_width(280.0);
-                                                
+
                                                 // Energy bar
                                                 ui.vertical(|ui| {
                                                     let energy_ratio = (agent.energy / agent.energy_capacity).clamp(0.0, 1.0);
@@ -7850,19 +7854,19 @@ fn main() {
                                                     } else {
                                                         egui::Color32::from_rgb(200, 0, 0)
                                                     };
-                                                    
+
                                                     ui.label(egui::RichText::new(
                                                         format!("Energy: {:.1}/{:.1}", agent.energy, agent.energy_capacity)
                                                     ).color(egui::Color32::WHITE));
-                                                    
+
                                                     let progress_bar = egui::ProgressBar::new(energy_ratio)
                                                         .fill(energy_color)
                                                         .animate(false);
                                                     ui.add(progress_bar);
                                                 });
-                                                
+
                                                 ui.add_space(4.0);
-                                                
+
                                                 // Pairing state bar
                                                 ui.vertical(|ui| {
                                                     let full_pairs = agent.gene_length; // Use actual gene length (non-X bases)
@@ -7872,11 +7876,11 @@ fn main() {
                                                         0.0
                                                     };
                                                     let pairing_color = egui::Color32::from_rgb(100, 150, 255);
-                                                    
+
                                                     ui.label(egui::RichText::new(
                                                         format!("Pairing: {}/{}", agent.pairing_counter, full_pairs)
                                                     ).color(egui::Color32::WHITE));
-                                                    
+
                                                     let progress_bar = egui::ProgressBar::new(pairing_ratio)
                                                         .fill(pairing_color)
                                                         .animate(false);

@@ -6,16 +6,16 @@ Modifier,Modifier_AA,V_Valine,M_Methionine,L_Leucine,P_Proline,K_Lysine,C_Cystei
 4,F,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Vampire Mouth,Vampire Mouth,Storage,Storage
 5,G,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Vampire Mouth,Vampire Mouth,Storage,Storage
 6,H,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Vampire Mouth,Vampire Mouth,Storage,Storage
-7,I,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Enabler,Enabler,Pairing Sensor,Pairing Sensor
-8,K,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Enabler,Enabler,Pairing Sensor,Pairing Sensor
-9,L,Agent Alpha Sensor,Agent Alpha Sensor,Propeller,Propeller,Enabler,Enabler,,
-10,M,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
-11,N,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
-12,P,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
-13,Q,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
+7,I,Alpha Magnitude Sensor,Alpha Magnitude Sensor,Propeller,Propeller,Enabler,Enabler,Pairing Sensor,Pairing Sensor
+8,K,Alpha Magnitude Sensor (var),Alpha Magnitude Sensor (var),Propeller,Propeller,Enabler,Enabler,Pairing Sensor,Pairing Sensor
+9,L,Agent Alpha Sensor,Agent Alpha Sensor,Propeller,Propeller,Enabler,Enabler,Trail Energy Sensor (alpha),Trail Energy Sensor (beta)
+10,M,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
+11,N,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
+12,P,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
+13,Q,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
 14,R,Beta Sensor,Beta Sensor,Displacer,Displacer,Clock (alpha/green),Clock (beta/red),Chiral Flipper,Chiral Flipper
 15,S,Beta Sensor,Beta Sensor,Displacer,Displacer,Clock (alpha/green),Clock (beta/red),Chiral Flipper,Chiral Flipper
-16,T,Beta Sensor,Beta Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
-17,V,Beta Sensor,Beta Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
+16,T,Beta Magnitude Sensor,Beta Magnitude Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
+17,V,Beta Magnitude Sensor (var),Beta Magnitude Sensor (var),Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
 18,W,Energy Sensor,Energy Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
 19,Y,Agent Beta Sensor,Agent Beta Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper

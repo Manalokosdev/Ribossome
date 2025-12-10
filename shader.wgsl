@@ -45,18 +45,36 @@ const INSPECTOR_WIDTH: u32 = 300u;    // Width of inspector panel on right side
 // ============================================================================
 
 struct BodyPart {
-    pos: vec2<f32>,           // relative position from agent center
-    size: f32,                // radius
-    part_type: u32,           // encoded: bits 0-7 = base type (amino acid or organ), bits 8-15 = organ parameter
-    alpha_signal: f32,        // alpha signal propagating through body
-    beta_signal: f32,         // beta signal propagating through body
-    _pad: vec2<f32>,          // _pad.x = smoothed signal angle OR alpha condenser charge
-                              // _pad.y = beta condenser charge
+    pos: vec2<f32>,           // relative position from agent center (8 bytes)
+    size: f32,                // radius (4 bytes)
+    part_type: u32,           // encoded: bits 0-7 = base type (amino acid or organ), bits 8-15 = organ parameter (4 bytes)
+    alpha_signal: f32,        // alpha signal propagating through body (4 bytes)
+    beta_signal: f32,         // beta signal propagating through body (4 bytes)
+    _pad: vec2<f32>,          // padding to 32 bytes (8 bytes)
+                              // _pad.x stores packed u16 prev_world_pos (x in low 16 bits, y in high 16 bits)
+                              // _pad.y = smoothed signal angle OR condenser charge OR clock signal
 }
 
 // ============================================================================
 // BODY PART ENCODING HELPERS
 // ============================================================================
+
+// Pack/unpack 16-bit previous world position from _pad.x
+// Stores x in low 16 bits, y in high 16 bits
+// Range: 0 to SIM_SIZE (15360), precision: ~0.234 units
+fn pack_prev_pos(prev_pos: vec2<f32>) -> u32 {
+    let scale = 65535.0 / f32(SIM_SIZE);
+    let x16 = u32(clamp(prev_pos.x * scale, 0.0, 65535.0));
+    let y16 = u32(clamp(prev_pos.y * scale, 0.0, 65535.0));
+    return (x16 & 0xFFFFu) | ((y16 & 0xFFFFu) << 16u);
+}
+
+fn unpack_prev_pos(packed: u32) -> vec2<f32> {
+    let scale = f32(SIM_SIZE) / 65535.0;
+    let x16 = f32(packed & 0xFFFFu);
+    let y16 = f32((packed >> 16u) & 0xFFFFu);
+    return vec2<f32>(x16 * scale, y16 * scale);
+}
 
 // Extract base type from encoded part_type (0-19 for amino acids, 20+ for organs)
 fn get_base_part_type(part_type: u32) -> u32 {
@@ -284,7 +302,7 @@ var<storage, read_write> gamma_grid: array<f32>; // Terrain height field + slope
 
 @group(0) @binding(14)
 // NOTE: Use vec4 for std430-friendly 16-byte stride to match host buffer layout
-var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGBA (A unused)
+var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGB + energy trail A (unclamped)
 
 @group(0) @binding(15)
 var<uniform> environment_init: EnvironmentInitParams;
@@ -324,6 +342,7 @@ struct AminoAcidProperties {
     is_energy_sensor: bool,
     is_agent_alpha_sensor: bool,
     is_agent_beta_sensor: bool,
+    is_trail_energy_sensor: bool,
     signal_decay: f32,
     alpha_left_mult: f32,
     alpha_right_mult: f32,
@@ -340,7 +359,7 @@ struct AminoAcidProperties {
 // AMINO ACID & ORGAN PROPERTY LOOKUP TABLE (36 entries: 0–19 amino, 20–35 organs)
 // ============================================================================
 
-const AMINO_COUNT: u32 = 36u;
+const AMINO_COUNT: u32 = 42u;
 
 var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<vec4<f32>, 6>, AMINO_COUNT>(
     // 0  A - Alanine
@@ -416,12 +435,24 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     // 34 AGENT ALPHA SENSOR
     array<vec4<f32>,6>( vec4<f32>(13.0, 10.0, -0.24, 0.025), vec4<f32>(-0.3332, 0.1, 0.0, 0.0015), vec4<f32>(0.2, 0.0, 0.2, 0.0), vec4<f32>(0.0, 0.3, 0.95, 0.95), vec4<f32>(0.2, 0.35, 0.65, 0.4), vec4<f32>(0.6, 0.0, 0.0, 0.0) ),
     // 35 AGENT BETA SENSOR
-    array<vec4<f32>,6>( vec4<f32>(11.5, 9.0, -0.523599, 0.03), vec4<f32>(-0.2, 0.52, 0.0, 0.0015), vec4<f32>(0.26, 0.26, 0.26, 0.0), vec4<f32>(0.0, 0.3, 0.08, 0.08), vec4<f32>(0.2, 0.25, 0.75, 0.3), vec4<f32>(0.7, 0.0, 0.0, 0.0) )
+    array<vec4<f32>,6>( vec4<f32>(11.5, 9.0, -0.523599, 0.03), vec4<f32>(-0.2, 0.52, 0.0, 0.0015), vec4<f32>(0.26, 0.26, 0.26, 0.0), vec4<f32>(0.0, 0.3, 0.08, 0.08), vec4<f32>(0.2, 0.25, 0.75, 0.3), vec4<f32>(0.7, 0.0, 0.0, 0.0) ),
+    // 36 unused
+    array<vec4<f32>,6>( vec4<f32>(10.0, 5.0, 0.0, 0.02), vec4<f32>(0.0, 0.0, 0.0, 0.001), vec4<f32>(0.5, 0.5, 0.5, 0.0), vec4<f32>(0.0, 0.2, 0.0, 0.0), vec4<f32>(0.2, 0.5, 0.5, 0.5), vec4<f32>(0.0, 0.0, 0.0, 0.0) ),
+    // 37 TRAIL ENERGY SENSOR
+    array<vec4<f32>,6>( vec4<f32>(11.0, 3.0, 0.3, 0.04), vec4<f32>(0.05, -0.1, 0.0, 0.00005), vec4<f32>(0.8, 0.6, 0.2, 0.0), vec4<f32>(0.0, 0.25, 0.5, 0.5), vec4<f32>(0.15, 0.6, 0.4, 0.7), vec4<f32>(0.4, 0.0, 0.0, 0.0) ),
+    // 38 ALPHA MAGNITUDE SENSOR
+    array<vec4<f32>,6>( vec4<f32>(10.0, 2.5, -0.1, 0.045), vec4<f32>(-0.05, -0.08, 0.0, 0.00005), vec4<f32>(0.2, 0.9, 0.3, 0.0), vec4<f32>(0.0, 0.2, 0.65, 0.65), vec4<f32>(0.1, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
+    // 39 ALPHA MAGNITUDE SENSOR (variant)
+    array<vec4<f32>,6>( vec4<f32>(10.5, 2.8, 0.15, 0.05), vec4<f32>(-0.1, -0.03, 0.0, 0.00005), vec4<f32>(0.3, 1.0, 0.4, 0.0), vec4<f32>(0.0, 0.2, 0.68, 0.68), vec4<f32>(0.1, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
+    // 40 BETA MAGNITUDE SENSOR
+    array<vec4<f32>,6>( vec4<f32>(10.0, 2.5, 0.25, 0.05), vec4<f32>(0.05, 0.15, 0.0, 0.00005), vec4<f32>(0.9, 0.2, 0.3, 0.0), vec4<f32>(0.0, 0.3, 0.38, 0.38), vec4<f32>(0.1, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
+    // 41 BETA MAGNITUDE SENSOR (variant)
+    array<vec4<f32>,6>( vec4<f32>(10.5, 2.8, 0.4, 0.05), vec4<f32>(0.0, 0.12, 0.0, 0.00005), vec4<f32>(1.0, 0.3, 0.4, 0.0), vec4<f32>(0.0, 0.3, 0.40, 0.40), vec4<f32>(0.1, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) )
 );
 
 var<private> AMINO_FLAGS: array<u32, AMINO_COUNT> = array<u32, AMINO_COUNT>(
     0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (1u<<9), (1u<<0), 0u, 0u, 0u, 0u, 0u, 0u, 0u, // 0–19
-    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<8), (1u<<9), 0u, 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6) // 20–35
+    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<8), (1u<<9), 0u, 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3) // 20–41
 );
 
 fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
@@ -448,6 +479,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     p.is_displacer          = (f & (1u<<8))  != 0u;
     p.is_inhibitor          = (f & (1u<<9))  != 0u; // enabler
     p.is_condenser          = (f & (1u<<10)) != 0u;
+    p.is_trail_energy_sensor = (f & (1u<<11)) != 0u;
 
     return p;
 }
@@ -457,6 +489,11 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
 // ============================================================================
 
 // Clamp position to world bounds (closed world)
+fn is_in_bounds(pos: vec2<f32>) -> bool {
+    let ws = f32(SIM_SIZE);
+    return pos.x >= 0.0 && pos.x <= ws && pos.y >= 0.0 && pos.y <= ws;
+}
+
 fn clamp_position(pos: vec2<f32>) -> vec2<f32> {
     let ws = f32(SIM_SIZE);
     return vec2<f32>(
@@ -527,6 +564,10 @@ fn get_part_name(part_type: u32) -> PartName {
         case 34u:{ name = PartName(array<u32,6>(65u,71u,83u,78u,65u,32u), 5u); } // AGSNA
         case 35u:{ name = PartName(array<u32,6>(65u,71u,83u,78u,66u,32u), 5u); } // AGSNB
         case 36u:{ name = PartName(array<u32,6>(80u,65u,73u,82u,71u,32u), 5u); } // PAIRG
+        case 38u:{ name = PartName(array<u32,6>(65u,77u,65u,71u,32u,32u), 4u); } // AMAG (Alpha Magnitude)
+        case 39u:{ name = PartName(array<u32,6>(65u,77u,65u,71u,50u,32u), 5u); } // AMAG2 (Alpha Magnitude var)
+        case 40u:{ name = PartName(array<u32,6>(66u,77u,65u,71u,32u,32u), 4u); } // BMAG (Beta Magnitude)
+        case 41u:{ name = PartName(array<u32,6>(66u,77u,65u,71u,50u,32u), 5u); } // BMAG2 (Beta Magnitude var)
         default: { }
     }
 
@@ -740,6 +781,12 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
 
         let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
         let sample_pos = center + offset;
+        
+        // Skip out-of-bounds samples (treat as zero)
+        if (!is_in_bounds(sample_pos)) {
+            continue;
+        }
+        
         let idx = grid_index(sample_pos);
 
         // Distance-based gaussian weight: exp(-d^2 / (2*sigma^2))
@@ -783,65 +830,157 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
     return weighted_sum * signal_polarity; // Apply polarity flip if combined_param < 0
 }
 
-// Stochastic trail sampling for agent sensors
-// Samples trail layer and computes color difference from agent color, weighted by direction
-fn sample_stochastic_trail(center: vec2<f32>, base_radius: f32, seed: u32, debug_mode: bool, sensor_perpendicular: vec2<f32>, agent_color: vec3<f32>) -> f32 {
+// Magnitude-only sampling (NO DIRECTIONAL WEIGHTING)
+// Measures total signal strength around sensor without caring about direction
+fn sample_magnitude_only(center: vec2<f32>, base_radius: f32, seed: u32, grid_type: u32, debug_mode: bool, promoter_param1: f32, modifier_param1: f32) -> f32 {
     let sample_count = 14u;
-    let radius = base_radius;
+
+    let combined_param = promoter_param1 + modifier_param1;
+    let radius = base_radius * abs(combined_param);
+    let signal_polarity = select(1.0, -1.0, combined_param < 0.0);
 
     var weighted_sum = 0.0;
     var weight_total = 0.0;
 
     for (var i = 0u; i < sample_count; i++) {
-        // Generate random offset using hash
         let h1 = hash_f32(seed * 1000u + i * 17u);
         let h2 = hash_f32(seed * 1000u + i * 23u + 13u);
 
-        // Random angle and distance (square root for uniform disk sampling)
-        let angle = h1 * 6.28318530718; // 2*PI
+        let angle = h1 * 6.28318530718;
         let dist = sqrt(h2) * radius;
 
         let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
         let sample_pos = center + offset;
+        
+        // Skip out-of-bounds samples (treat as zero)
+        if (!is_in_bounds(sample_pos)) {
+            continue;
+        }
+        
         let idx = grid_index(sample_pos);
 
-        // Distance-based gaussian weight: exp(-d^2 / (2*sigma^2))
+        // Distance-based gaussian weight only (NO directional component)
         let sigma = radius * 0.15;
-        let distance_weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
+        let weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
 
-        // Directional weight: dot product of sensor perpendicular and sample direction
-        let direction = select(vec2<f32>(0.0), normalize(offset), dist > 1e-5);
-        let directional_alignment = dot(sensor_perpendicular, direction); // Range: -1 to 1
+        var sample_value = 0.0;
+        if (grid_type == 0u) {
+            sample_value = alpha_grid[idx];
+        } else if (grid_type == 1u) {
+            sample_value = beta_grid[idx];
+        }
 
-        // Combined weight: distance falloff * directional alignment (full range -1 to 1)
-        let weight = distance_weight * directional_alignment;
-
-        // Sample trail color
-        let trail_color = trail_grid[idx].xyz;
-
-        // Normalize both colors before comparison
-        let trail_color_normalized = normalize(trail_color + vec3<f32>(1e-6)); // Avoid zero vector
-        let agent_color_normalized = normalize(agent_color + vec3<f32>(1e-6)); // Avoid zero vector
-
-        // Calculate color difference (Euclidean distance in normalized RGB space)
-        let color_diff_vec = trail_color_normalized - agent_color_normalized;
-        let color_difference = length(color_diff_vec);
-
-        // Debug visualization
         if (debug_mode) {
-            let dot_val = directional_alignment;
-            let red_intensity = clamp(dot_val, 0.0, 1.0);
-            let blue_intensity = clamp(-dot_val, 0.0, 1.0);
-            let debug_color = vec4<f32>(red_intensity, 0.0, blue_intensity, 0.7);
+            // Magnitude sensors show as yellow/orange circles
+            let debug_color = vec4<f32>(1.0, 0.7, 0.0, 0.7);
             let sample_size = clamp(radius * 0.03, 2.0, 8.0);
             draw_filled_circle(sample_pos, sample_size, debug_color);
         }
 
-        weighted_sum += color_difference * weight;
-        weight_total += weight; // Allow cancellation between positive and negative weights
+        weighted_sum += sample_value * weight;
+        weight_total += weight;
     }
 
-    // Return sum of weighted samples (no normalization)
+    // Normalize by total weight to get average magnitude
+    let result = select(0.0, weighted_sum / weight_total, weight_total > 1e-6);
+    return result * signal_polarity;
+}
+
+// Agent neighbor sampling for color-based sensors
+// Uses pre-collected neighbor list and samples trail color at their positions
+fn sample_neighbors_color(center: vec2<f32>, base_radius: f32, debug_mode: bool, sensor_perpendicular: vec2<f32>, agent_color: vec3<f32>, neighbor_ids: ptr<function, array<u32, 64>>, neighbor_count: u32) -> f32 {
+    let radius = base_radius;
+    var weighted_sum = 0.0;
+
+    // Iterate through pre-collected neighbors
+    for (var n = 0u; n < neighbor_count; n++) {
+        let other_agent = agents_in[(*neighbor_ids)[n]];
+        let offset = other_agent.position - center;
+        let dist = length(offset);
+
+        // Only process agents within radius
+        if (dist <= radius && dist > 0.001) {
+            // Distance-based gaussian weight
+            let sigma = radius * 0.15;
+            let distance_weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
+
+            // Directional weight
+            let direction = normalize(offset);
+            let directional_alignment = dot(sensor_perpendicular, direction);
+
+            // Combined weight
+            let weight = distance_weight * directional_alignment;
+
+            // Sample trail color at the agent's position
+            let trail_idx = grid_index(other_agent.position);
+            let trail_color = trail_grid[trail_idx].xyz;
+
+            // Normalize both colors before comparison
+            let trail_color_normalized = normalize(trail_color + vec3<f32>(1e-6));
+            let agent_color_normalized = normalize(agent_color + vec3<f32>(1e-6));
+
+            // Calculate color difference
+            let color_diff_vec = trail_color_normalized - agent_color_normalized;
+            let color_difference = length(color_diff_vec);
+
+            // Debug visualization
+            if (debug_mode) {
+                let dot_val = directional_alignment;
+                let red_intensity = clamp(dot_val, 0.0, 1.0);
+                let blue_intensity = clamp(-dot_val, 0.0, 1.0);
+                let debug_color = vec4<f32>(red_intensity, 0.0, blue_intensity, 0.7);
+                draw_filled_circle(other_agent.position, 5.0, debug_color);
+            }
+
+            weighted_sum += color_difference * weight;
+        }
+    }
+
+    return weighted_sum;
+}
+
+// Agent neighbor sampling for energy-based sensors
+// Uses pre-collected neighbor list and samples energy trail at their positions
+fn sample_neighbors_energy(center: vec2<f32>, base_radius: f32, debug_mode: bool, sensor_perpendicular: vec2<f32>, neighbor_ids: ptr<function, array<u32, 64>>, neighbor_count: u32) -> f32 {
+    let radius = base_radius;
+    var weighted_sum = 0.0;
+
+    // Iterate through pre-collected neighbors
+    for (var n = 0u; n < neighbor_count; n++) {
+        let other_agent = agents_in[(*neighbor_ids)[n]];
+        let offset = other_agent.position - center;
+        let dist = length(offset);
+
+        // Only process agents within radius
+        if (dist <= radius && dist > 0.001) {
+            // Distance-based gaussian weight
+            let sigma = radius * 0.15;
+            let distance_weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
+
+            // Directional weight
+            let direction = normalize(offset);
+            let directional_alignment = dot(sensor_perpendicular, direction);
+
+            // Combined weight
+            let weight = distance_weight * directional_alignment;
+
+            // Sample energy trail at the agent's position
+            let trail_idx = grid_index(other_agent.position);
+            let energy_value = trail_grid[trail_idx].w;
+
+            // Debug visualization
+            if (debug_mode) {
+                let dot_val = directional_alignment;
+                let red_intensity = clamp(dot_val, 0.0, 1.0);
+                let blue_intensity = clamp(-dot_val, 0.0, 1.0);
+                let debug_color = vec4<f32>(red_intensity, 0.0, blue_intensity, 0.7);
+                draw_filled_circle(other_agent.position, 5.0, debug_color);
+            }
+
+            weighted_sum += energy_value * weight;
+        }
+    }
+
     return weighted_sum;
 }
 
@@ -1403,12 +1542,16 @@ fn translate_codon_step(
             // Organ creation based on PROMOTER + MODIFIER combination
             // Promoters: V(17), M(10), L(9), P(12), K(8), C(1), H(6), Q(13)
 
-            // V/M promoters: Alpha Sensors (0-8), Agent Alpha Sensor (9), Beta Sensors (10-18), Agent Beta Sensor (19)
+            // V/M promoters: Alpha Sensors, Beta Sensors, Magnitude Sensors, Agent Sensors
             if (amino_type == 17u || amino_type == 10u) {  // V or M
-                if (modifier == 9u) { organ_base_type = 34u; }       // Agent Alpha Sensor (L: 9)
+                if (modifier == 7u) { organ_base_type = 38u; }       // Alpha Magnitude Sensor (I: 7)
+                else if (modifier == 8u) { organ_base_type = 39u; }  // Alpha Magnitude Sensor variant (K: 8)
+                else if (modifier == 9u) { organ_base_type = 34u; }  // Agent Alpha Sensor (L: 9)
+                else if (modifier == 16u) { organ_base_type = 40u; } // Beta Magnitude Sensor (T: 16)
+                else if (modifier == 17u) { organ_base_type = 41u; } // Beta Magnitude Sensor variant (V: 17)
                 else if (modifier == 19u) { organ_base_type = 35u; } // Agent Beta Sensor (Y: 19)
-                else if (modifier < 10u) { organ_base_type = 22u; }  // Alpha Sensors (A-K: 0-8)
-                else { organ_base_type = 23u; }                      // Beta Sensors (M-W: 10-18)
+                else if (modifier < 10u) { organ_base_type = 22u; }  // Alpha Sensors (A-H: 0-6)
+                else { organ_base_type = 23u; }                      // Beta Sensors (M-S/W: 10-15, 18)
             }
             // L/P promoters: Always Propellers (0-9) or Displacers (10-19)
             else if (amino_type == 9u || amino_type == 12u) {  // L or P
@@ -1424,11 +1567,12 @@ fn translate_codon_step(
                 else if (modifier < 16u) { organ_base_type = 31u; }  // Clocks (R-S: 14-15)
                 else { organ_base_type = 31u; }                      // Sine Wave Generators (T-Y: 16-19) - same as clocks
             }
-            // H/Q promoters: Storage, Pairing Sensors, Poison Resistance, Chiral Flippers
+            // H/Q promoters: Storage, Pairing Sensors, Trail Energy Sensors, Poison Resistance, Chiral Flippers
             else if (amino_type == 6u || amino_type == 13u) {  // H or Q
                 if (modifier < 7u) { organ_base_type = 28u; }        // Storage (A-H: 0-6)
                 else if (modifier < 9u) { organ_base_type = 36u; }   // Pairing State Sensors (I-K: 7-8)
-                else if (modifier < 14u) { organ_base_type = 29u; }  // Poison Resistance (L-Q: 9-13)
+                else if (modifier == 9u) { organ_base_type = 37u; }  // Trail Energy Sensor (L: 9) - NEW ORGAN
+                else if (modifier < 14u) { organ_base_type = 29u; }  // Poison Resistance (M-Q: 10-13)
                 else { organ_base_type = 30u; }                      // Chiral Flippers (R-Y: 14-19)
             }
 
@@ -1436,9 +1580,9 @@ fn translate_codon_step(
                 // Encode organ with parameter
                 var param_value = u32((f32(modifier) / 19.0) * 255.0);
 
-                // For slope sensors, clocks, and pairing sensors, encode promoter type in high bit
+                // For slope sensors, clocks, pairing sensors, and trail energy sensors, encode promoter type in high bit
                 // K/H promoter = alpha emitter (bit 7 = 0), C/Q promoter = beta emitter (bit 7 = 1)
-                if (organ_base_type == 31u || organ_base_type == 32u || organ_base_type == 36u) {
+                if (organ_base_type == 31u || organ_base_type == 32u || organ_base_type == 36u || organ_base_type == 37u) {
                     param_value = param_value & 127u;  // Clear bit 7 first
                     let is_beta_promoter = (amino_type == 1u || amino_type == 13u);  // C=1, Q=13
                     if (is_beta_promoter) {
@@ -1659,7 +1803,7 @@ fn render_body_part_ctx(
 
     // 4. ORGAN: Condenser (charge storage/discharge)
     if (amino_props.is_condenser) {
-        let signed_alpha_charge = part._pad.x;
+        let signed_alpha_charge = part._pad.y;
         let signed_beta_charge = part._pad.y;
         let alpha_charge = clamp(abs(signed_alpha_charge), 0.0, 10.0);
         let beta_charge = clamp(abs(signed_beta_charge), 0.0, 10.0);
@@ -1771,7 +1915,7 @@ fn render_body_part_ctx(
 
     // Vampire mouths (organ 33) get special big red 8-point asterisks
     if (base_type == 33u) {
-        let mouth_radius = max(part.size * 3.0, 8.0);
+        let mouth_radius = max(part.size * 6.0, 16.0);
 
         // Draw blinking white asterisk when draining energy (_pad.y stores drain amount)
         let drain_amount = part._pad.y;
@@ -1843,22 +1987,48 @@ fn render_body_part_ctx(
         let visual_scale = clamp(sensor_radius / 200.0, 0.3, 4.0);
         let marker_size = part.size * 3.0 * visual_scale; // Increased from 1.5x to 3.0x for better visibility
 
+        // Check if this is a magnitude sensor (organs 38-41)
+        let is_magnitude_sensor = (base_type >= 38u && base_type <= 41u);
+
         // Choose color based on sensor type and signal polarity
         var sensor_color = vec3<f32>(0.0);
         if (amino_props.is_alpha_sensor) {
-            // Green for positive polarity, cyan for negative polarity
-            sensor_color = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 1.0), combined_param < 0.0);
+            if (is_magnitude_sensor) {
+                // Magnitude sensors: brighter green/cyan
+                sensor_color = select(vec3<f32>(0.3, 1.0, 0.3), vec3<f32>(0.3, 1.0, 1.0), combined_param < 0.0);
+            } else {
+                // Directional sensors: standard green/cyan
+                sensor_color = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 1.0), combined_param < 0.0);
+            }
         } else {
-            // Red for positive polarity, magenta for negative polarity
-            sensor_color = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 1.0), combined_param < 0.0);
+            if (is_magnitude_sensor) {
+                // Magnitude sensors: brighter red/magenta
+                sensor_color = select(vec3<f32>(1.0, 0.3, 0.3), vec3<f32>(1.0, 0.3, 1.0), combined_param < 0.0);
+            } else {
+                // Directional sensors: standard red/magenta
+                sensor_color = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 1.0), combined_param < 0.0);
+            }
         }
         let blended_sensor_color = mix(sensor_color, agent_color, params.agent_color_blend * 0.3);
 
         // Draw circle marker with high opacity to ensure visibility
         draw_filled_circle_ctx(world_pos, marker_size, vec4<f32>(blended_sensor_color, 1.0), ctx);
 
-        // Draw outline circle to indicate sensing range at high zoom
+        // Magnitude sensors get a distinctive white outline
+        if (is_magnitude_sensor) {
+            let outline_thickness = max(marker_size * 0.25, 1.0);
+            let segments = 24u;
+            var prev_outline = world_pos + vec2<f32>(marker_size, 0.0);
+            for (var s = 1u; s <= segments; s++) {
+                let t = f32(s) / f32(segments);
+                let ang = t * 6.28318530718;
+                let p = world_pos + vec2<f32>(cos(ang) * marker_size, sin(ang) * marker_size);
+                draw_thick_line_ctx(prev_outline, p, outline_thickness, vec4<f32>(1.0, 1.0, 1.0, 0.9), ctx);
+                prev_outline = p;
+            }
+        }
 
+        // Draw outline circle to indicate sensing range at high zoom
         if (params.camera_zoom > 80.0) {
             let zoom_fade = clamp((params.camera_zoom - 8.0) / 12.0, 0.0, 1.0);
             let outline_alpha = 0.15 * zoom_fade;
@@ -1899,7 +2069,7 @@ fn render_body_part_ctx(
     // 10. ORGAN: Sine Wave Clock - large pulsating circle
     if (amino_props.is_clock) {
         // Get clock signal from _pad.x (stored during signal update pass)
-        let clock_signal = part._pad.x; // Range: -1 to +1
+        let clock_signal = part._pad.y; // Range: -1 to +1
 
         // Decode promoter type from part_type parameter (bit 7)
         let organ_param = get_organ_param(part.part_type);
@@ -1921,7 +2091,7 @@ fn render_body_part_ctx(
     // 11. ORGAN: Slope Sensor (type 32) - cyan triangle pointing in slope direction
     if (base_type == 32u) {
         // Get slope signal from _pad.x (stores slope direction/magnitude)
-        let slope_signal = part._pad.x; // -1 to +1 indicates slope direction
+        let slope_signal = part._pad.y; // -1 to +1 indicates slope direction
 
         // Decode promoter type from part_type parameter (bit 7)
         let organ_param = get_organ_param(part.part_type);
@@ -2097,10 +2267,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 for (var n = 0u; n < neighbor_count; n++) {
                     let victim_id = neighbor_ids[n];
-                    let victim = agents_in[victim_id];
+                    // Only read victim position for distance check (not energy yet)
+                    let victim_pos = agents_in[victim_id].position;
 
                     // Distance from mouth to victim center
-                    let delta = mouth_world_pos - victim.position;
+                    let delta = mouth_world_pos - victim_pos;
                     let dist = length(delta);
 
                     if (dist < max_drain_distance && dist < closest_dist) {
@@ -2113,15 +2284,15 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (closest_victim_id != 0xFFFFFFFFu) {
                     // Try to claim the victim's spatial grid cell atomically
                     // This prevents multiple vampires from draining the same victim simultaneously
-                    let victim = agents_in[closest_victim_id];
+                    let victim_pos = agents_in[closest_victim_id].position;
                     let victim_scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
-                    let victim_grid_x = u32(clamp(victim.position.x * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-                    let victim_grid_y = u32(clamp(victim.position.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+                    let victim_grid_x = u32(clamp(victim_pos.x * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+                    let victim_grid_y = u32(clamp(victim_pos.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
                     let victim_grid_idx = victim_grid_y * SPATIAL_GRID_SIZE + victim_grid_x;
 
                     // Atomic claim: try to replace victim_id with CLAIMED marker
                     let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[victim_grid_idx], closest_victim_id, SPATIAL_GRID_CLAIMED);
-                    
+
                     // Only proceed if we successfully claimed this victim (we were the first vampire to reach it)
                     if (claim_result.exchanged) {
                         // Distance-based drain: linear inverse proportion
@@ -2129,17 +2300,20 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         // At distance 100: drain 0%
                         let distance_factor = 1.0 - (closest_dist / max_drain_distance);
 
+                        // NOW read victim energy AFTER successful claim (prevents race condition)
+                        let victim_energy = agents_in[closest_victim_id].energy;
+
                         // Calculate base drain amount (up to 50% of victim's energy)
-                        let base_drain = distance_factor * victim.energy * 0.5;
+                        let base_drain = distance_factor * victim_energy * 0.5;
 
                         // Check if victim has any energy and we're in range
-                        if (victim.energy > 0.0001 && base_drain > 0.0001) {
+                        if (victim_energy > 0.0001 && base_drain > 0.0001) {
                             // Vampire absorbs the drain amount
                             let absorbed_energy = base_drain;
 
-                            // Victim loses 2x the absorbed amount (punishing vampirism)
-                            let victim_loss = absorbed_energy * 2.0;
-                            agents_in[closest_victim_id].energy = max(0.0, victim.energy - victim_loss);
+                            // Victim loses exactly what vampire absorbed (no extra penalty)
+                            let new_victim_energy = max(0.0, victim_energy - absorbed_energy);
+                            agents_in[closest_victim_id].energy = new_victim_energy;
 
                             total_energy_gained += absorbed_energy;
 
@@ -2148,7 +2322,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         } else {
                             agents_in[agent_id].body[i]._pad.y = 0.0;
                         }
-                        
+
                         // Keep cell claimed (cleared next frame) - this prevents other vampires from attacking same victim
                     } else {
                         // Failed to claim - another vampire got here first
@@ -2324,7 +2498,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Update size
             var rendered_size = props.thickness * 0.5;
-            let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor || props.is_agent_alpha_sensor || props.is_agent_beta_sensor;
+            let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor || props.is_agent_alpha_sensor || props.is_agent_beta_sensor || props.is_trail_energy_sensor;
             if (is_sensor) {
                 rendered_size *= 2.0;
             }
@@ -2596,8 +2770,134 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             new_beta = new_beta + nonlinear_value;
         }
 
+        // TRAIL ENERGY SENSOR - Senses nearby agent energies from trail
+        if (amino_props.is_trail_energy_sensor) {
+            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
+            let world_pos = agent.position + rotated_pos;
+
+            // Get sensor orientation (perpendicular to organ)
+            let axis_local = normalize(agents_out[agent_id].body[i].pos);
+            let perpendicular_local = normalize(vec2<f32>(-axis_local.y, axis_local.x));
+            let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
+
+            let sensed_value = sample_neighbors_energy(world_pos, sensor_radius, params.debug_mode != 0u, perpendicular_world, &neighbor_ids, neighbor_count);
+            // Normalize by a scaling factor (energy can be large, scale to -1..1 range)
+            let normalized_value = tanh(sensed_value * 0.01); // tanh for soft clamping to -1..1
+            // Split into alpha and beta based on sign (positive energy -> alpha, negative -> beta)
+            new_alpha += max(normalized_value, 0.0);
+            new_beta += max(-normalized_value, 0.0);
+        }
+
+        // ALPHA MAGNITUDE SENSORS - Organ types 38, 39 (V/M + I/K)
+        // Measure alpha signal strength without directional bias
+        if (base_type == 38u || base_type == 39u) {
+            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
+            let world_pos = agent.position + rotated_pos;
+            let sensor_seed = agent_id * 1000u + i * 13u;
+
+            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+            let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
+            let promoter_param1 = amino_props.parameter1;
+            let modifier_props = get_amino_acid_properties(modifier_index);
+            let modifier_param1 = modifier_props.parameter1;
+
+            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
+            new_alpha = new_alpha + nonlinear_value;
+        }
+
+        // BETA MAGNITUDE SENSORS - Organ types 40, 41 (V/M + T/V)
+        // Measure beta signal strength without directional bias
+        if (base_type == 40u || base_type == 41u) {
+            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
+            let world_pos = agent.position + rotated_pos;
+            let sensor_seed = agent_id * 1000u + i * 13u;
+
+            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+            let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
+            let promoter_param1 = amino_props.parameter1;
+            let modifier_props = get_amino_acid_properties(modifier_index);
+            let modifier_param1 = modifier_props.parameter1;
+
+            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
+            new_beta = new_beta + nonlinear_value;
+        }
+
+        // ALPHA MAGNITUDE SENSORS - Organ types 38, 39 (V/M + I/K)
+        // Measure alpha signal strength without directional bias
+        if (base_type == 38u || base_type == 39u) {
+            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
+            let world_pos = agent.position + rotated_pos;
+            let sensor_seed = agent_id * 1000u + i * 13u;
+
+            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+            let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
+            let promoter_param1 = amino_props.parameter1;
+            let modifier_props = get_amino_acid_properties(modifier_index);
+            let modifier_param1 = modifier_props.parameter1;
+
+            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
+            new_alpha = new_alpha + nonlinear_value;
+        }
+
+        // BETA MAGNITUDE SENSORS - Organ types 40, 41 (V/M + T/V)
+        // Measure beta signal strength without directional bias
+        if (base_type == 40u || base_type == 41u) {
+            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
+            let world_pos = agent.position + rotated_pos;
+            let sensor_seed = agent_id * 1000u + i * 13u;
+
+            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+            let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
+            let promoter_param1 = amino_props.parameter1;
+            let modifier_props = get_amino_acid_properties(modifier_index);
+            let modifier_param1 = modifier_props.parameter1;
+
+            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
+            new_beta = new_beta + nonlinear_value;
+        }
+
+        // ALPHA MAGNITUDE SENSORS - Organ types 38, 39 (V/M + I/K)
+        // Measure alpha signal strength without directional bias
+        if (base_type == 38u || base_type == 39u) {
+            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
+            let world_pos = agent.position + rotated_pos;
+            let sensor_seed = agent_id * 1000u + i * 13u;
+
+            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+            let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
+            let promoter_param1 = amino_props.parameter1;
+            let modifier_props = get_amino_acid_properties(modifier_index);
+            let modifier_param1 = modifier_props.parameter1;
+
+            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
+            new_alpha = new_alpha + nonlinear_value;
+        }
+
+        // BETA MAGNITUDE SENSORS - Organ types 40, 41 (V/M + T/V)
+        // Measure beta signal strength without directional bias
+        if (base_type == 40u || base_type == 41u) {
+            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
+            let world_pos = agent.position + rotated_pos;
+            let sensor_seed = agent_id * 1000u + i * 13u;
+
+            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+            let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
+            let promoter_param1 = amino_props.parameter1;
+            let modifier_props = get_amino_acid_properties(modifier_index);
+            let modifier_param1 = modifier_props.parameter1;
+
+            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
+            new_beta = new_beta + nonlinear_value;
+        }
+
         // AGENT ALPHA SENSOR - Organ type 34 (V/M + L)
-        // Samples trail layer and measures color difference from agent's color
+        // Senses nearby agent colors from trail
         if (base_type == 34u) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let sensor_world_pos = agent.position + rotated_pos;
@@ -2608,15 +2908,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
 
             // Use agent_color calculated from color_sum_morphology
-            let sensor_seed = agent_id * 1000u + i * 13u;
-            let sensed_value = sample_stochastic_trail(sensor_world_pos, sensor_radius, sensor_seed, params.debug_mode != 0u, perpendicular_world, agent_color);
+            let sensed_value = sample_neighbors_color(sensor_world_pos, sensor_radius, params.debug_mode != 0u, perpendicular_world, agent_color, &neighbor_ids, neighbor_count);
 
-            // Add trail difference signal to alpha
+            // Add agent color difference signal to alpha
             new_alpha += sensed_value;
         }
 
         // AGENT BETA SENSOR - Organ type 35 (V/M + Y)
-        // Samples trail layer and measures color difference from agent's color
+        // Senses nearby agent colors from trail
         if (base_type == 35u) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent.rotation);
             let sensor_world_pos = agent.position + rotated_pos;
@@ -2627,10 +2926,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
 
             // Use agent_color calculated from color_sum_morphology
-            let sensor_seed = agent_id * 1000u + i * 13u;
-            let sensed_value = sample_stochastic_trail(sensor_world_pos, sensor_radius, sensor_seed, params.debug_mode != 0u, perpendicular_world, agent_color);
+            let sensed_value = sample_neighbors_color(sensor_world_pos, sensor_radius, params.debug_mode != 0u, perpendicular_world, agent_color, &neighbor_ids, neighbor_count);
 
-            // Add trail difference signal to beta
+            // Add agent color difference signal to beta
             new_beta += sensed_value;
         }
 
@@ -2708,7 +3006,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             // Store clock signal in _pad.x for rendering
-            agents_out[agent_id].body[i]._pad.x = clock_signal;
+            agents_out[agent_id].body[i]._pad.y = clock_signal;
 
             // Emit to appropriate signal type
             if (is_alpha_emitter) {
@@ -2768,8 +3066,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Apply decay to non-sensor signals
         // Sensors are direct sources, condensers output directly without accumulation
-        if (!amino_props.is_alpha_sensor) { new_alpha *= 0.99; }
-        if (!amino_props.is_beta_sensor) { new_beta *= 0.99; }
+        if (!amino_props.is_alpha_sensor && !amino_props.is_trail_energy_sensor) { new_alpha *= 0.99; }
+        if (!amino_props.is_beta_sensor && !amino_props.is_trail_energy_sensor) { new_beta *= 0.99; }
 
         // Smooth internal signal changes to prevent sudden oscillations (75% new, 25% old)
         let update_rate = 0.75;
@@ -2792,6 +3090,34 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Accumulate forces and torques (relative to CoM)
     var force = vec2<f32>(0.0);
     var torque = 0.0;
+
+    // Agent-to-agent repulsion (simplified: once per agent pair, using total masses)
+    for (var n = 0u; n < neighbor_count; n++) {
+        let neighbor = agents_out[neighbor_ids[n]];
+
+        let delta = agent.position - neighbor.position;
+        let dist = length(delta);
+
+        // Distance-based repulsion force (inverse square law with cutoff)
+        let max_repulsion_distance = 500.0;
+
+        if (dist < max_repulsion_distance && dist > 0.1) {
+            // Inverse square repulsion: F = k / (d^2)
+            let base_strength = params.agent_repulsion_strength * 100000.0;
+            let force_magnitude = base_strength / (dist * dist);
+
+            // Clamp to prevent extreme forces at very small distances
+            let clamped_force = min(force_magnitude, 5000.0);
+
+            let direction = delta / dist; // Normalize
+
+            // Use reduced mass for proper two-body physics: μ = (m1 * m2) / (m1 + m2)
+            let neighbor_mass = max(neighbor.total_mass, 0.01);
+            let reduced_mass = (total_mass * neighbor_mass) / (total_mass + neighbor_mass);
+
+            force += direction * clamped_force * reduced_mass;
+        }
+    }
 
     // Now calculate forces using the updated morphology (using pre-collected neighbors)
     var chirality_flip_physics = 1.0; // Track cumulative chirality for propeller direction
@@ -2828,35 +3154,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let slope_force = -slope_gradient * params.gamma_strength * part_mass;
         force += slope_force;
         torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
-
-        // Agent-agent repulsion force per amino acid (using pre-collected neighbors)
-        var collision_force = vec2<f32>(0.0);
-
-        for (var n = 0u; n < neighbor_count; n++) {
-            let neighbor = agents_out[neighbor_ids[n]];
-
-            let delta = world_pos - neighbor.position;
-            let dist = length(delta);
-
-            // Distance-based repulsion force (inverse square law with cutoff)
-            let max_repulsion_distance = 500.0;
-
-            if (dist < max_repulsion_distance && dist > 0.1) {
-                // Inverse square repulsion: F = k / (d^2)
-                let base_strength = params.agent_repulsion_strength * 100000.0;
-                let force_magnitude = base_strength / (dist * dist);
-
-                // Clamp to prevent extreme forces at very small distances
-                let clamped_force = min(force_magnitude, 5000.0);
-
-                let direction = delta / dist; // Normalize
-                collision_force += direction * clamped_force * part_mass;
-            }
-        }
-
-        // Apply collision force
-        force += collision_force;
-        torque += (r_com.x * collision_force.y - r_com.y * collision_force.x);
 
         // Cached amplification for this part (organs will use it, organs may ignore)
         let amplification = amplification_per_part[i];
@@ -3138,20 +3435,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Each poison-resistant organ reduces poison/radiation damage by 50%
     let poison_multiplier = pow(0.5, f32(agents_out[agent_id].poison_resistant_count));
 
-    // Calculate speed-dependent absorption multiplier for mouths
-    // Exponential decay: 1.0x at rest, sharp falloff exp(-8)
-    let agent_speed = length(agent.velocity);
-    let normalized_speed = agent_speed / VEL_MAX; // 0.0 to 1.0 (max speed = 24)
-    // Very strong penalty: at half max speed (12) -> exp(-4) = 0.018 (1.8%)
-    let speed_absorption_multiplier = exp(-8.0 * normalized_speed);
-
-    // Debug output for first agent only
-    if (agent_id == 0u && params.debug_mode != 0u) {
-        // Store debug info in unused body part slot (will show in inspector)
-        agents_out[agent_id].body[63].pos.x = agent_speed;
-        agents_out[agent_id].body[63].pos.y = speed_absorption_multiplier;
-    }
-
     // Initialize accumulators
     let trail_deposit_strength = 0.08; // Strength of trail deposition (0-1)
     var energy_consumption = params.energy_cost; // base maintenance (can be 0)
@@ -3166,11 +3449,38 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
         let world_pos = agent.position + rotated_pos;
         let idx = grid_index(world_pos);
+        
+        // Calculate actual mouth speed including rotation (distance moved since last frame)
+        // Check if this looks like first frame (prev_world_pos near zero or equal to current pos)
+        let packed_prev = bitcast<u32>(agents_out[agent_id].body[i]._pad.x);
+        let prev_pos = unpack_prev_pos(packed_prev);
+        let displacement_vec = world_pos - prev_pos;
+        let displacement_sq = dot(displacement_vec, displacement_vec);
+        // If displacement is very small OR prev_pos is near origin, treat as first frame
+        let looks_like_first = (displacement_sq < 0.01) || (dot(prev_pos, prev_pos) < 1.0);
+        let mouth_speed = select(sqrt(displacement_sq), 0.0, looks_like_first);
+        let normalized_mouth_speed = mouth_speed / VEL_MAX;
+        let speed_absorption_multiplier = exp(-8.0 * normalized_mouth_speed);
+        
+        // Update previous world position for next frame (pack into _pad.x)
+        agents_out[agent_id].body[i]._pad.x = bitcast<f32>(pack_prev_pos(world_pos));
+        
+        // Debug output for first agent only
+        if (agent_id == 0u && params.debug_mode != 0u && i == 0u) {
+            agents_out[agent_id].body[63].pos.x = mouth_speed;
+            agents_out[agent_id].body[63].pos.y = speed_absorption_multiplier;
+        }
 
-        // 1) Trail deposition: blend agent color with existing trail
+        // 1) Trail deposition: blend agent color + deposit energy trail
         let current_trail = trail_grid[idx].xyz;
         let blended = mix(current_trail, agent_color, trail_deposit_strength);
-        trail_grid[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+
+        // Deposit energy trail (unclamped) - scale by agent energy
+        let current_energy_trail = trail_grid[idx].w;
+        let energy_deposit = agent.energy * trail_deposit_strength * 0.1; // 10% of energy deposited
+        let blended_energy = current_energy_trail + energy_deposit;
+
+        trail_grid[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), blended_energy);
 
         // 2) Energy consumption: calculate costs per organ type
         // Minimum baseline cost per amino acid (always paid)
@@ -3257,8 +3567,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent.energy = clamp(agent.energy, 0.0, max(capacity, 0.0));
 
     // 3) Maintenance: subtract consumption after feeding
-    // Poison protection also reduces maintenance costs (survival advantage)
-    agent.energy -= energy_consumption * poison_multiplier;
+    agent.energy -= energy_consumption;
 
     // 4) Energy-based death check - death probability inversely proportional to energy
     // High energy = low death chance, low energy = high death chance
@@ -3603,6 +3912,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     offspring.body[bi].part_type = 0u;
                     offspring.body[bi].alpha_signal = 0.0;
                     offspring.body[bi].beta_signal = 0.0;
+                    offspring.body[bi]._pad.x = bitcast<f32>(0u); // Packed prev_pos will be set on first morphology build
                     offspring.body[bi]._pad = vec2<f32>(0.0);
                 }
 
@@ -3681,6 +3991,30 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 0.5,
                 vec4<f32>(1.0, 1.0, 1.0, 1.0),
             );
+
+            // Check if agent has vampire mouth (organ 33) and mark with red circle
+            var has_vampire_mouth = false;
+            for (var i = 0u; i < min(agents_out[agent_id].body_count, MAX_BODY_PARTS); i++) {
+                let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+                if (base_type == 33u) {
+                    has_vampire_mouth = true;
+                    break;
+                }
+            }
+
+            if (has_vampire_mouth) {
+                // Draw red circle around agent with vampire mouth
+                let circle_radius = 15.0;
+                let segments = 24u;
+                var prev = center + vec2<f32>(circle_radius, 0.0);
+                for (var s = 1u; s <= segments; s++) {
+                    let t = f32(s) / f32(segments);
+                    let ang = t * 6.28318530718;
+                    let p = center + vec2<f32>(cos(ang) * circle_radius, sin(ang) * circle_radius);
+                    draw_thick_line(prev, p, 2.0, vec4<f32>(1.0, 0.0, 0.0, 0.9));
+                    prev = p;
+                }
+            }
         }
 
             // Debug: count visible agents
@@ -3698,10 +4032,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Publish an unrotated copy for inspector preview
         var unrotated_agent = agents_out[agent_id];
         unrotated_agent.rotation = 0.0;
-        // Store speed in torque_debug (x component) for inspector display
-        // Store speed_absorption_multiplier by encoding both into torque_debug as: speed * 1000.0 + multiplier
-        // This way inspector can decode: speed = floor(torque_debug / 1000.0), mult = torque_debug % 1000.0
-        unrotated_agent.torque_debug = agent_speed * 1000.0 + speed_absorption_multiplier;
+        // Speed info now stored per-mouth in body[63].pos during loop above (for debugging)
         // Store the calculated gene_length (we already computed it above for reproduction)
         unrotated_agent.gene_length = gene_length;
         // Copy generation/age/total_mass (already in agents_out) unchanged
@@ -4998,7 +5329,7 @@ fn compute_gamma_slope(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let inv_cell_size = f32(GRID_SIZE) / params.grid_size;
     var gradient = vec2<f32>(dx, dy) * inv_cell_size;
-    
+
     // Add global vector force (gravity/wind) to slope gradient
     // This makes slope sensors respond to both terrain slope AND gravity direction
     if (params.vector_force_power > 0.0) {
@@ -5008,7 +5339,7 @@ fn compute_gamma_slope(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
         gradient += gravity_vector;
     }
-    
+
     write_gamma_slope(idx, gradient);
 }
 
@@ -5050,7 +5381,12 @@ fn diffuse_trails(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Decay: gradually fade trails over time (controlled by trail_decay parameter)
     let faded = clamp(new_trail * params.trail_decay, vec3<f32>(0.0), vec3<f32>(1.0));
-    trail_grid[idx] = vec4<f32>(faded, 1.0);
+
+    // Decay energy trail (alpha channel) separately
+    let current_energy_trail = trail_grid[idx].w;
+    let faded_energy = current_energy_trail * params.trail_decay;
+
+    trail_grid[idx] = vec4<f32>(faded, faded_energy);
 }
 
 // Helper function to draw a digit (0-9) at a position
@@ -5794,10 +6130,17 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                         // For clock organs, oscillate color based on clock_signal in _pad.x
                         if (is_organ && base_type == 31u && part_count < body_count) {
                             // Read clock_signal from this part's _pad.x (range -1 to +1)
-                            let clock_signal = selected_agent_buffer[0].body[part_count]._pad.x;
+                            let clock_signal = selected_agent_buffer[0].body[part_count]._pad.y;
                             // Modulate brightness: 0.5 to 1.5 range based on signal
                             let brightness = 1.0 + clock_signal * 0.5;
                             base_color = base_color * brightness;
+                        }
+
+                        // For magnitude sensors (38-41), use brighter color tones to differentiate from directional sensors
+                        let is_magnitude_sensor = base_type == 38u || base_type == 39u || base_type == 40u || base_type == 41u;
+                        if (is_magnitude_sensor) {
+                            // Brighten the color by 30%
+                            base_color = base_color * 1.3;
                         }
 
                         // For organs that need amplification (propeller, displacer, mouth, vampire mouth, agent sensors), calculate and apply
@@ -6473,6 +6816,7 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
         agent.body[i].part_type = 0u;
         agent.body[i].alpha_signal = 0.0;
         agent.body[i].beta_signal = 0.0;
+        agent.body[i]._pad.x = bitcast<f32>(0u); // Packed prev_pos will be set on first morphology build
         agent.body[i]._pad = vec2<f32>(0.0);
     }
 
@@ -6687,12 +7031,12 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Try to claim the primary cell atomically
     let primary_result = atomicCompareExchangeWeak(&agent_spatial_grid[primary_idx], SPATIAL_GRID_EMPTY, agent_id);
-    
+
     if (!primary_result.exchanged) {
         // Primary cell is occupied - search for nearest empty cell in a spiral pattern
         // This ensures all agents are findable even in crowded areas
         var found = false;
-        
+
         // Search in expanding square rings up to radius 5 (covers 11x11 area = 121 cells)
         for (var radius = 1u; radius <= 5u && !found; radius++) {
             // Top and bottom edges of the square
@@ -6708,7 +7052,7 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
                         found = true;
                     }
                 }
-                
+
                 // Bottom edge (skip if radius == 0 to avoid duplicate)
                 if (!found && radius > 0u) {
                     let check_x_bot = i32(grid_x) + dx;
@@ -6723,7 +7067,7 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
             }
-            
+
             // Left and right edges (excluding corners already covered)
             for (var dy: i32 = -i32(radius) + 1; dy < i32(radius) && !found; dy++) {
                 // Left edge
@@ -6737,7 +7081,7 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
                         found = true;
                     }
                 }
-                
+
                 // Right edge
                 if (!found) {
                     let check_x_right = i32(grid_x) + i32(radius);
@@ -6753,7 +7097,7 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         }
-        
+
         // If still not found after searching 5 rings, agent won't be in spatial grid this frame
         // This is acceptable as it will retry next frame - prevents infinite loops
     }
