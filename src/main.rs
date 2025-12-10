@@ -2339,11 +2339,12 @@ impl GpuState {
         });
         profiler.mark("Sampler");
 
-        // Load shader (concatenate shared + render + simulation modules)
+        // Load shader (concatenate shared + render + composite + simulation modules)
         let shader_source = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
+            include_str!("../shaders/composite.wgsl"),
             include_str!("../simulation.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
