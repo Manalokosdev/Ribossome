@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.1391909,
+  "camera_zoom": 1.5064688,
   "spawn_probability": 0.5,
   "death_probability": 0.001,
   "mutation_rate": 0.001,
@@ -10,8 +10,8 @@
   "beta_blur": 0.0,
   "gamma_blur": 0.0,
   "alpha_slope_bias": -1.0,
-  "beta_slope_bias": 1.0,
-  "alpha_multiplier": 0.001,
+  "beta_slope_bias": -1.0,
+  "alpha_multiplier": 0.0005,
   "beta_multiplier": 0.001,
   "alpha_rain_map_path": null,
   "beta_rain_map_path": "C:\\Users\\1825\\Desktop\\pellets.jpg",

@@ -2332,9 +2332,9 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         // Apply global mouth activity and distance falloff to determine if kill succeeds
                         let kill_effectiveness = distance_factor * global_mouth_activity;
 
-                        // Check if victim has any energy and we're in range
-                        if (victim_energy > 0.0001 && kill_effectiveness > 0.01) {
-                            // Vampire absorbs ALL victim's energy
+                        // Minimum 10% absorption threshold - don't kill if effectiveness is too low
+                        if (victim_energy > 0.0001 && kill_effectiveness >= 0.1) {
+                            // Vampire absorbs ALL victim's energy (minimum 10% effectiveness ensures worthwhile kill)
                             let absorbed_energy = victim_energy * kill_effectiveness;
 
                             // Victim loses ALL energy (instant death)
@@ -5953,13 +5953,10 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Map to actual buffer position (rightmost area)
     let buffer_x = window_width - INSPECTOR_WIDTH + x;
 
-    // Dark grey background
-    var color = vec4<f32>(0.15, 0.15, 0.15, 1.0);
+    // Transparent background (no background drawn)
+    var color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 
-    // Border on left edge (lighter grey)
-    if (x < 2u) {
-        color = vec4<f32>(0.3, 0.3, 0.3, 1.0);
-    }
+    // No border drawn
 
     // Agent preview window: y between 0 and 300
     let preview_y_start = 0u;
@@ -5967,17 +5964,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
     let preview_x_start = 10u;
     let preview_x_end = 290u;
 
-    if (x >= preview_x_start && x < preview_x_end &&
-        flipped_y >= preview_y_start && flipped_y < preview_y_end) {
-        // Very dark grey background for preview window
-        color = vec4<f32>(0.04, 0.04, 0.04, 1.0);
-
-        // Draw border around preview window
-        if (x == preview_x_start || x == preview_x_end - 1u ||
-            flipped_y == preview_y_start || flipped_y == preview_y_end - 1u) {
-            color = vec4<f32>(0.4, 0.4, 0.4, 1.0);
-        }
-    }
+    // No preview window background drawn
 
     // Gene bars: y between 300 and 800
     let bar_anchor_x = 5u;
