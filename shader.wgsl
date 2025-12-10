@@ -51,8 +51,8 @@ struct BodyPart {
     alpha_signal: f32,        // alpha signal propagating through body (4 bytes)
     beta_signal: f32,         // beta signal propagating through body (4 bytes)
     _pad: vec2<f32>,          // padding to 32 bytes (8 bytes)
-                              // _pad.x stores packed u16 prev_world_pos (x in low 16 bits, y in high 16 bits)
-                              // _pad.y = smoothed signal angle OR condenser charge OR clock signal
+                              // _pad.x = smoothed signal angle OR condenser charge OR clock signal OR vampire cooldown
+                              // _pad.y = packed u16 prev_world_pos OR last drain amount (vampire mouths)
 }
 
 // ============================================================================
@@ -316,6 +316,7 @@ var<storage, read_write> agent_spatial_grid: array<atomic<u32>>; // Agent index 
 // Spatial grid special markers
 const SPATIAL_GRID_EMPTY: u32 = 0xFFFFFFFFu;     // No agent in this cell
 const SPATIAL_GRID_CLAIMED: u32 = 0xFFFFFFFEu;   // Cell claimed by vampire (victim being drained)
+const VAMPIRE_MOUTH_COOLDOWN: f32 = 60.0;         // Frames between drains (1 second at 60fps)
 
 // ============================================================================
 // AMINO ACID PROPERTIES
@@ -781,12 +782,12 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
 
         let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
         let sample_pos = center + offset;
-        
+
         // Skip out-of-bounds samples (treat as zero)
         if (!is_in_bounds(sample_pos)) {
             continue;
         }
-        
+
         let idx = grid_index(sample_pos);
 
         // Distance-based gaussian weight: exp(-d^2 / (2*sigma^2))
@@ -851,12 +852,12 @@ fn sample_magnitude_only(center: vec2<f32>, base_radius: f32, seed: u32, grid_ty
 
         let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
         let sample_pos = center + offset;
-        
+
         // Skip out-of-bounds samples (treat as zero)
         if (!is_in_bounds(sample_pos)) {
             continue;
         }
-        
+
         let idx = grid_index(sample_pos);
 
         // Distance-based gaussian weight only (NO directional component)
@@ -1939,8 +1940,9 @@ fn render_body_part_ctx(
                 draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
             }
         } else {
-            // Not draining - show normal red asterisk
-            let mouth_color = vec3<f32>(1.0, 0.0, 0.0); // Bright red
+            // Not draining - color based on agent's total energy (cyan = high energy, red = low)
+            let energy_ratio = clamp(agent_energy / 1000.0, 0.0, 1.0);
+            let mouth_color = mix(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 1.0), energy_ratio);
             draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
         }
     }
@@ -2207,7 +2209,9 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
 
                 let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                let neighbor_id = atomicLoad(&agent_spatial_grid[check_idx]);
+                let raw_neighbor_id = atomicLoad(&agent_spatial_grid[check_idx]);
+                // Unmask high bit to get actual agent ID
+                let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
 
                 if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                     let neighbor = agents_in[neighbor_id];
@@ -2231,21 +2235,20 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Process each vampire mouth organ (F=4u, G=5u, H=6u)
     var total_energy_gained = 0.0;
 
-    // Simple enabler check: count enablers in the agent (using fixed loops)
-    var has_enabler_nearby = false;
-    for (var e = 0u; e < MAX_BODY_PARTS; e++) {
-        if (e >= body_count) { break; }
-        let e_part = agents_in[agent_id].body[e];
-        let e_base = get_base_part_type(e_part.part_type);
-        let e_props = get_amino_acid_properties(e_base);
-        if (e_props.is_inhibitor) {
-            has_enabler_nearby = true;
-            break;
+    // Check for enabler/disabler organs to control vampire mouth activity
+    var enabler_sum = 0.0;
+    var disabler_sum = 0.0;
+    for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+        if (i >= body_count) { break; }
+        let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
+        if (base_type == 26u) {  // Enabler
+            enabler_sum += 1.0;
+        } else if (base_type == 27u) {  // Disabler
+            disabler_sum += 1.0;
         }
     }
-
-    // Vampire mouths are active when NO enablers present (inverted logic)
-    let global_mouth_activity = select(1.0, 0.0, has_enabler_nearby);
+    // Normal mode: positive enabler_sum enables, positive disabler_sum disables
+    let global_mouth_activity = clamp(enabler_sum - disabler_sum, 0.0, 1.0);
 
     if (global_mouth_activity > 0.01) {
         for (var i = 0u; i < MAX_BODY_PARTS; i++) {
@@ -2255,6 +2258,13 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Check if this is a vampire mouth organ (type 33)
             if (base_type == 33u) {
+                // Decrement cooldown timer (stored in _pad.x)
+                var current_cooldown = agents_in[agent_id].body[i]._pad.x;
+                if (current_cooldown > 0.0) {
+                    current_cooldown -= 1.0;
+                    agents_in[agent_id].body[i]._pad.x = current_cooldown;
+                }
+
                 // Get mouth world position
                 let part_pos = part.pos;
                 let rotated_pos = apply_agent_rotation(part_pos, agents_in[agent_id].rotation);
@@ -2283,42 +2293,60 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Drain from closest victim only
                 if (closest_victim_id != 0xFFFFFFFFu) {
                     // Try to claim the victim's spatial grid cell atomically
-                    // This prevents multiple vampires from draining the same victim simultaneously
+                    // This prevents multiple DIFFERENT vampires from draining the same victim simultaneously
+                    // But allows the same vampire to drain with multiple mouths
                     let victim_pos = agents_in[closest_victim_id].position;
                     let victim_scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
                     let victim_grid_x = u32(clamp(victim_pos.x * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
                     let victim_grid_y = u32(clamp(victim_pos.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
                     let victim_grid_idx = victim_grid_y * SPATIAL_GRID_SIZE + victim_grid_x;
 
-                    // Atomic claim: try to replace victim_id with CLAIMED marker
-                    let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[victim_grid_idx], closest_victim_id, SPATIAL_GRID_CLAIMED);
+                    // Atomic claim: mark victim with high bit to indicate it's being drained this frame
+                    // The high bit preserves the victim ID for physics (unmask with & 0x7FFFFFFF)
+                    // Once marked, the same vampire can drain with multiple mouths
+                    let current_cell = atomicLoad(&agent_spatial_grid[victim_grid_idx]);
+                    var can_drain = false;
+                    
+                    // Check if cell contains the victim (with or without high bit)
+                    let cell_agent_id = current_cell & 0x7FFFFFFFu;
+                    let is_claimed = (current_cell & 0x80000000u) != 0u;
+                    
+                    if (cell_agent_id == closest_victim_id && !is_claimed) {
+                        // Victim is unclaimed - try to mark with high bit
+                        let claimed_victim_id = closest_victim_id | 0x80000000u;
+                        let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[victim_grid_idx], closest_victim_id, claimed_victim_id);
+                        can_drain = claim_result.exchanged;
+                    } else if (cell_agent_id == closest_victim_id && is_claimed) {
+                        // Victim is already marked (claimed this frame) - allow same vampire to drain again
+                        can_drain = true;
+                    }
 
-                    // Only proceed if we successfully claimed this victim (we were the first vampire to reach it)
-                    if (claim_result.exchanged) {
-                        // Distance-based drain: linear inverse proportion
-                        // At distance 0: drain more energy
-                        // At distance 100: drain 0%
-                        let distance_factor = 1.0 - (closest_dist / max_drain_distance);
-
-                        // NOW read victim energy AFTER successful claim (prevents race condition)
+                    // Only proceed if we can drain this victim AND cooldown is ready
+                    if (can_drain && current_cooldown <= 0.0) {
+                        // INSTANT KILL: Vampire drains ALL energy from victim
                         let victim_energy = agents_in[closest_victim_id].energy;
 
-                        // Calculate base drain amount (up to 50% of victim's energy)
-                        let base_drain = distance_factor * victim_energy * 0.5;
+                        // Distance-based falloff: full power at 0 distance, 0 power at max_drain_distance
+                        let distance_factor = max(0.0, 1.0 - (closest_dist / max_drain_distance));
+                        
+                        // Apply global mouth activity and distance falloff to determine if kill succeeds
+                        let kill_effectiveness = distance_factor * global_mouth_activity;
 
                         // Check if victim has any energy and we're in range
-                        if (victim_energy > 0.0001 && base_drain > 0.0001) {
-                            // Vampire absorbs the drain amount
-                            let absorbed_energy = base_drain;
+                        if (victim_energy > 0.0001 && kill_effectiveness > 0.01) {
+                            // Vampire absorbs ALL victim's energy
+                            let absorbed_energy = victim_energy * kill_effectiveness;
 
-                            // Victim loses exactly what vampire absorbed (no extra penalty)
-                            let new_victim_energy = max(0.0, victim_energy - absorbed_energy);
-                            agents_in[closest_victim_id].energy = new_victim_energy;
+                            // Victim loses ALL energy (instant death)
+                            agents_in[closest_victim_id].energy = 0.0;
 
                             total_energy_gained += absorbed_energy;
 
                             // Store absorbed amount in _pad.y for visualization
                             agents_in[agent_id].body[i]._pad.y = absorbed_energy;
+                            
+                            // Set cooldown timer
+                            agents_in[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
                         } else {
                             agents_in[agent_id].body[i]._pad.y = 0.0;
                         }
@@ -2509,10 +2537,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Persist smoothed angle in _pad.x for regular amino acids only
             // Organs (condensers, clocks) use _pad for their own state storage
+            // EXCEPTION: Vampire mouths (type 33) need _pad.y preserved for visualization
             let is_organ = (base_type >= 20u);
+            let is_vampire_mouth = (base_type == 33u);
             if (!is_organ) {
                 let keep_pad_y = agents_out[agent_id].body[i]._pad.y;
                 agents_out[agent_id].body[i]._pad = vec2<f32>(smoothed_signal, keep_pad_y);
+            } else if (is_vampire_mouth) {
+                // Vampire mouths: preserve both cooldown (_pad.x) and drain amount (_pad.y)
+                let cooldown = agents_in[agent_id].body[i]._pad.x;
+                let drain_amount = agents_in[agent_id].body[i]._pad.y;
+                agents_out[agent_id].body[i]._pad = vec2<f32>(cooldown, drain_amount);
             }
         }
 
@@ -2628,7 +2663,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
 
                 let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                let neighbor_id = atomicLoad(&agent_spatial_grid[check_idx]);
+                let raw_neighbor_id = atomicLoad(&agent_spatial_grid[check_idx]);
+                // Unmask high bit to get actual agent ID (vampire claim bit)
+                let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
 
                 if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                     let neighbor = agents_in[neighbor_id];
@@ -3449,7 +3486,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
         let world_pos = agent.position + rotated_pos;
         let idx = grid_index(world_pos);
-        
+
         // Calculate actual mouth speed including rotation (distance moved since last frame)
         // Check if this looks like first frame (prev_world_pos near zero or equal to current pos)
         let packed_prev = bitcast<u32>(agents_out[agent_id].body[i]._pad.x);
@@ -3461,10 +3498,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let mouth_speed = select(sqrt(displacement_sq), 0.0, looks_like_first);
         let normalized_mouth_speed = mouth_speed / VEL_MAX;
         let speed_absorption_multiplier = exp(-8.0 * normalized_mouth_speed);
-        
+
         // Update previous world position for next frame (pack into _pad.x)
         agents_out[agent_id].body[i]._pad.x = bitcast<f32>(pack_prev_pos(world_pos));
-        
+
         // Debug output for first agent only
         if (agent_id == 0u && params.debug_mode != 0u && i == 0u) {
             agents_out[agent_id].body[63].pos.x = mouth_speed;
@@ -3483,6 +3520,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         trail_grid[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), blended_energy);
 
         // 2) Energy consumption: calculate costs per organ type
+        // Calculate global vampire mouth activity for this agent (used for vampire mouth cost)
+        var global_mouth_activity = 1.0; // Default: active
+        if (base_type == 33u) { // Only calculate for vampire mouths
+            var enabler_sum = 0.0;
+            var disabler_sum = 0.0;
+            for (var j = 0u; j < agents_out[agent_id].body_count; j++) {
+                let check_type = get_base_part_type(agents_out[agent_id].body[j].part_type);
+                if (check_type == 26u) { enabler_sum += 1.0; }      // Enabler
+                else if (check_type == 27u) { disabler_sum += 1.0; } // Disabler
+            }
+            global_mouth_activity = clamp(enabler_sum - disabler_sum, 0.0, 1.0);
+        }
+        
         // Minimum baseline cost per amino acid (always paid)
         let baseline = params.amino_maintenance_cost;
         // Organ-specific energy costs
@@ -3554,6 +3604,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let amp = amplification_per_part[i];
             let activity_cost = props.energy_consumption * amp * amp * 1.5;
             organ_extra = props.energy_consumption + activity_cost; // Base + activity
+        } else if (base_type == 33u) {
+            // Vampire mouths: high cost when active (global_mouth_activity from enablers/disablers)
+            // Base cost always paid, but heavy penalty when actively draining
+            let amp = amplification_per_part[i];
+            let activity_cost = props.energy_consumption * global_mouth_activity * amp * 3.0; // 3x multiplier for vampire cost
+            organ_extra = props.energy_consumption + activity_cost; // Base + activity penalty
         } else {
             // Other organs use linear amplification scaling
             let amp = amplification_per_part[i];
@@ -5746,7 +5802,10 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         let grid_x = u32(clamp(world_x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
         let grid_y = u32(clamp(world_y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
         let grid_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
-        let agent_id = atomicLoad(&agent_spatial_grid[grid_idx]);
+        let raw_agent_id = atomicLoad(&agent_spatial_grid[grid_idx]);
+        // Unmask high bit to get actual agent ID (vampire claim bit)
+        let agent_id = raw_agent_id & 0x7FFFFFFFu;
+        let is_claimed = (raw_agent_id & 0x80000000u) != 0u;
 
         // If cell contains an agent, tint it
         if (agent_id != SPATIAL_GRID_EMPTY && agent_id != SPATIAL_GRID_CLAIMED) {
@@ -5755,7 +5814,12 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             let r = f32((hash >> 0u) & 0xFFu) / 255.0;
             let g = f32((hash >> 8u) & 0xFFu) / 255.0;
             let b = f32((hash >> 16u) & 0xFFu) / 255.0;
-            let debug_color = vec3<f32>(r, g, b);
+            var debug_color = vec3<f32>(r, g, b);
+            
+            // If claimed (vampire draining), tint it red
+            if (is_claimed) {
+                debug_color = mix(debug_color, vec3<f32>(1.0, 0.0, 0.0), 0.6);
+            }
 
             // Blend debug color with base color (50% opacity)
             base_color = mix(base_color, debug_color, 0.5);
@@ -7016,7 +7080,7 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let agent = agents_out[agent_id];
+    let agent = agents_in[agent_id];
 
     // Skip dead agents
     if (agent.alive == 0u || agent.energy <= 0.0) {
