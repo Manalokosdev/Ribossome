@@ -333,20 +333,20 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
         max_dist = max(max_dist, dist);
     }
 
-    let radius = max_dist + 5.0; // Add some padding
-    let num_segments = 64u; // Circle segments
-    let color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Yellow circle
+    let color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Yellow crosshair
 
-    // Draw circle as line segments
-    for (var i = 0u; i < num_segments; i++) {
-        let angle1 = f32(i) / f32(num_segments) * 6.28318530718;
-        let angle2 = f32(i + 1u) / f32(num_segments) * 6.28318530718;
+    // Draw crosshair with fixed radius (4 long arms)
+    let fixed_radius = 25.0;  // Fixed distance from center
+    let arm_length = 30.0;    // Length of each arm
 
-        let p1 = center_pos + vec2<f32>(cos(angle1) * radius, sin(angle1) * radius);
-        let p2 = center_pos + vec2<f32>(cos(angle2) * radius, sin(angle2) * radius);
-
-        draw_thick_line(p1, p2, 2.0, color);
-    }
+    // Top arm
+    draw_line(center_pos + vec2<f32>(0.0, fixed_radius), center_pos + vec2<f32>(0.0, fixed_radius + arm_length), color);
+    // Right arm
+    draw_line(center_pos + vec2<f32>(fixed_radius, 0.0), center_pos + vec2<f32>(fixed_radius + arm_length, 0.0), color);
+    // Bottom arm
+    draw_line(center_pos + vec2<f32>(0.0, -fixed_radius), center_pos + vec2<f32>(0.0, -fixed_radius - arm_length), color);
+    // Left arm
+    draw_line(center_pos + vec2<f32>(-fixed_radius, 0.0), center_pos + vec2<f32>(-fixed_radius - arm_length, 0.0), color);
 }
 
 // ============================================================================
@@ -2181,109 +2181,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         pairing_counter = 0u;
     }
     agents_out[agent_id].pairing_counter = pairing_counter;
-
-    // ====== FRUSTUM CULLING & RENDERING ======
-    // Skip rendering if no body parts (will die from energy loss naturally)
-    if (agents_out[agent_id].body_count == 0u) {
-        agents_out[agent_id].position = agent.position;
-        agents_out[agent_id].velocity = agent.velocity;
-        agents_out[agent_id].rotation = agent.rotation;
-        agents_out[agent_id].energy = agent.energy;
-        agents_out[agent_id].alive = agent.alive;
-        // pairing_counter and rna_progress already written above
-        return;
-    }
-
-    // Calculate camera bounds with aspect ratio
-    let aspect_ratio = params.window_width / params.window_height;
-    let camera_half_height = params.grid_size / (2.0 * params.camera_zoom);
-    let camera_half_width = camera_half_height * aspect_ratio;
-    let camera_center = vec2<f32>(params.camera_pan_x, params.camera_pan_y);
-    let camera_min = camera_center - vec2<f32>(camera_half_width, camera_half_height);
-    let camera_max = camera_center + vec2<f32>(camera_half_width, camera_half_height);
-
-    // ====== RENDERING (only if draw is enabled) ======
-    if (params.draw_enabled != 0u) {
-        // Check if agent is visible and render it at its position only (no wrapping)
-        let margin = 20.0; // Maximum body extent
-        let center = agent.position;
-        if (center.x + margin >= camera_min.x && center.x - margin <= camera_max.x &&
-            center.y + margin >= camera_min.y && center.y - margin <= camera_max.y) {
-            // Agent is visible - render it
-            let in_debug_mode = params.debug_mode != 0u;
-
-            // Get the morphology origin (where the chain starts in local space after CoM centering)
-            let morphology_origin = agents_out[agent_id].morphology_origin;
-
-            // Draw all body parts using unified rendering function
-            for (var i = 0u; i < min(agents_out[agent_id].body_count, MAX_BODY_PARTS); i++) {
-                let part = agents_out[agent_id].body[i];
-                let jet_amplification = amplification_per_part[i];
-                render_body_part(
-                    part,
-                    i,
-                    agent_id,
-                    center,
-                    agent.rotation,
-                    agent.energy,
-                    agent_color,
-                    agents_out[agent_id].body_count,
-                    morphology_origin,
-                    jet_amplification,
-                    in_debug_mode
-                );
-            }
-
-        if (in_debug_mode) {
-            // Draw center cross marker only in debug mode
-            let cross_size = 3.0;
-            draw_thick_line(
-                center + vec2<f32>(-cross_size, 0.0),
-                center + vec2<f32>(cross_size, 0.0),
-                0.5,
-                vec4<f32>(1.0, 1.0, 1.0, 1.0),
-            );
-            draw_thick_line(
-                center + vec2<f32>(0.0, -cross_size),
-                center + vec2<f32>(0.0, cross_size),
-                0.5,
-                vec4<f32>(1.0, 1.0, 1.0, 1.0),
-            );
-
-            // Check if agent has vampire mouth (organ 33) and mark with red circle
-            var has_vampire_mouth = false;
-            for (var i = 0u; i < min(agents_out[agent_id].body_count, MAX_BODY_PARTS); i++) {
-                let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
-                if (base_type == 33u) {
-                    has_vampire_mouth = true;
-                    break;
-                }
-            }
-
-            if (has_vampire_mouth) {
-                // Draw red circle around agent with vampire mouth
-                let circle_radius = 15.0;
-                let segments = 24u;
-                var prev = center + vec2<f32>(circle_radius, 0.0);
-                for (var s = 1u; s <= segments; s++) {
-                    let t = f32(s) / f32(segments);
-                    let ang = t * 6.28318530718;
-                    let p = center + vec2<f32>(cos(ang) * circle_radius, sin(ang) * circle_radius);
-                    draw_thick_line(prev, p, 2.0, vec4<f32>(1.0, 0.0, 0.0, 0.9));
-                    prev = p;
-                }
-            }
-        }
-
-            // Debug: count visible agents
-            atomicAdd(&debug_counter, 1u);
-
-            // Draw selection circle if this agent is selected
-            if (agent.is_selected == 1u) {
-                draw_selection_circle(agent.position, agent_id, body_count);
-            }
-        }
-    } // End of drw_en
 
     // Always write selected agent to readback buffer for inspector (even when drawing disabled)
     if (agent.is_selected == 1u) {
@@ -4797,6 +4694,145 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Draw the character with organ color
         let char_pos = vec2<f32>(current_x, current_y);
         current_x += draw_char_vector(char_pos, letter, text_height, letter_color, text_ctx);
+    }
+}
+
+// ============================================================================
+// AGENT RENDERING KERNEL
+// ============================================================================
+
+// Dedicated kernel to render all agents to agent_grid
+// This runs after process_agents and before composite_agents
+@compute @workgroup_size(256)
+fn render_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (params.draw_enabled == 0u) { return; }
+    
+    let agent_id = gid.x;
+    if (agent_id >= params.max_agents) {
+        return;
+    }
+
+    // Only render alive agents
+    if (agents_out[agent_id].alive == 0u) {
+        return;
+    }
+
+    // Skip if no body parts
+    let body_count = agents_out[agent_id].body_count;
+    if (body_count == 0u) {
+        return;
+    }
+
+    // Calculate camera bounds with aspect ratio
+    let aspect_ratio = params.window_width / params.window_height;
+    let camera_half_height = params.grid_size / (2.0 * params.camera_zoom);
+    let camera_half_width = camera_half_height * aspect_ratio;
+    let camera_center = vec2<f32>(params.camera_pan_x, params.camera_pan_y);
+    let camera_min = camera_center - vec2<f32>(camera_half_width, camera_half_height);
+    let camera_max = camera_center + vec2<f32>(camera_half_width, camera_half_height);
+
+    // Frustum culling - check if agent is visible
+    let margin = 20.0; // Maximum body extent
+    let center = agents_out[agent_id].position;
+    if (center.x + margin < camera_min.x || center.x - margin > camera_max.x ||
+        center.y + margin < camera_min.y || center.y - margin > camera_max.y) {
+        return; // Not visible, skip rendering
+    }
+
+    // Agent is visible - render it
+    let in_debug_mode = params.debug_mode != 0u;
+
+    // Calculate agent color
+    var color_sum = 0.0;
+    for (var i = 0u; i < MAX_BODY_PARTS; i++) {
+        if (i < body_count) {
+            let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+            let part_props = get_amino_acid_properties(base_type);
+            color_sum += part_props.beta_damage;
+        }
+    }
+    let agent_color = vec3<f32>(
+        sin(color_sum * 3.0) * 0.5 + 0.5,
+        sin(color_sum * 5.0) * 0.5 + 0.5,
+        sin(color_sum * 7.0) * 0.5 + 0.5
+    );
+
+    // Get the morphology origin
+    let morphology_origin = agents_out[agent_id].morphology_origin;
+
+    // Draw all body parts using unified rendering function
+    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+        let part = agents_out[agent_id].body[i];
+        // Calculate jet amplification for this part
+        var jet_amplification = 1.0;
+        if (get_base_part_type(part.part_type) == 23u) { // Jet organ
+            let alpha_signal = part.alpha_signal;
+            let beta_signal = part.beta_signal;
+            jet_amplification = sqrt(alpha_signal * alpha_signal + beta_signal * beta_signal) * 3.0;
+        }
+        
+        render_body_part(
+            part,
+            i,
+            agent_id,
+            center,
+            agents_out[agent_id].rotation,
+            agents_out[agent_id].energy,
+            agent_color,
+            body_count,
+            morphology_origin,
+            jet_amplification,
+            in_debug_mode
+        );
+    }
+
+    if (in_debug_mode) {
+        // Draw center cross marker only in debug mode
+        let cross_size = 3.0;
+        draw_thick_line(
+            center + vec2<f32>(-cross_size, 0.0),
+            center + vec2<f32>(cross_size, 0.0),
+            0.5,
+            vec4<f32>(1.0, 1.0, 1.0, 1.0),
+        );
+        draw_thick_line(
+            center + vec2<f32>(0.0, -cross_size),
+            center + vec2<f32>(0.0, cross_size),
+            0.5,
+            vec4<f32>(1.0, 1.0, 1.0, 1.0),
+        );
+
+        // Check if agent has vampire mouth (organ 33) and mark with red circle
+        var has_vampire_mouth = false;
+        for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+            let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+            if (base_type == 33u) {
+                has_vampire_mouth = true;
+                break;
+            }
+        }
+
+        if (has_vampire_mouth) {
+            // Draw red circle around agent with vampire mouth
+            let circle_radius = 15.0;
+            let segments = 24u;
+            var prev = center + vec2<f32>(circle_radius, 0.0);
+            for (var s = 1u; s <= segments; s++) {
+                let t = f32(s) / f32(segments);
+                let ang = t * 6.28318530718;
+                let p = center + vec2<f32>(cos(ang) * circle_radius, sin(ang) * circle_radius);
+                draw_thick_line(prev, p, 2.0, vec4<f32>(1.0, 0.0, 0.0, 0.9));
+                prev = p;
+            }
+        }
+    }
+
+    // Debug: count visible agents
+    atomicAdd(&debug_counter, 1u);
+
+    // Draw selection circle if this agent is selected
+    if (agents_out[agent_id].is_selected == 1u) {
+        draw_selection_circle(center, agent_id, body_count);
     }
 }
 

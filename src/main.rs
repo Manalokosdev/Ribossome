@@ -1309,6 +1309,7 @@ struct GpuState {
     clear_visual_pipeline: wgpu::ComputePipeline,
     motion_blur_pipeline: wgpu::ComputePipeline,
     clear_agent_grid_pipeline: wgpu::ComputePipeline,
+    render_agents_pipeline: wgpu::ComputePipeline, // Render all agents to agent_grid
     render_inspector_pipeline: wgpu::ComputePipeline,
     draw_inspector_agent_pipeline: wgpu::ComputePipeline,
     composite_agents_pipeline: wgpu::ComputePipeline,
@@ -2805,6 +2806,17 @@ impl GpuState {
             });
         profiler.mark("draw inspector agent pipeline");
 
+        let render_agents_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Render Agents Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "render_agents",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("render agents pipeline");
+
         let composite_agents_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Composite Agents Pipeline"),
@@ -3158,6 +3170,7 @@ impl GpuState {
             clear_visual_pipeline,
             motion_blur_pipeline,
             clear_agent_grid_pipeline,
+            render_agents_pipeline,
             render_inspector_pipeline,
             draw_inspector_agent_pipeline,
             composite_agents_pipeline,
@@ -4665,6 +4678,12 @@ impl GpuState {
 
             // Composite agents onto visual grid when drawing
             if should_draw {
+                // Render all agents to agent_grid
+                cpass.set_pipeline(&self.render_agents_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                // Composite agent_grid onto visual_grid
                 cpass.set_pipeline(&self.composite_agents_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 let width_workgroups =
