@@ -2306,11 +2306,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Once marked, the same vampire can drain with multiple mouths
                     let current_cell = atomicLoad(&agent_spatial_grid[victim_grid_idx]);
                     var can_drain = false;
-                    
+
                     // Check if cell contains the victim (with or without high bit)
                     let cell_agent_id = current_cell & 0x7FFFFFFFu;
                     let is_claimed = (current_cell & 0x80000000u) != 0u;
-                    
+
                     if (cell_agent_id == closest_victim_id && !is_claimed) {
                         // Victim is unclaimed - try to mark with high bit
                         let claimed_victim_id = closest_victim_id | 0x80000000u;
@@ -2328,7 +2328,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                         // Distance-based falloff: full power at 0 distance, 0 power at max_drain_distance
                         let distance_factor = max(0.0, 1.0 - (closest_dist / max_drain_distance));
-                        
+
                         // Apply global mouth activity and distance falloff to determine if kill succeeds
                         let kill_effectiveness = distance_factor * global_mouth_activity;
 
@@ -2344,7 +2344,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                             // Store absorbed amount in _pad.y for visualization
                             agents_in[agent_id].body[i]._pad.y = absorbed_energy;
-                            
+
                             // Set cooldown timer
                             agents_in[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
                         } else {
@@ -3532,7 +3532,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             global_mouth_activity = clamp(enabler_sum - disabler_sum, 0.0, 1.0);
         }
-        
+
         // Minimum baseline cost per amino acid (always paid)
         let baseline = params.amino_maintenance_cost;
         // Organ-specific energy costs
@@ -5815,7 +5815,7 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             let g = f32((hash >> 8u) & 0xFFu) / 255.0;
             let b = f32((hash >> 16u) & 0xFFu) / 255.0;
             var debug_color = vec3<f32>(r, g, b);
-            
+
             // If claimed (vampire draining), tint it red
             if (is_claimed) {
                 debug_color = mix(debug_color, vec3<f32>(1.0, 0.0, 0.0), 0.6);
