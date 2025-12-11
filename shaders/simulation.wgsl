@@ -2567,6 +2567,9 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Normal mode: additive blending with opacity control (controlled by trail_opacity parameter)
         let blended_color = clamp(base_color + trail_color * clamp(params.trail_opacity, 0.0, 1.0), vec3<f32>(0.0), vec3<f32>(1.0));
         visual_grid[visual_idx] = vec4<f32>(blended_color, 1.0);
+    }
+}
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
