@@ -82,29 +82,30 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Process each vampire mouth organ (F=4u, G=5u, H=6u)
     var total_energy_gained = 0.0;
 
-    // Check for enabler/disabler organs to control vampire mouth activity
-    var enabler_sum = 0.0;
-    var disabler_sum = 0.0;
     for (var i = 0u; i < MAX_BODY_PARTS; i++) {
         if (i >= body_count) { break; }
-        let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
-        if (base_type == 26u) {  // Enabler
-            enabler_sum += 1.0;
-        } else if (base_type == 27u) {  // Disabler
-            disabler_sum += 1.0;
-        }
-    }
-    // DISABLED: Vampire mouths always work regardless of enablers/disablers
-    let global_mouth_activity = 1.0; // clamp(enabler_sum - disabler_sum, 0.0, 1.0);
+        let part = agents_in[agent_id].body[i];
+        let base_type = get_base_part_type(part.part_type);
 
-    if (true) { // global_mouth_activity > 0.01
-        for (var i = 0u; i < MAX_BODY_PARTS; i++) {
-            if (i >= body_count) { break; }
-            let part = agents_in[agent_id].body[i];
-            let base_type = get_base_part_type(part.part_type);
-
-            // Check if this is a vampire mouth organ (type 33)
-            if (base_type == 33u) {
+        // Check if this is a vampire mouth organ (type 33)
+        if (base_type == 33u) {
+            // Calculate amplification from nearby enablers (inverted - they act as disablers for vampire mouths)
+            let part_pos = agents_in[agent_id].body[i].pos;
+            var disabler_strength = 0.0;
+            for (var j = 0u; j < min(body_count, MAX_BODY_PARTS); j++) {
+                let check_type = get_base_part_type(agents_in[agent_id].body[j].part_type);
+                if (check_type == 26u) {  // Enabler acts as disabler for vampire mouths
+                    let enabler_pos = agents_in[agent_id].body[j].pos;
+                    let d = length(part_pos - enabler_pos);
+                    if (d < 20.0) {
+                        disabler_strength += max(0.0, 1.0 - d / 20.0);
+                    }
+                }
+            }
+            disabler_strength = min(disabler_strength, 1.0);
+            
+            // Only work if NOT disabled (inverted logic)
+            if (disabler_strength < 0.99) {
                 // Decrement cooldown timer (stored in _pad.x)
                 var current_cooldown = agents_in[agent_id].body[i]._pad.x;
                 if (current_cooldown > 0.0) {
@@ -120,7 +121,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Find closest victim within drain range
                 var closest_victim_id = 0xFFFFFFFFu;
                 var closest_dist = 999999.0;
-                let max_drain_distance = 100.0;
+                let max_drain_distance = 50.0; // Fixed 50 unit radius
 
                 for (var n = 0u; n < neighbor_count; n++) {
                     let victim_id = neighbor_ids[n];
@@ -170,22 +171,16 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Only proceed if we can drain this victim AND cooldown is ready
                     if (can_drain && current_cooldown <= 0.0) {
-                        // INSTANT KILL: Vampire drains ALL energy from victim
+                        // Vampire drains 50% of victim's energy (fixed rate, no distance falloff)
                         let victim_energy = agents_in[closest_victim_id].energy;
 
-                        // Distance-based falloff: full power at 0 distance, 0 power at max_drain_distance
-                        let distance_factor = max(0.0, 1.0 - (closest_dist / max_drain_distance));
+                        if (victim_energy > 0.0001) {
+                            // Absorb 50% of victim's energy
+                            let absorbed_energy = victim_energy * 0.5;
 
-                        // Apply global mouth activity and distance falloff to determine if kill succeeds
-                        let kill_effectiveness = distance_factor * global_mouth_activity;
-
-                        // Minimum 10% absorption threshold - don't kill if effectiveness is too low
-                        if (victim_energy > 0.0001 && kill_effectiveness >= 0.1) {
-                            // Vampire absorbs ALL victim's energy (minimum 10% effectiveness ensures worthwhile kill)
-                            let absorbed_energy = victim_energy * kill_effectiveness;
-
-                            // Victim loses ALL energy (instant death)
-                            agents_in[closest_victim_id].energy = 0.0;
+                            // Victim loses 1.5x the absorbed energy (75% total damage)
+                            let energy_damage = absorbed_energy * 1.5;
+                            agents_in[closest_victim_id].energy = max(0.0, victim_energy - energy_damage);
 
                             total_energy_gained += absorbed_energy;
 
@@ -198,15 +193,19 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             agents_in[agent_id].body[i]._pad.y = 0.0;
                         }
 
-                        // Keep cell claimed (cleared next frame) - this prevents other vampires from attacking same victim
                     } else {
-                        // Failed to claim - another vampire got here first
-                        agents_in[agent_id].body[i]._pad.y = 0.0;
+                        // Keep cell claimed (cleared next frame) - this prevents other vampires from attacking same victim
                     }
                 } else {
+                    // Failed to claim - another vampire got here first
                     agents_in[agent_id].body[i]._pad.y = 0.0;
                 }
+            } else {
+                agents_in[agent_id].body[i]._pad.y = 0.0;
             }
+        } else {
+            // Not enough amplification - clear visualization
+            agents_in[agent_id].body[i]._pad.y = 0.0;
         }
     }
 
@@ -316,7 +315,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         total_mass_morphology = 0.0;
         color_sum_morphology = 0.0;
         var poison_resistant_count = 0u;
-        var vampiric_mouth_count = 0u;
 
         // Loop through existing body parts and rebuild positions
         for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
@@ -332,11 +330,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Count poison-resistant organs (type 29) for signal angle modulation
             if (base_type == 29u) {
                 poison_resistant_count += 1u;
-            }
-
-            // Count vampiric mouth organs (type 33) for normal mouth reduction
-            if (base_type == 33u) {
-                vampiric_mouth_count += 1u;
             }
 
             let props = get_amino_acid_properties(base_type);
@@ -1335,11 +1328,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let idx = grid_index(world_pos);
 
         // Calculate actual mouth speed for mouth organs (distance moved since last frame)
-        // Only mouths need to track previous position for speed-based absorption
+        // Only non-vampire mouths need to track previous position for speed-based absorption
+        // Vampire mouths use _pad.x for cooldown tracking instead
         var mouth_speed = 0.0;
         var speed_absorption_multiplier = 1.0;
 
-        if (props.is_mouth) {
+        if (props.is_mouth && base_type != 33u) {
             let packed_prev = bitcast<u32>(agents_out[agent_id].body[i]._pad.x);
             let prev_pos = unpack_prev_pos(packed_prev);
             let displacement_vec = world_pos - prev_pos;
@@ -1350,7 +1344,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let normalized_mouth_speed = mouth_speed / VEL_MAX;
             speed_absorption_multiplier = exp(-8.0 * normalized_mouth_speed);
 
-            // Update previous world position for next frame (only for mouths)
+            // Update previous world position for next frame (only for non-vampire mouths)
             agents_out[agent_id].body[i]._pad.x = bitcast<f32>(pack_prev_pos(world_pos));
         }
 
@@ -1457,10 +1451,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let activity_cost = props.energy_consumption * amp * amp * 1.5;
             organ_extra = props.energy_consumption + activity_cost; // Base + activity
         } else if (base_type == 33u) {
-            // Vampire mouths: moderate maintenance cost (passive organ)
-            // No activity penalty - cost is balanced by cooldown and risk
-            let amp = amplification_per_part[i];
-            organ_extra = props.energy_consumption * amp * 0.5; // Low cost: vampires rely on successful hunts
+            // Vampire mouths: 3x base mouth cost (increased maintenance)
+            organ_extra = props.energy_consumption * 3.0;
         } else {
             // Other organs use linear amplification scaling
             let amp = amplification_per_part[i];

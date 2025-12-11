@@ -8,10 +8,10 @@
 // CONSTANTS
 // ============================================================================
 
-const ENV_GRID_SIZE: u32 = 1024u;      // Environment grid resolution (alpha/beta/gamma)
+const ENV_GRID_SIZE: u32 = 2048u;      // Environment grid resolution (alpha/beta/gamma)
 const GRID_SIZE: u32 = ENV_GRID_SIZE;  // Alias for backward compatibility
-const SPATIAL_GRID_SIZE: u32 = 512u;   // Spatial hash grid for agent collision detection
-const SIM_SIZE: u32 = 15360u;          // Simulation world size (reduced to half)
+const SPATIAL_GRID_SIZE: u32 = 1024u;   // Spatial hash grid for agent collision detection
+const SIM_SIZE: u32 = 30720u;          // Simulation world size (doubled)
 const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 256u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader

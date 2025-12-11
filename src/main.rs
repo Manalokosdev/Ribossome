@@ -23,12 +23,12 @@ use winit::{
     window::Window,
 };
 
-const GRID_DIM: usize = 1024; // Environment grid resolution (alpha/beta/gamma)
+const SIM_SIZE: f32 = 30720.0; // World size (must match shader SIM_SIZE)
+const GRID_DIM: usize = (SIM_SIZE / 15.0) as usize; // Environment grid resolution (alpha/beta/gamma) - derived from SIM_SIZE
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
-const SPATIAL_GRID_DIM: usize = 512; // Spatial hash grid for agent collision detection
+const SPATIAL_GRID_DIM: usize = (SIM_SIZE / 30.0) as usize; // Spatial hash grid for agent collision detection - derived from SIM_SIZE
 const SPATIAL_GRID_CELL_COUNT: usize = SPATIAL_GRID_DIM * SPATIAL_GRID_DIM;
-const SIM_SIZE: f32 = 15360.0; // World size (must match shader SIM_SIZE)
 const DIFFUSE_WG_SIZE_X: u32 = 16;
 const DIFFUSE_WG_SIZE_Y: u32 = 16;
 const CLEAR_WG_SIZE_X: u32 = 16;
@@ -1830,7 +1830,7 @@ impl GpuState {
         profiler.mark("egui renderer");
 
         // Initialize agents with minimal data - GPU will generate genome and build body
-        let max_agents = 20_000usize; // Lowered to reduce VRAM pressure (3.4 KB/agent => ~68 MB per agent buffer)
+        let max_agents = 50_000usize; // Increased with 2x world size (4x area): 3.4 KB/agent => ~170 MB per agent buffer
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
