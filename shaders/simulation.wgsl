@@ -89,10 +89,10 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
             disabler_sum += 1.0;
         }
     }
-    // Normal mode: positive enabler_sum enables, positive disabler_sum disables
-    let global_mouth_activity = clamp(enabler_sum - disabler_sum, 0.0, 1.0);
+    // DISABLED: Vampire mouths always work regardless of enablers/disablers
+    let global_mouth_activity = 1.0; // clamp(enabler_sum - disabler_sum, 0.0, 1.0);
 
-    if (global_mouth_activity > 0.01) {
+    if (true) { // global_mouth_activity > 0.01
         for (var i = 0u; i < MAX_BODY_PARTS; i++) {
             if (i >= body_count) { break; }
             let part = agents_in[agent_id].body[i];
@@ -1367,18 +1367,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         trail_grid[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), blended_energy);
 
         // 2) Energy consumption: calculate costs per organ type
-        // Calculate global vampire mouth activity for this agent (used for vampire mouth cost)
-        var global_mouth_activity = 1.0; // Default: active
-        if (base_type == 33u) { // Only calculate for vampire mouths
-            var enabler_sum = 0.0;
-            var disabler_sum = 0.0;
-            for (var j = 0u; j < agents_out[agent_id].body_count; j++) {
-                let check_type = get_base_part_type(agents_out[agent_id].body[j].part_type);
-                if (check_type == 26u) { enabler_sum += 1.0; }      // Enabler
-                else if (check_type == 27u) { disabler_sum += 1.0; } // Disabler
-            }
-            global_mouth_activity = clamp(enabler_sum - disabler_sum, 0.0, 1.0);
-        }
+        // DISABLED: Vampire mouths always active, no need to calculate enabler sum
+        var global_mouth_activity = 1.0; // Always active
+        // if (base_type == 33u) { // Only calculate for vampire mouths
+        //     var enabler_sum = 0.0;
+        //     var disabler_sum = 0.0;
+        //     for (var j = 0u; j < agents_out[agent_id].body_count; j++) {
+        //         let check_type = get_base_part_type(agents_out[agent_id].body[j].part_type);
+        //         if (check_type == 26u) { enabler_sum += 1.0; }      // Enabler
+        //         else if (check_type == 27u) { disabler_sum += 1.0; } // Disabler
+        //     }
+        //     global_mouth_activity = clamp(enabler_sum - disabler_sum, 0.0, 1.0);
+        // }
 
         // Minimum baseline cost per amino acid (always paid)
         let baseline = params.amino_maintenance_cost;
