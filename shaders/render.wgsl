@@ -69,14 +69,69 @@ fn render_body_part_ctx(
     let is_last = part_index == body_count - 1u;
     let is_single = body_count == 1u;
 
-    // 1. STRUCTURAL RENDERING: Base segment line
-    if (!in_debug_mode) {
-        let thickness = part.size * 0.5;
-        let blended_color = mix(amino_props.color, agent_color, params.agent_color_blend);
-        draw_thick_line_ctx(segment_start_world, world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
-        if (!is_single && (is_first || is_last)) {
-            draw_filled_circle_ctx(world_pos, thickness, vec4<f32>(blended_color, 1.0), ctx);
+    // 1. STRUCTURAL RENDERING: Zigzag line with gradient shading
+    if (!in_debug_mode && base_type < 20u) {
+        // Draw zigzag structure for amino acids
+        let base_color = mix(amino_props.color, agent_color, params.agent_color_blend);
+
+        let seed = base_type * 12345u + 67890u;
+        let segment_length = length(world_pos - segment_start_world);
+        let organ_width = segment_length * 0.15;
+        let line_width = organ_width;
+
+        let point_count = 4u + (base_type % 3u);
+        var prev_pos = segment_start_world;
+
+        for (var i = 1u; i < point_count - 1u; i++) {
+            let t = f32(i) / f32(point_count - 1u);
+            let base_pos = mix(segment_start_world, world_pos, t);
+
+            let offset_seed = seed + i * 9876u;
+            let offset_angle = f32(offset_seed % 628u) / 100.0;
+            let offset_dist = f32((offset_seed / 628u) % 100u) / 100.0 * organ_width * 3.5;
+            let offset = vec2<f32>(cos(offset_angle) * offset_dist, sin(offset_angle) * offset_dist);
+            let curr_pos = base_pos + offset;
+
+            let dark_color = vec4<f32>(base_color * 0.5, 1.0);
+            let light_color = vec4<f32>(base_color, 1.0);
+            draw_thick_line_gradient_ctx(prev_pos, curr_pos, line_width, dark_color, light_color, ctx);
+            prev_pos = curr_pos;
         }
+
+        let dark_color = vec4<f32>(base_color * 0.5, 1.0);
+        let light_color = vec4<f32>(base_color, 1.0);
+        draw_thick_line_gradient_ctx(prev_pos, world_pos, line_width, dark_color, light_color, ctx);
+    } else if (!in_debug_mode) {
+        // Organs: same zigzag with gradient
+        let base_color = mix(amino_props.color, agent_color, params.agent_color_blend);
+
+        let seed = base_type * 12345u + 67890u;
+        let segment_length = length(world_pos - segment_start_world);
+        let organ_width = segment_length * 0.15;
+        let line_width = part.size * 0.5;
+
+        let point_count = 4u + (base_type % 3u);
+        var prev_pos = segment_start_world;
+
+        for (var i = 1u; i < point_count - 1u; i++) {
+            let t = f32(i) / f32(point_count - 1u);
+            let base_pos = mix(segment_start_world, world_pos, t);
+
+            let offset_seed = seed + i * 9876u;
+            let offset_angle = f32(offset_seed % 628u) / 100.0;
+            let offset_dist = f32((offset_seed / 628u) % 100u) / 100.0 * organ_width * 3.5;
+            let offset = vec2<f32>(cos(offset_angle) * offset_dist, sin(offset_angle) * offset_dist);
+            let curr_pos = base_pos + offset;
+
+            let dark_color = vec4<f32>(base_color * 0.5, 1.0);
+            let light_color = vec4<f32>(base_color, 1.0);
+            draw_thick_line_gradient_ctx(prev_pos, curr_pos, line_width, dark_color, light_color, ctx);
+            prev_pos = curr_pos;
+        }
+
+        let dark_color = vec4<f32>(base_color * 0.5, 1.0);
+        let light_color = vec4<f32>(base_color, 1.0);
+        draw_thick_line_gradient_ctx(prev_pos, world_pos, line_width, dark_color, light_color, ctx);
     }
 
     // 2. DEBUG MODE RENDERING: Signal visualization
@@ -192,7 +247,7 @@ fn render_body_part_ctx(
             let t = f32(s) / f32(segments);
             let ang = t * 6.28318530718;
             let p = world_pos + vec2<f32>(cos(ang)*radius, sin(ang)*radius);
-            draw_thick_line_ctx(prev, p, 1.5, color, ctx);
+            draw_thin_line_ctx(prev, p, color, ctx);
             prev = p;
         }
         let blended_color_enabler = mix(amino_props.color, agent_color, params.agent_color_blend);
