@@ -305,6 +305,7 @@ var<storage, read_write> agent_spatial_grid: array<atomic<u32>>; // Agent index 
 const SPATIAL_GRID_EMPTY: u32 = 0xFFFFFFFFu;     // No agent in this cell
 const SPATIAL_GRID_CLAIMED: u32 = 0xFFFFFFFEu;   // Cell claimed by vampire (victim being drained)
 const VAMPIRE_MOUTH_COOLDOWN: f32 = 60.0;         // Frames between drains (1 second at 60fps)
+const VAMPIRE_NEWBORN_GRACE_FRAMES: u32 = 60u;    // Newborn agents ignore/are immune to vampire drain for 1 second
 
 // ============================================================================
 // AMINO ACID PROPERTIES

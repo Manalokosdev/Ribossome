@@ -15,6 +15,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
+    // Newborn grace: don't attack or get attacked in the first few frames after spawning
+    if (agent.age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
+        return;
+    }
+
     // Check if this agent has any vampire mouth organs (type 33)
     let body_count = agent.body_count;
     var has_vampire_mouth = false;
@@ -58,7 +63,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                     let neighbor = agents_in[neighbor_id];
 
-                    if (neighbor.alive != 0u && neighbor.energy > 0.0) {
+                    if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                         if (neighbor_count < 64u) {
                             neighbor_ids[neighbor_count] = neighbor_id;
                             neighbor_count++;
@@ -1452,11 +1457,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let activity_cost = props.energy_consumption * amp * amp * 1.5;
             organ_extra = props.energy_consumption + activity_cost; // Base + activity
         } else if (base_type == 33u) {
-            // Vampire mouths: high cost when active (global_mouth_activity from enablers/disablers)
-            // Base cost always paid, but heavy penalty when actively draining
+            // Vampire mouths: moderate maintenance cost (passive organ)
+            // No activity penalty - cost is balanced by cooldown and risk
             let amp = amplification_per_part[i];
-            let activity_cost = props.energy_consumption * global_mouth_activity * amp * 3.0; // 3x multiplier for vampire cost
-            organ_extra = props.energy_consumption + activity_cost; // Base + activity penalty
+            organ_extra = props.energy_consumption * amp * 0.5; // Low cost: vampires rely on successful hunts
         } else {
             // Other organs use linear amplification scaling
             let amp = amplification_per_part[i];
