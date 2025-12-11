@@ -875,17 +875,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Signal-driven clocks: x = internal_value * parameter1
                 // K senses beta, C senses alpha (opposite of what they emit)
                 let sensed_field = select(new_alpha, new_beta, is_alpha_emitter); // K?beta, C?alpha
-                // Use _pad.y to accumulate sensed field over time
-                var internal_value = agents_out[agent_id].body[i]._pad.y;
+                // Use _pad.x to accumulate sensed field over time (NOT used by prev_pos for organs)
+                var internal_value = agents_out[agent_id].body[i]._pad.x;
                 internal_value += sensed_field;
-                agents_out[agent_id].body[i]._pad.y = internal_value;
+                agents_out[agent_id].body[i]._pad.x = internal_value;
 
                 let x = internal_value * param1;
                 clock_signal = sin(x);
             }
 
-            // Store clock signal in _pad.x for rendering
-            agents_out[agent_id].body[i]._pad.x = clock_signal;
+            // Store clock signal in _pad.y for rendering (avoids conflict with prev_pos)
+            agents_out[agent_id].body[i]._pad.y = clock_signal;
 
             // Emit to appropriate signal type
             if (is_alpha_emitter) {
