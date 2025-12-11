@@ -291,11 +291,48 @@ fn render_body_part_ctx(
 
     // 7. ORGAN: Mouth (feeding organ) - asterisk marker
     if (amino_props.is_mouth) {
-        // Vampire mouths (F/G/H) get special big red 8-point asterisks
-        let is_vampire = (base_type == 4u || base_type == 5u || base_type == 6u);
-        let mouth_radius = select(max(part.size * 1.5, 4.0), max(part.size * 3.0, 8.0), is_vampire);
-        let mouth_color = select(mix(amino_props.color, agent_color, params.agent_color_blend), vec3<f32>(1.0, 0.0, 0.0), is_vampire);
+        // Regular mouths get small yellow asterisk
+        let mouth_radius = max(part.size * 1.5, 4.0);
+        let mouth_color = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
+    }
+
+    // Vampire mouths (organ 33) get special big flashing asterisks
+    if (base_type == 33u) {
+        let mouth_radius = max(part.size * 6.0, 16.0);
+
+        // Draw blinking white asterisk when draining energy (_pad.y stores drain amount)
+        let drain_amount = part._pad.y;
+        let has_any_drain = drain_amount > 0.0000001;
+
+        if (has_any_drain) {
+            // Blink white using epoch-based animation
+            let blink_speed = 0.3; // Faster blinking
+            let blink_phase = fract(f32(params.epoch) * blink_speed);
+            let blink_on = blink_phase < 0.5; // 50% duty cycle
+
+            if (blink_on) {
+                let mouth_color = vec3<f32>(1.0, 1.0, 1.0); // Bright white when vampiring
+                draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 1.0), ctx);
+            } else {
+                // Show amount as green intensity during off phase
+                let intensity = min(drain_amount * 100.0, 1.0);
+                let mouth_color = vec3<f32>(0.0, intensity, 0.0); // Green based on drain amount
+                draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
+            }
+        } else {
+            // Not draining - color based on agent's total energy (cyan = high energy, red = low)
+            let energy_ratio = clamp(agent_energy / 1000.0, 0.0, 1.0);
+            let mouth_color = mix(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 1.0), energy_ratio);
+            draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
+        }
+    }
+
+    // Pairing state sensors (organ 36) get orange asterisks
+    if (base_type == 36u) {
+        let star_size = max(part.size * 2.0, 6.0);
+        let orange_color = vec3<f32>(1.0, 0.6, 0.0); // Orange
+        draw_asterisk_ctx(world_pos, star_size, vec4<f32>(orange_color, 0.9), ctx);
     }
 
     // 8. ORGAN: Displacer (repulsion field) - diamond marker
