@@ -356,9 +356,8 @@ fn render_body_part_ctx(
         // Extract organ parameters to calculate actual sensor radius
         let organ_param = get_organ_param(part.part_type);
         let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
-        let promoter_props = get_amino_acid_properties(base_type);
         let modifier_props = get_amino_acid_properties(modifier_index);
-        let combined_param = promoter_props.parameter1 + modifier_props.parameter1;
+        let combined_param = amino_props.parameter1 + modifier_props.parameter1;
 
         // Calculate actual sensor radius (same formula as in sample_stochastic_gaussian)
         let base_radius = 100.0;
@@ -368,24 +367,50 @@ fn render_body_part_ctx(
         // Scale visual marker based on sensor radius (normalized to typical range)
         // Typical range: 0-300, so normalize and scale for visibility
         let visual_scale = clamp(sensor_radius / 200.0, 0.3, 4.0);
-        let marker_size = part.size * 1.5 * visual_scale;
+        let marker_size = part.size * 3.0 * visual_scale; // Increased from 1.5x to 3.0x for better visibility
+
+        // Check if this is a magnitude sensor (organs 38-41)
+        let is_magnitude_sensor = (base_type >= 38u && base_type <= 41u);
 
         // Choose color based on sensor type and signal polarity
         var sensor_color = vec3<f32>(0.0);
         if (amino_props.is_alpha_sensor) {
-            // Green for positive polarity, cyan for negative polarity
-            sensor_color = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 1.0), combined_param < 0.0);
+            if (is_magnitude_sensor) {
+                // Magnitude sensors: brighter green/cyan
+                sensor_color = select(vec3<f32>(0.3, 1.0, 0.3), vec3<f32>(0.3, 1.0, 1.0), combined_param < 0.0);
+            } else {
+                // Directional sensors: standard green/cyan
+                sensor_color = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 1.0), combined_param < 0.0);
+            }
         } else {
-            // Red for positive polarity, magenta for negative polarity
-            sensor_color = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 1.0), combined_param < 0.0);
+            if (is_magnitude_sensor) {
+                // Magnitude sensors: brighter red/magenta
+                sensor_color = select(vec3<f32>(1.0, 0.3, 0.3), vec3<f32>(1.0, 0.3, 1.0), combined_param < 0.0);
+            } else {
+                // Directional sensors: standard red/magenta
+                sensor_color = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 1.0), combined_param < 0.0);
+            }
         }
         let blended_sensor_color = mix(sensor_color, agent_color, params.agent_color_blend * 0.3);
 
-        // Draw circle marker
-        draw_filled_circle_ctx(world_pos, marker_size, vec4<f32>(blended_sensor_color, 0.8), ctx);
+        // Draw circle marker with high opacity to ensure visibility
+        draw_filled_circle_ctx(world_pos, marker_size, vec4<f32>(blended_sensor_color, 1.0), ctx);
+
+        // Magnitude sensors get a distinctive white outline
+        if (is_magnitude_sensor) {
+            let outline_thickness = max(marker_size * 0.25, 1.0);
+            let segments = 24u;
+            var prev_outline = world_pos + vec2<f32>(marker_size, 0.0);
+            for (var s = 1u; s <= segments; s++) {
+                let t = f32(s) / f32(segments);
+                let ang = t * 6.28318530718;
+                let p = world_pos + vec2<f32>(cos(ang) * marker_size, sin(ang) * marker_size);
+                draw_thick_line_ctx(prev_outline, p, outline_thickness, vec4<f32>(1.0, 1.0, 1.0, 0.9), ctx);
+                prev_outline = p;
+            }
+        }
 
         // Draw outline circle to indicate sensing range at high zoom
-
         if (params.camera_zoom > 80.0) {
             let zoom_fade = clamp((params.camera_zoom - 8.0) / 12.0, 0.0, 1.0);
             let outline_alpha = 0.15 * zoom_fade;
@@ -402,25 +427,81 @@ fn render_body_part_ctx(
         }
     }
 
+    // 9a. ORGAN: Agent Alpha/Beta Sensors (types 34, 35) - dark purple pentagon
+    if (base_type == 34u || base_type == 35u) {
+        let pentagon_size = max(part.size * 0.80, 6.0);
+        let dark_purple = vec3<f32>(0.3, 0.0, 0.5); // Dark purple
+        let blended_color = mix(dark_purple, agent_color, params.agent_color_blend * 0.3);
+
+        // Draw pentagon using 5 points
+        let num_sides = 5u;
+        let angle_offset = -1.5708; // -90 degrees to point upward
+        for (var i = 0u; i < num_sides; i++) {
+            let angle1 = angle_offset + (f32(i) / f32(num_sides)) * 6.28318530718;
+            let angle2 = angle_offset + (f32(i + 1u) / f32(num_sides)) * 6.28318530718;
+            let p1 = world_pos + vec2<f32>(cos(angle1) * pentagon_size, sin(angle1) * pentagon_size);
+            let p2 = world_pos + vec2<f32>(cos(angle2) * pentagon_size, sin(angle2) * pentagon_size);
+            // Draw edges
+            draw_thick_line_ctx(p1, p2, 1.5, vec4<f32>(blended_color, 0.9), ctx);
+            // Fill from center
+            draw_thick_line_ctx(world_pos, p1, pentagon_size * 0.5, vec4<f32>(blended_color, 0.6), ctx);
+        }
+    }
+
     // 10. ORGAN: Sine Wave Clock - large pulsating circle
     if (amino_props.is_clock) {
-        // Get clock signal from _pad.x (stored during signal update pass)
-        let clock_signal = part._pad.x; // Range: -1 to +1
+        // Get clock signal from _pad.y (stored during signal update pass)
+        let clock_signal = part._pad.y; // Range: -1 to +1
 
         // Decode promoter type from part_type parameter (bit 7)
         let organ_param = get_organ_param(part.part_type);
         let is_C_promoter = ((organ_param & 128u) != 0u);
 
-        // Dark green for K promoter (alpha), dark red for C promoter (beta)
-        let clock_color = select(vec3<f32>(0.0, 0.5, 0.0), vec3<f32>(0.5, 0.0, 0.0), is_C_promoter);
+        // Bright green for K promoter (alpha), bright blue for C promoter (beta)
+        let clock_color = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.5, 1.0), is_C_promoter);
 
         // Pulsate size based on signal output
-        // Map sine output (-1 to +1) to size multiplier (0.7 to 1.3)
+        // Base size is larger (3x part size), then pulsate ±30%
+        let base_size = part.size * 3.0;
         let size_multiplier = 1.0 + clock_signal * 0.3;
-        let pulsating_size = part.size * size_multiplier;
+        let pulsating_size = base_size * size_multiplier;
 
         // Draw large filled circle with full opacity
         draw_filled_circle_ctx(world_pos, pulsating_size, vec4<f32>(clock_color, 1.0), ctx);
+    }
+
+    // 11. ORGAN: Slope Sensor (type 32) - cyan triangle pointing in slope direction
+    if (base_type == 32u) {
+        // Get slope signal from _pad.y (stores slope direction/magnitude)
+        let slope_signal = part._pad.y; // -1 to +1 indicates slope direction
+
+        // Decode promoter type from part_type parameter (bit 7)
+        let organ_param = get_organ_param(part.part_type);
+        let is_beta_promoter = ((organ_param & 128u) != 0u);
+
+        // Cyan for alpha emitter (K), yellow for beta emitter (C)
+        let slope_color = select(vec3<f32>(0.0, 0.8, 0.8), vec3<f32>(0.8, 0.8, 0.0), is_beta_promoter);
+
+        // Triangle size scales with signal strength
+        let signal_strength = abs(slope_signal);
+        let triangle_size = part.size * (2.0 + signal_strength);
+
+        // Triangle points in slope direction (signal sign determines up/down)
+        // Draw isosceles triangle
+        let pointing_up = slope_signal > 0.0;
+        let tip_y = select(triangle_size, -triangle_size, pointing_up);
+        let base_y = select(-triangle_size * 0.5, triangle_size * 0.5, pointing_up);
+
+        let tip = world_pos + vec2<f32>(0.0, tip_y);
+        let left = world_pos + vec2<f32>(-triangle_size * 0.8, base_y);
+        let right = world_pos + vec2<f32>(triangle_size * 0.8, base_y);
+
+        // Draw filled triangle
+        draw_thick_line_ctx(tip, left, 1.5, vec4<f32>(slope_color, 0.9), ctx);
+        draw_thick_line_ctx(left, right, 1.5, vec4<f32>(slope_color, 0.9), ctx);
+        draw_thick_line_ctx(right, tip, 1.5, vec4<f32>(slope_color, 0.9), ctx);
+        // Fill center
+        draw_thick_line_ctx(world_pos, tip, triangle_size * 0.7, vec4<f32>(slope_color, 0.7), ctx);
     }
 }
 
