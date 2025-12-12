@@ -103,7 +103,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
             disabler_strength = min(disabler_strength, 1.0);
-            
+
             // Only work if NOT disabled (inverted logic)
             if (disabler_strength < 0.99) {
                 // Decrement cooldown timer (stored in _pad.x)

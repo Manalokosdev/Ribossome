@@ -1,5 +1,5 @@
 // Standalone Fluid Simulation
-// Stable-fluids style: advection + external forces + projection + dye
+// Stable-fluids style: advection + external forces + projection
 
 // ============================================================================
 // CONSTANTS
@@ -19,14 +19,10 @@ const FLUID_GRID_CELLS: u32 = 16384u; // 128 * 128
 // Force input (vec2 per cell) - will be written by test force generator
 @group(0) @binding(2) var<storage, read_write> forces: array<vec2<f32>>;
 
-// Passive dye ping-pong buffers (vec4 per cell: rgb + a)
-@group(0) @binding(4) var<storage, read> dye_in: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read_write> dye_out: array<vec4<f32>>;
-
 // Pressure ping-pong + divergence (f32 per cell)
-@group(0) @binding(6) var<storage, read> pressure_in: array<f32>;
-@group(0) @binding(7) var<storage, read_write> pressure_out: array<f32>;
-@group(0) @binding(8) var<storage, read_write> divergence: array<f32>;
+@group(0) @binding(4) var<storage, read> pressure_in: array<f32>;
+@group(0) @binding(5) var<storage, read_write> pressure_out: array<f32>;
+@group(0) @binding(6) var<storage, read_write> divergence: array<f32>;
 
 
 // Parameters
@@ -37,10 +33,19 @@ struct FluidParams {
     grid_size: u32,
     // mouse.xy in grid coords (0..grid), mouse.zw = mouse velocity in grid units/sec
     mouse: vec4<f32>,
-    // splat.x = radius (cells), splat.y = force scale, splat.z = dye amount, splat.w = mouse_down (0/1)
+    // splat.x = radius (cells), splat.y = force scale,
+    // splat.z = vorticity confinement strength (0 disables), splat.w = mouse_down (0/1)
     splat: vec4<f32>,
 }
 @group(0) @binding(3) var<uniform> params: FluidParams;
+
+// Display/feedback texture (ping-pong) used for visualization.
+// This is in group(1) so it can coexist with the buffer-only group(0) layout.
+// NOTE: WebGPU disallows read-only storage textures unless using a native-only feature;
+// so we read via a sampled texture + sampler and write via a storage texture.
+@group(1) @binding(0) var display_tex_in: texture_2d<f32>;
+@group(1) @binding(1) var display_tex_sampler: sampler;
+@group(1) @binding(2) var display_tex_out: texture_storage_2d<rgba16float, write>;
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -58,58 +63,37 @@ fn clamp_coords(x: i32, y: i32) -> vec2<u32> {
 
 // Bilinear interpolation for velocity sampling
 fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
-    let x = pos.x - 0.5;
-    let y = pos.y - 0.5;
-    
+    // Clamp sampling to the interior so advection never repeatedly samples the
+    // outermost edge cells (which tends to create persistent high-frequency noise).
+    let min_pos = 1.5;
+    let max_pos = f32(FLUID_GRID_SIZE) - 1.5;
+    let p = clamp(pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
+
+    let x = p.x - 0.5;
+    let y = p.y - 0.5;
+
     let x0 = i32(floor(x));
     let y0 = i32(floor(y));
     let x1 = x0 + 1;
     let y1 = y0 + 1;
-    
+
     let fx = fract(x);
     let fy = fract(y);
-    
+
     let c00 = clamp_coords(x0, y0);
     let c10 = clamp_coords(x1, y0);
     let c01 = clamp_coords(x0, y1);
     let c11 = clamp_coords(x1, y1);
-    
+
     let v00 = velocity_in[grid_index(c00.x, c00.y)];
     let v10 = velocity_in[grid_index(c10.x, c10.y)];
     let v01 = velocity_in[grid_index(c01.x, c01.y)];
     let v11 = velocity_in[grid_index(c11.x, c11.y)];
-    
+
     let v0 = mix(v00, v10, fx);
     let v1 = mix(v01, v11, fx);
-    
+
     return mix(v0, v1, fy);
-}
-
-fn sample_dye(pos: vec2<f32>) -> vec4<f32> {
-    let x = pos.x - 0.5;
-    let y = pos.y - 0.5;
-
-    let x0 = i32(floor(x));
-    let y0 = i32(floor(y));
-    let x1 = x0 + 1;
-    let y1 = y0 + 1;
-
-    let fx = fract(x);
-    let fy = fract(y);
-
-    let c00 = clamp_coords(x0, y0);
-    let c10 = clamp_coords(x1, y0);
-    let c01 = clamp_coords(x0, y1);
-    let c11 = clamp_coords(x1, y1);
-
-    let d00 = dye_in[grid_index(c00.x, c00.y)];
-    let d10 = dye_in[grid_index(c10.x, c10.y)];
-    let d01 = dye_in[grid_index(c01.x, c01.y)];
-    let d11 = dye_in[grid_index(c11.x, c11.y)];
-
-    let d0 = mix(d00, d10, fx);
-    let d1 = mix(d01, d11, fx);
-    return mix(d0, d1, fy);
 }
 
 fn splat_falloff(dist: f32, radius: f32) -> f32 {
@@ -121,6 +105,119 @@ fn splat_falloff(dist: f32, radius: f32) -> f32 {
     return x * x;
 }
 
+fn sample_display_bilinear_pos(pos: vec2<f32>) -> vec4<f32> {
+    // pos is in texel space where the center of texel (x,y) is (x+0.5,y+0.5).
+    // Manual bilinear using 4 exact texel loads.
+    let x = pos.x - 0.5;
+    let y = pos.y - 0.5;
+
+    let x0i = i32(floor(x));
+    let y0i = i32(floor(y));
+    let x1i = x0i + 1;
+    let y1i = y0i + 1;
+
+    let fx = fract(x);
+    let fy = fract(y);
+
+    let x0 = clamp(x0i, 0, i32(FLUID_GRID_SIZE) - 1);
+    let x1 = clamp(x1i, 0, i32(FLUID_GRID_SIZE) - 1);
+    let y0 = clamp(y0i, 0, i32(FLUID_GRID_SIZE) - 1);
+    let y1 = clamp(y1i, 0, i32(FLUID_GRID_SIZE) - 1);
+
+    let c00 = textureLoad(display_tex_in, vec2<i32>(x0, y0), 0);
+    let c10 = textureLoad(display_tex_in, vec2<i32>(x1, y0), 0);
+    let c01 = textureLoad(display_tex_in, vec2<i32>(x0, y1), 0);
+    let c11 = textureLoad(display_tex_in, vec2<i32>(x1, y1), 0);
+
+    let c0 = mix(c00, c10, fx);
+    let c1 = mix(c01, c11, fx);
+    return mix(c0, c1, fy);
+}
+
+fn keys_cubic_weight(x: f32, a: f32) -> f32 {
+    // Keys cubic kernel (a=-0.5 Catmull-Rom; a=-1 Mitchell-ish; smaller magnitude is softer)
+    let t = abs(x);
+    let t2 = t * t;
+    let t3 = t2 * t;
+
+    if (t < 1.0) {
+        return (a + 2.0) * t3 - (a + 3.0) * t2 + 1.0;
+    }
+    if (t < 2.0) {
+        return a * t3 - 5.0 * a * t2 + 8.0 * a * t - 4.0 * a;
+    }
+    return 0.0;
+}
+
+fn keys_cubic_weights(f: f32, a: f32) -> array<f32, 4> {
+    // Weights for taps at offsets [-1, 0, 1, 2] relative to base cell.
+    return array<f32, 4>(
+        keys_cubic_weight(f + 1.0, a),
+        keys_cubic_weight(f, a),
+        keys_cubic_weight(1.0 - f, a),
+        keys_cubic_weight(2.0 - f, a),
+    );
+}
+
+fn sample_display_bicubic_pos(pos: vec2<f32>) -> vec4<f32> {
+    // pos is in texel space where the center of texel (x,y) is (x+0.5,y+0.5).
+    let p = pos - vec2<f32>(0.5);
+    let base = vec2<i32>(i32(floor(p.x)), i32(floor(p.y)));
+    let f = fract(p);
+
+    // NOTE: This function is currently unused; kept for quick A/B testing.
+    let a = -0.35;
+    let wx = keys_cubic_weights(f.x, a);
+    let wy = keys_cubic_weights(f.y, a);
+
+    // Naga currently requires constant indices for arrays; unroll the 4x4 taps.
+    let wx0 = wx[0];
+    let wx1 = wx[1];
+    let wx2 = wx[2];
+    let wx3 = wx[3];
+    let wy0 = wy[0];
+    let wy1 = wy[1];
+    let wy2 = wy[2];
+    let wy3 = wy[3];
+
+    let x0 = clamp(base.x - 1, 0, i32(FLUID_GRID_SIZE) - 1);
+    let x1 = clamp(base.x + 0, 0, i32(FLUID_GRID_SIZE) - 1);
+    let x2 = clamp(base.x + 1, 0, i32(FLUID_GRID_SIZE) - 1);
+    let x3 = clamp(base.x + 2, 0, i32(FLUID_GRID_SIZE) - 1);
+    let y0 = clamp(base.y - 1, 0, i32(FLUID_GRID_SIZE) - 1);
+    let y1 = clamp(base.y + 0, 0, i32(FLUID_GRID_SIZE) - 1);
+    let y2 = clamp(base.y + 1, 0, i32(FLUID_GRID_SIZE) - 1);
+    let y3 = clamp(base.y + 2, 0, i32(FLUID_GRID_SIZE) - 1);
+
+    var sum = vec4<f32>(0.0);
+
+    // Row y0
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x0, y0), 0) * (wx0 * wy0);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x1, y0), 0) * (wx1 * wy0);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x2, y0), 0) * (wx2 * wy0);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x3, y0), 0) * (wx3 * wy0);
+
+    // Row y1
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x0, y1), 0) * (wx0 * wy1);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x1, y1), 0) * (wx1 * wy1);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x2, y1), 0) * (wx2 * wy1);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x3, y1), 0) * (wx3 * wy1);
+
+    // Row y2
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x0, y2), 0) * (wx0 * wy2);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x1, y2), 0) * (wx1 * wy2);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x2, y2), 0) * (wx2 * wy2);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x3, y2), 0) * (wx3 * wy2);
+
+    // Row y3
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x0, y3), 0) * (wx0 * wy3);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x1, y3), 0) * (wx1 * wy3);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x2, y3), 0) * (wx2 * wy3);
+    sum = sum + textureLoad(display_tex_in, vec2<i32>(x3, y3), 0) * (wx3 * wy3);
+
+    return sum;
+}
+
 // ============================================================================
 // COMPUTE KERNELS
 // ============================================================================
@@ -130,11 +227,11 @@ fn splat_falloff(dist: f32, radius: f32) -> f32 {
 fn generate_test_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-    
+
     if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
         return;
     }
-    
+
     let idx = grid_index(x, y);
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
@@ -149,23 +246,6 @@ fn generate_test_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let falloff = splat_falloff(dist, params.splat.x);
         // Force along mouse motion.
         f = f + params.mouse.zw * (params.splat.y * falloff);
-    } else {
-        // Keep a small moving source so the sim shows motion without interaction.
-        let base_center = vec2<f32>(f32(FLUID_GRID_SIZE) * 0.5);
-        let orbit = vec2<f32>(sin(params.time * 0.7), cos(params.time * 0.7)) * (f32(FLUID_GRID_SIZE) * 0.18);
-        let center = base_center + orbit;
-        let offset = pos - center;
-        let dist = length(offset);
-        let radius = 18.0;
-        let falloff = splat_falloff(dist, radius);
-        let orbit_dir = normalize(vec2<f32>(cos(params.time * 0.7), -sin(params.time * 0.7)));
-        var orbit_force = orbit_dir * (350.0 * falloff);
-        if (dist > 1.0) {
-            let radial = offset / dist;
-            let tangential = vec2<f32>(-radial.y, radial.x);
-            orbit_force = orbit_force + tangential * (250.0 * falloff);
-        }
-        f = f + orbit_force;
     }
 
     forces[idx] = f;
@@ -176,75 +256,29 @@ fn generate_test_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn advect_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-    
+
     if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
         return;
     }
-    
+
     let idx = grid_index(x, y);
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
-    
+
     // Read current velocity
     let vel = velocity_in[idx];
-    
+
     // Backward trace
     // Scale velocity by grid size relative to 1.0 if needed, but here pixels = units.
     let trace_pos = pos - vel * params.dt;
-    
+
     // Sample velocity at traced position
     let advected_vel = sample_velocity(trace_pos);
-    
-    // Apply decay
-    velocity_out[idx] = advected_vel * params.decay;
-}
 
-// 2b. Advect passive dye by the *projected* velocity field (velocity_in)
-@compute @workgroup_size(16, 16)
-fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
-
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
-        return;
-    }
-
-    let idx = grid_index(x, y);
-    let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
-
-    // Use the divergence-free velocity to advect dye.
-    let vel = velocity_in[idx];
-    let trace_pos = pos - vel * params.dt;
-    let advected = sample_dye(trace_pos);
-
-    // Dye decay
-    var out_dye = advected * 0.995;
-
-    // Inject dye at mouse while dragging; otherwise inject at moving source.
-    if (params.splat.w > 0.5) {
-        let center = params.mouse.xy;
-        let dist = length(pos - center);
-        let falloff = splat_falloff(dist, params.splat.x);
-        let t = params.time;
-        // Bright, time-varying color.
-        let color = vec3<f32>(
-            0.5 + 0.5 * sin(t * 1.7),
-            0.5 + 0.5 * sin(t * 1.7 + 2.094),
-            0.5 + 0.5 * sin(t * 1.7 + 4.188)
-        );
-        let inject = color * (params.splat.z * falloff) * params.dt;
-        out_dye = vec4<f32>(clamp(out_dye.rgb + inject, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-    } else {
-        let base_center = vec2<f32>(f32(FLUID_GRID_SIZE) * 0.5);
-        let orbit = vec2<f32>(sin(params.time * 0.7), cos(params.time * 0.7)) * (f32(FLUID_GRID_SIZE) * 0.18);
-        let center = base_center + orbit;
-        let dist = length(pos - center);
-        let falloff = splat_falloff(dist, 20.0);
-        let color = vec3<f32>(0.2, 0.7, 1.0);
-        let inject = color * (6.0 * falloff) * params.dt;
-        out_dye = vec4<f32>(clamp(out_dye.rgb + inject, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-    }
-
-    dye_out[idx] = out_dye;
+    // Apply decay in a frame-rate independent way.
+    // `params.decay` is interpreted as a per-frame damping factor at 60 FPS.
+    // For arbitrary dt, scale it as decay^(dt*60).
+    let decay_factor = pow(params.decay, params.dt * 60.0);
+    velocity_out[idx] = advected_vel * decay_factor;
 }
 
 // 3. Compute divergence of a velocity field (reads velocity_in, writes divergence)
@@ -258,6 +292,12 @@ fn compute_divergence(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
+
+    // Solid boundary: treat boundary cells as non-divergent.
+    if (x == 0u || x == FLUID_GRID_SIZE - 1u || y == 0u || y == FLUID_GRID_SIZE - 1u) {
+        divergence[idx] = 0.0;
+        return;
+    }
 
     let xm = clamp(i32(x) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let xp = clamp(i32(x) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
@@ -300,12 +340,16 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Skip edges.
-    if (x == 0 || x == FLUID_GRID_SIZE - 1 || y == 0 || y == FLUID_GRID_SIZE - 1) {
+    let idx = grid_index(x, y);
+
+    // Skip a small border so curl sampling never uses clamped edge neighbors.
+    // This avoids confinement injecting high-frequency noise along the walls.
+    let border = 2u;
+    if (x < border || x >= FLUID_GRID_SIZE - border || y < border || y >= FLUID_GRID_SIZE - border) {
+        // IMPORTANT: still write output, otherwise border cells keep stale values.
+        velocity_out[idx] = velocity_in[idx];
         return;
     }
-
-    let idx = grid_index(x, y);
 
     let w_l = abs(curl_at(x - 1u, y));
     let w_r = abs(curl_at(x + 1u, y));
@@ -317,12 +361,29 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let n = grad / mag;
 
     let w = curl_at(x, y);
+    // Cut off tiny curl values to avoid amplifying numerical noise.
+    if (abs(w) < 5e-4) {
+        velocity_out[idx] = velocity_in[idx];
+        return;
+    }
     // Confinement force: epsilon * (n x w_k) in 2D
     // Equivalent: f = epsilon * vec2(n.y, -n.x) * w
-    let epsilon = 8.0;
+    let epsilon = params.splat.z;
+    if (abs(epsilon) < 1e-6) {
+        velocity_out[idx] = velocity_in[idx];
+        return;
+    }
     let f = vec2<f32>(n.y, -n.x) * (w * epsilon);
 
-    velocity_out[idx] = velocity_in[idx] + f * params.dt;
+    // Clamp per-frame change to keep confinement from injecting high-frequency “static”.
+    var dv = f * params.dt;
+    let dv_len = length(dv);
+    let max_dv = 2.0;
+    if (dv_len > max_dv) {
+        dv = dv * (max_dv / dv_len);
+    }
+
+    velocity_out[idx] = velocity_in[idx] + dv;
 }
 
 // 4. Clear pressure (for init / each frame)
@@ -351,21 +412,24 @@ fn jacobi_pressure(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    // Boundary condition: pressure = 0 at edges
-    if (x == 0 || x == FLUID_GRID_SIZE - 1 || y == 0 || y == FLUID_GRID_SIZE - 1) {
-        pressure_out[idx] = 0.0;
-        return;
+    // Neumann boundary (solid walls): dp/dn = 0.
+    // Implemented by mirroring the edge pressure to the outside.
+    var p_l = pressure_in[idx];
+    if (x > 0u) {
+        p_l = pressure_in[grid_index(x - 1u, y)];
     }
-
-    let xm = clamp(i32(x) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
-    let xp = clamp(i32(x) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
-    let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
-    let yp = clamp(i32(y) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
-
-    let p_l = pressure_in[grid_index(u32(xm), y)];
-    let p_r = pressure_in[grid_index(u32(xp), y)];
-    let p_b = pressure_in[grid_index(x, u32(ym))];
-    let p_t = pressure_in[grid_index(x, u32(yp))];
+    var p_r = pressure_in[idx];
+    if (x + 1u < FLUID_GRID_SIZE) {
+        p_r = pressure_in[grid_index(x + 1u, y)];
+    }
+    var p_b = pressure_in[idx];
+    if (y > 0u) {
+        p_b = pressure_in[grid_index(x, y - 1u)];
+    }
+    var p_t = pressure_in[idx];
+    if (y + 1u < FLUID_GRID_SIZE) {
+        p_t = pressure_in[grid_index(x, y + 1u)];
+    }
 
     // Jacobi: p = (sum_neighbors - div) / 4, assuming dx = 1.
     pressure_out[idx] = (p_l + p_r + p_b + p_t - divergence[idx]) * 0.25;
@@ -383,19 +447,36 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    let xm = clamp(i32(x) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
-    let xp = clamp(i32(x) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
-    let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
-    let yp = clamp(i32(y) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
-
-    let p_l = pressure_in[grid_index(u32(xm), y)];
-    let p_r = pressure_in[grid_index(u32(xp), y)];
-    let p_b = pressure_in[grid_index(x, u32(ym))];
-    let p_t = pressure_in[grid_index(x, u32(yp))];
+    // Use the same Neumann pressure boundary treatment as the Jacobi solve.
+    var p_l = pressure_in[idx];
+    if (x > 0u) {
+        p_l = pressure_in[grid_index(x - 1u, y)];
+    }
+    var p_r = pressure_in[idx];
+    if (x + 1u < FLUID_GRID_SIZE) {
+        p_r = pressure_in[grid_index(x + 1u, y)];
+    }
+    var p_b = pressure_in[idx];
+    if (y > 0u) {
+        p_b = pressure_in[grid_index(x, y - 1u)];
+    }
+    var p_t = pressure_in[idx];
+    if (y + 1u < FLUID_GRID_SIZE) {
+        p_t = pressure_in[grid_index(x, y + 1u)];
+    }
 
     let grad = vec2<f32>(p_r - p_l, p_t - p_b) * 0.5;
-    let v = velocity_in[idx];
-    velocity_out[idx] = v - grad;
+    var v = velocity_in[idx] - grad;
+
+    // Free-slip solid boundary: zero normal component at the walls.
+    if (x == 0u || x == FLUID_GRID_SIZE - 1u) {
+        v.x = 0.0;
+    }
+    if (y == 0u || y == FLUID_GRID_SIZE - 1u) {
+        v.y = 0.0;
+    }
+
+    velocity_out[idx] = v;
 }
 
 // 3. Add forces to velocity field
@@ -403,49 +484,86 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn add_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-    
+
     if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
         return;
     }
-    
+
     let idx = grid_index(x, y);
-    
+
     // Add force scaled by dt
     velocity_out[idx] = velocity_in[idx] + forces[idx] * params.dt;
 }
 
-// 4. Enforce boundary conditions (no-slip: velocity = 0 at edges)
+// Velocity diffusion / viscosity (explicit step): v <- v + nu*dt*∇²v
+// This damps 1-cell oscillations (checkerboard / “TV static”) without adding new buffers.
+@compute @workgroup_size(16, 16)
+fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+
+    // Keep boundaries unchanged; boundary enforcement pass handles walls.
+    if (x == 0u || x == FLUID_GRID_SIZE - 1u || y == 0u || y == FLUID_GRID_SIZE - 1u) {
+        velocity_out[idx] = velocity_in[idx];
+        return;
+    }
+
+    let v_c = velocity_in[idx];
+    let v_l = velocity_in[grid_index(x - 1u, y)];
+    let v_r = velocity_in[grid_index(x + 1u, y)];
+    let v_b = velocity_in[grid_index(x, y - 1u)];
+    let v_t = velocity_in[grid_index(x, y + 1u)];
+
+    let lap = (v_l + v_r + v_b + v_t) - 4.0 * v_c;
+
+    // nu is in “cells^2 / second” with dx=1; lower values reduce blur.
+    let nu = 0.35;
+    let a = nu * params.dt;
+    velocity_out[idx] = v_c + a * lap;
+}
+
+// 4. Enforce boundary conditions (free-slip: zero normal component)
 @compute @workgroup_size(16, 16)
 fn enforce_boundaries(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-    
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
-        return;
-    }
-    
-    let idx = grid_index(x, y);
-    
-    // Set velocity to 0 at boundaries, pass through interior cells.
-    if (x == 0 || x == FLUID_GRID_SIZE - 1 || y == 0 || y == FLUID_GRID_SIZE - 1) {
-        velocity_out[idx] = vec2<f32>(0.0);
-    } else {
-        velocity_out[idx] = velocity_in[idx];
-    }
-}
-
-// 4b. Clear dye (for initialization)
-@compute @workgroup_size(16, 16)
-fn clear_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
 
     if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
         return;
     }
 
     let idx = grid_index(x, y);
-    dye_out[idx] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+
+    // Free-slip solid walls using a simple “ghost cell” style update:
+    // - normal component is zero at the wall
+    // - tangential component is copied from the adjacent interior cell
+    var v = velocity_in[idx];
+
+    // Left / right walls: set v.x = 0 and copy v.y from interior neighbor.
+    if (x == 0u) {
+        v.x = 0.0;
+        v.y = velocity_in[grid_index(1u, y)].y;
+    } else if (x == FLUID_GRID_SIZE - 1u) {
+        v.x = 0.0;
+        v.y = velocity_in[grid_index(FLUID_GRID_SIZE - 2u, y)].y;
+    }
+
+    // Bottom / top walls: set v.y = 0 and copy v.x from interior neighbor.
+    if (y == 0u) {
+        v.y = 0.0;
+        v.x = velocity_in[grid_index(x, 1u)].x;
+    } else if (y == FLUID_GRID_SIZE - 1u) {
+        v.y = 0.0;
+        v.x = velocity_in[grid_index(x, FLUID_GRID_SIZE - 2u)].x;
+    }
+
+    velocity_out[idx] = v;
 }
 
 // 4. Clear velocities (for initialization)
@@ -453,11 +571,11 @@ fn clear_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn clear_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-    
+
     if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
         return;
     }
-    
+
     let idx = grid_index(x, y);
     velocity_out[idx] = vec2<f32>(0.0);
 }
@@ -467,11 +585,50 @@ fn clear_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn copy_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-    
+
     if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
         return;
     }
-    
+
     let idx = grid_index(x, y);
     velocity_out[idx] = velocity_in[idx];
+}
+
+// Advect the display texture forward using the *current* velocity field.
+// This creates a feedback loop: the texture evolves from the previous frame.
+@compute @workgroup_size(16, 16)
+fn advect_display_texture(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+    let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
+    let vel = velocity_in[idx];
+
+    // Semi-Lagrangian backtrace in grid/texel space.
+    let trace_pos = pos - vel * params.dt;
+
+    let current = textureLoad(display_tex_in, vec2<i32>(i32(x), i32(y)), 0);
+
+    // Avoid repeatedly resampling (which can slowly introduce/boost high-frequency noise)
+    // when the flow is nearly stationary: just copy the exact texel.
+    let disp = length(vel) * params.dt;
+    if (disp < 0.01) {
+        textureStore(display_tex_out, vec2<i32>(i32(x), i32(y)), current);
+        return;
+    }
+
+    // Clamp to texel centers to stay in-bounds for the 4x4 footprint.
+    let min_pos = 1.5;
+    let max_pos = f32(FLUID_GRID_SIZE) - 1.5;
+    let p = clamp(trace_pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
+
+    let advected = sample_display_bilinear_pos(p);
+    // Apply only 10% of the advection over the existing texture.
+    let c = clamp(mix(current, advected, 0.1), vec4<f32>(0.0), vec4<f32>(1.0));
+    textureStore(display_tex_out, vec2<i32>(i32(x), i32(y)), c);
 }

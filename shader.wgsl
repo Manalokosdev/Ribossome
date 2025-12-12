@@ -364,7 +364,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let agent = agents_in[agent_id];
-    
+
     // Copy agent to output buffer first (process_agents will read from agents_in)
     agents_out[agent_id] = agent;
 

@@ -1,10 +1,11 @@
 // Fluid visualization shader
 // Modes:
-// 0 = dye
-// 1 = velocity (rgb encodes direction, intensity encodes speed)
-// 2 = pressure
-// 3 = divergence
-// 4 = vorticity
+// 0 = advected display texture (feedback)
+// 1 = velocity Y component (red for positive, blue for negative)
+// 2 = speed (magnitude)
+// 3 = pressure
+// 4 = divergence
+// 5 = vorticity
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -14,21 +15,22 @@ struct VertexOutput {
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
-    
+
     // Full-screen triangle
     let x = f32((vertex_index & 1u) << 2u);
     let y = f32((vertex_index & 2u) << 1u);
-    
+
     out.position = vec4<f32>(x - 1.0, 1.0 - y, 0.0, 1.0);
     out.uv = vec2<f32>(x * 0.5, y * 0.5);
-    
+
     return out;
 }
 
 @group(0) @binding(0) var<storage, read> velocity: array<vec2<f32>>;
-@group(0) @binding(1) var<storage, read> dye: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> pressure: array<f32>;
-@group(0) @binding(3) var<storage, read> divergence: array<f32>;
+@group(0) @binding(1) var<storage, read> pressure: array<f32>;
+@group(0) @binding(2) var<storage, read> divergence: array<f32>;
+@group(0) @binding(4) var tex: texture_2d<f32>;
+@group(0) @binding(5) var tex_sampler: sampler;
 
 struct Params {
     grid_size: u32,
@@ -37,7 +39,7 @@ struct Params {
     // x = velocity intensity scale, y = pressure scale, z = divergence scale, w = vorticity scale
     scale: vec4<f32>,
 }
-@group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(3) var<uniform> params: Params;
 
 fn clamp_u32(v: i32, lo: i32, hi: i32) -> u32 {
     return u32(clamp(v, lo, hi));
@@ -80,34 +82,36 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     switch params.mode {
         case 0u: {
-            // Dye
-            let d = dye[idx];
-            return vec4<f32>(clamp(d.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+            // Display the feedback/advected texture directly.
+            let c = textureSample(tex, tex_sampler, in.uv);
+            return vec4<f32>(c.rgb, 1.0);
         }
         case 1u: {
-            // Velocity
+            // Velocity Y component (red for positive, blue for negative)
+            let v = velocity[idx];
+            let vy = v.y * params.scale.x;
+            let pos = clamp(vy, 0.0, 1.0);
+            let neg = clamp(-vy, 0.0, 1.0);
+            return vec4<f32>(pos, 0.0, neg, 1.0);
+        }
+        case 2u: {
+            // Speed (magnitude)
             let v = velocity[idx];
             let speed = length(v);
             let intensity = clamp(speed * params.scale.x, 0.0, 1.0);
-            let angle = atan2(v.y, v.x);
-            let dir_rgb = vec3<f32>(
-                0.5 + 0.5 * cos(angle),
-                0.5 + 0.5 * sin(angle),
-                0.5 + 0.5 * cos(angle + 2.094)
-            );
-            return vec4<f32>(dir_rgb * intensity, 1.0);
-        }
-        case 2u: {
-            // Pressure (signed, centered at 0.5)
-            let p = pressure[idx] * params.scale.y;
-            let v = clamp(0.5 + p, 0.0, 1.0);
-            return vec4<f32>(v, v, v, 1.0);
+            return vec4<f32>(intensity, intensity, intensity, 1.0);
         }
         case 3u: {
+            // Pressure (signed, centered at 0.5)
+            let p = pressure[idx] * params.scale.y;
+            let val = clamp(0.5 + p, 0.0, 1.0);
+            return vec4<f32>(val, val, val, 1.0);
+        }
+        case 4u: {
             // Divergence (signed, centered at 0.5)
             let d = divergence[idx] * params.scale.z;
-            let v = clamp(0.5 + d, 0.0, 1.0);
-            return vec4<f32>(v, v, v, 1.0);
+            let val = clamp(0.5 + d, 0.0, 1.0);
+            return vec4<f32>(val, val, val, 1.0);
         }
         default: {
             // Vorticity (signed) computed from velocity
