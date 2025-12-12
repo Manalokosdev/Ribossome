@@ -178,17 +178,16 @@ struct SimParams {
     trail_opacity: f32,
     trail_show: u32,
     interior_isotropic: u32,   // When 1, override per-amino left/right multipliers with isotropic interior diffusion
-    ignore_stop_codons: u32,   // When 1, translate entire genome to max body parts
-    require_start_codon: u32,  // When 1, require AUG start codon before translation begins
-    asexual_reproduction: u32, // When 1, offspring are direct mutated copies (asexual); when 0, reverse-complemented (sexual)
-    // Visualization parameters
+    ignore_stop_codons: u32,
+    require_start_codon: u32,
+    asexual_reproduction: u32,
     background_color_r: f32,
     background_color_g: f32,
     background_color_b: f32,
     alpha_blend_mode: u32,
     beta_blend_mode: u32,
     gamma_blend_mode: u32,
-    slope_blend_mode: u32,  // 0=none, 1=hard light, 2=soft light
+    slope_blend_mode: u32,
     alpha_color_r: f32,
     alpha_color_g: f32,
     alpha_color_b: f32,
@@ -198,26 +197,26 @@ struct SimParams {
     gamma_color_r: f32,
     gamma_color_g: f32,
     gamma_color_b: f32,
-    grid_interpolation: u32,  // 0=nearest, 1=bilinear, 2=bicubic
-    alpha_gamma_adjust: f32,  // Gamma correction for alpha channel
-    beta_gamma_adjust: f32,   // Gamma correction for beta channel
-    gamma_gamma_adjust: f32,  // Gamma correction for gamma channel
-    light_dir_x: f32,         // Light direction for slope-based lighting
+    grid_interpolation: u32,
+    alpha_gamma_adjust: f32,
+    beta_gamma_adjust: f32,
+    gamma_gamma_adjust: f32,
+    light_dir_x: f32,
     light_dir_y: f32,
     light_dir_z: f32,
-    light_power: f32,         // Light intensity multiplier for 3D shading
-    agent_blend_mode: u32,    // Agent visualization: 0=comp, 1=add, 2=subtract, 3=multiply
+    light_power: f32,
+    agent_blend_mode: u32,
     agent_color_r: f32,
     agent_color_g: f32,
     agent_color_b: f32,
-    agent_color_blend: f32,   // Blend factor: 0.0=amino color only, 1.0=agent color only
-    epoch: u32,               // Current simulation epoch for time-based effects
-    vector_force_power: f32,  // Global force multiplier (0.0 = off)
-    vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
-    vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
-    inspector_zoom: f32,      // Inspector preview zoom level (1.0 = default)
-    agent_trail_decay: f32,   // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
-    _padding1: f32,
+    agent_color_blend: f32,
+    epoch: u32,
+    vector_force_power: f32,
+    vector_force_x: f32,
+    vector_force_y: f32,
+    inspector_zoom: f32,
+    agent_trail_decay: f32,
+    fluid_show: u32,
     _padding2: f32,
 }
 
@@ -296,7 +295,7 @@ var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGB 
 var<uniform> environment_init: EnvironmentInitParams;
 
 @group(0) @binding(16)
-var<storage, read> rain_map: array<vec2<f32>>; // x=alpha, y=beta
+var<storage, read_write> fluid_forces: array<vec2<f32>>; // Fluid momentum injection from agent propellers (128x128 grid)
 
 @group(0) @binding(17)
 var<storage, read_write> agent_spatial_grid: array<atomic<u32>>; // Agent index per grid cell (atomic for vampire victim claiming)
@@ -306,6 +305,10 @@ const SPATIAL_GRID_EMPTY: u32 = 0xFFFFFFFFu;     // No agent in this cell
 const SPATIAL_GRID_CLAIMED: u32 = 0xFFFFFFFEu;   // Cell claimed by vampire (victim being drained)
 const VAMPIRE_MOUTH_COOLDOWN: f32 = 60.0;         // Frames between drains (1 second at 60fps)
 const VAMPIRE_NEWBORN_GRACE_FRAMES: u32 = 60u;    // Newborn agents ignore/are immune to vampire drain for 1 second
+
+// Fluid constants
+const FLUID_GRID_SIZE: u32 = 128u;
+const FLUID_FORCE_SCALE: f32 = 50.0;  // Multiplier for propeller forces injected into fluid
 
 // ============================================================================
 // AMINO ACID PROPERTIES

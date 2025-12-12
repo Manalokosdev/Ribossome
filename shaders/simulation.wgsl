@@ -1137,6 +1137,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 force += thrust_force;
                 // Torque from lever arm r_com cross thrust (scaled down to reduce perpetual spinning)
                 torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
+
+                // INJECT PROPELLER FORCE INTO FLUID GRID
+                // Map world position to fluid grid (128x128)
+                let fluid_grid_x = u32(clamp(world_pos.x / f32(SIM_SIZE) * 128.0, 0.0, 127.0));
+                let fluid_grid_y = u32(clamp(world_pos.y / f32(SIM_SIZE) * 128.0, 0.0, 127.0));
+                let fluid_idx = fluid_grid_y * 128u + fluid_grid_x;
+
+                // Add thrust force scaled for fluid (opposite direction - propeller pushes fluid backward)
+                // NOTE: Race condition possible with multiple agents, but effect is additive so acceptable
+                let scaled_force = -thrust_force * FLUID_FORCE_SCALE;
+                fluid_forces[fluid_idx] = fluid_forces[fluid_idx] + scaled_force;
             }
         }
 
@@ -2045,7 +2056,8 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform alpha rain (food): remove spatial and beta-dependent gradients.
     // Each cell independently receives a saturated rain event with probability alpha_multiplier * 0.05.
     // (Scaling by 0.05 preserves prior expected value semantics.)
-    let alpha_rain_factor = clamp(rain_map[idx].x, 0.0, 1.0);
+    // NOTE: rain_map disabled (binding 16 repurposed for fluid simulation)
+    let alpha_rain_factor = 1.0;  // Was: clamp(rain_map[idx].x, 0.0, 1.0);
     let alpha_probability_sat = params.alpha_multiplier * 0.05 * alpha_rain_factor;
     if (rain_chance < alpha_probability_sat) {
         final_alpha = 1.0;  // Saturated drop
@@ -2054,7 +2066,8 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform beta rain (poison): also no vertical gradient. Probability = beta_multiplier * 0.05.
     let beta_seed = cell_seed * 1103515245u;
     let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
-    let beta_rain_factor = clamp(rain_map[idx].y, 0.0, 1.0);
+    // NOTE: rain_map disabled (binding 16 repurposed for fluid simulation)
+    let beta_rain_factor = 1.0;  // Was: clamp(rain_map[idx].y, 0.0, 1.0);
     let beta_probability_sat = params.beta_multiplier * 0.05 * beta_rain_factor;
     if (beta_rain_chance < beta_probability_sat) {
         final_beta = 1.0;  // Saturated drop
@@ -2602,30 +2615,57 @@ var<uniform> render_params: SimParams;
 @group(0) @binding(3)
 var<storage, read> agent_grid_render: array<vec4<f32>>;
 
+@group(0) @binding(16)
+var<storage, read> fluid_forces_render: array<vec2<f32>>;
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Calculate pixel coordinates based on window size
-    let safe_width = max(render_params.window_width, 1.0);
-    let safe_height = max(render_params.window_height, 1.0);
-    let window_width = u32(safe_width);
-    let window_height = u32(safe_height);
-
-    let pixel_x = u32(in.uv.x * f32(window_width));
-    let pixel_y = u32(in.uv.y * f32(window_height));
-
-    // Sample visual texture and composite with agent_grid (which includes inspector)
+    // Sample visual texture (already has environment + agents composited)
     let color = textureSample(visual_tex, visual_sampler, in.uv);
+    var final_color = color.rgb;
 
-    // Check if there's an agent pixel to composite (or inspector if selected)
-    let idx = pixel_y * render_params.visual_stride + pixel_x;
-    let agent_pixel = agent_grid_render[idx];
+    // Only show fluid visualization if enabled
+    if (render_params.fluid_show != 0u) {
+        // Convert UV to world coordinates using camera transform
+        let safe_zoom = max(render_params.camera_zoom, 0.0001);
+        let safe_width = max(render_params.window_width, 1.0);
+        let safe_height = max(render_params.window_height, 1.0);
+        let aspect_ratio = safe_width / safe_height;
+        let view_width = render_params.grid_size / safe_zoom;
+        let view_height = view_width / aspect_ratio;
+        let cam_min_x = render_params.camera_pan_x - view_width * 0.5;
+        let cam_min_y = render_params.camera_pan_y - view_height * 0.5;
 
-    // Composite agent on top if it has alpha
-    if (agent_pixel.a > 0.0) {
-        return vec4<f32>(agent_pixel.rgb, 1.0);
+        let world_x = cam_min_x + in.uv.x * view_width;
+        let world_y = cam_min_y + in.uv.y * view_height;
+
+        // Map world coordinates to fluid grid (128x128)
+        let fluid_grid_x = u32(clamp((world_x / f32(SIM_SIZE)) * 128.0, 0.0, 127.0));
+        let fluid_grid_y = u32(clamp((world_y / f32(SIM_SIZE)) * 128.0, 0.0, 127.0));
+        let fluid_idx = fluid_grid_y * 128u + fluid_grid_x;
+
+        // Sample fluid velocity
+        let velocity = fluid_forces_render[fluid_idx];
+        let speed = length(velocity);
+
+        // Visualize fluid motion using HSV color mapping
+        if (speed > 0.00001) {
+            let angle = atan2(velocity.y, velocity.x);
+            let hue = (angle + 3.14159265) / (2.0 * 3.14159265); // Normalize to 0-1
+
+            // HSV to RGB conversion
+            let c = vec3<f32>(hue, 1.0, 1.0);
+            let k = vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0);
+            let p = abs(fract(c.xxx + k.xyz) * 6.0 - vec3<f32>(3.0));
+            let rgb = c.z * mix(vec3<f32>(1.0), clamp(p - vec3<f32>(1.0), vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
+
+            // Blend based on speed (adjust multiplier and threshold as needed)
+            let opacity = clamp(speed * 200.0, 0.0, 0.5);
+            final_color = mix(final_color, rgb, opacity);
+        }
     }
 
-    return vec4<f32>(color.rgb, 1.0);
+    return vec4<f32>(final_color, 1.0);
 }
 
 // ============================================================================
