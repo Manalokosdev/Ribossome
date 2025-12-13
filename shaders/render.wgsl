@@ -2435,7 +2435,7 @@ fn render_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Debug: count visible agents
-    atomicAdd(&debug_counter, 1u);
+    atomicAdd(&spawn_debug_counters[1], 1u);
 
     // Draw selection circle if this agent is selected
     if (agents_out[agent_id].is_selected == 1u) {

@@ -24,6 +24,9 @@ const FLUID_GRID_CELLS: u32 = 16384u; // 128 * 128
 @group(0) @binding(5) var<storage, read_write> pressure_out: array<f32>;
 @group(0) @binding(6) var<storage, read_write> divergence: array<f32>;
 
+// Force vectors buffer (vec2 per cell) - populated by propeller forces each frame
+@group(0) @binding(7) var<storage, read_write> force_vectors: array<vec2<f32>>;
+
 
 // Parameters
 struct FluidParams {
@@ -46,6 +49,46 @@ struct FluidParams {
 @group(1) @binding(0) var display_tex_in: texture_2d<f32>;
 @group(1) @binding(1) var display_tex_sampler: sampler;
 @group(1) @binding(2) var display_tex_out: texture_storage_2d<rgba16float, write>;
+
+// ============================================================================
+// VELOCITY EXPORT (for visualization in main sim composite)
+// ============================================================================
+
+@compute @workgroup_size(16, 16)
+fn copy_velocity_to_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+    forces[idx] = velocity_in[idx];
+}
+
+@compute @workgroup_size(16, 16)
+fn clear_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+    forces[idx] = vec2<f32>(0.0, 0.0);
+}
+
+@compute @workgroup_size(16, 16)
+fn clear_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+    force_vectors[idx] = vec2<f32>(0.0, 0.0);
+}
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -222,7 +265,7 @@ fn sample_display_bicubic_pos(pos: vec2<f32>) -> vec4<f32> {
 // COMPUTE KERNELS
 // ============================================================================
 
-// 1. Generate external forces (mouse splat + optional moving source)
+// 1. Generate external forces from static force vectors buffer
 @compute @workgroup_size(16, 16)
 fn generate_test_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
@@ -233,22 +276,9 @@ fn generate_test_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
-    // Start with zero; later passes can accumulate additional forces.
-    var f = vec2<f32>(0.0);
-
-    // Mouse splat force.
-    if (params.splat.w > 0.5) {
-        let center = params.mouse.xy;
-        let offset = pos - center;
-        let dist = length(offset);
-        let falloff = splat_falloff(dist, params.splat.x);
-        // Force along mouse motion.
-        f = f + params.mouse.zw * (params.splat.y * falloff);
-    }
-
-    forces[idx] = f;
+    // Read force from the static force vectors buffer
+    forces[idx] = force_vectors[idx];
 }
 
 // 2. Advect velocity field (semi-Lagrangian, no forces yet)

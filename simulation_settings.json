@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.1542323,
+  "camera_zoom": 0.45485547,
   "spawn_probability": 0.5,
   "death_probability": 0.001,
   "mutation_rate": 0.001,
@@ -123,8 +123,8 @@
   "gamma_blend_mode": 0,
   "slope_blend_mode": 0,
   "alpha_color": [
-    0.0627451,
-    0.41960785,
+    0.11372549,
+    0.62352943,
     0.0
   ],
   "beta_color": [

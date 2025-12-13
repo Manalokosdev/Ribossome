@@ -1138,7 +1138,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Torque from lever arm r_com cross thrust (scaled down to reduce perpetual spinning)
                 torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
 
-                // INJECT PROPELLER FORCE INTO FLUID GRID
+                // INJECT PROPELLER FORCE INTO FLUID FORCE_VECTORS BUFFER
                 // Map world position to fluid grid (128x128)
                 let fluid_grid_x = u32(clamp(world_pos.x / f32(SIM_SIZE) * 128.0, 0.0, 127.0));
                 let fluid_grid_y = u32(clamp(world_pos.y / f32(SIM_SIZE) * 128.0, 0.0, 127.0));
@@ -1147,7 +1147,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Add thrust force scaled for fluid (opposite direction - propeller pushes fluid backward)
                 // NOTE: Race condition possible with multiple agents, but effect is additive so acceptable
                 let scaled_force = -thrust_force * FLUID_FORCE_SCALE;
-                fluid_forces[fluid_idx] = fluid_forces[fluid_idx] + scaled_force;
+                force_vectors[fluid_idx] = force_vectors[fluid_idx] + scaled_force;
             }
         }
 
@@ -1588,7 +1588,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Attempt reproduction: create complementary genome offspring with mutations
         let current_count = atomicLoad(&alive_counter);
         if (current_count < params.max_agents) {
-            let spawn_index = atomicAdd(&spawn_counter, 1u);
+            let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
             if (spawn_index < 2000u) {
                 // Generate hash for offspring randomization
                 // CRITICAL: Include agent_id to ensure each parent's offspring gets unique mutations
@@ -2616,7 +2616,7 @@ var<uniform> render_params: SimParams;
 var<storage, read> agent_grid_render: array<vec4<f32>>;
 
 @group(0) @binding(16)
-var<storage, read> fluid_forces_render: array<vec2<f32>>;
+var<storage, read> fluid_velocity_render: array<vec2<f32>>;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -2645,7 +2645,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let fluid_idx = fluid_grid_y * 128u + fluid_grid_x;
 
         // Sample fluid velocity
-        let velocity = fluid_forces_render[fluid_idx];
+        let velocity = fluid_velocity_render[fluid_idx];
         let speed = length(velocity);
 
         // Visualize fluid motion using HSV color mapping
@@ -2701,7 +2701,7 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(64)
 fn merge_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let spawn_id = gid.x;
-    let spawn_count = atomicLoad(&spawn_counter);
+    let spawn_count = atomicLoad(&spawn_debug_counters[0]);
 
     if (spawn_id >= spawn_count) {
         return;
@@ -2730,14 +2730,14 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var spawn_index: u32 = 0u;
     loop {
-        let current_spawn = atomicLoad(&spawn_counter);
+        let current_spawn = atomicLoad(&spawn_debug_counters[0]);
         if (current_spawn >= 2000u) {
             return;
         }
         if (alive_now + current_spawn >= params.max_agents) {
             return;
         }
-        let result = atomicCompareExchangeWeak(&spawn_counter, current_spawn, current_spawn + 1u);
+        let result = atomicCompareExchangeWeak(&spawn_debug_counters[0], current_spawn, current_spawn + 1u);
         if (result.exchanged) {
             spawn_index = result.old_value;
             break;
@@ -2862,7 +2862,7 @@ fn compact_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 // Reset spawn counter for next frame
 @compute @workgroup_size(1)
 fn reset_spawn_counter(@builtin(global_invocation_id) gid: vec3<u32>) {
-    atomicStore(&spawn_counter, 0u);
+    atomicStore(&spawn_debug_counters[0], 0u);
 }
 
 // ============================================================================

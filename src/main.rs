@@ -1280,7 +1280,7 @@ struct GpuState {
     params_buffer: wgpu::Buffer,
     environment_init_params_buffer: wgpu::Buffer,
     alive_counter: wgpu::Buffer,
-    debug_counter: wgpu::Buffer,
+    spawn_debug_counters: wgpu::Buffer, // [spawn_counter, debug_counter]
     alive_readbacks: [Arc<wgpu::Buffer>; 2],
     alive_readback_pending: [Arc<Mutex<Option<Result<u32, ()>>>>; 2],
     alive_readback_inflight: [bool; 2],
@@ -1290,7 +1290,6 @@ struct GpuState {
     selected_agent_buffer: wgpu::Buffer, // GPU buffer for selected agent
     selected_agent_readback: wgpu::Buffer, // CPU readback for selected agent
     new_agents_buffer: wgpu::Buffer, // Buffer for spawned agents
-    spawn_counter: wgpu::Buffer,   // Count of spawned agents
     spawn_readback: wgpu::Buffer,  // Readback for spawn count
     spawn_requests_buffer: wgpu::Buffer, // CPU spawn requests seeds
 
@@ -1306,6 +1305,7 @@ struct GpuState {
     fluid_pressure_b: wgpu::Buffer,
     fluid_divergence: wgpu::Buffer,
     fluid_forces: wgpu::Buffer,
+    fluid_force_vectors: wgpu::Buffer,
     fluid_params_buffer: wgpu::Buffer,
 
     // Fluid simulation pipelines
@@ -1320,6 +1320,9 @@ struct GpuState {
     fluid_jacobi_pressure_pipeline: wgpu::ComputePipeline,
     fluid_subtract_gradient_pipeline: wgpu::ComputePipeline,
     fluid_copy_pipeline: wgpu::ComputePipeline,
+    fluid_copy_velocity_to_forces_pipeline: wgpu::ComputePipeline,
+    fluid_clear_forces_pipeline: wgpu::ComputePipeline,
+    fluid_clear_force_vectors_pipeline: wgpu::ComputePipeline,
     fluid_clear_velocity_pipeline: wgpu::ComputePipeline,
 
     // Fluid bind groups
@@ -2217,9 +2220,9 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
-        let debug_counter = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Counter"),
-            size: 4,
+        let spawn_debug_counters = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Spawn/Debug Counters"),
+            size: 8, // 2 x u32
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -2227,7 +2230,7 @@ impl GpuState {
         });
 
         queue.write_buffer(&alive_counter, 0, bytemuck::bytes_of(&0u32));
-        queue.write_buffer(&debug_counter, 0, bytemuck::bytes_of(&0u32));
+        queue.write_buffer(&spawn_debug_counters, 0, bytemuck::cast_slice(&[0u32, 0u32]));
 
         let alive_readbacks = [
             Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -2296,23 +2299,12 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
-        let spawn_counter = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Spawn Counter"),
-            size: 4,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
         let spawn_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spawn Readback"),
             size: 4,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        // Initialize spawn_counter to 0 to avoid undefined first-frame content
-        queue.write_buffer(&spawn_counter, 0, bytemuck::bytes_of(&0u32));
         profiler.mark("Counters and readbacks");
 
         // Grid readback buffers for snapshot save
@@ -2373,7 +2365,7 @@ impl GpuState {
         });
         profiler.mark("Sampler");
 
-        // Load shader (concatenate shared + render + composite + simulation modules)
+        // Load main shader (concatenate shared + render + composite + simulation modules)
         let shader_source = format!(
             "{}\n{}\n{}\n{}",
             include_str!("../shaders/shared.wgsl"),
@@ -2385,7 +2377,7 @@ impl GpuState {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
-        profiler.mark("Shader compiled");
+        profiler.mark("Main shader compiled");
 
         // ============================================================================
         // FLUID SIMULATION BUFFERS (created early so they can be used in bind groups)
@@ -2415,6 +2407,14 @@ impl GpuState {
             size: fluid_velocity_size,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
+        });
+
+        // Create force vectors buffer for per-frame propeller force injection
+        let force_vectors_zeros = vec![[0.0f32, 0.0f32]; FLUID_GRID_CELLS];
+        let fluid_force_vectors = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Fluid Force Vectors"),
+            contents: bytemuck::cast_slice(&force_vectors_zeros),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         let fluid_pressure_a = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2529,7 +2529,7 @@ impl GpuState {
                         binding: 8,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2668,7 +2668,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: debug_counter.as_entire_binding(),
+                    resource: fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -2676,7 +2676,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: spawn_counter.as_entire_binding(),
+                    resource: spawn_debug_counters.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
@@ -2700,7 +2700,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: fluid_forces.as_entire_binding(),
+                    resource: fluid_force_vectors.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
@@ -2747,7 +2747,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: debug_counter.as_entire_binding(),
+                    resource: fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -2755,7 +2755,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: spawn_counter.as_entire_binding(),
+                    resource: spawn_debug_counters.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
@@ -2779,7 +2779,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: fluid_forces.as_entire_binding(),
+                    resource: fluid_force_vectors.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
@@ -3100,7 +3100,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: fluid_forces.as_entire_binding(),
+                    resource: fluid_velocity_a.as_entire_binding(),
                 },
             ],
         });
@@ -3256,6 +3256,16 @@ impl GpuState {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -3271,6 +3281,7 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: fluid_divergence.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: fluid_force_vectors.as_entire_binding() },
             ],
         });
 
@@ -3285,6 +3296,7 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: fluid_divergence.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: fluid_force_vectors.as_entire_binding() },
             ],
         });
 
@@ -3395,6 +3407,33 @@ impl GpuState {
             cache: None,
         });
 
+        let fluid_copy_velocity_to_forces_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Copy Velocity To Forces"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "copy_velocity_to_forces",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_clear_forces_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Clear Forces"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "clear_forces",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_clear_force_vectors_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Clear Force Vectors"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "clear_force_vectors",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         let fluid_clear_velocity_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Fluid Clear Velocity"),
             layout: Some(&fluid_pipeline_layout),
@@ -3416,8 +3455,7 @@ impl GpuState {
             &new_agents_buffer,
             &spawn_requests_buffer,
             &alive_counter,
-            &debug_counter,
-            &spawn_counter,
+            &spawn_debug_counters,
             &selected_agent_buffer,
             &visual_grid_buffer,
         ] {
@@ -3532,7 +3570,7 @@ impl GpuState {
             params_buffer,
             environment_init_params_buffer,
             alive_counter,
-            debug_counter,
+            spawn_debug_counters,
             alive_readbacks,
             alive_readback_pending,
             alive_readback_inflight: [false; 2],
@@ -3542,7 +3580,6 @@ impl GpuState {
             selected_agent_buffer,
             selected_agent_readback,
             new_agents_buffer,
-            spawn_counter,
             spawn_readback,
             spawn_requests_buffer,
             alpha_grid_readback,
@@ -3681,6 +3718,7 @@ impl GpuState {
             fluid_pressure_b,
             fluid_divergence,
             fluid_forces,
+            fluid_force_vectors,
             fluid_params_buffer,
             fluid_generate_forces_pipeline,
             fluid_add_forces_pipeline,
@@ -3693,6 +3731,9 @@ impl GpuState {
             fluid_jacobi_pressure_pipeline,
             fluid_subtract_gradient_pipeline,
             fluid_copy_pipeline,
+            fluid_copy_velocity_to_forces_pipeline,
+            fluid_clear_forces_pipeline,
+            fluid_clear_force_vectors_pipeline,
             fluid_clear_velocity_pipeline,
             fluid_bind_group_ab,
             fluid_bind_group_ba,
@@ -4113,7 +4154,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.debug_counter.as_entire_binding(),
+                    resource: self.fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -4121,7 +4162,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: self.spawn_counter.as_entire_binding(),
+                    resource: self.spawn_debug_counters.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
@@ -4191,7 +4232,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.debug_counter.as_entire_binding(),
+                    resource: self.fluid_velocity_b.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -4199,7 +4240,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: self.spawn_counter.as_entire_binding(),
+                    resource: self.spawn_debug_counters.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
@@ -4256,7 +4297,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: self.fluid_forces.as_entire_binding(),
+                    resource: self.fluid_velocity_a.as_entire_binding(),
                 },
             ],
         });
@@ -4454,7 +4495,7 @@ impl GpuState {
         self.params_buffer.destroy();
         self.environment_init_params_buffer.destroy();
         self.alive_counter.destroy();
-        self.debug_counter.destroy();
+        self.spawn_debug_counters.destroy();
         for buffer in &self.alive_readbacks {
             buffer.destroy();
         }
@@ -4463,7 +4504,6 @@ impl GpuState {
         self.selected_agent_buffer.destroy();
         self.selected_agent_readback.destroy();
         self.new_agents_buffer.destroy();
-        self.spawn_counter.destroy();
         self.spawn_readback.destroy();
         self.spawn_requests_buffer.destroy();
         self.visual_texture.destroy();
@@ -4586,7 +4626,7 @@ impl GpuState {
 
         if cpu_spawn_count > 0 {
             encoder.clear_buffer(&self.alive_counter, 0, None);
-            encoder.clear_buffer(&self.debug_counter, 0, None);
+            encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
 
             // Upload spawn requests for this batch so GPU has per-request seeds/data
             // Limit to the count actually being processed (capped at 2000 elsewhere)
@@ -4922,6 +4962,31 @@ impl GpuState {
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
+        // Update fluid params with actual frame dt
+        {
+            #[repr(C)]
+            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+            struct FluidParams {
+                time: f32,
+                dt: f32,
+                decay: f32,
+                grid_size: u32,
+                mouse: [f32; 4],
+                splat: [f32; 4],
+            }
+
+            let fluid_params = FluidParams {
+                time: self.epoch as f32,
+                dt: 0.016,
+                decay: 0.995,
+                grid_size: 128,
+                mouse: [0.0; 4],
+                splat: [0.0; 4],
+            };
+
+            self.queue.write_buffer(&self.fluid_params_buffer, 0, bytemuck::bytes_of(&fluid_params));
+        }
+
         // Handle CPU spawns - only when not paused (consistent with autospawn)
         if !self.is_paused && cpu_spawn_count > 0 {
             // Use the reliable paused spawn path for all manual spawns
@@ -4949,7 +5014,7 @@ impl GpuState {
         // Clear counters (spawn_counter is reset in-shader at end of previous frame)
         if should_run_simulation {
             encoder.clear_buffer(&self.alive_counter, 0, None);
-            encoder.clear_buffer(&self.debug_counter, 0, None);
+            encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
         }
         // Do NOT clear spawn_counter here; we may set it from CPU spawns below.
 
@@ -5051,10 +5116,101 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
 
+                // Clear force_vectors buffer BEFORE agents inject propeller forces
+                {
+                    const FLUID_GRID_SIZE: u32 = 128;
+                    let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+                    cpass.set_pipeline(&self.fluid_clear_force_vectors_pipeline);
+                    cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                }
+
                 // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(256)
+                // Agents will inject propeller forces into force_vectors buffer
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                // Run fluid solver - copy force_vectors to forces, then evolve field
+                {
+                    const FLUID_GRID_SIZE: u32 = 128;
+                    let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+                    let bg_ab = &self.fluid_bind_group_ab;
+                    let bg_ba = &self.fluid_bind_group_ba;
+
+                    // 0. Copy force_vectors to forces buffer
+                    cpass.set_pipeline(&self.fluid_generate_forces_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 1. Advect velocity (A -> B)
+                    cpass.set_pipeline(&self.fluid_advect_velocity_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 2. Add forces (B -> A)
+                    cpass.set_pipeline(&self.fluid_add_forces_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 3. Vorticity confinement (A -> B)
+                    cpass.set_pipeline(&self.fluid_vorticity_confinement_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 4. Enforce boundaries (B -> A)
+                    cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 5. Diffuse velocity (A -> B)
+                    cpass.set_pipeline(&self.fluid_diffuse_velocity_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 6. Copy back (B -> A)
+                    cpass.set_pipeline(&self.fluid_copy_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 7. Compute divergence (reads velocity_a)
+                    cpass.set_pipeline(&self.fluid_divergence_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 8. Clear pressure buffers
+                    cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 9. Jacobi iterations for pressure
+                    const JACOBI_ITERS: u32 = 31;
+                    for i in 0..JACOBI_ITERS {
+                        let bg = if (i & 1) == 0 { bg_ab } else { bg_ba };
+                        cpass.set_pipeline(&self.fluid_jacobi_pressure_pipeline);
+                        cpass.set_bind_group(0, bg, &[]);
+                        cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                    }
+
+                    // 10. Subtract pressure gradient (A->B)
+                    cpass.set_pipeline(&self.fluid_subtract_gradient_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 11. Enforce boundaries (B->A, final result in velocity_a)
+                    cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 12. Export final velocity (A) into `fluid_forces` for visualization in composite.wgsl
+                    cpass.set_pipeline(&self.fluid_copy_velocity_to_forces_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                }
 
                 // Compact alive agents - workgroup_size(64)
                 cpass.set_pipeline(&self.compact_pipeline);
@@ -5086,9 +5242,81 @@ impl GpuState {
             } else if should_draw && self.agent_count > 0 {
                 // When paused or no living agents: run process pipeline for rendering only (dt=0, probabilities=0)
                 // but skip compaction, spawning, and buffer swapping
+                {
+                    const FLUID_GRID_SIZE: u32 = 128;
+                    let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+                    cpass.set_pipeline(&self.fluid_clear_forces_pipeline);
+                    cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                }
+
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                // Keep the fluid field evolving even in render-only mode
+                {
+                    const FLUID_GRID_SIZE: u32 = 128;
+                    let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+                    let bg_ab = &self.fluid_bind_group_ab;
+                    let bg_ba = &self.fluid_bind_group_ba;
+
+                    cpass.set_pipeline(&self.fluid_advect_velocity_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_add_forces_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_vorticity_confinement_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_diffuse_velocity_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_copy_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_divergence_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    const JACOBI_ITERS: u32 = 31;
+                    for i in 0..JACOBI_ITERS {
+                        let bg = if (i & 1) == 0 { bg_ab } else { bg_ba };
+                        cpass.set_pipeline(&self.fluid_jacobi_pressure_pipeline);
+                        cpass.set_bind_group(0, bg, &[]);
+                        cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                    }
+
+                    cpass.set_pipeline(&self.fluid_subtract_gradient_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_copy_velocity_to_forces_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                }
             }
 
             // Composite agents onto visual grid when drawing
@@ -5141,116 +5369,6 @@ impl GpuState {
         self.process_completed_alive_readbacks();
         let slot = self.ensure_alive_slot_ready();
         let alive_buffer = self.copy_state_to_staging(&mut encoder, slot);
-
-        // ============================================================================
-        // FLUID SIMULATION UPDATE (128x128 grid, runs every frame)
-        // ============================================================================
-        const FLUID_GRID_SIZE: u32 = 128;
-        const FLUID_DT: f32 = 1.0 / 60.0;
-
-        // Update fluid time and parameters
-        self.fluid_time += FLUID_DT;
-
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        struct FluidParams {
-            time: f32,
-            dt: f32,
-            decay: f32,
-            grid_size: u32,
-            mouse: [f32; 4],
-            splat: [f32; 4],
-        }
-
-        let fluid_params = FluidParams {
-            time: self.fluid_time,
-            dt: FLUID_DT,
-            decay: 0.9995,
-            grid_size: FLUID_GRID_SIZE,
-            mouse: [0.0, 0.0, 0.0, 0.0], // No mouse input for now
-            splat: [0.0, 0.0, 0.0, 0.0],  // No force injection for now
-        };
-
-        self.queue.write_buffer(&self.fluid_params_buffer, 0, bytemuck::cast_slice(&[fluid_params]));
-
-        {
-            let mut fluid_cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Fluid Simulation Pass"),
-                timestamp_writes: None,
-            });
-
-            let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
-            let bg_ab = &self.fluid_bind_group_ab;
-            let bg_ba = &self.fluid_bind_group_ba;
-
-            // 1. Generate test forces
-            fluid_cpass.set_pipeline(&self.fluid_generate_forces_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ab, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 2. Advect velocity (A -> B)
-            fluid_cpass.set_pipeline(&self.fluid_advect_velocity_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ab, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 3. Add forces (B -> A)
-            fluid_cpass.set_pipeline(&self.fluid_add_forces_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ba, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 4. Vorticity confinement (A -> B)
-            fluid_cpass.set_pipeline(&self.fluid_vorticity_confinement_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ab, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 5. Enforce boundaries (B -> A)
-            fluid_cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ba, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 5b. Diffuse velocity (A -> B) to damp 1-cell noise
-            fluid_cpass.set_pipeline(&self.fluid_diffuse_velocity_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ab, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 5c. Copy back (B -> A)
-            fluid_cpass.set_pipeline(&self.fluid_copy_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ba, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 6. Compute divergence (reads velocity_a)
-            fluid_cpass.set_pipeline(&self.fluid_divergence_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ab, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 7. Clear pressure buffers
-            fluid_cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ba, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            fluid_cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ab, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 8. Jacobi iterations for pressure (31 iterations, odd count)
-            const JACOBI_ITERS: u32 = 31;
-            for i in 0..JACOBI_ITERS {
-                let bg = if (i & 1) == 0 { bg_ab } else { bg_ba };
-                fluid_cpass.set_pipeline(&self.fluid_jacobi_pressure_pipeline);
-                fluid_cpass.set_bind_group(0, bg, &[]);
-                fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-            }
-
-            // 9. Subtract pressure gradient (A->B)
-            fluid_cpass.set_pipeline(&self.fluid_subtract_gradient_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ab, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-            // 10. Enforce boundaries (B->A, final result in velocity_a)
-            fluid_cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
-            fluid_cpass.set_bind_group(0, bg_ba, &[]);
-            fluid_cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-        }
 
         self.queue.submit(Some(encoder.finish()));
 
@@ -5722,7 +5840,7 @@ impl GpuState {
         self.queue.write_buffer(&self.alive_counter, 0, bytemuck::bytes_of(&0u32));
 
         // Clear spawn counter
-        self.queue.write_buffer(&self.spawn_counter, 0, bytemuck::bytes_of(&0u32));
+        self.queue.write_buffer(&self.spawn_debug_counters, 0, bytemuck::bytes_of(&0u32));
 
         // Zero out all agent buffers
         let zero_agents = vec![Agent::zeroed(); self.agent_buffer_capacity];
@@ -5981,50 +6099,54 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: self.params_buffer.as_entire_binding(),
+                    resource: self.agent_grid_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: self.alive_counter.as_entire_binding(),
+                    resource: self.params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: self.debug_counter.as_entire_binding(),
+                    resource: self.alive_counter.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.new_agents_buffer.as_entire_binding(),
+                    resource: self.fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
-                    resource: self.spawn_counter.as_entire_binding(),
+                    resource: self.new_agents_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: self.spawn_requests_buffer.as_entire_binding(),
+                    resource: self.spawn_debug_counters.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: self.selected_agent_buffer.as_entire_binding(),
+                    resource: self.spawn_requests_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: self.gamma_grid.as_entire_binding(),
+                    resource: self.selected_agent_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: self.trail_grid.as_entire_binding(),
+                    resource: self.gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 14,
-                    resource: self.environment_init_params_buffer.as_entire_binding(),
+                    resource: self.trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: self.rain_map_buffer.as_entire_binding(),
+                    resource: self.environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
+                    resource: self.fluid_force_vectors.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
                     resource: self.agent_spatial_grid_buffer.as_entire_binding(),
                 },
             ],
@@ -6069,42 +6191,42 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.debug_counter.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: self.new_agents_buffer.as_entire_binding(),
+                    resource: self.fluid_velocity_b.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
-                    resource: self.spawn_counter.as_entire_binding(),
+                    resource: self.new_agents_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: self.spawn_requests_buffer.as_entire_binding(),
+                    resource: self.spawn_debug_counters.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: self.selected_agent_buffer.as_entire_binding(),
+                    resource: self.spawn_requests_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: self.gamma_grid.as_entire_binding(),
+                    resource: self.selected_agent_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 13,
-                    resource: self.trail_grid.as_entire_binding(),
+                    resource: self.gamma_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 14,
-                    resource: self.environment_init_params_buffer.as_entire_binding(),
+                    resource: self.trail_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 15,
-                    resource: self.rain_map_buffer.as_entire_binding(),
+                    resource: self.environment_init_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
+                    resource: self.fluid_force_vectors.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
                     resource: self.agent_spatial_grid_buffer.as_entire_binding(),
                 },
             ],
@@ -6184,8 +6306,7 @@ impl GpuState {
 
         // Clear alive counter and spawn counter
         encoder.clear_buffer(&self.alive_counter, 0, None);
-        encoder.clear_buffer(&self.spawn_counter, 0, None);
-        encoder.clear_buffer(&self.debug_counter, 0, None);
+        encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
 
         // Reinitialize environment grids (alpha, beta, gamma, trails) via GPU compute
         const CLEAR_WG_SIZE_X: u32 = 16;
@@ -7528,9 +7649,8 @@ fn main() {
                                                                 encoder.clear_buffer(&state.agents_buffer_a, 0, None);
                                                                 encoder.clear_buffer(&state.agents_buffer_b, 0, None);
                                                                 encoder.clear_buffer(&state.new_agents_buffer, 0, None);
-                                                                encoder.clear_buffer(&state.spawn_counter, 0, None);
+                                                                encoder.clear_buffer(&state.spawn_debug_counters, 0, None);
                                                                 encoder.clear_buffer(&state.alive_counter, 0, None);
-                                                                encoder.clear_buffer(&state.debug_counter, 0, None);
                                                                 state.queue.submit(Some(encoder.finish()));
                                                                 state.window.request_redraw();
                                                             }

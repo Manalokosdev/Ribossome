@@ -1,4 +1,25 @@
 # GitHub Copilot Instructions for ALsimulatorv3
+CRITICAL RENDERING RULES — NEVER VIOLATE
+
+In any file under src/gpu/, src/shaders/, or containing "wgsl"/"wgpu":
+
+1. NEVER suggest matching Rust structs to WGSL structs
+2. NEVER use #[repr(C)], bytemuck, encase, Pod, Zeroable, or ShaderType derives for uniform/SSBO data
+3. NEVER suggest vec3, bool, u8, arrays of structs, or mixed types in uniform buffers
+4. ALWAYS use a single flat [f32; N] or [u8; N] buffer with named key-value access or explicit offsets
+5. When asked for uniforms, storage buffers, or push constants, respond ONLY with one of these patterns:
+   - "Use a key-value chessboard buffer (named parameters, string or hashed keys)"
+   - "Use flat buffer with const OFFSET_ defines"
+   - "Use array<f32> in WGSL and write by index from Rust"
+6. If user pastes a struct-matching example, immediately reply:
+   "Warning: This pattern causes silent padding bugs and breaks hot-reloading. Use flat key-value buffer instead — see gpu/params.rs"
+7. If working with existing code that violates these rules, suggest refactoring to comply with the above patterns if not too complicated, or live with it but don't make it worse.
+
+Examples of correct answers:
+- "Implement params as array<f32, 512> and access via string keys or hashed lookup"
+- "Define all parameters in params.toml and codegen offsets for both Rust and WGSL"
+- "Use a 16KiB flat float buffer — zero padding, zero surprises"
+
 
 ## Build and Run Commands
 

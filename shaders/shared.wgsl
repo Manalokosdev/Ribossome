@@ -270,13 +270,13 @@ var<uniform> params: SimParams;
 var<storage, read_write> alive_counter: atomic<u32>;
 
 @group(0) @binding(8)
-var<storage, read_write> debug_counter: atomic<u32>;
+var<storage, read> fluid_velocity: array<vec2<f32>>; // 128x128 fluid velocity field for visualization
 
 @group(0) @binding(9)
 var<storage, read_write> new_agents: array<Agent>;  // Buffer for spawned agents
 
 @group(0) @binding(10)
-var<storage, read_write> spawn_counter: atomic<u32>;  // Count of spawned agents this frame
+var<storage, read_write> spawn_debug_counters: array<atomic<u32>, 2>;  // [0]=spawn_counter, [1]=debug_counter
 
 @group(0) @binding(11)
 var<storage, read> spawn_requests: array<SpawnRequest>;
@@ -295,7 +295,7 @@ var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGB 
 var<uniform> environment_init: EnvironmentInitParams;
 
 @group(0) @binding(16)
-var<storage, read_write> fluid_forces: array<vec2<f32>>; // Fluid momentum injection from agent propellers (128x128 grid)
+var<storage, read_write> force_vectors: array<vec2<f32>>; // Agent propeller forces (cleared each frame, injected by agents, copied to fluid solver)
 
 @group(0) @binding(17)
 var<storage, read_write> agent_spatial_grid: array<atomic<u32>>; // Agent index per grid cell (atomic for vampire victim claiming)
@@ -308,7 +308,7 @@ const VAMPIRE_NEWBORN_GRACE_FRAMES: u32 = 60u;    // Newborn agents ignore/are i
 
 // Fluid constants
 const FLUID_GRID_SIZE: u32 = 128u;
-const FLUID_FORCE_SCALE: f32 = 50.0;  // Multiplier for propeller forces injected into fluid
+const FLUID_FORCE_SCALE: f32 = 500.0;  // Multiplier for propeller forces injected into fluid
 
 // ============================================================================
 // AMINO ACID PROPERTIES
