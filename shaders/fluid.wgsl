@@ -5,37 +5,34 @@
 // RECOMMENDED PER-FRAME DISPATCH ORDER (Rust/wgpu)
 // ============================================================================
 //
-// The order matters! Forces from the PREVIOUS frame must be applied FIRST,
-// then new forces are written. This allows forces to build momentum before
-// being damped by advection.
+// The order matters! Forces are written by agents and immediately applied.
 //
-// 1. add_forces (velocity += forces * dt) ← Apply PREVIOUS frame's forces!
+// 1. [Agent simulation writes propeller forces to force_vectors buffer]
 //
-// 2. clear_force_vectors (clear propeller force accumulator)
+// 2. generate_test_forces (copy force_vectors → forces with 100x boost)
 //
-// 3. [Agent simulation writes NEW propeller forces to force_vectors buffer]
+// 3. add_forces (velocity += forces * dt) ← Apply THIS frame's forces!
 //
-// 4. generate_test_forces (copy force_vectors → forces with boost)
+// 4. diffuse_velocity (optional explicit viscosity smoothing)
 //
-// 5. diffuse_velocity (optional explicit viscosity smoothing)
+// 5. advect_velocity (self-advect velocity field)
 //
-// 6. advect_velocity (self-advect velocity field)
+// 6. vorticity_confinement (adds swirly detail, optional)
 //
-// 7. vorticity_confinement (adds swirly detail, optional)
+// 7. compute_divergence (∇·v)
 //
-// 8. compute_divergence (∇·v)
+// 8. clear_pressure (both pressure buffers)
 //
-// 9. clear_pressure (both pressure buffers)
+// 9. jacobi_pressure (20-40 iterations with ping-pong)
 //
-// 10. jacobi_pressure (20-40 iterations with ping-pong)
+// 10. subtract_gradient (make velocity divergence-free)
 //
-// 11. subtract_gradient (make velocity divergence-free)
+// 11. enforce_boundaries (free-slip walls)
 //
-// 12. enforce_boundaries (free-slip walls)
+// 12. advect_display_texture (optional feedback visualization)
 //
-// 13. advect_display_texture (optional feedback visualization)
-//
-// Note: Ping-pong velocity_in/velocity_out between steps as needed.
+// Note: No need to clear force_vectors - agents fully overwrite it each frame.
+//       Ping-pong velocity_in/velocity_out between steps as needed.
 //       Final result should be in velocity_a for visualization.
 //
 // ============================================================================

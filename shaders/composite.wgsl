@@ -91,7 +91,7 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Convert to HSV: hue from direction, brightness from speed
         let angle = atan2(vel.y, vel.x);
         let hue = (angle + 3.14159265) / (2.0 * 3.14159265); // 0-1
-        
+
         // Show base blue for zero velocity, brighter colors for movement
         let base_brightness = 0.2;  // Dim blue for zero velocity
         let speed_brightness = min(speed * 8.0, 1.0);
