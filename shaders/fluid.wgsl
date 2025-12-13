@@ -5,33 +5,32 @@
 // RECOMMENDED PER-FRAME DISPATCH ORDER (Rust/wgpu)
 // ============================================================================
 //
-// The order matters! Forces are written by agents and immediately applied.
+// Forces are written directly by agents to the forces buffer (binding 2) with
+// 100x boost already applied. No intermediate buffer or copy needed.
 //
-// 1. [Agent simulation writes propeller forces to force_vectors buffer]
+// 1. [Agent simulation writes propeller forces directly to forces buffer]
 //
-// 2. generate_test_forces (copy force_vectors → forces with 100x boost)
+// 2. add_forces (velocity += forces * dt) ← Apply forces immediately!
 //
-// 3. add_forces (velocity += forces * dt) ← Apply THIS frame's forces!
+// 3. diffuse_velocity (optional explicit viscosity smoothing)
 //
-// 4. diffuse_velocity (optional explicit viscosity smoothing)
+// 4. advect_velocity (self-advect velocity field)
 //
-// 5. advect_velocity (self-advect velocity field)
+// 5. vorticity_confinement (adds swirly detail, optional)
 //
-// 6. vorticity_confinement (adds swirly detail, optional)
+// 6. compute_divergence (∇·v)
 //
-// 7. compute_divergence (∇·v)
+// 7. clear_pressure (both pressure buffers)
 //
-// 8. clear_pressure (both pressure buffers)
+// 8. jacobi_pressure (20-40 iterations with ping-pong)
 //
-// 9. jacobi_pressure (20-40 iterations with ping-pong)
+// 9. subtract_gradient (make velocity divergence-free)
 //
-// 10. subtract_gradient (make velocity divergence-free)
+// 10. enforce_boundaries (free-slip walls)
 //
-// 11. enforce_boundaries (free-slip walls)
+// 11. advect_display_texture (optional feedback visualization)
 //
-// 12. advect_display_texture (optional feedback visualization)
-//
-// Note: No need to clear force_vectors - agents fully overwrite it each frame.
+// Note: Agents write to forces buffer directly at binding 2 (shared with fluid group).
 //       Ping-pong velocity_in/velocity_out between steps as needed.
 //       Final result should be in velocity_a for visualization.
 //

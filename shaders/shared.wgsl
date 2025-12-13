@@ -295,7 +295,7 @@ var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGB 
 var<uniform> environment_init: EnvironmentInitParams;
 
 @group(0) @binding(16)
-var<storage, read_write> force_vectors: array<vec2<f32>>; // Agent propeller forces (cleared each frame, injected by agents, copied to fluid solver)
+var<storage, read_write> fluid_forces: array<vec2<f32>>; // Fluid forces buffer - agents write propeller forces directly with 100x boost
 
 @group(0) @binding(17)
 var<storage, read_write> agent_spatial_grid: array<atomic<u32>>; // Agent index per grid cell (atomic for vampire victim claiming)

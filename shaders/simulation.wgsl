@@ -1138,16 +1138,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Torque from lever arm r_com cross thrust (scaled down to reduce perpetual spinning)
                 torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
 
-                // INJECT PROPELLER FORCE INTO FLUID FORCE_VECTORS BUFFER
+                // INJECT PROPELLER FORCE DIRECTLY INTO FLUID FORCES BUFFER
                 // Map world position to fluid grid (128x128)
                 let fluid_grid_x = u32(clamp(world_pos.x / f32(SIM_SIZE) * 128.0, 0.0, 127.0));
                 let fluid_grid_y = u32(clamp(world_pos.y / f32(SIM_SIZE) * 128.0, 0.0, 127.0));
                 let fluid_idx = fluid_grid_y * 128u + fluid_grid_x;
 
-                // Add thrust force scaled for fluid (opposite direction - propeller pushes fluid backward)
+                // Write thrust force directly to fluid forces buffer with 100x boost
+                // (opposite direction - propeller pushes fluid backward)
                 // NOTE: Race condition possible with multiple agents, but effect is additive so acceptable
-                let scaled_force = -thrust_force * FLUID_FORCE_SCALE;
-                force_vectors[fluid_idx] = force_vectors[fluid_idx] + scaled_force;
+                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 100.0;
+                fluid_forces[fluid_idx] = fluid_forces[fluid_idx] + scaled_force;
             }
         }
 
