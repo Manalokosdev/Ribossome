@@ -84,37 +84,39 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let fluid_y = u32(clamp(world_pos.y / ws * 128.0, 0.0, 127.0));
         let fluid_idx = fluid_y * 128u + fluid_x;
 
-        // Sample fluid velocity
+        // Sample fluid velocity (evolved by Navier-Stokes from propeller forces)
         let vel = fluid_velocity[fluid_idx];
         let speed = length(vel);
 
-        if (speed > 0.000001) {
-            // Convert to HSV: hue from direction, brightness from speed
-            let angle = atan2(vel.y, vel.x);
-            let hue = (angle + 3.14159265) / (2.0 * 3.14159265); // 0-1
-            let brightness = min(speed * 8.0, 1.0);
+        // Convert to HSV: hue from direction, brightness from speed
+        let angle = atan2(vel.y, vel.x);
+        let hue = (angle + 3.14159265) / (2.0 * 3.14159265); // 0-1
+        
+        // Show base blue for zero velocity, brighter colors for movement
+        let base_brightness = 0.2;  // Dim blue for zero velocity
+        let speed_brightness = min(speed * 8.0, 1.0);
+        let brightness = max(base_brightness, speed_brightness);
 
-            // HSV to RGB conversion
-            let h6 = hue * 6.0;
-            let i = floor(h6);
-            let f = h6 - i;
-            let p = 0.0;
-            let q = brightness * (1.0 - f);
-            let t = brightness * f;
+        // HSV to RGB conversion
+        let h6 = hue * 6.0;
+        let i = floor(h6);
+        let f = h6 - i;
+        let p = 0.0;
+        let q = brightness * (1.0 - f);
+        let t = brightness * f;
 
-            var fluid_color = vec3<f32>(0.0);
-            let i_mod = u32(i) % 6u;
-            if (i_mod == 0u) { fluid_color = vec3<f32>(brightness, t, p); }
-            else if (i_mod == 1u) { fluid_color = vec3<f32>(q, brightness, p); }
-            else if (i_mod == 2u) { fluid_color = vec3<f32>(p, brightness, t); }
-            else if (i_mod == 3u) { fluid_color = vec3<f32>(p, q, brightness); }
-            else if (i_mod == 4u) { fluid_color = vec3<f32>(t, p, brightness); }
-            else { fluid_color = vec3<f32>(brightness, p, q); }
+        var fluid_color = vec3<f32>(0.0);
+        let i_mod = u32(i) % 6u;
+        if (i_mod == 0u) { fluid_color = vec3<f32>(brightness, t, p); }
+        else if (i_mod == 1u) { fluid_color = vec3<f32>(q, brightness, p); }
+        else if (i_mod == 2u) { fluid_color = vec3<f32>(p, brightness, t); }
+        else if (i_mod == 3u) { fluid_color = vec3<f32>(p, q, brightness); }
+        else if (i_mod == 4u) { fluid_color = vec3<f32>(t, p, brightness); }
+        else { fluid_color = vec3<f32>(brightness, p, q); }
 
-            // Blend fluid overlay with opacity based on speed (high gain so it's visible)
-            let fluid_alpha = clamp(speed * 6.0, 0.0, 0.85);
-            result_color = mix(result_color, fluid_color, fluid_alpha);
-        }
+        // Always show overlay with significant alpha
+        let fluid_alpha = 0.5;  // Constant 50% opacity
+        result_color = mix(result_color, fluid_color, fluid_alpha);
     }
 
     visual_grid[idx] = vec4<f32>(result_color, 1.0);

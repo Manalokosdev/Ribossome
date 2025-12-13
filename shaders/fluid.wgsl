@@ -278,7 +278,9 @@ fn generate_test_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = grid_index(x, y);
 
     // Read force from the static force vectors buffer
-    forces[idx] = force_vectors[idx];
+    // (Populated by agent propellers in simulation shader)
+    // Boost forces 100x so they survive fluid dissipation
+    forces[idx] = force_vectors[idx] * 100.0;
 }
 
 // 2. Advect velocity field (semi-Lagrangian, no forces yet)
@@ -307,7 +309,7 @@ fn advect_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Apply decay in a frame-rate independent way.
     // `params.decay` is interpreted as a per-frame damping factor at 60 FPS.
     // For arbitrary dt, scale it as decay^(dt*60).
-    let decay_factor = pow(params.decay, params.dt * 60.0);
+    let decay_factor = pow(0.999, params.dt * 60.0);  // Reduced from params.decay (0.9995)
     velocity_out[idx] = advected_vel * decay_factor;
 }
 
@@ -552,8 +554,8 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let lap = (v_l + v_r + v_b + v_t) - 4.0 * v_c;
 
-    // nu is in “cells^2 / second” with dx=1; lower values reduce blur.
-    let nu = 0.35;
+    // nu is in "cells^2 / second" with dx=1; lower values reduce blur.
+    let nu = 0.05;  // Reduced from 0.35 for less dissipation
     let a = nu * params.dt;
     velocity_out[idx] = v_c + a * lap;
 }

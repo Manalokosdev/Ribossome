@@ -37,10 +37,6 @@ tokio = { version = "1", features = ["full"] }
 name = "ribossome"
 path = "src/main.rs"
 
-[[bin]]
-name = "fluid_test"
-path = "src/fluid_test.rs"
-
 [profile.release]
 opt-level = 3
 lto = true

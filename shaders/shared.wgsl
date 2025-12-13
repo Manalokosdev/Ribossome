@@ -308,7 +308,7 @@ const VAMPIRE_NEWBORN_GRACE_FRAMES: u32 = 60u;    // Newborn agents ignore/are i
 
 // Fluid constants
 const FLUID_GRID_SIZE: u32 = 128u;
-const FLUID_FORCE_SCALE: f32 = 500.0;  // Multiplier for propeller forces injected into fluid
+const FLUID_FORCE_SCALE: f32 = 5000.0;  // Multiplier for propeller forces injected into fluid (increased 10x for visibility)
 
 // ============================================================================
 // AMINO ACID PROPERTIES

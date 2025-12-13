@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.45485547,
+  "camera_zoom": 9.740782,
   "spawn_probability": 0.5,
   "death_probability": 0.001,
   "mutation_rate": 0.001,
@@ -22,10 +22,10 @@
   "amino_maintenance_cost": 0.0003,
   "pairing_cost": 0.0,
   "prop_wash_strength": 0.5,
-  "repulsion_strength": 5.0,
+  "repulsion_strength": 10.0,
   "agent_repulsion_strength": 0.001,
-  "limit_fps": false,
-  "limit_fps_25": false,
+  "limit_fps": true,
+  "limit_fps_25": true,
   "render_interval": 50,
   "gamma_debug_visual": false,
   "slope_debug_visual": false,
@@ -123,8 +123,8 @@
   "gamma_blend_mode": 0,
   "slope_blend_mode": 0,
   "alpha_color": [
-    0.11372549,
-    0.62352943,
+    0.0627451,
+    0.41960785,
     0.0
   ],
   "beta_color": [
