@@ -5131,54 +5131,45 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
 
-                // Run fluid solver - copy force_vectors to forces, then evolve field
+                // Run fluid solver - CORRECTED ORDER: forces first, then advection
+                // Stable Fluids order: add_forces → diffuse → advect → project
                 {
                     const FLUID_GRID_SIZE: u32 = 128;
                     let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
                     let bg_ab = &self.fluid_bind_group_ab;
                     let bg_ba = &self.fluid_bind_group_ba;
 
-                    // 0. Copy force_vectors to forces buffer
+                    // 1. Copy force_vectors to forces buffer
                     cpass.set_pipeline(&self.fluid_generate_forces_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
-                    // 1. Advect velocity (A -> B)
+                    // 2. Add forces FIRST (A -> B) so they can accumulate momentum
+                    cpass.set_pipeline(&self.fluid_add_forces_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 3. Diffuse velocity (B -> A)
+                    cpass.set_pipeline(&self.fluid_diffuse_velocity_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 4. Advect velocity (A -> B)
                     cpass.set_pipeline(&self.fluid_advect_velocity_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
-                    // 2. Add forces (B -> A)
-                    cpass.set_pipeline(&self.fluid_add_forces_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    // 3. Vorticity confinement (A -> B)
+                    // 5. Vorticity confinement (B -> A)
                     cpass.set_pipeline(&self.fluid_vorticity_confinement_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    // 4. Enforce boundaries (B -> A)
-                    cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
-                    // 5. Diffuse velocity (A -> B)
-                    cpass.set_pipeline(&self.fluid_diffuse_velocity_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    // 6. Copy back (B -> A)
-                    cpass.set_pipeline(&self.fluid_copy_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    // 7. Compute divergence (reads velocity_a)
+                    // 6. Compute divergence (reads velocity_a)
                     cpass.set_pipeline(&self.fluid_divergence_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
-                    // 8. Clear pressure buffers
+                    // 7. Clear pressure buffers
                     cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
@@ -5187,7 +5178,7 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
-                    // 9. Jacobi iterations for pressure
+                    // 8. Jacobi iterations for pressure (31 iterations)
                     const JACOBI_ITERS: u32 = 31;
                     for i in 0..JACOBI_ITERS {
                         let bg = if (i & 1) == 0 { bg_ab } else { bg_ba };
@@ -5196,19 +5187,14 @@ impl GpuState {
                         cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
                     }
 
-                    // 10. Subtract pressure gradient (A->B)
+                    // 9. Subtract pressure gradient (A->B)
                     cpass.set_pipeline(&self.fluid_subtract_gradient_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
-                    // 11. Enforce boundaries (B->A, final result in velocity_a)
+                    // 10. Enforce boundaries (B->A, final result in velocity_a)
                     cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    // 12. Export final velocity (A) into `fluid_forces` for visualization in composite.wgsl
-                    cpass.set_pipeline(&self.fluid_copy_velocity_to_forces_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
                 }
 
