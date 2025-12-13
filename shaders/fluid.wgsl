@@ -5,16 +5,17 @@
 // RECOMMENDED PER-FRAME DISPATCH ORDER (Rust/wgpu)
 // ============================================================================
 //
-// The order matters! Forces must be applied BEFORE advection to accumulate
-// momentum. Applying forces after advection causes immediate dissipation.
+// The order matters! Forces from the PREVIOUS frame must be applied FIRST,
+// then new forces are written. This allows forces to build momentum before
+// being damped by advection.
 //
-// 1. clear_force_vectors (optional - clear propeller force accumulator)
+// 1. add_forces (velocity += forces * dt) ← Apply PREVIOUS frame's forces!
 //
-// 2. [Agent simulation writes propeller forces to force_vectors buffer]
+// 2. clear_force_vectors (clear propeller force accumulator)
 //
-// 3. generate_test_forces (copy force_vectors → forces with boost)
+// 3. [Agent simulation writes NEW propeller forces to force_vectors buffer]
 //
-// 4. add_forces (velocity += forces * dt) ← KEY: Apply forces FIRST!
+// 4. generate_test_forces (copy force_vectors → forces with boost)
 //
 // 5. diffuse_velocity (optional explicit viscosity smoothing)
 //
