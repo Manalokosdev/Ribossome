@@ -1,6 +1,42 @@
 // Standalone Fluid Simulation
 // Stable-fluids style: advection + external forces + projection
-
+//
+// ============================================================================
+// RECOMMENDED PER-FRAME DISPATCH ORDER (Rust/wgpu)
+// ============================================================================
+//
+// The order matters! Forces must be applied BEFORE advection to accumulate
+// momentum. Applying forces after advection causes immediate dissipation.
+//
+// 1. clear_force_vectors (optional - clear propeller force accumulator)
+//
+// 2. [Agent simulation writes propeller forces to force_vectors buffer]
+//
+// 3. generate_test_forces (copy force_vectors → forces with boost)
+//
+// 4. add_forces (velocity += forces * dt) ← KEY: Apply forces FIRST!
+//
+// 5. diffuse_velocity (optional explicit viscosity smoothing)
+//
+// 6. advect_velocity (self-advect velocity field)
+//
+// 7. vorticity_confinement (adds swirly detail, optional)
+//
+// 8. compute_divergence (∇·v)
+//
+// 9. clear_pressure (both pressure buffers)
+//
+// 10. jacobi_pressure (20-40 iterations with ping-pong)
+//
+// 11. subtract_gradient (make velocity divergence-free)
+//
+// 12. enforce_boundaries (free-slip walls)
+//
+// 13. advect_display_texture (optional feedback visualization)
+//
+// Note: Ping-pong velocity_in/velocity_out between steps as needed.
+//       Final result should be in velocity_a for visualization.
+//
 // ============================================================================
 // CONSTANTS
 // ============================================================================
