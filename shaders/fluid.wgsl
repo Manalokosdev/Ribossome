@@ -602,12 +602,12 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let grad = vec2<f32>(p_r - p_l, p_t - p_b) * 0.5;
     var v = sanitize_vec2(velocity_in[idx]) - grad;
 
-    // Free-slip solid boundary: zero normal component at the walls.
+    // No-slip solid boundary: zero velocity at the walls (stronger containment).
     if (x == 0u || x == FLUID_GRID_SIZE - 1u) {
-        v.x = 0.0;
+        v = vec2<f32>(0.0, 0.0);
     }
     if (y == 0u || y == FLUID_GRID_SIZE - 1u) {
-        v.y = 0.0;
+        v = vec2<f32>(0.0, 0.0);
     }
 
     velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v), MAX_VEL);
@@ -684,21 +684,9 @@ fn enforce_boundaries(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var v = sanitize_vec2(velocity_in[idx]);
 
     // Left / right walls: set v.x = 0 and copy v.y from interior neighbor.
-    if (x == 0u) {
-        v.x = 0.0;
-        v.y = velocity_in[grid_index(1u, y)].y;
-    } else if (x == FLUID_GRID_SIZE - 1u) {
-        v.x = 0.0;
-        v.y = velocity_in[grid_index(FLUID_GRID_SIZE - 2u, y)].y;
-    }
-
-    // Bottom / top walls: set v.y = 0 and copy v.x from interior neighbor.
-    if (y == 0u) {
-        v.y = 0.0;
-        v.x = velocity_in[grid_index(x, 1u)].x;
-    } else if (y == FLUID_GRID_SIZE - 1u) {
-        v.y = 0.0;
-        v.x = velocity_in[grid_index(x, FLUID_GRID_SIZE - 2u)].x;
+    // At walls, enforce zero velocity completely (no-slip boundaries)
+    if (x == 0u || x == FLUID_GRID_SIZE - 1u || y == 0u || y == FLUID_GRID_SIZE - 1u) {
+        v = vec2<f32>(0.0, 0.0);
     }
 
     velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v), MAX_VEL);
