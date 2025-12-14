@@ -38,8 +38,7 @@
 // CONSTANTS
 // ============================================================================
 
-const FLUID_GRID_SIZE: u32 = 128u;
-const FLUID_GRID_CELLS: u32 = 16384u; // 128 * 128
+// NOTE: FLUID_GRID_SIZE is injected by Rust at shader compile time.
 
 // Stability limits
 const MAX_DT: f32 = 0.02;         // Clamp dt spikes (e.g., window stalls)

@@ -307,7 +307,7 @@ const VAMPIRE_MOUTH_COOLDOWN: f32 = 60.0;         // Frames between drains (1 se
 const VAMPIRE_NEWBORN_GRACE_FRAMES: u32 = 60u;    // Newborn agents ignore/are immune to vampire drain for 1 second
 
 // Fluid constants
-const FLUID_GRID_SIZE: u32 = 128u;
+// NOTE: FLUID_GRID_SIZE is injected by Rust at shader compile time.
 const FLUID_FORCE_SCALE: f32 = 5000.0;  // Multiplier for propeller forces injected into fluid (increased 10x for visibility)
 
 // ============================================================================

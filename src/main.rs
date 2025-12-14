@@ -24,6 +24,8 @@ use winit::{
 };
 
 const SIM_SIZE: f32 = 30720.0; // World size (must match shader SIM_SIZE)
+// Fluid simulation resolution (N x N). Keep this in sync with GPU buffer allocations and shader constants.
+const FLUID_GRID_SIZE: u32 = 256;
 const GRID_DIM: usize = (SIM_SIZE / 15.0) as usize; // Environment grid resolution (alpha/beta/gamma) - derived from SIM_SIZE
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
@@ -2375,8 +2377,10 @@ impl GpuState {
         profiler.mark("Sampler");
 
         // Load main shader (concatenate shared + render + simulation modules, composite is separate)
+        // Inject compile-time constants here so resolution changes are centralized in Rust.
         let shader_source = format!(
-            "{}\n{}\n{}",
+            "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}",
+            FLUID_GRID_SIZE,
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
             include_str!("../shaders/simulation.wgsl")
@@ -2388,20 +2392,24 @@ impl GpuState {
         profiler.mark("Main shader compiled");
 
         // Load composite shader (standalone, minimal dependencies)
+        let composite_shader_source = format!(
+            "const FLUID_GRID_SIZE: u32 = {}u;\n{}",
+            FLUID_GRID_SIZE,
+            include_str!("../shaders/composite.wgsl")
+        );
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Composite Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/composite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(composite_shader_source.into()),
         });
         profiler.mark("Composite shader compiled");
 
         // ============================================================================
         // FLUID SIMULATION BUFFERS (created early so they can be used in bind groups)
         // ============================================================================
-        const FLUID_GRID_SIZE: u32 = 128;
-        const FLUID_GRID_CELLS: usize = (FLUID_GRID_SIZE * FLUID_GRID_SIZE) as usize;
+        let fluid_grid_cells: usize = (FLUID_GRID_SIZE * FLUID_GRID_SIZE) as usize;
 
-        let fluid_velocity_size = (FLUID_GRID_CELLS * std::mem::size_of::<[f32; 2]>()) as u64;
-        let fluid_scalar_size = (FLUID_GRID_CELLS * std::mem::size_of::<f32>()) as u64;
+        let fluid_velocity_size = (fluid_grid_cells * std::mem::size_of::<[f32; 2]>()) as u64;
+        let fluid_scalar_size = (fluid_grid_cells * std::mem::size_of::<f32>()) as u64;
 
         let fluid_velocity_a = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fluid Velocity A"),
@@ -2425,7 +2433,7 @@ impl GpuState {
         });
 
         // Create force vectors buffer for per-frame propeller force injection
-        let force_vectors_zeros = vec![[0.0f32, 0.0f32]; FLUID_GRID_CELLS];
+        let force_vectors_zeros = vec![[0.0f32, 0.0f32]; fluid_grid_cells];
         let fluid_force_vectors = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Fluid Force Vectors"),
             contents: bytemuck::cast_slice(&force_vectors_zeros),
@@ -3269,9 +3277,14 @@ impl GpuState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Load fluid shader
-        let fluid_shader_source = std::fs::read_to_string("shaders/fluid.wgsl")
+        // Load fluid shader (standalone) and inject compile-time constants.
+        let fluid_shader_source_raw = std::fs::read_to_string("shaders/fluid.wgsl")
             .expect("Failed to load shaders/fluid.wgsl");
+        let fluid_shader_source = format!(
+            "const FLUID_GRID_SIZE: u32 = {}u;\n{}",
+            FLUID_GRID_SIZE,
+            fluid_shader_source_raw
+        );
         let fluid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Fluid Shader"),
             source: wgpu::ShaderSource::Wgsl(fluid_shader_source.into()),
@@ -5188,7 +5201,7 @@ impl GpuState {
                 time: self.epoch as f32,
                 dt: 0.016,
                 decay: 0.995,
-                grid_size: 128,
+                grid_size: FLUID_GRID_SIZE,
                 mouse: [0.0; 4],
                 splat: [0.0; 4],
             };
@@ -5326,7 +5339,6 @@ impl GpuState {
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
 
                 // Clear fluid force vectors before agents write to it
-                const FLUID_GRID_SIZE: u32 = 128;
                 let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
                 cpass.set_pipeline(&self.clear_fluid_force_vectors_pipeline);
                 cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
@@ -5352,7 +5364,6 @@ impl GpuState {
                 // Run fluid solver - forces already written by agents to force_vectors
                 // Stable Fluids order: inject_test_force (combines) → add_forces → diffuse → advect → project
                 {
-                    const FLUID_GRID_SIZE: u32 = 128;
                     let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
                     let bg_ab = &self.fluid_bind_group_ab;
                     let bg_ba = &self.fluid_bind_group_ba;
@@ -5478,7 +5489,6 @@ impl GpuState {
 
                 // Keep the fluid field evolving even in render-only mode
                 {
-                    const FLUID_GRID_SIZE: u32 = 128;
                     let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
                     let bg_ab = &self.fluid_bind_group_ab;
                     let bg_ba = &self.fluid_bind_group_ba;

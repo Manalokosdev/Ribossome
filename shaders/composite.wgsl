@@ -190,25 +190,26 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             cam_min_y + norm_y * view_height
         );
 
-        // Wrap into [0..SIM_SIZE) to match simulation space
+        // Respect hard simulation bounds (no torus wrap). Outside the world: no dye overlay.
         let ws = f32(SIM_SIZE);
-        world_pos = world_pos - floor(world_pos / ws) * ws;
+        if (world_pos.x >= 0.0 && world_pos.x < ws && world_pos.y >= 0.0 && world_pos.y < ws) {
+            // Map to fluid grid coordinates (FLUID_GRID_SIZE x FLUID_GRID_SIZE) using the same mapping as propeller injection
+            let grid_f = f32(FLUID_GRID_SIZE);
+            let max_idx_f = grid_f - 1.0;
+            let fluid_x = u32(clamp(world_pos.x / ws * grid_f, 0.0, max_idx_f));
+            let fluid_y = u32(clamp(world_pos.y / ws * grid_f, 0.0, max_idx_f));
+            let fluid_idx = fluid_y * FLUID_GRID_SIZE + fluid_x;
 
-        // Map to fluid grid coordinates (128x128) using the same mapping as propeller injection
-        let fluid_x = u32(clamp(world_pos.x / ws * 128.0, 0.0, 127.0));
-        let fluid_y = u32(clamp(world_pos.y / ws * 128.0, 0.0, 127.0));
-        let fluid_idx = fluid_y * 128u + fluid_x;
+            // Sample dye concentration directly from fluid_dye buffer
+            let dye_concentration = fluid_dye[fluid_idx];
 
-        // Sample dye concentration directly from fluid_dye buffer
-        let dye_concentration = fluid_dye[fluid_idx];
+            // Dye color: bright cyan/blue that fades to transparent
+            let dye_color = vec3<f32>(0.2, 0.7, 1.0);
 
-        // Dye color: bright cyan/blue that fades to transparent
-        // Use a color that contrasts well with the simulation background
-        let dye_color = vec3<f32>(0.2, 0.7, 1.0); // Bright cyan-blue
-
-        // Alpha based on dye concentration - visible where dye exists
-        let fluid_alpha = clamp(dye_concentration * 0.8, 0.0, 0.8);
-        result_color = mix(result_color, dye_color, fluid_alpha);
+            // Alpha based on dye concentration - visible where dye exists
+            let fluid_alpha = clamp(dye_concentration * 0.8, 0.0, 0.8);
+            result_color = mix(result_color, dye_color, fluid_alpha);
+        }
     }
 
     visual_grid[idx] = vec4<f32>(result_color, 1.0);

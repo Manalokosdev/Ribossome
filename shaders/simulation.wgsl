@@ -1139,16 +1139,21 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
 
                 // INJECT PROPELLER FORCE DIRECTLY INTO FLUID FORCES BUFFER
-                // Map world position to fluid grid (128x128)
-                let fluid_grid_x = u32(clamp(world_pos.x / f32(SIM_SIZE) * 128.0, 0.0, 127.0));
-                let fluid_grid_y = u32(clamp(world_pos.y / f32(SIM_SIZE) * 128.0, 0.0, 127.0));
-                let fluid_idx = fluid_grid_y * 128u + fluid_grid_x;
+                // Map world position to fluid grid (FLUID_GRID_SIZE x FLUID_GRID_SIZE)
+                // IMPORTANT: do NOT clamp out-of-bounds positions into the edge cells.
+                // That produces "wind coming from outside" when propellers are outside the valid world.
+                if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
+                    let grid_f = f32(FLUID_GRID_SIZE);
+                    let max_idx_f = grid_f - 1.0;
+                    let fluid_grid_x = u32(clamp(world_pos.x / f32(SIM_SIZE) * grid_f, 0.0, max_idx_f));
+                    let fluid_grid_y = u32(clamp(world_pos.y / f32(SIM_SIZE) * grid_f, 0.0, max_idx_f));
+                    let fluid_idx = fluid_grid_y * FLUID_GRID_SIZE + fluid_grid_x;
 
-                // Write thrust force directly to fluid forces buffer with 100x boost
-                // (opposite direction - propeller pushes fluid backward)
-                // NOTE: Race condition possible with multiple agents, but effect is additive so acceptable
-                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 1000000.0;
-                fluid_forces[fluid_idx] = fluid_forces[fluid_idx] + scaled_force;
+                    // Write thrust force into the shared vec2 buffer.
+                    // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
+                    let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 1.0;
+                    fluid_forces[fluid_idx] = fluid_forces[fluid_idx] + scaled_force;
+                }
             }
         }
 
@@ -2623,10 +2628,10 @@ var<storage, read> fluid_velocity_render: array<vec2<f32>>;
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample visual texture (already has environment + agents + fluid dye composited)
     let color = textureSample(visual_tex, visual_sampler, in.uv);
-    
+
     // Fluid visualization is now handled in composite.wgsl compute shader
     // which directly blends dye markers onto visual_grid before rendering
-    
+
     return vec4<f32>(color.rgb, 1.0);
 }
 
