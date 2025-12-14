@@ -12,7 +12,7 @@
 // ============================================================================
 
 // Standalone bindings for composite shader (not part of shared.wgsl)
-const SIM_SIZE: u32 = 8192u;
+const SIM_SIZE: u32 = 30720u;
 
 struct SimParams {
     grid_size: f32,
@@ -125,7 +125,7 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Alpha based on dye concentration - visible where dye exists
         let fluid_alpha = clamp(dye_concentration * 0.8, 0.0, 0.8);
-        result_color = mix(result_color, dye_color, fluid_alpha);
+        result_color = mix(result_color, dye_color, fluid_alpha)*0.0;
     }
 
     visual_grid[idx] = vec4<f32>(result_color, 1.0);

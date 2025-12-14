@@ -2621,52 +2621,13 @@ var<storage, read> fluid_velocity_render: array<vec2<f32>>;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Sample visual texture (already has environment + agents composited)
+    // Sample visual texture (already has environment + agents + fluid dye composited)
     let color = textureSample(visual_tex, visual_sampler, in.uv);
-    var final_color = color.rgb;
-
-    // Only show fluid visualization if enabled
-    if (render_params.fluid_show != 0u) {
-        // Convert UV to world coordinates using camera transform
-        let safe_zoom = max(render_params.camera_zoom, 0.0001);
-        let safe_width = max(render_params.window_width, 1.0);
-        let safe_height = max(render_params.window_height, 1.0);
-        let aspect_ratio = safe_width / safe_height;
-        let view_width = render_params.grid_size / safe_zoom;
-        let view_height = view_width / aspect_ratio;
-        let cam_min_x = render_params.camera_pan_x - view_width * 0.5;
-        let cam_min_y = render_params.camera_pan_y - view_height * 0.5;
-
-        let world_x = cam_min_x + in.uv.x * view_width;
-        let world_y = cam_min_y + in.uv.y * view_height;
-
-        // Map world coordinates to fluid grid (128x128)
-        let fluid_grid_x = u32(clamp((world_x / f32(SIM_SIZE)) * 128.0, 0.0, 127.0));
-        let fluid_grid_y = u32(clamp((world_y / f32(SIM_SIZE)) * 128.0, 0.0, 127.0));
-        let fluid_idx = fluid_grid_y * 128u + fluid_grid_x;
-
-        // Sample fluid velocity
-        let velocity = fluid_velocity_render[fluid_idx];
-        let speed = length(velocity);
-
-        // Visualize fluid motion using HSV color mapping
-        if (speed > 0.00001) {
-            let angle = atan2(velocity.y, velocity.x);
-            let hue = (angle + 3.14159265) / (2.0 * 3.14159265); // Normalize to 0-1
-
-            // HSV to RGB conversion
-            let c = vec3<f32>(hue, 1.0, 1.0);
-            let k = vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0);
-            let p = abs(fract(c.xxx + k.xyz) * 6.0 - vec3<f32>(3.0));
-            let rgb = c.z * mix(vec3<f32>(1.0), clamp(p - vec3<f32>(1.0), vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
-
-            // Blend based on speed (adjust multiplier and threshold as needed)
-            let opacity = clamp(speed * 200.0, 0.0, 0.5);
-            final_color = mix(final_color, rgb, opacity);
-        }
-    }
-
-    return vec4<f32>(final_color, 1.0);
+    
+    // Fluid visualization is now handled in composite.wgsl compute shader
+    // which directly blends dye markers onto visual_grid before rendering
+    
+    return vec4<f32>(color.rgb, 1.0);
 }
 
 // ============================================================================
