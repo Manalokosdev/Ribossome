@@ -338,6 +338,19 @@ fn gamma_index(x: u32, y: u32) -> u32 {
     return y * GAMMA_GRID_DIM + x;
 }
 
+// gamma_grid packs 3 layers: height + slope_x + slope_y, each of size GAMMA_GRID_DIM^2.
+const GAMMA_LAYER_SIZE: u32 = GAMMA_GRID_DIM * GAMMA_GRID_DIM;
+const GAMMA_SLOPE_X_OFFSET: u32 = GAMMA_LAYER_SIZE;
+const GAMMA_SLOPE_Y_OFFSET: u32 = GAMMA_LAYER_SIZE * 2u;
+
+fn gamma_height_at_idx(idx: u32) -> f32 {
+    return gamma_grid[idx];
+}
+
+fn gamma_slope_at_idx(idx: u32) -> vec2<f32> {
+    return vec2<f32>(gamma_grid[idx + GAMMA_SLOPE_X_OFFSET], gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET]);
+}
+
 fn gamma_at_fluid_cell(x: u32, y: u32) -> f32 {
     // Map fluid cell (0..FLUID_GRID_SIZE) into gamma grid (0..GAMMA_GRID_DIM)
     // Both cover the same world extents.
@@ -346,7 +359,7 @@ fn gamma_at_fluid_cell(x: u32, y: u32) -> f32 {
     let max_idx_f = f32(GAMMA_GRID_DIM - 1u);
     let gx = u32(clamp(fx, 0.0, max_idx_f));
     let gy = u32(clamp(fy, 0.0, max_idx_f));
-    return gamma_grid[gamma_index(gx, gy)];
+    return gamma_height_at_idx(gamma_index(gx, gy));
 }
 
 fn clamp_cell_u32(v: i32) -> u32 {
@@ -362,17 +375,17 @@ fn gamma_slope_force(x: u32, y: u32) -> vec2<f32> {
         return vec2<f32>(0.0, 0.0);
     }
 
-    // Central differences in *fluid cell* space.
-    let xi = i32(x);
-    let yi = i32(y);
-    let g_l = gamma_at_fluid_cell_clamped(xi - 1, yi);
-    let g_r = gamma_at_fluid_cell_clamped(xi + 1, yi);
-    let g_b = gamma_at_fluid_cell_clamped(xi, yi - 1);
-    let g_t = gamma_at_fluid_cell_clamped(xi, yi + 1);
+    // Use the simulation-provided slope vector field (already includes gamma+alpha+beta contributions).
+    // Interpreted as a height gradient (points uphill); apply downhill force by negating it.
+    let fx = (f32(x) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let fy = (f32(y) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let max_idx_f = f32(GAMMA_GRID_DIM - 1u);
+    let gx = u32(clamp(fx, 0.0, max_idx_f));
+    let gy = u32(clamp(fy, 0.0, max_idx_f));
+    let idx = gamma_index(gx, gy);
 
-    let grad = vec2<f32>(g_r - g_l, g_t - g_b) * 0.5;
-    // Flow "downhill": towards lower gamma.
-    return -grad * SLOPE_FORCE_SCALE;
+    let slope_grad = gamma_slope_at_idx(idx);
+    return -sanitize_vec2(slope_grad) * SLOPE_FORCE_SCALE;
 }
 
 fn obstacle_strength(x: u32, y: u32) -> f32 {
