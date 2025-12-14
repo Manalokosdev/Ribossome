@@ -3281,8 +3281,9 @@ impl GpuState {
         let fluid_shader_source_raw = std::fs::read_to_string("shaders/fluid.wgsl")
             .expect("Failed to load shaders/fluid.wgsl");
         let fluid_shader_source = format!(
-            "const FLUID_GRID_SIZE: u32 = {}u;\n{}",
+            "const FLUID_GRID_SIZE: u32 = {}u;\nconst GAMMA_GRID_DIM: u32 = {}u;\n{}",
             FLUID_GRID_SIZE,
+            GRID_DIM_U32,
             fluid_shader_source_raw
         );
         let fluid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -3309,6 +3310,17 @@ impl GpuState {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Gamma grid (terrain) as read-only obstacle field
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -3404,6 +3416,7 @@ impl GpuState {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: fluid_velocity_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: fluid_velocity_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: gamma_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: fluid_params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_b.as_entire_binding() },
@@ -3421,6 +3434,7 @@ impl GpuState {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: fluid_velocity_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: fluid_velocity_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: gamma_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: fluid_params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_a.as_entire_binding() },

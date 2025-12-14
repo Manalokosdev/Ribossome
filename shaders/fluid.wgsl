@@ -45,6 +45,11 @@ const MAX_DT: f32 = 0.02;         // Clamp dt spikes (e.g., window stalls)
 const MAX_FORCE: f32 = 20000.0;   // Clamp injected force magnitude per cell
 const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 
+// Gamma-grid-driven obstacles
+// NOTE: Keep these as constants for now to avoid expanding uniform layouts.
+const OBSTACLES_ENABLED: bool = true;
+const OBSTACLE_GAMMA_THRESHOLD: f32 = 0.6;
+
 // ============================================================================
 // BINDINGS
 // ============================================================================
@@ -52,6 +57,9 @@ const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 // Velocity ping-pong buffers (vec2 per cell)
 @group(0) @binding(0) var<storage, read> velocity_in: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read_write> velocity_out: array<vec2<f32>>;
+
+// Gamma grid (terrain) sampled as an obstacle field
+@group(0) @binding(2) var<storage, read> gamma_grid: array<f32>;
 
 // Intermediate force vectors buffer (vec2 per cell) - agents write propeller forces here
 @group(0) @binding(16) var<storage, read_write> fluid_force_vectors: array<vec2<f32>>;
@@ -195,6 +203,11 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
+    if (is_solid_cell(x, y)) {
+        dye_out[idx] = 0.0;
+        return;
+    }
+
     // Check if there's a propeller force at this location
     let force = fluid_force_vectors[idx];
     let force_magnitude = length(force);
@@ -225,6 +238,10 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
+    if (is_solid_cell(x, y)) {
+        dye_out[idx] = 0.0;
+        return;
+    }
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
     // Read current velocity
@@ -299,6 +316,36 @@ fn clamp_vec2_len(v: vec2<f32>, max_len: f32) -> vec2<f32> {
     return v;
 }
 
+fn obstacles_enabled() -> bool {
+    return OBSTACLES_ENABLED;
+}
+
+fn obstacle_gamma_threshold() -> f32 {
+    return OBSTACLE_GAMMA_THRESHOLD;
+}
+
+fn gamma_index(x: u32, y: u32) -> u32 {
+    return y * GAMMA_GRID_DIM + x;
+}
+
+fn gamma_at_fluid_cell(x: u32, y: u32) -> f32 {
+    // Map fluid cell (0..FLUID_GRID_SIZE) into gamma grid (0..GAMMA_GRID_DIM)
+    // Both cover the same world extents.
+    let fx = (f32(x) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let fy = (f32(y) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let max_idx_f = f32(GAMMA_GRID_DIM - 1u);
+    let gx = u32(clamp(fx, 0.0, max_idx_f));
+    let gy = u32(clamp(fy, 0.0, max_idx_f));
+    return gamma_grid[gamma_index(gx, gy)];
+}
+
+fn is_solid_cell(x: u32, y: u32) -> bool {
+    if (!obstacles_enabled()) {
+        return false;
+    }
+    return gamma_at_fluid_cell(x, y) > obstacle_gamma_threshold();
+}
+
 fn clamp_coords(x: i32, y: i32) -> vec2<u32> {
     let cx = clamp(x, 0, i32(FLUID_GRID_SIZE) - 1);
     let cy = clamp(y, 0, i32(FLUID_GRID_SIZE) - 1);
@@ -334,10 +381,10 @@ fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
     let c01 = clamp_coords(x0, y1);
     let c11 = clamp_coords(x1, y1);
 
-    let v00 = velocity_in[grid_index(c00.x, c00.y)];
-    let v10 = velocity_in[grid_index(c10.x, c10.y)];
-    let v01 = velocity_in[grid_index(c01.x, c01.y)];
-    let v11 = velocity_in[grid_index(c11.x, c11.y)];
+    let v00 = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(c00.x, c00.y)], !is_solid_cell(c00.x, c00.y));
+    let v10 = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(c10.x, c10.y)], !is_solid_cell(c10.x, c10.y));
+    let v01 = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(c01.x, c01.y)], !is_solid_cell(c01.x, c01.y));
+    let v11 = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(c11.x, c11.y)], !is_solid_cell(c11.x, c11.y));
 
     let v0 = mix(v00, v10, fx);
     let v1 = mix(v01, v11, fx);
@@ -372,10 +419,10 @@ fn sample_dye(pos: vec2<f32>) -> f32 {
     let c01 = clamp_coords(x0, y1);
     let c11 = clamp_coords(x1, y1);
 
-    let d00 = dye_in[grid_index(c00.x, c00.y)];
-    let d10 = dye_in[grid_index(c10.x, c10.y)];
-    let d01 = dye_in[grid_index(c01.x, c01.y)];
-    let d11 = dye_in[grid_index(c11.x, c11.y)];
+    let d00 = select(0.0, dye_in[grid_index(c00.x, c00.y)], !is_solid_cell(c00.x, c00.y));
+    let d10 = select(0.0, dye_in[grid_index(c10.x, c10.y)], !is_solid_cell(c10.x, c10.y));
+    let d01 = select(0.0, dye_in[grid_index(c01.x, c01.y)], !is_solid_cell(c01.x, c01.y));
+    let d11 = select(0.0, dye_in[grid_index(c11.x, c11.y)], !is_solid_cell(c11.x, c11.y));
 
     let d0 = mix(d00, d10, fx);
     let d1 = mix(d01, d11, fx);
@@ -520,6 +567,10 @@ fn advect_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
+    if (is_solid_cell(x, y)) {
+        velocity_out[idx] = vec2<f32>(0.0, 0.0);
+        return;
+    }
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
     // Read current velocity
@@ -552,6 +603,11 @@ fn compute_divergence(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
+    if (is_solid_cell(x, y)) {
+        divergence[idx] = 0.0;
+        return;
+    }
+
     // Solid boundary: treat boundary cells as non-divergent.
     if (x == 0u || x == FLUID_GRID_SIZE - 1u || y == 0u || y == FLUID_GRID_SIZE - 1u) {
         divergence[idx] = 0.0;
@@ -563,10 +619,10 @@ fn compute_divergence(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let yp = clamp(i32(y) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
 
-    let v_l = sanitize_vec2(velocity_in[grid_index(u32(xm), y)]);
-    let v_r = sanitize_vec2(velocity_in[grid_index(u32(xp), y)]);
-    let v_b = sanitize_vec2(velocity_in[grid_index(x, u32(ym))]);
-    let v_t = sanitize_vec2(velocity_in[grid_index(x, u32(yp))]);
+    let v_l = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(u32(xm), y)]), !is_solid_cell(u32(xm), y));
+    let v_r = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(u32(xp), y)]), !is_solid_cell(u32(xp), y));
+    let v_b = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x, u32(ym))]), !is_solid_cell(x, u32(ym)));
+    let v_t = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x, u32(yp))]), !is_solid_cell(x, u32(yp)));
 
     // Central differences; assume dx = 1.
     let div = 0.5 * ((v_r.x - v_l.x) + (v_t.y - v_b.y));
@@ -579,10 +635,10 @@ fn curl_at(x: u32, y: u32) -> f32 {
     let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let yp = clamp(i32(y) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
 
-    let v_l = velocity_in[grid_index(u32(xm), y)];
-    let v_r = velocity_in[grid_index(u32(xp), y)];
-    let v_b = velocity_in[grid_index(x, u32(ym))];
-    let v_t = velocity_in[grid_index(x, u32(yp))];
+    let v_l = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(u32(xm), y)], !is_solid_cell(u32(xm), y));
+    let v_r = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(u32(xp), y)], !is_solid_cell(u32(xp), y));
+    let v_b = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(x, u32(ym))], !is_solid_cell(x, u32(ym)));
+    let v_t = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(x, u32(yp))], !is_solid_cell(x, u32(yp)));
 
     let dvy_dx = 0.5 * (v_r.y - v_l.y);
     let dvx_dy = 0.5 * (v_t.x - v_b.x);
@@ -600,6 +656,11 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
+
+    if (is_solid_cell(x, y)) {
+        velocity_out[idx] = vec2<f32>(0.0, 0.0);
+        return;
+    }
 
     // Skip a small border so curl sampling never uses clamped edge neighbors.
     // This avoids confinement injecting high-frequency noise along the walls.
@@ -672,22 +733,27 @@ fn jacobi_pressure(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
+    if (is_solid_cell(x, y)) {
+        pressure_out[idx] = 0.0;
+        return;
+    }
+
     // Neumann boundary (solid walls): dp/dn = 0.
     // Implemented by mirroring the edge pressure to the outside.
     var p_l = pressure_in[idx];
-    if (x > 0u) {
+    if (x > 0u && !is_solid_cell(x - 1u, y)) {
         p_l = pressure_in[grid_index(x - 1u, y)];
     }
     var p_r = pressure_in[idx];
-    if (x + 1u < FLUID_GRID_SIZE) {
+    if (x + 1u < FLUID_GRID_SIZE && !is_solid_cell(x + 1u, y)) {
         p_r = pressure_in[grid_index(x + 1u, y)];
     }
     var p_b = pressure_in[idx];
-    if (y > 0u) {
+    if (y > 0u && !is_solid_cell(x, y - 1u)) {
         p_b = pressure_in[grid_index(x, y - 1u)];
     }
     var p_t = pressure_in[idx];
-    if (y + 1u < FLUID_GRID_SIZE) {
+    if (y + 1u < FLUID_GRID_SIZE && !is_solid_cell(x, y + 1u)) {
         p_t = pressure_in[grid_index(x, y + 1u)];
     }
 
@@ -712,21 +778,26 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
+    if (is_solid_cell(x, y)) {
+        velocity_out[idx] = vec2<f32>(0.0, 0.0);
+        return;
+    }
+
     // Use the same Neumann pressure boundary treatment as the Jacobi solve.
     var p_l = pressure_in[idx];
-    if (x > 0u) {
+    if (x > 0u && !is_solid_cell(x - 1u, y)) {
         p_l = pressure_in[grid_index(x - 1u, y)];
     }
     var p_r = pressure_in[idx];
-    if (x + 1u < FLUID_GRID_SIZE) {
+    if (x + 1u < FLUID_GRID_SIZE && !is_solid_cell(x + 1u, y)) {
         p_r = pressure_in[grid_index(x + 1u, y)];
     }
     var p_b = pressure_in[idx];
-    if (y > 0u) {
+    if (y > 0u && !is_solid_cell(x, y - 1u)) {
         p_b = pressure_in[grid_index(x, y - 1u)];
     }
     var p_t = pressure_in[idx];
-    if (y + 1u < FLUID_GRID_SIZE) {
+    if (y + 1u < FLUID_GRID_SIZE && !is_solid_cell(x, y + 1u)) {
         p_t = pressure_in[grid_index(x, y + 1u)];
     }
 
@@ -756,6 +827,11 @@ fn add_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
+    if (is_solid_cell(x, y)) {
+        velocity_out[idx] = vec2<f32>(0.0, 0.0);
+        return;
+    }
+
     // Add force scaled by dt (clamped to avoid instability on dt spikes)
     let dt = clamp(params.dt, 0.0, MAX_DT);
     let v0 = sanitize_vec2(velocity_in[idx]);
@@ -776,6 +852,11 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
+    if (is_solid_cell(x, y)) {
+        velocity_out[idx] = vec2<f32>(0.0, 0.0);
+        return;
+    }
+
     // Keep boundaries unchanged; boundary enforcement pass handles walls.
     if (x == 0u || x == FLUID_GRID_SIZE - 1u || y == 0u || y == FLUID_GRID_SIZE - 1u) {
         velocity_out[idx] = velocity_in[idx];
@@ -783,10 +864,10 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let v_c = sanitize_vec2(velocity_in[idx]);
-    let v_l = sanitize_vec2(velocity_in[grid_index(x - 1u, y)]);
-    let v_r = sanitize_vec2(velocity_in[grid_index(x + 1u, y)]);
-    let v_b = sanitize_vec2(velocity_in[grid_index(x, y - 1u)]);
-    let v_t = sanitize_vec2(velocity_in[grid_index(x, y + 1u)]);
+    let v_l = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x - 1u, y)]), !is_solid_cell(x - 1u, y));
+    let v_r = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x + 1u, y)]), !is_solid_cell(x + 1u, y));
+    let v_b = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x, y - 1u)]), !is_solid_cell(x, y - 1u));
+    let v_t = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x, y + 1u)]), !is_solid_cell(x, y + 1u));
 
     let lap = (v_l + v_r + v_b + v_t) - 4.0 * v_c;
 
@@ -808,6 +889,12 @@ fn enforce_boundaries(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
+
+    // Solid obstacles: no-slip (zero velocity)
+    if (is_solid_cell(x, y)) {
+        velocity_out[idx] = vec2<f32>(0.0, 0.0);
+        return;
+    }
 
     // Free-slip solid walls using a simple “ghost cell” style update:
     // - normal component is zero at the wall
