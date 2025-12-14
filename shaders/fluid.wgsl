@@ -55,7 +55,7 @@ const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 @group(0) @binding(1) var<storage, read_write> velocity_out: array<vec2<f32>>;
 
 // Intermediate force vectors buffer (vec2 per cell) - agents write propeller forces here
-@group(0) @binding(16) var<storage, read> fluid_force_vectors: array<vec2<f32>>;
+@group(0) @binding(16) var<storage, read_write> fluid_force_vectors: array<vec2<f32>>;
 
 // Combined forces buffer (vec2 per cell) - inject_test_force writes combined forces here
 @group(0) @binding(7) var<storage, read_write> fluid_forces: array<vec2<f32>>;
@@ -118,7 +118,7 @@ fn clear_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // Clear intermediate force vectors buffer (called before agents write)
 @compute @workgroup_size(16, 16)
-fn clear_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn clear_fluid_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
     if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
@@ -126,8 +126,7 @@ fn clear_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    // Note: This buffer is at binding 16 in simulation group, so we can't clear it from here
-    // It must be cleared by a separate pipeline using the simulation bind group
+    fluid_force_vectors[idx] = vec2<f32>(0.0, 0.0);
 }
 
 // Combine propeller forces with test force - reads from fluid_force_vectors, writes to fluid_forces

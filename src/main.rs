@@ -1309,6 +1309,7 @@ struct GpuState {
     fluid_params_buffer: wgpu::Buffer,
 
     // Fluid simulation pipelines
+    fluid_generate_forces_pipeline: wgpu::ComputePipeline,
     fluid_add_forces_pipeline: wgpu::ComputePipeline,
     fluid_advect_velocity_pipeline: wgpu::ComputePipeline,
     fluid_diffuse_velocity_pipeline: wgpu::ComputePipeline,
@@ -1321,6 +1322,7 @@ struct GpuState {
     fluid_copy_pipeline: wgpu::ComputePipeline,
     fluid_copy_velocity_to_forces_pipeline: wgpu::ComputePipeline,
     fluid_clear_forces_pipeline: wgpu::ComputePipeline,
+    fluid_clear_force_vectors_pipeline: wgpu::ComputePipeline,
     fluid_clear_velocity_pipeline: wgpu::ComputePipeline,
 
     // Fluid bind groups
@@ -1337,6 +1339,8 @@ struct GpuState {
 
     // Pipelines
     process_pipeline: wgpu::ComputePipeline,
+    clear_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
+    randomize_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_trails_pipeline: wgpu::ComputePipeline,
     clear_visual_pipeline: wgpu::ComputePipeline,
@@ -2698,7 +2702,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: fluid_forces.as_entire_binding(),
+                    resource: fluid_force_vectors.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
@@ -2777,7 +2781,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: fluid_forces.as_entire_binding(),
+                    resource: fluid_force_vectors.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
@@ -3245,6 +3249,16 @@ impl GpuState {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
                     binding: 16,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
@@ -3268,7 +3282,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: fluid_divergence.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 16, resource: fluid_forces.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: fluid_forces.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 16, resource: fluid_force_vectors.as_entire_binding() },
             ],
         });
 
@@ -3282,7 +3297,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: fluid_divergence.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 16, resource: fluid_forces.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: fluid_forces.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 16, resource: fluid_force_vectors.as_entire_binding() },
             ],
         });
 
@@ -3294,6 +3310,16 @@ impl GpuState {
         });
 
         // Create fluid compute pipelines
+        // Test force injection for debugging
+        let fluid_generate_forces_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Inject Test Force"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "inject_test_force",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         let fluid_add_forces_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Fluid Add Forces"),
             layout: Some(&fluid_pipeline_layout),
@@ -3402,11 +3428,39 @@ impl GpuState {
             cache: None,
         });
 
+        // NOTE: This pipeline is unused but kept for struct compatibility
+        let fluid_clear_force_vectors_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Clear Force Vectors (unused)"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "clear_forces",  // Use valid entry point since this is never dispatched
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         let fluid_clear_velocity_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Fluid Clear Velocity"),
             layout: Some(&fluid_pipeline_layout),
             module: &fluid_shader,
             entry_point: "clear_velocity",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let clear_fluid_force_vectors_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Clear Fluid Force Vectors"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "clear_fluid_force_vectors",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let randomize_fluid_force_vectors_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Randomize Fluid Force Vectors"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "randomize_forces",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -3557,6 +3611,8 @@ impl GpuState {
             visual_texture_view,
             sampler,
             process_pipeline,
+            clear_fluid_force_vectors_pipeline,
+            randomize_fluid_force_vectors_pipeline,
             diffuse_pipeline,
             diffuse_trails_pipeline,
             clear_visual_pipeline,
@@ -3688,6 +3744,7 @@ impl GpuState {
             fluid_forces,
             fluid_force_vectors,
             fluid_params_buffer,
+            fluid_generate_forces_pipeline,
             fluid_add_forces_pipeline,
             fluid_advect_velocity_pipeline,
             fluid_diffuse_velocity_pipeline,
@@ -3700,6 +3757,7 @@ impl GpuState {
             fluid_copy_pipeline,
             fluid_copy_velocity_to_forces_pipeline,
             fluid_clear_forces_pipeline,
+            fluid_clear_force_vectors_pipeline,
             fluid_clear_velocity_pipeline,
             fluid_bind_group_ab,
             fluid_bind_group_ba,
@@ -4152,7 +4210,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: self.rain_map_buffer.as_entire_binding(),
+                    resource: self.fluid_force_vectors.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
@@ -4198,7 +4256,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.fluid_velocity_b.as_entire_binding(),
+                    resource: self.fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -4230,7 +4288,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 16,
-                    resource: self.rain_map_buffer.as_entire_binding(),
+                    resource: self.fluid_force_vectors.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
@@ -5082,24 +5140,52 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
 
+                // Clear fluid force vectors before agents write to it
+                const FLUID_GRID_SIZE: u32 = 128;
+                let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+                cpass.set_pipeline(&self.clear_fluid_force_vectors_pipeline);
+                cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+                cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
                 // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(256)
-                // Agents will inject propeller forces directly into fluid forces buffer with 100x boost
+                // Agents will write propeller forces to fluid_force_vectors buffer with 100x boost
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+            }
+        }
 
-                // Run fluid solver - forces already written by agents
-                // Stable Fluids order: add_forces → diffuse → advect → project
+        // End the first compute pass to ensure agent writes to fluid_force_vectors are visible
+        // Start a new compute pass for fluid simulation
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Fluid Compute Pass"),
+                timestamp_writes: None,
+            });
+
+            if should_run_simulation {
+                // Run fluid solver - forces already written by agents to force_vectors
+                // Stable Fluids order: inject_test_force (combines) → add_forces → diffuse → advect → project
                 {
                     const FLUID_GRID_SIZE: u32 = 128;
                     let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
                     let bg_ab = &self.fluid_bind_group_ab;
                     let bg_ba = &self.fluid_bind_group_ba;
 
+                    // Combine force_vectors (written in simulation pass) into fluid_forces.
+                    cpass.set_pipeline(&self.fluid_generate_forces_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
                     // 1. Add forces to velocity (A -> B)
-                    // Forces already written directly by agents with 100x boost
+                    // Forces already written directly by agents with 100x boost + test force
                     cpass.set_pipeline(&self.fluid_add_forces_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // Clear forces after applying them (so agents start fresh next frame)
+                    cpass.set_pipeline(&self.fluid_clear_forces_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
                     // 2. Diffuse velocity (B -> A)
@@ -5150,7 +5236,16 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
                 }
+            }
 
+            // End fluid compute pass, start new pass for remaining simulation work
+            drop(cpass);
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Post-Fluid Compute Pass"),
+                timestamp_writes: None,
+            });
+
+            if should_run_simulation {
                 // Compact alive agents - workgroup_size(64)
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_swap, &[]);
@@ -5181,13 +5276,6 @@ impl GpuState {
             } else if should_draw && self.agent_count > 0 {
                 // When paused or no living agents: run process pipeline for rendering only (dt=0, probabilities=0)
                 // but skip compaction, spawning, and buffer swapping
-                {
-                    const FLUID_GRID_SIZE: u32 = 128;
-                    let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
-                    cpass.set_pipeline(&self.fluid_clear_forces_pipeline);
-                    cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-                }
 
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
