@@ -1147,7 +1147,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Write thrust force directly to fluid forces buffer with 100x boost
                 // (opposite direction - propeller pushes fluid backward)
                 // NOTE: Race condition possible with multiple agents, but effect is additive so acceptable
-                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 100.0;
+                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 1000000.0;
                 fluid_forces[fluid_idx] = fluid_forces[fluid_idx] + scaled_force;
             }
         }

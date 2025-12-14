@@ -41,6 +41,11 @@
 const FLUID_GRID_SIZE: u32 = 128u;
 const FLUID_GRID_CELLS: u32 = 16384u; // 128 * 128
 
+// Stability limits
+const MAX_DT: f32 = 0.02;         // Clamp dt spikes (e.g., window stalls)
+const MAX_FORCE: f32 = 20000.0;   // Clamp injected force magnitude per cell
+const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
+
 // ============================================================================
 // BINDINGS
 // ============================================================================
@@ -49,16 +54,16 @@ const FLUID_GRID_CELLS: u32 = 16384u; // 128 * 128
 @group(0) @binding(0) var<storage, read> velocity_in: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read_write> velocity_out: array<vec2<f32>>;
 
-// Force input (vec2 per cell) - will be written by test force generator
-@group(0) @binding(2) var<storage, read_write> forces: array<vec2<f32>>;
+// Intermediate force vectors buffer (vec2 per cell) - agents write propeller forces here
+@group(0) @binding(16) var<storage, read> fluid_force_vectors: array<vec2<f32>>;
+
+// Combined forces buffer (vec2 per cell) - inject_test_force writes combined forces here
+@group(0) @binding(7) var<storage, read_write> fluid_forces: array<vec2<f32>>;
 
 // Pressure ping-pong + divergence (f32 per cell)
 @group(0) @binding(4) var<storage, read> pressure_in: array<f32>;
 @group(0) @binding(5) var<storage, read_write> pressure_out: array<f32>;
 @group(0) @binding(6) var<storage, read_write> divergence: array<f32>;
-
-// Force vectors buffer (vec2 per cell) - populated by propeller forces each frame
-@group(0) @binding(7) var<storage, read_write> force_vectors: array<vec2<f32>>;
 
 
 // Parameters
@@ -96,7 +101,7 @@ fn copy_velocity_to_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    forces[idx] = velocity_in[idx];
+    fluid_forces[idx] = velocity_in[idx];
 }
 
 @compute @workgroup_size(16, 16)
@@ -108,9 +113,10 @@ fn clear_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    forces[idx] = vec2<f32>(0.0, 0.0);
+    fluid_forces[idx] = vec2<f32>(0.0, 0.0);
 }
 
+// Clear intermediate force vectors buffer (called before agents write)
 @compute @workgroup_size(16, 16)
 fn clear_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
@@ -120,7 +126,47 @@ fn clear_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    force_vectors[idx] = vec2<f32>(0.0, 0.0);
+    // Note: This buffer is at binding 16 in simulation group, so we can't clear it from here
+    // It must be cleared by a separate pipeline using the simulation bind group
+}
+
+// Combine propeller forces with test force - reads from fluid_force_vectors, writes to fluid_forces
+@compute @workgroup_size(16, 16)
+fn inject_test_force(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+
+    // Start with propeller forces from agents (simulation pass writes into fluid_force_vectors).
+    // Clamp to avoid solver blow-ups from rare extreme values.
+    let f = sanitize_vec2(fluid_force_vectors[idx]);
+    fluid_forces[idx] = clamp_vec2_len(f, MAX_FORCE);
+}
+
+// Fill the forces buffer with deterministic pseudo-random vectors.
+// Used to verify the "forces -> velocity" path independent of agent propellers.
+@compute @workgroup_size(16, 16)
+fn randomize_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+
+    // Deterministic per-frame seed from time (ms-ish).
+    let t = u32(params.time * 1000.0);
+    let r1 = rand01(idx ^ t ^ 0xA511E9B3u);
+    let r2 = rand01(idx ^ t ^ 0x63D83595u);
+    let v = vec2<f32>(r1 * 2.0 - 1.0, r2 * 2.0 - 1.0);
+
+    let strength = 1.0;
+    fluid_forces[idx] = v * strength;
 }
 
 // ============================================================================
@@ -129,6 +175,41 @@ fn clear_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 fn grid_index(x: u32, y: u32) -> u32 {
     return y * FLUID_GRID_SIZE + x;
+}
+
+fn hash_u32(v: u32) -> u32 {
+    var x = v;
+    x = x ^ (x >> 16u);
+    x = x * 0x7FEB352Du;
+    x = x ^ (x >> 15u);
+    x = x * 0x846CA68Bu;
+    x = x ^ (x >> 16u);
+    return x;
+}
+
+fn rand01(seed: u32) -> f32 {
+    // [0, 1)
+    return f32(hash_u32(seed)) / 4294967296.0;
+}
+
+fn is_bad_f32(x: f32) -> bool {
+    // WGSL portability: detect NaN via (x != x). Detect Inf/overflow via a large threshold.
+    return (x != x) || (abs(x) > 1e20);
+}
+
+fn sanitize_vec2(v: vec2<f32>) -> vec2<f32> {
+    if (is_bad_f32(v.x) || is_bad_f32(v.y)) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    return v;
+}
+
+fn clamp_vec2_len(v: vec2<f32>, max_len: f32) -> vec2<f32> {
+    let len = length(v);
+    if (len > max_len) {
+        return v * (max_len / max(len, 1e-12));
+    }
+    return v;
 }
 
 fn clamp_coords(x: i32, y: i32) -> vec2<u32> {
@@ -298,25 +379,7 @@ fn sample_display_bicubic_pos(pos: vec2<f32>) -> vec4<f32> {
 // COMPUTE KERNELS
 // ============================================================================
 
-// 1. Generate external forces from static force vectors buffer
-@compute @workgroup_size(16, 16)
-fn generate_test_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
-
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
-        return;
-    }
-
-    let idx = grid_index(x, y);
-
-    // Read force from the static force vectors buffer
-    // (Populated by agent propellers in simulation shader)
-    // Boost forces 100x so they survive fluid dissipation
-    forces[idx] = force_vectors[idx] * 100.0;
-}
-
-// 2. Advect velocity field (semi-Lagrangian, no forces yet)
+// Advect velocity field (semi-Lagrangian)
 @compute @workgroup_size(16, 16)
 fn advect_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
@@ -330,11 +393,12 @@ fn advect_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
     // Read current velocity
-    let vel = velocity_in[idx];
+    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let vel = clamp_vec2_len(sanitize_vec2(velocity_in[idx]), MAX_VEL);
 
     // Backward trace
     // Scale velocity by grid size relative to 1.0 if needed, but here pixels = units.
-    let trace_pos = pos - vel * params.dt;
+    let trace_pos = pos - vel * dt;
 
     // Sample velocity at traced position
     let advected_vel = sample_velocity(trace_pos);
@@ -342,8 +406,8 @@ fn advect_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Apply decay in a frame-rate independent way.
     // `params.decay` is interpreted as a per-frame damping factor at 60 FPS.
     // For arbitrary dt, scale it as decay^(dt*60).
-    let decay_factor = pow(0.999, params.dt * 60.0);  // Reduced from params.decay (0.9995)
-    velocity_out[idx] = advected_vel * decay_factor;
+    let decay_factor = pow(0.999, dt * 60.0);  // Reduced from params.decay (0.9995)
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(advected_vel * decay_factor), MAX_VEL);
 }
 
 // 3. Compute divergence of a velocity field (reads velocity_in, writes divergence)
@@ -369,10 +433,10 @@ fn compute_divergence(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let yp = clamp(i32(y) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
 
-    let v_l = velocity_in[grid_index(u32(xm), y)];
-    let v_r = velocity_in[grid_index(u32(xp), y)];
-    let v_b = velocity_in[grid_index(x, u32(ym))];
-    let v_t = velocity_in[grid_index(x, u32(yp))];
+    let v_l = sanitize_vec2(velocity_in[grid_index(u32(xm), y)]);
+    let v_r = sanitize_vec2(velocity_in[grid_index(u32(xp), y)]);
+    let v_b = sanitize_vec2(velocity_in[grid_index(x, u32(ym))]);
+    let v_t = sanitize_vec2(velocity_in[grid_index(x, u32(yp))]);
 
     // Central differences; assume dx = 1.
     let div = 0.5 * ((v_r.x - v_l.x) + (v_t.y - v_b.y));
@@ -441,14 +505,15 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let f = vec2<f32>(n.y, -n.x) * (w * epsilon);
 
     // Clamp per-frame change to keep confinement from injecting high-frequency “static”.
-    var dv = f * params.dt;
+    let dt = clamp(params.dt, 0.0, MAX_DT);
+    var dv = f * dt;
     let dv_len = length(dv);
     let max_dv = 2.0;
     if (dv_len > max_dv) {
         dv = dv * (max_dv / dv_len);
     }
 
-    velocity_out[idx] = velocity_in[idx] + dv;
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(velocity_in[idx] + dv), MAX_VEL);
 }
 
 // 4. Clear pressure (for init / each frame)
@@ -497,7 +562,12 @@ fn jacobi_pressure(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     // Jacobi: p = (sum_neighbors - div) / 4, assuming dx = 1.
-    pressure_out[idx] = (p_l + p_r + p_b + p_t - divergence[idx]) * 0.25;
+    let div = divergence[idx];
+    if (is_bad_f32(div) || is_bad_f32(p_l) || is_bad_f32(p_r) || is_bad_f32(p_b) || is_bad_f32(p_t)) {
+        pressure_out[idx] = 0.0;
+        return;
+    }
+    pressure_out[idx] = (p_l + p_r + p_b + p_t - div) * 0.25;
 }
 
 // 6. Subtract pressure gradient from velocity to make it divergence-free.
@@ -531,7 +601,7 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let grad = vec2<f32>(p_r - p_l, p_t - p_b) * 0.5;
-    var v = velocity_in[idx] - grad;
+    var v = sanitize_vec2(velocity_in[idx]) - grad;
 
     // Free-slip solid boundary: zero normal component at the walls.
     if (x == 0u || x == FLUID_GRID_SIZE - 1u) {
@@ -541,10 +611,10 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
         v.y = 0.0;
     }
 
-    velocity_out[idx] = v;
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v), MAX_VEL);
 }
 
-// 3. Add forces to velocity field
+// Add forces to velocity field
 @compute @workgroup_size(16, 16)
 fn add_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
@@ -556,8 +626,11 @@ fn add_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    // Add force scaled by dt
-    velocity_out[idx] = velocity_in[idx] + forces[idx] * params.dt;
+    // Add force scaled by dt (clamped to avoid instability on dt spikes)
+    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let v0 = sanitize_vec2(velocity_in[idx]);
+    let f = clamp_vec2_len(sanitize_vec2(fluid_forces[idx]), MAX_FORCE);
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v0 + f * dt), MAX_VEL);
 }
 
 // Velocity diffusion / viscosity (explicit step): v <- v + nu*dt*∇²v
@@ -579,18 +652,19 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let v_c = velocity_in[idx];
-    let v_l = velocity_in[grid_index(x - 1u, y)];
-    let v_r = velocity_in[grid_index(x + 1u, y)];
-    let v_b = velocity_in[grid_index(x, y - 1u)];
-    let v_t = velocity_in[grid_index(x, y + 1u)];
+    let v_c = sanitize_vec2(velocity_in[idx]);
+    let v_l = sanitize_vec2(velocity_in[grid_index(x - 1u, y)]);
+    let v_r = sanitize_vec2(velocity_in[grid_index(x + 1u, y)]);
+    let v_b = sanitize_vec2(velocity_in[grid_index(x, y - 1u)]);
+    let v_t = sanitize_vec2(velocity_in[grid_index(x, y + 1u)]);
 
     let lap = (v_l + v_r + v_b + v_t) - 4.0 * v_c;
 
     // nu is in "cells^2 / second" with dx=1; lower values reduce blur.
     let nu = 0.05;  // Reduced from 0.35 for less dissipation
-    let a = nu * params.dt;
-    velocity_out[idx] = v_c + a * lap;
+    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let a = nu * dt;
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v_c + a * lap), MAX_VEL);
 }
 
 // 4. Enforce boundary conditions (free-slip: zero normal component)
@@ -608,7 +682,7 @@ fn enforce_boundaries(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Free-slip solid walls using a simple “ghost cell” style update:
     // - normal component is zero at the wall
     // - tangential component is copied from the adjacent interior cell
-    var v = velocity_in[idx];
+    var v = sanitize_vec2(velocity_in[idx]);
 
     // Left / right walls: set v.x = 0 and copy v.y from interior neighbor.
     if (x == 0u) {
@@ -628,7 +702,7 @@ fn enforce_boundaries(@builtin(global_invocation_id) global_id: vec3<u32>) {
         v.x = velocity_in[grid_index(x, FLUID_GRID_SIZE - 2u)].x;
     }
 
-    velocity_out[idx] = v;
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v), MAX_VEL);
 }
 
 // 4. Clear velocities (for initialization)
