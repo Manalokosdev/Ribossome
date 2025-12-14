@@ -4457,6 +4457,31 @@ impl GpuState {
             ],
         });
 
+        // Composite bind group (must be recreated too, since it references the resized buffers)
+        let clayout0 = self.composite_agents_pipeline.get_bind_group_layout(0);
+        self.composite_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Composite Bind Group"),
+            layout: &clayout0,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.visual_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.agent_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.fluid_dye_a.as_entire_binding(),
+                },
+            ],
+        });
+
         // Render bind group
         let rlayout0 = self.render_pipeline.get_bind_group_layout(0);
         self.render_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -5512,14 +5537,24 @@ impl GpuState {
                 }
             }
 
-            // Composite agents onto visual grid when drawing
+            // Render all agents to agent_grid when drawing
             if should_draw {
-                // Render all agents to agent_grid
                 cpass.set_pipeline(&self.render_agents_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+            }
+        }
 
-                // Composite agent_grid onto visual_grid
+        // End compute pass to ensure agent_grid writes are visible before composite reads
+        // Start new compute pass for compositing
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Composite Compute Pass"),
+                timestamp_writes: None,
+            });
+
+            // Composite agent_grid onto visual_grid when drawing
+            if should_draw {
                 cpass.set_pipeline(&self.composite_agents_pipeline);
                 cpass.set_bind_group(0, &self.composite_bind_group, &[]);
                 let width_workgroups =
@@ -5527,8 +5562,6 @@ impl GpuState {
                 let height_workgroups =
                     (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-
-                // Inspector panel is now drawn by the selected agent during simulation
             }
         }
 
