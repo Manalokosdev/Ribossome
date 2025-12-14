@@ -308,10 +308,15 @@ fn clamp_coords(x: i32, y: i32) -> vec2<u32> {
 
 // Bilinear interpolation for velocity sampling
 fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
-    // Clamp sampling to the interior so advection never repeatedly samples the
-    // outermost edge cells (which tends to create persistent high-frequency noise).
-    let min_pos = 1.5;
-    let max_pos = f32(FLUID_GRID_SIZE) - 1.5;
+    // Solid-wall behavior for semi-Lagrangian advection:
+    // - If the traced position leaves the domain, treat it as sampling zero.
+    // This prevents “outside wind” artifacts that occur when out-of-bounds
+    // positions are clamped back into the interior.
+    let min_pos = 0.5;
+    let max_pos = f32(FLUID_GRID_SIZE) - 0.5;
+    if (pos.x < min_pos || pos.x > max_pos || pos.y < min_pos || pos.y > max_pos) {
+        return vec2<f32>(0.0, 0.0);
+    }
     let p = clamp(pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
 
     let x = p.x - 0.5;
@@ -343,9 +348,13 @@ fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
 
 // Bilinear interpolation for dye concentration sampling
 fn sample_dye(pos: vec2<f32>) -> f32 {
-    // Clamp sampling to the interior
-    let min_pos = 1.5;
-    let max_pos = f32(FLUID_GRID_SIZE) - 1.5;
+    // Match velocity advection boundary handling:
+    // out-of-bounds sampling contributes no dye.
+    let min_pos = 0.5;
+    let max_pos = f32(FLUID_GRID_SIZE) - 0.5;
+    if (pos.x < min_pos || pos.x > max_pos || pos.y < min_pos || pos.y > max_pos) {
+        return 0.0;
+    }
     let p = clamp(pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
 
     let x = p.x - 0.5;
