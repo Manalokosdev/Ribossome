@@ -48,10 +48,14 @@ const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 // Gamma-grid-driven obstacles
 // NOTE: Keep these as constants for now to avoid expanding uniform layouts.
 const OBSTACLES_ENABLED: bool = true;
-// Gamma->obstacle mapping: below MIN = no obstacle; above MAX = solid.
-// Mid-tones become partially blocking (porous medium / heightmap feel).
-const OBSTACLE_GAMMA_MIN: f32 = 0.4;
-const OBSTACLE_GAMMA_MAX: f32 = 0.8;
+// Obstacle mapping: use gamma directly in [0,1] (optionally shaped by a power curve).
+// 0 = no obstacle, 1 = fully solid.
+const OBSTACLE_GAMMA_POWER: f32 = 1.0;
+
+// Optional: drive fluid using the gamma slope (heightmap-style downhill flow).
+// This uses the gradient of gamma (in fluid-cell space) as a force vector.
+const SLOPE_FORCE_ENABLED: bool = true;
+const SLOPE_FORCE_SCALE: f32 = 2500.0;
 
 // ============================================================================
 // BINDINGS
@@ -345,13 +349,39 @@ fn gamma_at_fluid_cell(x: u32, y: u32) -> f32 {
     return gamma_grid[gamma_index(gx, gy)];
 }
 
+fn clamp_cell_u32(v: i32) -> u32 {
+    return u32(clamp(v, 0, i32(FLUID_GRID_SIZE) - 1));
+}
+
+fn gamma_at_fluid_cell_clamped(xi: i32, yi: i32) -> f32 {
+    return gamma_at_fluid_cell(clamp_cell_u32(xi), clamp_cell_u32(yi));
+}
+
+fn gamma_slope_force(x: u32, y: u32) -> vec2<f32> {
+    if (!SLOPE_FORCE_ENABLED) {
+        return vec2<f32>(0.0, 0.0);
+    }
+
+    // Central differences in *fluid cell* space.
+    let xi = i32(x);
+    let yi = i32(y);
+    let g_l = gamma_at_fluid_cell_clamped(xi - 1, yi);
+    let g_r = gamma_at_fluid_cell_clamped(xi + 1, yi);
+    let g_b = gamma_at_fluid_cell_clamped(xi, yi - 1);
+    let g_t = gamma_at_fluid_cell_clamped(xi, yi + 1);
+
+    let grad = vec2<f32>(g_r - g_l, g_t - g_b) * 0.5;
+    // Flow "downhill": towards lower gamma.
+    return -grad * SLOPE_FORCE_SCALE;
+}
+
 fn obstacle_strength(x: u32, y: u32) -> f32 {
     // 0..1 where 1 means fully solid.
     if (!obstacles_enabled()) {
         return 0.0;
     }
     let g = gamma_at_fluid_cell(x, y);
-    return smoothstep(OBSTACLE_GAMMA_MIN, OBSTACLE_GAMMA_MAX, g);
+    return pow(clamp(g, 0.0, 1.0), OBSTACLE_GAMMA_POWER);
 }
 
 fn permeability(x: u32, y: u32) -> f32 {
@@ -872,7 +902,9 @@ fn add_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dt = clamp(params.dt, 0.0, MAX_DT);
     let perm = permeability(x, y);
     let v0 = sanitize_vec2(velocity_in[idx]) * perm;
-    let f = clamp_vec2_len(sanitize_vec2(fluid_forces[idx]), MAX_FORCE);
+    let f_user = sanitize_vec2(fluid_forces[idx]);
+    let f_slope = gamma_slope_force(x, y);
+    let f = clamp_vec2_len(sanitize_vec2(f_user + f_slope), MAX_FORCE);
     velocity_out[idx] = clamp_vec2_len(sanitize_vec2((v0 + f * dt) * perm), MAX_VEL);
 }
 
