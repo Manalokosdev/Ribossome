@@ -48,7 +48,10 @@ const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 // Gamma-grid-driven obstacles
 // NOTE: Keep these as constants for now to avoid expanding uniform layouts.
 const OBSTACLES_ENABLED: bool = true;
-const OBSTACLE_GAMMA_THRESHOLD: f32 = 0.6;
+// Gamma->obstacle mapping: below MIN = no obstacle; above MAX = solid.
+// Mid-tones become partially blocking (porous medium / heightmap feel).
+const OBSTACLE_GAMMA_MIN: f32 = 0.4;
+const OBSTACLE_GAMMA_MAX: f32 = 0.8;
 
 // ============================================================================
 // BINDINGS
@@ -203,7 +206,7 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         dye_out[idx] = 0.0;
         return;
     }
@@ -224,7 +227,8 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
         current_dye *= 0.995;
     }
 
-    dye_out[idx] = current_dye;
+    let perm = permeability(x, y);
+    dye_out[idx] = current_dye * perm;
 }
 
 // Advect dye concentration using semi-Lagrangian method (same as velocity advection)
@@ -238,7 +242,7 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         dye_out[idx] = 0.0;
         return;
     }
@@ -257,7 +261,8 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Apply slight decay to make dye fade over time
     let decay_factor = 0.998;
 
-    dye_out[idx] = clamp(advected_dye * decay_factor, 0.0, 1.0);
+    let perm = permeability(x, y);
+    dye_out[idx] = clamp(advected_dye * decay_factor * perm, 0.0, 1.0);
 }
 
 // Clear dye buffer (for reset)
@@ -320,8 +325,9 @@ fn obstacles_enabled() -> bool {
     return OBSTACLES_ENABLED;
 }
 
-fn obstacle_gamma_threshold() -> f32 {
-    return OBSTACLE_GAMMA_THRESHOLD;
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = clamp((x - edge0) / max(edge1 - edge0, 1e-12), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
 }
 
 fn gamma_index(x: u32, y: u32) -> u32 {
@@ -339,11 +345,22 @@ fn gamma_at_fluid_cell(x: u32, y: u32) -> f32 {
     return gamma_grid[gamma_index(gx, gy)];
 }
 
-fn is_solid_cell(x: u32, y: u32) -> bool {
+fn obstacle_strength(x: u32, y: u32) -> f32 {
+    // 0..1 where 1 means fully solid.
     if (!obstacles_enabled()) {
-        return false;
+        return 0.0;
     }
-    return gamma_at_fluid_cell(x, y) > obstacle_gamma_threshold();
+    let g = gamma_at_fluid_cell(x, y);
+    return smoothstep(OBSTACLE_GAMMA_MIN, OBSTACLE_GAMMA_MAX, g);
+}
+
+fn permeability(x: u32, y: u32) -> f32 {
+    // 1..0 where 0 means fully solid.
+    return 1.0 - obstacle_strength(x, y);
+}
+
+fn is_effectively_solid(x: u32, y: u32) -> bool {
+    return obstacle_strength(x, y) > 0.999;
 }
 
 fn clamp_coords(x: i32, y: i32) -> vec2<u32> {
@@ -381,10 +398,10 @@ fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
     let c01 = clamp_coords(x0, y1);
     let c11 = clamp_coords(x1, y1);
 
-    let v00 = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(c00.x, c00.y)], !is_solid_cell(c00.x, c00.y));
-    let v10 = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(c10.x, c10.y)], !is_solid_cell(c10.x, c10.y));
-    let v01 = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(c01.x, c01.y)], !is_solid_cell(c01.x, c01.y));
-    let v11 = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(c11.x, c11.y)], !is_solid_cell(c11.x, c11.y));
+    let v00 = velocity_in[grid_index(c00.x, c00.y)] * permeability(c00.x, c00.y);
+    let v10 = velocity_in[grid_index(c10.x, c10.y)] * permeability(c10.x, c10.y);
+    let v01 = velocity_in[grid_index(c01.x, c01.y)] * permeability(c01.x, c01.y);
+    let v11 = velocity_in[grid_index(c11.x, c11.y)] * permeability(c11.x, c11.y);
 
     let v0 = mix(v00, v10, fx);
     let v1 = mix(v01, v11, fx);
@@ -419,10 +436,10 @@ fn sample_dye(pos: vec2<f32>) -> f32 {
     let c01 = clamp_coords(x0, y1);
     let c11 = clamp_coords(x1, y1);
 
-    let d00 = select(0.0, dye_in[grid_index(c00.x, c00.y)], !is_solid_cell(c00.x, c00.y));
-    let d10 = select(0.0, dye_in[grid_index(c10.x, c10.y)], !is_solid_cell(c10.x, c10.y));
-    let d01 = select(0.0, dye_in[grid_index(c01.x, c01.y)], !is_solid_cell(c01.x, c01.y));
-    let d11 = select(0.0, dye_in[grid_index(c11.x, c11.y)], !is_solid_cell(c11.x, c11.y));
+    let d00 = dye_in[grid_index(c00.x, c00.y)] * permeability(c00.x, c00.y);
+    let d10 = dye_in[grid_index(c10.x, c10.y)] * permeability(c10.x, c10.y);
+    let d01 = dye_in[grid_index(c01.x, c01.y)] * permeability(c01.x, c01.y);
+    let d11 = dye_in[grid_index(c11.x, c11.y)] * permeability(c11.x, c11.y);
 
     let d0 = mix(d00, d10, fx);
     let d1 = mix(d01, d11, fx);
@@ -567,7 +584,7 @@ fn advect_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         velocity_out[idx] = vec2<f32>(0.0, 0.0);
         return;
     }
@@ -588,7 +605,8 @@ fn advect_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // `params.decay` is interpreted as a per-frame damping factor at 60 FPS.
     // For arbitrary dt, scale it as decay^(dt*60).
     let decay_factor = pow(0.999, dt * 60.0);  // Reduced from params.decay (0.9995)
-    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(advected_vel * decay_factor), MAX_VEL);
+    let perm = permeability(x, y);
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(advected_vel * decay_factor), MAX_VEL) * perm;
 }
 
 // 3. Compute divergence of a velocity field (reads velocity_in, writes divergence)
@@ -603,7 +621,7 @@ fn compute_divergence(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         divergence[idx] = 0.0;
         return;
     }
@@ -619,10 +637,10 @@ fn compute_divergence(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let yp = clamp(i32(y) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
 
-    let v_l = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(u32(xm), y)]), !is_solid_cell(u32(xm), y));
-    let v_r = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(u32(xp), y)]), !is_solid_cell(u32(xp), y));
-    let v_b = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x, u32(ym))]), !is_solid_cell(x, u32(ym)));
-    let v_t = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x, u32(yp))]), !is_solid_cell(x, u32(yp)));
+    let v_l = sanitize_vec2(velocity_in[grid_index(u32(xm), y)]) * permeability(u32(xm), y);
+    let v_r = sanitize_vec2(velocity_in[grid_index(u32(xp), y)]) * permeability(u32(xp), y);
+    let v_b = sanitize_vec2(velocity_in[grid_index(x, u32(ym))]) * permeability(x, u32(ym));
+    let v_t = sanitize_vec2(velocity_in[grid_index(x, u32(yp))]) * permeability(x, u32(yp));
 
     // Central differences; assume dx = 1.
     let div = 0.5 * ((v_r.x - v_l.x) + (v_t.y - v_b.y));
@@ -635,10 +653,10 @@ fn curl_at(x: u32, y: u32) -> f32 {
     let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let yp = clamp(i32(y) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
 
-    let v_l = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(u32(xm), y)], !is_solid_cell(u32(xm), y));
-    let v_r = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(u32(xp), y)], !is_solid_cell(u32(xp), y));
-    let v_b = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(x, u32(ym))], !is_solid_cell(x, u32(ym)));
-    let v_t = select(vec2<f32>(0.0, 0.0), velocity_in[grid_index(x, u32(yp))], !is_solid_cell(x, u32(yp)));
+    let v_l = velocity_in[grid_index(u32(xm), y)] * permeability(u32(xm), y);
+    let v_r = velocity_in[grid_index(u32(xp), y)] * permeability(u32(xp), y);
+    let v_b = velocity_in[grid_index(x, u32(ym))] * permeability(x, u32(ym));
+    let v_t = velocity_in[grid_index(x, u32(yp))] * permeability(x, u32(yp));
 
     let dvy_dx = 0.5 * (v_r.y - v_l.y);
     let dvx_dy = 0.5 * (v_t.x - v_b.x);
@@ -657,7 +675,7 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         velocity_out[idx] = vec2<f32>(0.0, 0.0);
         return;
     }
@@ -704,7 +722,8 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
         dv = dv * (max_dv / dv_len);
     }
 
-    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(velocity_in[idx] + dv), MAX_VEL);
+    let perm = permeability(x, y);
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(velocity_in[idx] + dv), MAX_VEL) * perm;
 }
 
 // 4. Clear pressure (for init / each frame)
@@ -733,7 +752,7 @@ fn jacobi_pressure(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         pressure_out[idx] = 0.0;
         return;
     }
@@ -741,20 +760,28 @@ fn jacobi_pressure(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Neumann boundary (solid walls): dp/dn = 0.
     // Implemented by mirroring the edge pressure to the outside.
     var p_l = pressure_in[idx];
-    if (x > 0u && !is_solid_cell(x - 1u, y)) {
-        p_l = pressure_in[grid_index(x - 1u, y)];
+    if (x > 0u) {
+        let w = permeability(x - 1u, y);
+        let pn = pressure_in[grid_index(x - 1u, y)];
+        p_l = mix(pressure_in[idx], pn, w);
     }
     var p_r = pressure_in[idx];
-    if (x + 1u < FLUID_GRID_SIZE && !is_solid_cell(x + 1u, y)) {
-        p_r = pressure_in[grid_index(x + 1u, y)];
+    if (x + 1u < FLUID_GRID_SIZE) {
+        let w = permeability(x + 1u, y);
+        let pn = pressure_in[grid_index(x + 1u, y)];
+        p_r = mix(pressure_in[idx], pn, w);
     }
     var p_b = pressure_in[idx];
-    if (y > 0u && !is_solid_cell(x, y - 1u)) {
-        p_b = pressure_in[grid_index(x, y - 1u)];
+    if (y > 0u) {
+        let w = permeability(x, y - 1u);
+        let pn = pressure_in[grid_index(x, y - 1u)];
+        p_b = mix(pressure_in[idx], pn, w);
     }
     var p_t = pressure_in[idx];
-    if (y + 1u < FLUID_GRID_SIZE && !is_solid_cell(x, y + 1u)) {
-        p_t = pressure_in[grid_index(x, y + 1u)];
+    if (y + 1u < FLUID_GRID_SIZE) {
+        let w = permeability(x, y + 1u);
+        let pn = pressure_in[grid_index(x, y + 1u)];
+        p_t = mix(pressure_in[idx], pn, w);
     }
 
     // Jacobi: p = (sum_neighbors - div) / 4, assuming dx = 1.
@@ -778,31 +805,40 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         velocity_out[idx] = vec2<f32>(0.0, 0.0);
         return;
     }
 
     // Use the same Neumann pressure boundary treatment as the Jacobi solve.
     var p_l = pressure_in[idx];
-    if (x > 0u && !is_solid_cell(x - 1u, y)) {
-        p_l = pressure_in[grid_index(x - 1u, y)];
+    if (x > 0u) {
+        let w = permeability(x - 1u, y);
+        let pn = pressure_in[grid_index(x - 1u, y)];
+        p_l = mix(pressure_in[idx], pn, w);
     }
     var p_r = pressure_in[idx];
-    if (x + 1u < FLUID_GRID_SIZE && !is_solid_cell(x + 1u, y)) {
-        p_r = pressure_in[grid_index(x + 1u, y)];
+    if (x + 1u < FLUID_GRID_SIZE) {
+        let w = permeability(x + 1u, y);
+        let pn = pressure_in[grid_index(x + 1u, y)];
+        p_r = mix(pressure_in[idx], pn, w);
     }
     var p_b = pressure_in[idx];
-    if (y > 0u && !is_solid_cell(x, y - 1u)) {
-        p_b = pressure_in[grid_index(x, y - 1u)];
+    if (y > 0u) {
+        let w = permeability(x, y - 1u);
+        let pn = pressure_in[grid_index(x, y - 1u)];
+        p_b = mix(pressure_in[idx], pn, w);
     }
     var p_t = pressure_in[idx];
-    if (y + 1u < FLUID_GRID_SIZE && !is_solid_cell(x, y + 1u)) {
-        p_t = pressure_in[grid_index(x, y + 1u)];
+    if (y + 1u < FLUID_GRID_SIZE) {
+        let w = permeability(x, y + 1u);
+        let pn = pressure_in[grid_index(x, y + 1u)];
+        p_t = mix(pressure_in[idx], pn, w);
     }
 
     let grad = vec2<f32>(p_r - p_l, p_t - p_b) * 0.5;
-    var v = sanitize_vec2(velocity_in[idx]) - grad;
+    let perm = permeability(x, y);
+    var v = (sanitize_vec2(velocity_in[idx]) * perm) - grad;
 
     // No-slip solid boundary: zero velocity at the walls (stronger containment).
     if (x == 0u || x == FLUID_GRID_SIZE - 1u) {
@@ -812,7 +848,7 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
         v = vec2<f32>(0.0, 0.0);
     }
 
-    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v), MAX_VEL);
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v), MAX_VEL) * perm;
 }
 
 // Add forces to velocity field
@@ -827,16 +863,17 @@ fn add_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         velocity_out[idx] = vec2<f32>(0.0, 0.0);
         return;
     }
 
     // Add force scaled by dt (clamped to avoid instability on dt spikes)
     let dt = clamp(params.dt, 0.0, MAX_DT);
-    let v0 = sanitize_vec2(velocity_in[idx]);
+    let perm = permeability(x, y);
+    let v0 = sanitize_vec2(velocity_in[idx]) * perm;
     let f = clamp_vec2_len(sanitize_vec2(fluid_forces[idx]), MAX_FORCE);
-    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v0 + f * dt), MAX_VEL);
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2((v0 + f * dt) * perm), MAX_VEL);
 }
 
 // Velocity diffusion / viscosity (explicit step): v <- v + nu*dt*∇²v
@@ -852,7 +889,7 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         velocity_out[idx] = vec2<f32>(0.0, 0.0);
         return;
     }
@@ -863,11 +900,12 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let v_c = sanitize_vec2(velocity_in[idx]);
-    let v_l = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x - 1u, y)]), !is_solid_cell(x - 1u, y));
-    let v_r = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x + 1u, y)]), !is_solid_cell(x + 1u, y));
-    let v_b = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x, y - 1u)]), !is_solid_cell(x, y - 1u));
-    let v_t = select(vec2<f32>(0.0, 0.0), sanitize_vec2(velocity_in[grid_index(x, y + 1u)]), !is_solid_cell(x, y + 1u));
+    let perm = permeability(x, y);
+    let v_c = sanitize_vec2(velocity_in[idx]) * perm;
+    let v_l = sanitize_vec2(velocity_in[grid_index(x - 1u, y)]) * permeability(x - 1u, y);
+    let v_r = sanitize_vec2(velocity_in[grid_index(x + 1u, y)]) * permeability(x + 1u, y);
+    let v_b = sanitize_vec2(velocity_in[grid_index(x, y - 1u)]) * permeability(x, y - 1u);
+    let v_t = sanitize_vec2(velocity_in[grid_index(x, y + 1u)]) * permeability(x, y + 1u);
 
     let lap = (v_l + v_r + v_b + v_t) - 4.0 * v_c;
 
@@ -875,7 +913,7 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let nu = 0.05;  // Reduced from 0.35 for less dissipation
     let dt = clamp(params.dt, 0.0, MAX_DT);
     let a = nu * dt;
-    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v_c + a * lap), MAX_VEL);
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v_c + a * lap), MAX_VEL) * perm;
 }
 
 // 4. Enforce boundary conditions (free-slip: zero normal component)
@@ -891,7 +929,7 @@ fn enforce_boundaries(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = grid_index(x, y);
 
     // Solid obstacles: no-slip (zero velocity)
-    if (is_solid_cell(x, y)) {
+    if (is_effectively_solid(x, y)) {
         velocity_out[idx] = vec2<f32>(0.0, 0.0);
         return;
     }
@@ -907,7 +945,8 @@ fn enforce_boundaries(@builtin(global_invocation_id) global_id: vec3<u32>) {
         v = vec2<f32>(0.0, 0.0);
     }
 
-    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v), MAX_VEL);
+    let perm = permeability(x, y);
+    velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v), MAX_VEL) * perm;
 }
 
 // 4. Clear velocities (for initialization)
