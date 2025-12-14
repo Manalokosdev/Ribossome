@@ -65,6 +65,9 @@ const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 @group(0) @binding(5) var<storage, read_write> pressure_out: array<f32>;
 @group(0) @binding(6) var<storage, read_write> divergence: array<f32>;
 
+// Dye concentration ping-pong buffers (f32 per cell) - for flow visualization
+@group(0) @binding(8) var<storage, read> dye_in: array<f32>;
+@group(0) @binding(9) var<storage, read_write> dye_out: array<f32>;
 
 // Parameters
 struct FluidParams {
@@ -102,6 +105,20 @@ fn copy_velocity_to_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = grid_index(x, y);
     fluid_forces[idx] = velocity_in[idx];
+}
+
+// Copy dye concentration to forces buffer for visualization (dye in x, zero in y)
+@compute @workgroup_size(16, 16)
+fn copy_dye_to_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+    // Store dye concentration in x component, zero in y
+    fluid_forces[idx] = vec2<f32>(dye_in[idx], 0.0);
 }
 
 @compute @workgroup_size(16, 16)
@@ -166,6 +183,78 @@ fn randomize_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let strength = 1.0;
     fluid_forces[idx] = v * strength;
+}
+
+// Inject dye at locations where propellers are active (where forces are non-zero)
+@compute @workgroup_size(16, 16)
+fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+
+    // Check if there's a propeller force at this location
+    let force = fluid_force_vectors[idx];
+    let force_magnitude = length(force);
+
+    // If there's significant force, inject dye (concentration = 1.0)
+    // Otherwise, let existing dye decay slightly
+    var current_dye = dye_in[idx];
+
+    if (force_magnitude > 1.0) {
+        // Strong dye injection at propeller locations
+        current_dye = min(current_dye + 1.0, 1.0);
+    } else {
+        // Slight decay over time
+        current_dye *= 0.995;
+    }
+
+    dye_out[idx] = current_dye;
+}
+
+// Advect dye concentration using semi-Lagrangian method (same as velocity advection)
+@compute @workgroup_size(16, 16)
+fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+    let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
+
+    // Read current velocity
+    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let vel = clamp_vec2_len(sanitize_vec2(velocity_in[idx]), MAX_VEL);
+
+    // Backward trace - follow the flow backwards to find where dye came from
+    let trace_pos = pos - vel * dt;
+
+    // Sample dye concentration at traced position using bilinear interpolation
+    let advected_dye = sample_dye(trace_pos);
+
+    // Apply slight decay to make dye fade over time
+    let decay_factor = 0.998;
+
+    dye_out[idx] = clamp(advected_dye * decay_factor, 0.0, 1.0);
+}
+
+// Clear dye buffer (for reset)
+@compute @workgroup_size(16, 16)
+fn clear_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+
+    let idx = grid_index(x, y);
+    dye_out[idx] = 0.0;
 }
 
 // ============================================================================
@@ -250,6 +339,40 @@ fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
     let v1 = mix(v01, v11, fx);
 
     return mix(v0, v1, fy);
+}
+
+// Bilinear interpolation for dye concentration sampling
+fn sample_dye(pos: vec2<f32>) -> f32 {
+    // Clamp sampling to the interior
+    let min_pos = 1.5;
+    let max_pos = f32(FLUID_GRID_SIZE) - 1.5;
+    let p = clamp(pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
+
+    let x = p.x - 0.5;
+    let y = p.y - 0.5;
+
+    let x0 = i32(floor(x));
+    let y0 = i32(floor(y));
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+
+    let fx = fract(x);
+    let fy = fract(y);
+
+    let c00 = clamp_coords(x0, y0);
+    let c10 = clamp_coords(x1, y0);
+    let c01 = clamp_coords(x0, y1);
+    let c11 = clamp_coords(x1, y1);
+
+    let d00 = dye_in[grid_index(c00.x, c00.y)];
+    let d10 = dye_in[grid_index(c10.x, c10.y)];
+    let d01 = dye_in[grid_index(c01.x, c01.y)];
+    let d11 = dye_in[grid_index(c11.x, c11.y)];
+
+    let d0 = mix(d00, d10, fx);
+    let d1 = mix(d01, d11, fx);
+
+    return mix(d0, d1, fy);
 }
 
 fn splat_falloff(dist: f32, radius: f32) -> f32 {

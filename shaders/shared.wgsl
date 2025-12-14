@@ -270,7 +270,7 @@ var<uniform> params: SimParams;
 var<storage, read_write> alive_counter: atomic<u32>;
 
 @group(0) @binding(8)
-var<storage, read> fluid_velocity: array<vec2<f32>>; // 128x128 fluid velocity field for visualization
+var<storage, read> fluid_velocity: array<vec2<f32>>; // 128x128 fluid velocity field for visualization (also used for dye when fluid_show enabled)
 
 @group(0) @binding(9)
 var<storage, read_write> new_agents: array<Agent>;  // Buffer for spawned agents

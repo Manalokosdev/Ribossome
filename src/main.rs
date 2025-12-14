@@ -1306,6 +1306,8 @@ struct GpuState {
     fluid_divergence: wgpu::Buffer,
     fluid_forces: wgpu::Buffer,
     fluid_force_vectors: wgpu::Buffer,
+    fluid_dye_a: wgpu::Buffer,
+    fluid_dye_b: wgpu::Buffer,
     fluid_params_buffer: wgpu::Buffer,
 
     // Fluid simulation pipelines
@@ -1321,9 +1323,13 @@ struct GpuState {
     fluid_subtract_gradient_pipeline: wgpu::ComputePipeline,
     fluid_copy_pipeline: wgpu::ComputePipeline,
     fluid_copy_velocity_to_forces_pipeline: wgpu::ComputePipeline,
+    fluid_copy_dye_to_forces_pipeline: wgpu::ComputePipeline,
     fluid_clear_forces_pipeline: wgpu::ComputePipeline,
     fluid_clear_force_vectors_pipeline: wgpu::ComputePipeline,
     fluid_clear_velocity_pipeline: wgpu::ComputePipeline,
+    fluid_inject_dye_pipeline: wgpu::ComputePipeline,
+    fluid_advect_dye_pipeline: wgpu::ComputePipeline,
+    fluid_clear_dye_pipeline: wgpu::ComputePipeline,
 
     // Fluid bind groups
     fluid_bind_group_ab: wgpu::BindGroup,
@@ -1366,6 +1372,7 @@ struct GpuState {
     // Bind groups
     compute_bind_group_a: wgpu::BindGroup,
     compute_bind_group_b: wgpu::BindGroup,
+    composite_bind_group: wgpu::BindGroup,
     render_bind_group: wgpu::BindGroup,
 
     // State
@@ -2367,12 +2374,11 @@ impl GpuState {
         });
         profiler.mark("Sampler");
 
-        // Load main shader (concatenate shared + render + composite + simulation modules)
+        // Load main shader (concatenate shared + render + simulation modules, composite is separate)
         let shader_source = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}\n{}",
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
-            include_str!("../shaders/composite.wgsl"),
             include_str!("../shaders/simulation.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2380,6 +2386,13 @@ impl GpuState {
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
         profiler.mark("Main shader compiled");
+
+        // Load composite shader (standalone, minimal dependencies)
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Composite Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/composite.wgsl").into()),
+        });
+        profiler.mark("Composite shader compiled");
 
         // ============================================================================
         // FLUID SIMULATION BUFFERS (created early so they can be used in bind groups)
@@ -2440,7 +2453,74 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
+        let fluid_dye_a = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fluid Dye A"),
+            size: fluid_scalar_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let fluid_dye_b = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fluid Dye B"),
+            size: fluid_scalar_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
         profiler.mark("Fluid buffers");
+
+        // Composite bind group layout (minimal bindings for compositing - created early before compute layout)
+        let composite_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Composite Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let composite_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Composite Pipeline Layout"),
+            bind_group_layouts: &[&composite_bind_group_layout],
+            push_constant_ranges: &[],
+        });
 
         // Create bind group layouts
         let compute_bind_group_layout =
@@ -2791,6 +2871,19 @@ impl GpuState {
         });
         profiler.mark("Compute bind groups");
 
+        // Create composite bind group (uses separate bind group from compute)
+        let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Composite Bind Group"),
+            layout: &composite_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: visual_grid_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: agent_grid_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: fluid_dye_a.as_entire_binding() },
+            ],
+        });
+        profiler.mark("Composite bind group");
+
         // Create compute pipelines
         let compute_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2911,8 +3004,8 @@ impl GpuState {
         let composite_agents_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Composite Agents Pipeline"),
-                layout: Some(&compute_pipeline_layout),
-                module: &shader,
+                layout: Some(&composite_pipeline_layout),
+                module: &composite_shader,
                 entry_point: "composite_agents",
                 compilation_options: Default::default(),
                 cache: None,
@@ -3268,6 +3361,26 @@ impl GpuState {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -3284,6 +3397,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 6, resource: fluid_divergence.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: fluid_forces.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 16, resource: fluid_force_vectors.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: fluid_dye_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: fluid_dye_b.as_entire_binding() },
             ],
         });
 
@@ -3299,6 +3414,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 6, resource: fluid_divergence.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: fluid_forces.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 16, resource: fluid_force_vectors.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: fluid_dye_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: fluid_dye_a.as_entire_binding() },
             ],
         });
 
@@ -3419,6 +3536,15 @@ impl GpuState {
             cache: None,
         });
 
+        let fluid_copy_dye_to_forces_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Copy Dye To Forces"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "copy_dye_to_forces",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         let fluid_clear_forces_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Fluid Clear Forces"),
             layout: Some(&fluid_pipeline_layout),
@@ -3461,6 +3587,33 @@ impl GpuState {
             layout: Some(&fluid_pipeline_layout),
             module: &fluid_shader,
             entry_point: "randomize_forces",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_inject_dye_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Inject Dye"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "inject_dye",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_advect_dye_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Advect Dye"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "advect_dye",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_clear_dye_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Clear Dye"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "clear_dye",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -3636,6 +3789,7 @@ impl GpuState {
             render_pipeline,
             compute_bind_group_a,
             compute_bind_group_b,
+            composite_bind_group,
             render_bind_group,
             ping_pong: false,
             agent_count: initial_agents as u32,
@@ -3743,6 +3897,8 @@ impl GpuState {
             fluid_divergence,
             fluid_forces,
             fluid_force_vectors,
+            fluid_dye_a,
+            fluid_dye_b,
             fluid_params_buffer,
             fluid_generate_forces_pipeline,
             fluid_add_forces_pipeline,
@@ -3756,9 +3912,13 @@ impl GpuState {
             fluid_subtract_gradient_pipeline,
             fluid_copy_pipeline,
             fluid_copy_velocity_to_forces_pipeline,
+            fluid_copy_dye_to_forces_pipeline,
             fluid_clear_forces_pipeline,
             fluid_clear_force_vectors_pipeline,
             fluid_clear_velocity_pipeline,
+            fluid_inject_dye_pipeline,
+            fluid_advect_dye_pipeline,
+            fluid_clear_dye_pipeline,
             fluid_bind_group_ab,
             fluid_bind_group_ba,
             fluid_time: 0.0,
@@ -5235,6 +5395,16 @@ impl GpuState {
                     cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 10. Inject dye at propeller locations (A->B)
+                    cpass.set_pipeline(&self.fluid_inject_dye_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // 11. Advect dye with velocity field (B->A, final result in dye_a)
+                    cpass.set_pipeline(&self.fluid_advect_dye_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
                 }
             }
 
@@ -5339,10 +5509,6 @@ impl GpuState {
                     cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_copy_velocity_to_forces_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
                 }
             }
 
@@ -5355,7 +5521,7 @@ impl GpuState {
 
                 // Composite agent_grid onto visual_grid
                 cpass.set_pipeline(&self.composite_agents_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.set_bind_group(0, &self.composite_bind_group, &[]);
                 let width_workgroups =
                     (self.surface_config.width + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
                 let height_workgroups =

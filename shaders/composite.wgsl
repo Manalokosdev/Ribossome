@@ -11,6 +11,38 @@
 // - Mode 3: Multiply (multiplicative blending with color tint)
 // ============================================================================
 
+// Standalone bindings for composite shader (not part of shared.wgsl)
+const SIM_SIZE: u32 = 8192u;
+
+struct SimParams {
+    grid_size: f32,
+    window_width: f32,
+    window_height: f32,
+    camera_zoom: f32,
+    camera_pan_x: f32,
+    camera_pan_y: f32,
+    visual_stride: u32,
+    draw_enabled: u32,
+    agent_blend_mode: u32,
+    agent_color_r: f32,
+    agent_color_g: f32,
+    agent_color_b: f32,
+    fluid_show: u32,
+    _pad: u32,
+}
+
+@group(0) @binding(0)
+var<storage, read_write> visual_grid: array<vec4<f32>>;
+
+@group(0) @binding(1)
+var<storage, read> agent_grid: array<vec4<f32>>;
+
+@group(0) @binding(2)
+var<uniform> params: SimParams;
+
+@group(0) @binding(3)
+var<storage, read> fluid_dye: array<f32>;
+
 @compute @workgroup_size(16, 16)
 fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (params.draw_enabled == 0u) { return; }
@@ -57,7 +89,7 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // Overlay fluid velocity visualization if enabled
+    // Overlay fluid dye visualization if enabled
     if (params.fluid_show > 0u) {
         // Convert screen pixel -> world coordinates using the same camera math as shared.wgsl
         let safe_zoom = max(params.camera_zoom, 0.0001);
@@ -84,39 +116,16 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let fluid_y = u32(clamp(world_pos.y / ws * 128.0, 0.0, 127.0));
         let fluid_idx = fluid_y * 128u + fluid_x;
 
-        // Sample fluid velocity (evolved by Navier-Stokes from propeller forces)
-        let vel = fluid_velocity[fluid_idx];
-        let speed = length(vel);
+        // Sample dye concentration directly from fluid_dye buffer
+        let dye_concentration = fluid_dye[fluid_idx];
 
-        // Convert to HSV: hue from direction, brightness from speed
-        let angle = atan2(vel.y, vel.x);
-        let hue = (angle + 3.14159265) / (2.0 * 3.14159265); // 0-1
+        // Dye color: bright cyan/blue that fades to transparent
+        // Use a color that contrasts well with the simulation background
+        let dye_color = vec3<f32>(0.2, 0.7, 1.0); // Bright cyan-blue
 
-        // Show base blue for zero velocity, brighter colors for movement
-        let base_brightness = 0.2;  // Dim blue for zero velocity
-        let speed_brightness = min(speed * 8.0, 1.0);
-        let brightness = max(base_brightness, speed_brightness);
-
-        // HSV to RGB conversion
-        let h6 = hue * 6.0;
-        let i = floor(h6);
-        let f = h6 - i;
-        let p = 0.0;
-        let q = brightness * (1.0 - f);
-        let t = brightness * f;
-
-        var fluid_color = vec3<f32>(0.0);
-        let i_mod = u32(i) % 6u;
-        if (i_mod == 0u) { fluid_color = vec3<f32>(brightness, t, p); }
-        else if (i_mod == 1u) { fluid_color = vec3<f32>(q, brightness, p); }
-        else if (i_mod == 2u) { fluid_color = vec3<f32>(p, brightness, t); }
-        else if (i_mod == 3u) { fluid_color = vec3<f32>(p, q, brightness); }
-        else if (i_mod == 4u) { fluid_color = vec3<f32>(t, p, brightness); }
-        else { fluid_color = vec3<f32>(brightness, p, q); }
-
-        // Always show overlay with significant alpha
-        let fluid_alpha = 0.5;  // Constant 50% opacity
-        result_color = mix(result_color, fluid_color, fluid_alpha);
+        // Alpha based on dye concentration - visible where dye exists
+        let fluid_alpha = clamp(dye_concentration * 0.8, 0.0, 0.8);
+        result_color = mix(result_color, dye_color, fluid_alpha);
     }
 
     visual_grid[idx] = vec4<f32>(result_color, 1.0);
