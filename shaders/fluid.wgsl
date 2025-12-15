@@ -50,7 +50,7 @@ const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 const OBSTACLES_ENABLED: bool = true;
 // Permeability model: perm = 1 / (1 + k * |slope|)
 // Larger k => stronger blocking.
-const STEEPNESS_K: f32 = 20.0;
+const STEEPNESS_K: f32 = 200.0;
 // Treat cells with very low permeability as effectively solid.
 const SOLID_PERM_THRESHOLD: f32 = 0.02;
 
@@ -60,7 +60,14 @@ const SLOPE_FORCE_ENABLED: bool = true;
 const SLOPE_FORCE_SCALE: f32 = 100.0;
 
 // Dye injection from environment layers (alpha/beta “oozing”)
-const OOZE_RATE: f32 = 2.0;
+const OOZE_RATE: f32 = 0.5;
+
+// Dye persistence & diffusion tuning
+// Higher values fade less (closer to 1.0).
+const DYE_INJECT_DECAY: f32 = 1;
+const DYE_ADVECT_DECAY: f32 = 0.998;
+// 0..1: how much we blend towards a 4-neighbor blur each frame.
+const DYE_DIFFUSE_MIX: f32 = 0.05;
 
 // ============================================================================
 // BINDINGS
@@ -220,11 +227,6 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = grid_index(x, y);
 
-    if (is_effectively_solid(x, y)) {
-        dye_out[idx] = vec2<f32>(0.0, 0.0);
-        return;
-    }
-
     // Sample alpha/beta at the corresponding environment cell.
     let env_idx = gamma_idx_for_fluid_cell(x, y);
     let a = clamp(alpha_grid[env_idx], 0.0, 1.0);
@@ -236,12 +238,12 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Inject proportionally each frame, with mild decay so it doesn't stick forever.
     let dt = clamp(params.dt, 0.0, MAX_DT);
-    var current_dye = dye_in[idx] * 0.995;
+    var current_dye = dye_in[idx] * DYE_INJECT_DECAY;
     let injected = vec2<f32>(ooze_beta, ooze_alpha) * (OOZE_RATE * dt);
     current_dye = min(current_dye + injected, vec2<f32>(1.0, 1.0));
 
-    let perm = permeability(x, y);
-    dye_out[idx] = current_dye * perm;
+    // Dye ignores obstacles: don't attenuate by permeability.
+    dye_out[idx] = current_dye;
 }
 
 // Advect dye concentration using semi-Lagrangian method (same as velocity advection)
@@ -255,10 +257,6 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    if (is_effectively_solid(x, y)) {
-        dye_out[idx] = vec2<f32>(0.0, 0.0);
-        return;
-    }
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
     // Read current velocity
@@ -272,10 +270,25 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let advected_dye = sample_dye(trace_pos);
 
     // Apply slight decay to make dye fade over time
-    let decay_factor = 0.998;
+    let decay_factor = DYE_ADVECT_DECAY;
 
-    let perm = permeability(x, y);
-    dye_out[idx] = clamp(advected_dye * decay_factor * perm, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    // Extra diffusion: blend advected dye towards a local 4-neighbor blur.
+    // This makes the dye spread out more instead of staying filament-thin.
+    let cx = i32(x);
+    let cy = i32(y);
+    let l = clamp_coords(cx - 1, cy);
+    let r = clamp_coords(cx + 1, cy);
+    let u = clamp_coords(cx, cy - 1);
+    let d = clamp_coords(cx, cy + 1);
+    let d_l = dye_in[grid_index(l.x, l.y)];
+    let d_r = dye_in[grid_index(r.x, r.y)];
+    let d_u = dye_in[grid_index(u.x, u.y)];
+    let d_d = dye_in[grid_index(d.x, d.y)];
+    let neighbor_blur = (d_l + d_r + d_u + d_d) * 0.25;
+    let advected_diffused = mix(advected_dye, neighbor_blur, clamp(DYE_DIFFUSE_MIX, 0.0, 1.0));
+
+    // Dye ignores obstacles: don't attenuate by permeability.
+    dye_out[idx] = clamp(advected_diffused * decay_factor, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
 }
 
 // Clear dye buffer (for reset)
@@ -490,10 +503,11 @@ fn sample_dye(pos: vec2<f32>) -> vec2<f32> {
     let c01 = clamp_coords(x0, y1);
     let c11 = clamp_coords(x1, y1);
 
-    let d00 = dye_in[grid_index(c00.x, c00.y)] * permeability(c00.x, c00.y);
-    let d10 = dye_in[grid_index(c10.x, c10.y)] * permeability(c10.x, c10.y);
-    let d01 = dye_in[grid_index(c01.x, c01.y)] * permeability(c01.x, c01.y);
-    let d11 = dye_in[grid_index(c11.x, c11.y)] * permeability(c11.x, c11.y);
+    // Dye ignores obstacles: sample raw dye values.
+    let d00 = dye_in[grid_index(c00.x, c00.y)];
+    let d10 = dye_in[grid_index(c10.x, c10.y)];
+    let d01 = dye_in[grid_index(c01.x, c01.y)];
+    let d11 = dye_in[grid_index(c11.x, c11.y)];
 
     let d0 = mix(d00, d10, fx);
     let d1 = mix(d01, d11, fx);
