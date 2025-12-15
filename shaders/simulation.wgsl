@@ -1386,15 +1386,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         // 1) Trail deposition: blend agent color + deposit energy trail
-        let current_trail = trail_grid[idx].xyz;
+        // NOTE: write into trail_grid_inject; the displayed trail_grid is produced by fluid-pass advection.
+        let current_trail = trail_grid_inject[idx].xyz;
         let blended = mix(current_trail, agent_color, trail_deposit_strength);
 
         // Deposit energy trail (unclamped) - scale by agent energy
-        let current_energy_trail = trail_grid[idx].w;
+        let current_energy_trail = trail_grid_inject[idx].w;
         let energy_deposit = agent.energy * trail_deposit_strength * 0.1; // 10% of energy deposited
         let blended_energy = current_energy_trail + energy_deposit;
 
-        trail_grid[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), blended_energy);
+        trail_grid_inject[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), blended_energy);
 
         // 2) Energy consumption: calculate costs per organ type
         // DISABLED: Vampire mouths always active, no need to calculate enabler sum
@@ -1606,7 +1607,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (pairing_counter >= gene_length && gene_length > 0u) {
         // Attempt reproduction: create complementary genome offspring with mutations
-        let current_count = atomicLoad(&alive_counter);
+        let current_count = atomicLoad(&spawn_debug_counters[2]);
         if (current_count < params.max_agents) {
             let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
             if (spawn_index < 2000u) {
@@ -2095,10 +2096,6 @@ fn compute_gamma_slope(@builtin(global_invocation_id) gid: vec3<u32>) {
     write_gamma_slope(idx, gradient);
 }
 
-// ============================================================================
-// RGB TRAIL DIFFUSION
-// ============================================================================
-
 @compute @workgroup_size(16, 16)
 fn diffuse_trails(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
@@ -2110,35 +2107,32 @@ fn diffuse_trails(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * GRID_SIZE + x;
 
-    // Get current trail value (RGB)
-    let current_trail = trail_grid[idx].xyz;
+    // Prepare the injection buffer for dye-style trails:
+    // - start from the currently displayed trail_grid
+    // - apply optional mild diffusion
+    // - apply decay
+    // Agents then deposit into trail_grid_inject during process_agents.
+    let current = trail_grid[idx];
+    let strength = clamp(params.trail_diffusion, 0.0, 1.0);
+    let decay = clamp(params.trail_decay, 0.0, 1.0);
 
-    // Sample 3x3 neighborhood for diffusion
-    var trail_sum = vec3<f32>(0.0);
+    let xi = i32(x);
+    let yi = i32(y);
+    let x_l = u32(clamp(xi - 1, 0, i32(GRID_SIZE) - 1));
+    let x_r = u32(clamp(xi + 1, 0, i32(GRID_SIZE) - 1));
+    let y_u = u32(clamp(yi - 1, 0, i32(GRID_SIZE) - 1));
+    let y_d = u32(clamp(yi + 1, 0, i32(GRID_SIZE) - 1));
 
-    for (var i = 0u; i < 9u; i++) {
-        let dx = i32(i % 3u) - 1;
-        let dy = i32(i / 3u) - 1;
-        let nx_i = clamp(i32(x) + dx, 0, i32(GRID_SIZE) - 1);
-        let ny_i = clamp(i32(y) + dy, 0, i32(GRID_SIZE) - 1);
-        let nidx = u32(ny_i) * GRID_SIZE + u32(nx_i);
+    let l = trail_grid[y * GRID_SIZE + x_l];
+    let r = trail_grid[y * GRID_SIZE + x_r];
+    let u = trail_grid[y_u * GRID_SIZE + x];
+    let d = trail_grid[y_d * GRID_SIZE + x];
+    let neighbor_blur = (l + r + u + d) * 0.25;
 
-    trail_sum += trail_grid[nidx].xyz;
-    }
-
-    let trail_avg = trail_sum / 9.0;
-
-    // Diffusion: blend current with average (controlled by trail_diffusion parameter)
-    let new_trail = mix(current_trail, trail_avg, params.trail_diffusion);
-
-    // Decay: gradually fade trails over time (controlled by trail_decay parameter)
-    let faded = clamp(new_trail * params.trail_decay, vec3<f32>(0.0), vec3<f32>(1.0));
-
-    // Decay energy trail (alpha channel) separately
-    let current_energy_trail = trail_grid[idx].w;
-    let faded_energy = current_energy_trail * params.trail_decay;
-
-    trail_grid[idx] = vec4<f32>(faded, faded_energy);
+    let mixed = mix(current, neighbor_blur, strength);
+    let faded_rgb = clamp(mixed.xyz * decay, vec3<f32>(0.0), vec3<f32>(1.0));
+    let faded_energy = mixed.w * decay;
+    trail_grid_inject[idx] = vec4<f32>(faded_rgb, faded_energy);
 }
 
 // Helper function to draw a digit (0-9) at a position
@@ -2611,6 +2605,7 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
     gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET] = environment_init.slope_pair.y;
 
     trail_grid[idx] = environment_init.trail_values;
+    trail_grid_inject[idx] = environment_init.trail_values;
 }
 
 // ============================================================================
@@ -2627,8 +2622,8 @@ fn merge_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Append to end of compacted alive array using alive_counter as running size
-    let target_index = atomicAdd(&alive_counter, 1u);
+    // Append to end of compacted alive array using alive counter as running size
+    let target_index = atomicAdd(&spawn_debug_counters[2], 1u);
     if (target_index < params.max_agents) {
         agents_out[target_index] = new_agents[spawn_id];
     }
@@ -2643,7 +2638,7 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let request = spawn_requests[request_id];
 
-    let alive_now = atomicLoad(&alive_counter);
+    let alive_now = atomicLoad(&spawn_debug_counters[2]);
     if (alive_now >= params.max_agents) {
         return;
     }
@@ -2747,7 +2742,7 @@ fn initialize_dead_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let alive_total = atomicLoad(&alive_counter);
+    let alive_total = atomicLoad(&spawn_debug_counters[2]);
     if (idx < alive_total) {
         return;
     }
@@ -2772,7 +2767,7 @@ fn compact_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let agent = agents_in[agent_id];
     if (agent.alive != 0u) {
-        let idx = atomicAdd(&alive_counter, 1u);
+        let idx = atomicAdd(&spawn_debug_counters[2], 1u);
         if (idx < params.max_agents) {
             agents_out[idx] = agent;
         }

@@ -1279,12 +1279,12 @@ struct GpuState {
     agent_spatial_grid_buffer: wgpu::Buffer,
     gamma_grid: wgpu::Buffer,
     trail_grid: wgpu::Buffer,
+    trail_grid_inject: wgpu::Buffer,
     visual_grid_buffer: wgpu::Buffer,
     agent_grid_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
     environment_init_params_buffer: wgpu::Buffer,
-    alive_counter: wgpu::Buffer,
-    spawn_debug_counters: wgpu::Buffer, // [spawn_counter, debug_counter]
+    spawn_debug_counters: wgpu::Buffer, // [spawn_counter, debug_counter, alive_counter]
     alive_readbacks: [Arc<wgpu::Buffer>; 2],
     alive_readback_pending: [Arc<Mutex<Option<Result<u32, ()>>>>; 2],
     alive_readback_inflight: [bool; 2],
@@ -1333,6 +1333,7 @@ struct GpuState {
     fluid_clear_velocity_pipeline: wgpu::ComputePipeline,
     fluid_inject_dye_pipeline: wgpu::ComputePipeline,
     fluid_advect_dye_pipeline: wgpu::ComputePipeline,
+    fluid_advect_trail_pipeline: wgpu::ComputePipeline,
     fluid_clear_dye_pipeline: wgpu::ComputePipeline,
 
     // Fluid bind groups
@@ -2059,6 +2060,15 @@ impl GpuState {
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+
+        let trail_grid_inject = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Trail Grid Inject"),
+            size: trail_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         profiler.mark("Alpha/Beta/Gamma/Trail buffers");
 
         let env_seed = (seed ^ (seed >> 32)) as u32;
@@ -2224,26 +2234,16 @@ impl GpuState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let alive_counter = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Alive Counter"),
-            size: 4,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
         let spawn_debug_counters = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spawn/Debug Counters"),
-            size: 8, // 2 x u32
+            size: 12, // 3 x u32
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
-        queue.write_buffer(&alive_counter, 0, bytemuck::bytes_of(&0u32));
-        queue.write_buffer(&spawn_debug_counters, 0, bytemuck::cast_slice(&[0u32, 0u32]));
+        queue.write_buffer(&spawn_debug_counters, 0, bytemuck::cast_slice(&[0u32, 0u32, 0u32]));
 
         let alive_readbacks = [
             Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -2761,7 +2761,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: alive_counter.as_entire_binding(),
+                    resource: trail_grid_inject.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
@@ -2840,7 +2840,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: alive_counter.as_entire_binding(),
+                    resource: trail_grid_inject.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
@@ -3434,6 +3434,26 @@ impl GpuState {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -3455,6 +3475,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 16, resource: fluid_force_vectors.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: fluid_dye_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 9, resource: fluid_dye_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 12, resource: trail_grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 13, resource: trail_grid_inject.as_entire_binding() },
             ],
         });
 
@@ -3475,6 +3497,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 16, resource: fluid_force_vectors.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: fluid_dye_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 9, resource: fluid_dye_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 12, resource: trail_grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 13, resource: trail_grid_inject.as_entire_binding() },
             ],
         });
 
@@ -3668,6 +3692,15 @@ impl GpuState {
             cache: None,
         });
 
+        let fluid_advect_trail_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Advect Trail"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "advect_trail",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         let fluid_clear_dye_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Fluid Clear Dye"),
             layout: Some(&fluid_pipeline_layout),
@@ -3688,7 +3721,6 @@ impl GpuState {
             &agents_buffer_b,
             &new_agents_buffer,
             &spawn_requests_buffer,
-            &alive_counter,
             &spawn_debug_counters,
             &selected_agent_buffer,
             &visual_grid_buffer,
@@ -3799,11 +3831,11 @@ impl GpuState {
             agent_spatial_grid_buffer,
             gamma_grid,
             trail_grid,
+            trail_grid_inject,
             visual_grid_buffer,
             agent_grid_buffer,
             params_buffer,
             environment_init_params_buffer,
-            alive_counter,
             spawn_debug_counters,
             alive_readbacks,
             alive_readback_pending,
@@ -3977,6 +4009,7 @@ impl GpuState {
             fluid_clear_velocity_pipeline,
             fluid_inject_dye_pipeline,
             fluid_advect_dye_pipeline,
+            fluid_advect_trail_pipeline,
             fluid_clear_dye_pipeline,
             fluid_bind_group_ab,
             fluid_bind_group_ba,
@@ -4393,7 +4426,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: self.alive_counter.as_entire_binding(),
+                    resource: self.trail_grid_inject.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
@@ -4471,7 +4504,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: self.alive_counter.as_entire_binding(),
+                    resource: self.trail_grid_inject.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
@@ -4759,10 +4792,10 @@ impl GpuState {
         self.agent_spatial_grid_buffer.destroy();
         self.gamma_grid.destroy();
         self.trail_grid.destroy();
+        self.trail_grid_inject.destroy();
         self.visual_grid_buffer.destroy();
         self.params_buffer.destroy();
         self.environment_init_params_buffer.destroy();
-        self.alive_counter.destroy();
         self.spawn_debug_counters.destroy();
         for buffer in &self.alive_readbacks {
             buffer.destroy();
@@ -4810,7 +4843,8 @@ impl GpuState {
         slot: usize,
     ) -> Arc<wgpu::Buffer> {
         let alive_buffer = self.alive_readbacks[slot].clone();
-        encoder.copy_buffer_to_buffer(&self.alive_counter, 0, alive_buffer.as_ref(), 0, 4);
+        // alive counter lives in spawn_debug_counters[2] (u32) at byte offset 8
+        encoder.copy_buffer_to_buffer(&self.spawn_debug_counters, 8, alive_buffer.as_ref(), 0, 4);
 
         encoder.copy_buffer_to_buffer(
             &self.selected_agent_buffer,
@@ -4893,7 +4927,6 @@ impl GpuState {
             });
 
         if cpu_spawn_count > 0 {
-            encoder.clear_buffer(&self.alive_counter, 0, None);
             encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
 
             // Upload spawn requests for this batch so GPU has per-request seeds/data
@@ -5281,7 +5314,6 @@ impl GpuState {
 
         // Clear counters (spawn_counter is reset in-shader at end of previous frame)
         if should_run_simulation {
-            encoder.clear_buffer(&self.alive_counter, 0, None);
             encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
         }
         // Do NOT clear spawn_counter here; we may set it from CPU spawns below.
@@ -5307,8 +5339,13 @@ impl GpuState {
                 let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
                 let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
+            }
 
-                // Diffuse RGB trail grids
+            // Prepare trails every simulation frame (copy/decay + optional blur into trail_grid_inject).
+            // The actual advection runs in the fluid pass.
+            if should_run_simulation {
+                let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
+                let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
                 cpass.set_pipeline(&self.diffuse_trails_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
@@ -5487,6 +5524,11 @@ impl GpuState {
                     // 11. Advect dye with velocity field (B->A, final result in dye_a)
                     cpass.set_pipeline(&self.fluid_advect_dye_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                    // 12. Advect agent trails with velocity field (trail_grid_inject -> trail_grid)
+                    cpass.set_pipeline(&self.fluid_advect_trail_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
                 }
             }
@@ -6120,10 +6162,8 @@ impl GpuState {
     fn load_snapshot_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
         // Reset simulation state before loading to prevent crashes on subsequent loads
         // Clear alive counter
-        self.queue.write_buffer(&self.alive_counter, 0, bytemuck::bytes_of(&0u32));
-
-        // Clear spawn counter
-        self.queue.write_buffer(&self.spawn_debug_counters, 0, bytemuck::bytes_of(&0u32));
+        // Clear [spawn, debug, alive] counters
+        self.queue.write_buffer(&self.spawn_debug_counters, 0, bytemuck::cast_slice(&[0u32, 0u32, 0u32]));
 
         // Zero out all agent buffers
         let zero_agents = vec![Agent::zeroed(); self.agent_buffer_capacity];
@@ -6390,11 +6430,11 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: self.alive_counter.as_entire_binding(),
+                    resource: self.trail_grid_inject.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.fluid_velocity_a.as_entire_binding(),
+                    resource: self.fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -6470,7 +6510,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: self.alive_counter.as_entire_binding(),
+                    resource: self.trail_grid_inject.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
@@ -6587,8 +6627,7 @@ impl GpuState {
             label: Some("Reset Encoder"),
         });
 
-        // Clear alive counter and spawn counter
-        encoder.clear_buffer(&self.alive_counter, 0, None);
+        // Clear [spawn, debug, alive] counters
         encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
 
         // Reinitialize environment grids (alpha, beta, gamma, trails) via GPU compute
@@ -7974,7 +8013,6 @@ fn main() {
                                                                 encoder.clear_buffer(&state.agents_buffer_b, 0, None);
                                                                 encoder.clear_buffer(&state.new_agents_buffer, 0, None);
                                                                 encoder.clear_buffer(&state.spawn_debug_counters, 0, None);
-                                                                encoder.clear_buffer(&state.alive_counter, 0, None);
                                                                 state.queue.submit(Some(encoder.finish()));
                                                                 state.window.request_redraw();
                                                             }
@@ -8211,7 +8249,7 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.trail_decay,
-                                                                0.9..=1.0,
+                                                                0.0..=1.0,
                                                             )
                                                             .text("Trail Fade Rate"),
                                                         );

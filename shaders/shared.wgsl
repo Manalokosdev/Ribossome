@@ -266,8 +266,9 @@ var<storage, read_write> agent_grid: array<vec4<f32>>; // Separate agent render 
 @group(0) @binding(6)
 var<uniform> params: SimParams;
 
+// Agent trail dye injection buffer (prepared each frame from trail_grid, then written by agents).
 @group(0) @binding(7)
-var<storage, read_write> alive_counter: atomic<u32>;
+var<storage, read_write> trail_grid_inject: array<vec4<f32>>;
 
 @group(0) @binding(8)
 var<storage, read> fluid_velocity: array<vec2<f32>>; // 128x128 fluid velocity field for visualization (also used for dye when fluid_show enabled)
@@ -276,7 +277,7 @@ var<storage, read> fluid_velocity: array<vec2<f32>>; // 128x128 fluid velocity f
 var<storage, read_write> new_agents: array<Agent>;  // Buffer for spawned agents
 
 @group(0) @binding(10)
-var<storage, read_write> spawn_debug_counters: array<atomic<u32>, 2>;  // [0]=spawn_counter, [1]=debug_counter
+var<storage, read_write> spawn_debug_counters: array<atomic<u32>, 3>;  // [0]=spawn_counter, [1]=debug_counter, [2]=alive_counter
 
 @group(0) @binding(11)
 var<storage, read> spawn_requests: array<SpawnRequest>;
@@ -289,7 +290,7 @@ var<storage, read_write> gamma_grid: array<f32>; // Terrain height field + slope
 
 @group(0) @binding(14)
 // NOTE: Use vec4 for std430-friendly 16-byte stride to match host buffer layout
-var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent color trail RGB + energy trail A (unclamped)
+var<storage, read_write> trail_grid: array<vec4<f32>>; // Agent dye trail RGB + energy trail A (unclamped)
 
 @group(0) @binding(15)
 var<uniform> environment_init: EnvironmentInitParams;

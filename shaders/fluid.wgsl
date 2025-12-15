@@ -100,6 +100,12 @@ const DYE_DIFFUSE_MIX: f32 = 0.01;
 @group(0) @binding(8) var<storage, read> dye_in: array<vec2<f32>>;
 @group(0) @binding(9) var<storage, read_write> dye_out: array<vec2<f32>>;
 
+// Agent trail dye (RGBA) advected by the fluid velocity.
+// trail_in is prepared by the simulation pass (copy/decay + agent deposits).
+// advect_trail writes the advected result into trail_out for rendering/sensing.
+@group(0) @binding(12) var<storage, read_write> trail_out: array<vec4<f32>>;
+@group(0) @binding(13) var<storage, read> trail_in: array<vec4<f32>>;
+
 // Parameters
 struct FluidParams {
     time: f32,
@@ -536,6 +542,87 @@ fn sample_dye(pos: vec2<f32>) -> vec2<f32> {
     let d1 = mix(d01, d11, fx);
 
     return mix(d0, d1, fy);
+}
+
+fn sample_trail(pos: vec2<f32>) -> vec4<f32> {
+    // Trail is sampled in dye-grid coordinates (GAMMA_GRID_DIM).
+    // Out-of-bounds contributes no trail.
+    let min_pos = 0.5;
+    let max_pos = f32(GAMMA_GRID_DIM) - 0.5;
+    if (pos.x < min_pos || pos.x > max_pos || pos.y < min_pos || pos.y > max_pos) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let p = clamp(pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
+
+    let x = p.x - 0.5;
+    let y = p.y - 0.5;
+
+    let x0 = i32(floor(x));
+    let y0 = i32(floor(y));
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+
+    let fx = fract(x);
+    let fy = fract(y);
+
+    let c00 = dye_clamp_coords(x0, y0);
+    let c10 = dye_clamp_coords(x1, y0);
+    let c01 = dye_clamp_coords(x0, y1);
+    let c11 = dye_clamp_coords(x1, y1);
+
+    let t00 = trail_in[dye_grid_index(c00.x, c00.y)];
+    let t10 = trail_in[dye_grid_index(c10.x, c10.y)];
+    let t01 = trail_in[dye_grid_index(c01.x, c01.y)];
+    let t11 = trail_in[dye_grid_index(c11.x, c11.y)];
+
+    let t0 = mix(t00, t10, fx);
+    let t1 = mix(t01, t11, fx);
+    return mix(t0, t1, fy);
+}
+
+@compute @workgroup_size(16, 16)
+fn advect_trail(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+
+    // Trails are stored/updated at environment resolution.
+    if (x >= GAMMA_GRID_DIM || y >= GAMMA_GRID_DIM) {
+        return;
+    }
+
+    let idx = dye_grid_index(x, y);
+    let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
+
+    // Convert trail-grid position into fluid-grid coordinates for velocity sampling.
+    let dye_to_fluid = f32(FLUID_GRID_SIZE) / f32(GAMMA_GRID_DIM);
+    let fluid_to_dye = 1.0 / dye_to_fluid;
+    let fluid_pos = pos * dye_to_fluid;
+
+    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let vel_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
+    let vel_dye = vel_fluid * fluid_to_dye;
+
+    // Semi-Lagrangian backtrace
+    let trace_pos = pos - vel_dye * dt;
+    let advected = sample_trail(trace_pos);
+
+    // Optional extra diffusion: blend towards a 4-neighbor blur from trail_in.
+    // Keep subtle; most spreading should come from advection.
+    let TRAIL_DIFFUSE_MIX: f32 = 0.005;
+    let cx = i32(x);
+    let cy = i32(y);
+    let l = dye_clamp_coords(cx - 1, cy);
+    let r = dye_clamp_coords(cx + 1, cy);
+    let u = dye_clamp_coords(cx, cy - 1);
+    let d = dye_clamp_coords(cx, cy + 1);
+    let t_l = trail_in[dye_grid_index(l.x, l.y)];
+    let t_r = trail_in[dye_grid_index(r.x, r.y)];
+    let t_u = trail_in[dye_grid_index(u.x, u.y)];
+    let t_d = trail_in[dye_grid_index(d.x, d.y)];
+    let neighbor_blur = (t_l + t_r + t_u + t_d) * 0.25;
+
+    let mixed = mix(advected, neighbor_blur, clamp(TRAIL_DIFFUSE_MIX, 0.0, 1.0));
+    trail_out[idx] = mixed;
 }
 
 fn splat_falloff(dist: f32, radius: f32) -> f32 {
