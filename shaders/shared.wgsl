@@ -726,7 +726,7 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
         let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
         let sample_pos = center + offset;
         if (!is_in_bounds(sample_pos)) { continue; }
-        let fidx = fluid_grid_index(sample_pos);
+        let fidx = grid_index(sample_pos);
 
         let sigma = radius * 0.15;
         let distance_weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
@@ -777,7 +777,7 @@ fn sample_magnitude_only(center: vec2<f32>, base_radius: f32, seed: u32, grid_ty
         let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
         let sample_pos = center + offset;
         if (!is_in_bounds(sample_pos)) { continue; }
-        let fidx = fluid_grid_index(sample_pos);
+        let fidx = grid_index(sample_pos);
 
         let sigma = radius * 0.15;
         let weight = exp(-(dist * dist) / (2.0 * sigma * sigma));

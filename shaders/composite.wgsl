@@ -194,15 +194,15 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Respect hard simulation bounds (no torus wrap). Outside the world: no dye overlay.
         let ws = f32(SIM_SIZE);
         if (world_pos.x >= 0.0 && world_pos.x < ws && world_pos.y >= 0.0 && world_pos.y < ws) {
-            // Map to fluid grid coordinates (FLUID_GRID_SIZE x FLUID_GRID_SIZE) using the same mapping as propeller injection
-            let grid_f = f32(FLUID_GRID_SIZE);
+            // Map to dye grid coordinates (GAMMA_GRID_DIM x GAMMA_GRID_DIM).
+            let grid_f = f32(GAMMA_GRID_DIM);
             let max_idx_f = grid_f - 1.0;
-            let fluid_x = u32(clamp(world_pos.x / ws * grid_f, 0.0, max_idx_f));
-            let fluid_y = u32(clamp(world_pos.y / ws * grid_f, 0.0, max_idx_f));
-            let fluid_idx = fluid_y * FLUID_GRID_SIZE + fluid_x;
+            let dye_x = u32(clamp(world_pos.x / ws * grid_f, 0.0, max_idx_f));
+            let dye_y = u32(clamp(world_pos.y / ws * grid_f, 0.0, max_idx_f));
+            let dye_idx = dye_y * GAMMA_GRID_DIM + dye_x;
 
-            // Sample dye (beta=red, alpha=green) directly from fluid_dye buffer
-            let dye = fluid_dye[fluid_idx];
+            // Sample dye (beta=red, alpha=green) directly from dye buffer
+            let dye = fluid_dye[dye_idx];
             let dye_color = vec3<f32>(clamp(dye.x, 0.0, 1.0), clamp(dye.y, 0.0, 1.0), 0.0);
 
             // Alpha based on strongest channel

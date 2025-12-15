@@ -60,14 +60,14 @@ const SLOPE_FORCE_ENABLED: bool = true;
 const SLOPE_FORCE_SCALE: f32 = 100.0;
 
 // Dye injection from environment layers (alpha/beta “oozing”)
-const OOZE_RATE: f32 = 0.5;
+const OOZE_RATE: f32 = 0.2;
 
 // Dye persistence & diffusion tuning
 // Higher values fade less (closer to 1.0).
 const DYE_INJECT_DECAY: f32 = 1;
-const DYE_ADVECT_DECAY: f32 = 0.998;
+const DYE_ADVECT_DECAY: f32 = 0.999;
 // 0..1: how much we blend towards a 4-neighbor blur each frame.
-const DYE_DIFFUSE_MIX: f32 = 0.05;
+const DYE_DIFFUSE_MIX: f32 = 0.01;
 
 // ============================================================================
 // BINDINGS
@@ -148,8 +148,10 @@ fn copy_dye_to_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    // Store dye (beta, alpha) directly for downstream visualization/debug
-    fluid_forces[idx] = dye_in[idx];
+    // Dye buffers are GAMMA_GRID_DIM^2, so map the current fluid cell to an env cell.
+    let env_idx = gamma_idx_for_fluid_cell(x, y);
+    // Store dye (beta, alpha) directly for downstream visualization/debug.
+    fluid_forces[idx] = dye_in[env_idx];
 }
 
 @compute @workgroup_size(16, 16)
@@ -221,14 +223,15 @@ fn randomize_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+    // Dye is stored/updated at environment resolution.
+    if (x >= GAMMA_GRID_DIM || y >= GAMMA_GRID_DIM) {
         return;
     }
 
-    let idx = grid_index(x, y);
+    let idx = dye_grid_index(x, y);
 
-    // Sample alpha/beta at the corresponding environment cell.
-    let env_idx = gamma_idx_for_fluid_cell(x, y);
+    // Sample alpha/beta from the corresponding environment cell (same resolution).
+    let env_idx = gamma_index(x, y);
     let a = clamp(alpha_grid[env_idx], 0.0, 1.0);
     let b = clamp(beta_grid[env_idx], 0.0, 1.0);
 
@@ -252,19 +255,28 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
 
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+    if (x >= GAMMA_GRID_DIM || y >= GAMMA_GRID_DIM) {
         return;
     }
 
-    let idx = grid_index(x, y);
+    let idx = dye_grid_index(x, y);
+    // Position in dye-grid coordinates.
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
+
+    // Convert dye-grid position into fluid-grid coordinates for velocity sampling.
+    let dye_to_fluid = f32(FLUID_GRID_SIZE) / f32(GAMMA_GRID_DIM);
+    let fluid_to_dye = 1.0 / dye_to_fluid;
+    let fluid_pos = pos * dye_to_fluid;
 
     // Read current velocity
     let dt = clamp(params.dt, 0.0, MAX_DT);
-    let vel = clamp_vec2_len(sanitize_vec2(velocity_in[idx]), MAX_VEL);
+    let vel_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
+
+    // Convert velocity to dye-grid units before tracing.
+    let vel_dye = vel_fluid * fluid_to_dye;
 
     // Backward trace - follow the flow backwards to find where dye came from
-    let trace_pos = pos - vel * dt;
+    let trace_pos = pos - vel_dye * dt;
 
     // Sample dye concentration at traced position using bilinear interpolation
     let advected_dye = sample_dye(trace_pos);
@@ -276,14 +288,14 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // This makes the dye spread out more instead of staying filament-thin.
     let cx = i32(x);
     let cy = i32(y);
-    let l = clamp_coords(cx - 1, cy);
-    let r = clamp_coords(cx + 1, cy);
-    let u = clamp_coords(cx, cy - 1);
-    let d = clamp_coords(cx, cy + 1);
-    let d_l = dye_in[grid_index(l.x, l.y)];
-    let d_r = dye_in[grid_index(r.x, r.y)];
-    let d_u = dye_in[grid_index(u.x, u.y)];
-    let d_d = dye_in[grid_index(d.x, d.y)];
+    let l = dye_clamp_coords(cx - 1, cy);
+    let r = dye_clamp_coords(cx + 1, cy);
+    let u = dye_clamp_coords(cx, cy - 1);
+    let d = dye_clamp_coords(cx, cy + 1);
+    let d_l = dye_in[dye_grid_index(l.x, l.y)];
+    let d_r = dye_in[dye_grid_index(r.x, r.y)];
+    let d_u = dye_in[dye_grid_index(u.x, u.y)];
+    let d_d = dye_in[dye_grid_index(d.x, d.y)];
     let neighbor_blur = (d_l + d_r + d_u + d_d) * 0.25;
     let advected_diffused = mix(advected_dye, neighbor_blur, clamp(DYE_DIFFUSE_MIX, 0.0, 1.0));
 
@@ -296,11 +308,11 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn clear_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+    if (x >= GAMMA_GRID_DIM || y >= GAMMA_GRID_DIM) {
         return;
     }
 
-    let idx = grid_index(x, y);
+    let idx = dye_grid_index(x, y);
     dye_out[idx] = vec2<f32>(0.0, 0.0);
 }
 
@@ -310,6 +322,11 @@ fn clear_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 fn grid_index(x: u32, y: u32) -> u32 {
     return y * FLUID_GRID_SIZE + x;
+}
+
+// Dye is stored at environment resolution (GAMMA_GRID_DIM x GAMMA_GRID_DIM).
+fn dye_grid_index(x: u32, y: u32) -> u32 {
+    return y * GAMMA_GRID_DIM + x;
 }
 
 fn hash_u32(v: u32) -> u32 {
@@ -436,6 +453,12 @@ fn clamp_coords(x: i32, y: i32) -> vec2<u32> {
     return vec2<u32>(u32(cx), u32(cy));
 }
 
+fn dye_clamp_coords(x: i32, y: i32) -> vec2<u32> {
+    let cx = clamp(x, 0, i32(GAMMA_GRID_DIM) - 1);
+    let cy = clamp(y, 0, i32(GAMMA_GRID_DIM) - 1);
+    return vec2<u32>(u32(cx), u32(cy));
+}
+
 // Bilinear interpolation for velocity sampling
 fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
     // Solid-wall behavior for semi-Lagrangian advection:
@@ -478,10 +501,10 @@ fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
 
 // Bilinear interpolation for dye concentration sampling
 fn sample_dye(pos: vec2<f32>) -> vec2<f32> {
-    // Match velocity advection boundary handling:
-    // out-of-bounds sampling contributes no dye.
+    // Dye is sampled in dye-grid coordinates (GAMMA_GRID_DIM).
+    // Out-of-bounds contributes no dye.
     let min_pos = 0.5;
-    let max_pos = f32(FLUID_GRID_SIZE) - 0.5;
+    let max_pos = f32(GAMMA_GRID_DIM) - 0.5;
     if (pos.x < min_pos || pos.x > max_pos || pos.y < min_pos || pos.y > max_pos) {
         return vec2<f32>(0.0, 0.0);
     }
@@ -498,16 +521,16 @@ fn sample_dye(pos: vec2<f32>) -> vec2<f32> {
     let fx = fract(x);
     let fy = fract(y);
 
-    let c00 = clamp_coords(x0, y0);
-    let c10 = clamp_coords(x1, y0);
-    let c01 = clamp_coords(x0, y1);
-    let c11 = clamp_coords(x1, y1);
+    let c00 = dye_clamp_coords(x0, y0);
+    let c10 = dye_clamp_coords(x1, y0);
+    let c01 = dye_clamp_coords(x0, y1);
+    let c11 = dye_clamp_coords(x1, y1);
 
     // Dye ignores obstacles: sample raw dye values.
-    let d00 = dye_in[grid_index(c00.x, c00.y)];
-    let d10 = dye_in[grid_index(c10.x, c10.y)];
-    let d01 = dye_in[grid_index(c01.x, c01.y)];
-    let d11 = dye_in[grid_index(c11.x, c11.y)];
+    let d00 = dye_in[dye_grid_index(c00.x, c00.y)];
+    let d10 = dye_in[dye_grid_index(c10.x, c10.y)];
+    let d01 = dye_in[dye_grid_index(c01.x, c01.y)];
+    let d11 = dye_in[dye_grid_index(c11.x, c11.y)];
 
     let d0 = mix(d00, d10, fx);
     let d1 = mix(d01, d11, fx);

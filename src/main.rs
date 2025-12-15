@@ -25,7 +25,7 @@ use winit::{
 
 const SIM_SIZE: f32 = 30720.0; // World size (must match shader SIM_SIZE)
 // Fluid simulation resolution (N x N). Keep this in sync with GPU buffer allocations and shader constants.
-const FLUID_GRID_SIZE: u32 = 256;
+const FLUID_GRID_SIZE: u32 = 512;
 const GRID_DIM: usize = (SIM_SIZE / 15.0) as usize; // Environment grid resolution (alpha/beta/gamma) - derived from SIM_SIZE
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
@@ -2393,8 +2393,9 @@ impl GpuState {
 
         // Load composite shader (standalone, minimal dependencies)
         let composite_shader_source = format!(
-            "const FLUID_GRID_SIZE: u32 = {}u;\n{}",
+            "const FLUID_GRID_SIZE: u32 = {}u;\nconst GAMMA_GRID_DIM: u32 = {}u;\n{}",
             FLUID_GRID_SIZE,
+            GRID_DIM_U32,
             include_str!("../shaders/composite.wgsl")
         );
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2407,9 +2408,13 @@ impl GpuState {
         // FLUID SIMULATION BUFFERS (created early so they can be used in bind groups)
         // ============================================================================
         let fluid_grid_cells: usize = (FLUID_GRID_SIZE * FLUID_GRID_SIZE) as usize;
+        let env_grid_cells: usize = (GRID_DIM_U32 * GRID_DIM_U32) as usize;
 
         let fluid_velocity_size = (fluid_grid_cells * std::mem::size_of::<[f32; 2]>()) as u64;
         let fluid_scalar_size = (fluid_grid_cells * std::mem::size_of::<f32>()) as u64;
+        // Dye is stored at environment-grid resolution (GAMMA_GRID_DIM x GAMMA_GRID_DIM).
+        // This replaces the previous fluid-resolution dye buffers without adding any new bindings.
+        let fluid_dye_size = (env_grid_cells * std::mem::size_of::<[f32; 2]>()) as u64;
 
         let fluid_velocity_a = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fluid Velocity A"),
@@ -2463,14 +2468,14 @@ impl GpuState {
 
         let fluid_dye_a = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fluid Dye A"),
-            size: fluid_scalar_size,
+            size: fluid_dye_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let fluid_dye_b = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fluid Dye B"),
-            size: fluid_scalar_size,
+            size: fluid_dye_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -2758,7 +2763,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: fluid_velocity_a.as_entire_binding(),
+                    resource: fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -2837,7 +2842,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: fluid_velocity_a.as_entire_binding(),
+                    resource: fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -3326,6 +3331,27 @@ impl GpuState {
                     },
                     count: None,
                 },
+                // Alpha/Beta environment layers (read-only) used for dye injection
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -3417,6 +3443,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 0, resource: fluid_velocity_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: fluid_velocity_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: gamma_grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: alpha_grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: beta_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: fluid_params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_b.as_entire_binding() },
@@ -3435,6 +3463,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 0, resource: fluid_velocity_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: fluid_velocity_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: gamma_grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: alpha_grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: beta_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: fluid_params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_a.as_entire_binding() },
@@ -4365,7 +4395,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.fluid_velocity_a.as_entire_binding(),
+                    resource: self.fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -4443,7 +4473,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.fluid_velocity_a.as_entire_binding(),
+                    resource: self.fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -5379,6 +5409,7 @@ impl GpuState {
                 // Stable Fluids order: inject_test_force (combines) → add_forces → diffuse → advect → project
                 {
                     let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+                    let dye_workgroups = (GRID_DIM_U32 + 15) / 16;
                     let bg_ab = &self.fluid_bind_group_ab;
                     let bg_ba = &self.fluid_bind_group_ba;
 
@@ -5449,12 +5480,12 @@ impl GpuState {
                     // 10. Inject dye at propeller locations (A->B)
                     cpass.set_pipeline(&self.fluid_inject_dye_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
 
                     // 11. Advect dye with velocity field (B->A, final result in dye_a)
                     cpass.set_pipeline(&self.fluid_advect_dye_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
                 }
             }
 
@@ -6441,7 +6472,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.fluid_velocity_b.as_entire_binding(),
+                    resource: self.fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -6571,6 +6602,47 @@ impl GpuState {
             pass.set_pipeline(&self.environment_init_pipeline);
             pass.set_bind_group(0, &self.compute_bind_group_a, &[]);
             pass.dispatch_workgroups(env_groups_x, env_groups_y, 1);
+        }
+
+        // Clear fluid simulation buffers (velocity/pressure/dye ping-pong + forces).
+        // This prevents stale flow/dye from persisting across resets.
+        let fluid_groups = (FLUID_GRID_SIZE + 15) / 16;
+        let dye_groups = (GRID_DIM_U32 + 15) / 16;
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Fluid Reset Pass"),
+                timestamp_writes: None,
+            });
+
+            // Clear intermediate propeller force vectors (written by agents) and combined forces.
+            pass.set_pipeline(&self.clear_fluid_force_vectors_pipeline);
+            pass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+            pass.dispatch_workgroups(fluid_groups, fluid_groups, 1);
+
+            pass.set_pipeline(&self.fluid_clear_forces_pipeline);
+            pass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+            pass.dispatch_workgroups(fluid_groups, fluid_groups, 1);
+
+            // Clear both velocity buffers (A and B).
+            pass.set_pipeline(&self.fluid_clear_velocity_pipeline);
+            pass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+            pass.dispatch_workgroups(fluid_groups, fluid_groups, 1);
+            pass.set_bind_group(0, &self.fluid_bind_group_ba, &[]);
+            pass.dispatch_workgroups(fluid_groups, fluid_groups, 1);
+
+            // Clear both pressure buffers (A and B).
+            pass.set_pipeline(&self.fluid_clear_pressure_pipeline);
+            pass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+            pass.dispatch_workgroups(fluid_groups, fluid_groups, 1);
+            pass.set_bind_group(0, &self.fluid_bind_group_ba, &[]);
+            pass.dispatch_workgroups(fluid_groups, fluid_groups, 1);
+
+            // Clear both dye buffers (A and B).
+            pass.set_pipeline(&self.fluid_clear_dye_pipeline);
+            pass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+            pass.dispatch_workgroups(dye_groups, dye_groups, 1);
+            pass.set_bind_group(0, &self.fluid_bind_group_ba, &[]);
+            pass.dispatch_workgroups(dye_groups, dye_groups, 1);
         }
 
         // Initialize all agent slots as dead
