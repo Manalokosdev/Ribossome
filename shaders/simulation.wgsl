@@ -1151,7 +1151,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Write thrust force into the shared vec2 buffer.
                     // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
-                    let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 1.0;
+                    let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1;
                     fluid_forces[fluid_idx] = fluid_forces[fluid_idx] + scaled_force;
                 }
             }
