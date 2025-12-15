@@ -504,6 +504,16 @@ fn grid_index(pos: vec2<f32>) -> u32 {
     return u32(y) * ENV_GRID_SIZE + u32(x);
 }
 
+fn fluid_grid_index(pos: vec2<f32>) -> u32 {
+    let clamped = clamp_position(pos);
+    let scale = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+    var x: i32 = i32(clamped.x / scale);
+    var y: i32 = i32(clamped.y / scale);
+    x = clamp(x, 0, i32(FLUID_GRID_SIZE) - 1);
+    y = clamp(y, 0, i32(FLUID_GRID_SIZE) - 1);
+    return u32(y) * FLUID_GRID_SIZE + u32(x);
+}
+
 struct PartName {
     chars: array<u32, 6>,
     len: u32,
@@ -716,7 +726,7 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
         let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
         let sample_pos = center + offset;
         if (!is_in_bounds(sample_pos)) { continue; }
-        let idx = grid_index(sample_pos);
+        let fidx = fluid_grid_index(sample_pos);
 
         let sigma = radius * 0.15;
         let distance_weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
@@ -726,8 +736,11 @@ fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, gr
         let weight = distance_weight * directional_weight;
 
         var sample_value = 0.0;
-        if (grid_type == 0u) { sample_value = alpha_grid[idx]; }
-        else if (grid_type == 1u) { sample_value = beta_grid[idx]; }
+        // Sensors read from the dye layer instead of the raw environment grids.
+        // Reuse the existing `fluid_velocity` binding for this (it's a vec2 field).
+        // Dye channels: x = beta (red), y = alpha (green).
+        if (grid_type == 0u) { sample_value = fluid_velocity[fidx].y; }
+        else if (grid_type == 1u) { sample_value = fluid_velocity[fidx].x; }
 
         if (debug_mode) {
             let dot_val = directional_weight;
@@ -764,14 +777,17 @@ fn sample_magnitude_only(center: vec2<f32>, base_radius: f32, seed: u32, grid_ty
         let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
         let sample_pos = center + offset;
         if (!is_in_bounds(sample_pos)) { continue; }
-        let idx = grid_index(sample_pos);
+        let fidx = fluid_grid_index(sample_pos);
 
         let sigma = radius * 0.15;
         let weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
 
         var sample_value = 0.0;
-        if (grid_type == 0u) { sample_value = alpha_grid[idx]; }
-        else if (grid_type == 1u) { sample_value = beta_grid[idx]; }
+        // Sensors read from the dye layer instead of the raw environment grids.
+        // Reuse the existing `fluid_velocity` binding for this (it's a vec2 field).
+        // Dye channels: x = beta (red), y = alpha (green).
+        if (grid_type == 0u) { sample_value = fluid_velocity[fidx].y; }
+        else if (grid_type == 1u) { sample_value = fluid_velocity[fidx].x; }
 
         if (debug_mode) {
             let debug_color = vec4<f32>(1.0, 0.7, 0.0, 0.7);
