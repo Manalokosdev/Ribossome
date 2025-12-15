@@ -45,12 +45,14 @@ const MAX_DT: f32 = 0.02;         // Clamp dt spikes (e.g., window stalls)
 const MAX_FORCE: f32 = 20000.0;   // Clamp injected force magnitude per cell
 const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 
-// Gamma-grid-driven obstacles
-// NOTE: Keep these as constants for now to avoid expanding uniform layouts.
-const OBSTACLES_ENABLED: bool = false;
-// Obstacle mapping: use gamma directly in [0,1] (optionally shaped by a power curve).
-// 0 = no obstacle, 1 = fully solid.
-const OBSTACLE_GAMMA_POWER: f32 = 0.0;
+// Slope-driven obstacles (porous steepness)
+// If enabled, steeper terrain becomes less permeable (more like rock / barrier).
+const OBSTACLES_ENABLED: bool = true;
+// Permeability model: perm = 1 / (1 + k * |slope|)
+// Larger k => stronger blocking.
+const STEEPNESS_K: f32 = 2.0;
+// Treat cells with very low permeability as effectively solid.
+const SOLID_PERM_THRESHOLD: f32 = 0.02;
 
 // Optional: drive fluid using the gamma slope (heightmap-style downhill flow).
 // This uses the gradient of gamma (in fluid-cell space) as a force vector.
@@ -352,14 +354,8 @@ fn gamma_slope_at_idx(idx: u32) -> vec2<f32> {
 }
 
 fn gamma_at_fluid_cell(x: u32, y: u32) -> f32 {
-    // Map fluid cell (0..FLUID_GRID_SIZE) into gamma grid (0..GAMMA_GRID_DIM)
-    // Both cover the same world extents.
-    let fx = (f32(x) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
-    let fy = (f32(y) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
-    let max_idx_f = f32(GAMMA_GRID_DIM - 1u);
-    let gx = u32(clamp(fx, 0.0, max_idx_f));
-    let gy = u32(clamp(fy, 0.0, max_idx_f));
-    return gamma_height_at_idx(gamma_index(gx, gy));
+    let idx = gamma_idx_for_fluid_cell(x, y);
+    return gamma_height_at_idx(idx);
 }
 
 fn gamma_slope_force(x: u32, y: u32) -> vec2<f32> {
@@ -367,35 +363,51 @@ fn gamma_slope_force(x: u32, y: u32) -> vec2<f32> {
         return vec2<f32>(0.0, 0.0);
     }
 
-    // Use the simulation-provided slope vector field (already includes gamma+alpha+beta contributions).
-    // Interpreted as a height gradient (points uphill); apply downhill force by negating it.
-    let fx = (f32(x) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
-    let fy = (f32(y) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
-    let max_idx_f = f32(GAMMA_GRID_DIM - 1u);
-    let gx = u32(clamp(fx, 0.0, max_idx_f));
-    let gy = u32(clamp(fy, 0.0, max_idx_f));
-    let idx = gamma_index(gx, gy);
+    // Uses the simulation-provided slope vector field (gamma+alpha+beta contributions).
+    let idx = gamma_idx_for_fluid_cell(x, y);
 
     let slope_grad = gamma_slope_at_idx(idx);
     return sanitize_vec2(slope_grad) * SLOPE_FORCE_SCALE;
 }
 
+fn gamma_idx_for_fluid_cell(x: u32, y: u32) -> u32 {
+    let fx = (f32(x) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let fy = (f32(y) + 0.5) * f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let max_idx_f = f32(GAMMA_GRID_DIM - 1u);
+    let gx = u32(clamp(fx, 0.0, max_idx_f));
+    let gy = u32(clamp(fy, 0.0, max_idx_f));
+    return gamma_index(gx, gy);
+}
+
+fn slope_magnitude_at_fluid_cell(x: u32, y: u32) -> f32 {
+    let idx = gamma_idx_for_fluid_cell(x, y);
+    let s = sanitize_vec2(gamma_slope_at_idx(idx));
+    return length(s);
+}
+
+fn slope_permeability(x: u32, y: u32) -> f32 {
+    // Porous steepness: flat = ~1, steep = smaller.
+    let m = slope_magnitude_at_fluid_cell(x, y);
+    return 1.0 / (1.0 + STEEPNESS_K * m);
+}
+
 fn obstacle_strength(x: u32, y: u32) -> f32 {
     // 0..1 where 1 means fully solid.
-    if (!obstacles_enabled()) {
-        return 0.0;
-    }
-    let g = gamma_at_fluid_cell(x, y);
-    return pow(clamp(g, 0.0, 1.0), OBSTACLE_GAMMA_POWER);
+    // In slope-only mode we derive obstacles from steepness (not gamma height).
+    let perm = permeability(x, y);
+    return 1.0 - perm;
 }
 
 fn permeability(x: u32, y: u32) -> f32 {
     // 1..0 where 0 means fully solid.
-    return 1.0 - obstacle_strength(x, y);
+    if (!obstacles_enabled()) {
+        return 1.0;
+    }
+    return clamp(slope_permeability(x, y), 0.0, 1.0);
 }
 
 fn is_effectively_solid(x: u32, y: u32) -> bool {
-    return obstacle_strength(x, y) > 0.999;
+    return permeability(x, y) < SOLID_PERM_THRESHOLD;
 }
 
 fn clamp_coords(x: i32, y: i32) -> vec2<u32> {
