@@ -1019,9 +1019,11 @@ impl Default for SimulationSettings {
             auto_replenish: true,
             diffusion_interval: 1,
             slope_interval: 1,
-            alpha_blur: 0.002,
-            beta_blur: 0.0005,
-            gamma_blur: 0.0005,
+            // Repurposed: env spreads by following the fluid-advected dye field.
+            // alpha_blur/beta_blur = follow strength, gamma_blur = persistence.
+            alpha_blur: 0.05,
+            beta_blur: 0.05,
+            gamma_blur: 0.9995,
             alpha_slope_bias: -5.0,
             beta_slope_bias: 5.0,
             alpha_multiplier: 0.0001,
@@ -1226,9 +1228,9 @@ impl SimulationSettings {
         // auto_replenish requires no sanitizing
         self.diffusion_interval = self.diffusion_interval.clamp(1, 64);
         self.slope_interval = self.slope_interval.clamp(1, 64);
-        self.alpha_blur = self.alpha_blur.clamp(0.0, 0.1);
-        self.beta_blur = self.beta_blur.clamp(0.0, 0.1);
-        self.gamma_blur = self.gamma_blur.clamp(0.0, 0.1);
+        self.alpha_blur = self.alpha_blur.clamp(0.0, 1.0);
+        self.beta_blur = self.beta_blur.clamp(0.0, 1.0);
+        self.gamma_blur = self.gamma_blur.clamp(0.0, 1.0);
         self.alpha_slope_bias = self.alpha_slope_bias.clamp(-10.0, 10.0);
         self.beta_slope_bias = self.beta_slope_bias.clamp(-10.0, 10.0);
         self.alpha_multiplier = self.alpha_multiplier.clamp(0.0, 0.001);
@@ -2133,9 +2135,9 @@ impl GpuState {
             follow_mode: 0,
             window_width: surface_config.width as f32,
             window_height: surface_config.height as f32,
-            alpha_blur: 0.002,
-            beta_blur: 0.0005,
-            gamma_blur: 0.0005,
+            alpha_blur: 0.05,
+            beta_blur: 0.05,
+            gamma_blur: 0.9995,
             alpha_slope_bias: -5.0,
             beta_slope_bias: 5.0,
             alpha_multiplier: 0.0001, // Rain probability: 0.01% per cell per frame
@@ -8229,11 +8231,26 @@ fn main() {
                                                         ui.heading("Environment Scheduling");
                                                         ui.add(
                                                             egui::Slider::new(&mut state.diffusion_interval, 1..=64)
-                                                                .text("Diffuse every N steps"),
+                                                                .text("Update env from fluid every N steps"),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.slope_interval, 1..=64)
                                                                 .text("Rebuild slope every N steps"),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Fluid Spreading");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.alpha_blur, 0.0..=1.0)
+                                                                .text("Alpha Shift Strength"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.beta_blur, 0.0..=1.0)
+                                                                .text("Beta Shift Strength"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.gamma_blur, 0.9..=1.0)
+                                                                .text("Env Persistence"),
                                                         );
 
                                                         ui.separator();
@@ -8260,14 +8277,6 @@ fn main() {
                                                                 .text("Noise Power (Contrast)"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.alpha_blur, 0.0..=0.1)
-                                                                .text("Distribution Blur"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.alpha_slope_bias, -10.0..=10.0)
-                                                                .text("Slope Bias"),
-                                                        );
-                                                        ui.add(
                                                             egui::Slider::new(&mut state.alpha_multiplier, 0.0..=0.01)
                                                                 .text("Rain Probability"),
                                                         );
@@ -8275,13 +8284,6 @@ fn main() {
                                                         if state.rain_debug_visual {
                                                             ui.label("≡ƒƒó Green = Alpha (food) | ≡ƒö┤ Red = Beta (poison)");
                                                         }
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.chemical_slope_scale_alpha,
-                                                                0.0..=1.0,
-                                                            )
-                                                            .text("Alpha Slope Mix"),
-                                                        );
                                                         ui.horizontal(|ui| {
                                                             if ui.button("Load Alpha Rain Map").clicked() {
                                                                 if let Some(path) = rfd::FileDialog::new()
@@ -8346,23 +8348,8 @@ fn main() {
                                                                 .text("Beta Noise Scale"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.beta_blur, 0.0..=0.1)
-                                                                .text("Distribution Blur"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.beta_slope_bias, -10.0..=10.0)
-                                                                .text("Slope Bias"),
-                                                        );
-                                                        ui.add(
                                                             egui::Slider::new(&mut state.beta_multiplier, 0.0..=0.01)
                                                                 .text("Rain Probability"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.chemical_slope_scale_beta,
-                                                                0.0..=1.0,
-                                                            )
-                                                            .text("Beta Slope Mix"),
                                                         );
                                                         ui.horizontal(|ui| {
                                                             if ui.button("Load Beta Rain Map").clicked() {
@@ -8440,10 +8427,6 @@ fn main() {
                                                         }
                                                         ui.checkbox(&mut state.gamma_hidden, "Hide Gamma in Composite");
                                                         ui.checkbox(&mut state.slope_debug_visual, "Show Raw Slopes");
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.gamma_blur, 0.0..=0.1)
-                                                                .text("Gamma Blur"),
-                                                        );
                                                         let min_changed = ui
                                                             .add(
                                                                 egui::Slider::new(
