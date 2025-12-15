@@ -152,26 +152,8 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         clamp(params.agent_color_b, 0.0, 1.0)
     );
 
-    var result_color = base_color;
-
-    if (agent_pixel.a > 0.0) {
-        if (params.agent_blend_mode == 0u) {
-            // Comp (normal) - alpha blend agent on top of base
-            result_color = mix(base_color, agent_pixel.rgb, agent_pixel.a);
-        } else if (params.agent_blend_mode == 1u) {
-            // Add - add agent color tint to agent pixel, then composite
-            let tinted_agent = clamp(agent_pixel.rgb + agent_color_param, vec3<f32>(0.0), vec3<f32>(1.0));
-            result_color = clamp(base_color + tinted_agent * agent_pixel.a, vec3<f32>(0.0), vec3<f32>(1.0));
-        } else if (params.agent_blend_mode == 2u) {
-            // Subtract - subtract agent color tint from agent pixel, then composite
-            let tinted_agent = clamp(agent_pixel.rgb - agent_color_param, vec3<f32>(0.0), vec3<f32>(1.0));
-            result_color = mix(base_color, tinted_agent, agent_pixel.a);
-        } else {
-            // Multiply - multiply agent by color tint, then composite
-            let tinted_agent = agent_pixel.rgb * agent_color_param;
-            result_color = mix(base_color, tinted_agent, agent_pixel.a);
-        }
-    }
+    // Compose background layers first (dye), then composite agents last.
+    var under_color = base_color;
 
     // Overlay fluid dye visualization if enabled
     if (params.fluid_show > 0u) {
@@ -208,7 +190,27 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Alpha based on strongest channel
             let dye_strength = max(dye_color.r, dye_color.g);
             let fluid_alpha = clamp(dye_strength * 0.8, 0.0, 0.8);
-            result_color = mix(result_color, dye_color, fluid_alpha);
+            under_color = mix(under_color, dye_color, fluid_alpha);
+        }
+    }
+
+    var result_color = under_color;
+    if (agent_pixel.a > 0.0) {
+        if (params.agent_blend_mode == 0u) {
+            // Comp (normal) - alpha blend agent on top of base
+            result_color = mix(under_color, agent_pixel.rgb, agent_pixel.a);
+        } else if (params.agent_blend_mode == 1u) {
+            // Add - add agent color tint to agent pixel, then composite
+            let tinted_agent = clamp(agent_pixel.rgb + agent_color_param, vec3<f32>(0.0), vec3<f32>(1.0));
+            result_color = clamp(under_color + tinted_agent * agent_pixel.a, vec3<f32>(0.0), vec3<f32>(1.0));
+        } else if (params.agent_blend_mode == 2u) {
+            // Subtract - subtract agent color tint from agent pixel, then composite
+            let tinted_agent = clamp(agent_pixel.rgb - agent_color_param, vec3<f32>(0.0), vec3<f32>(1.0));
+            result_color = mix(under_color, tinted_agent, agent_pixel.a);
+        } else {
+            // Multiply - multiply agent by color tint, then composite
+            let tinted_agent = agent_pixel.rgb * agent_color_param;
+            result_color = mix(under_color, tinted_agent, agent_pixel.a);
         }
     }
 

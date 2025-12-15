@@ -707,100 +707,75 @@ fn hash(v: u32) -> u32 {
 fn hash_f32(v: u32) -> f32 { return f32(hash(v)) / 4294967295.0; }
 
 // Sensor and sampling helpers
-fn sample_stochastic_gaussian(center: vec2<f32>, base_radius: f32, seed: u32, grid_type: u32, debug_mode: bool, sensor_perpendicular: vec2<f32>, promoter_param1: f32, modifier_param1: f32) -> f32 {
-    let sample_count = 14u;
+fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, grid_type: u32, debug_mode: bool, sensor_perpendicular: vec2<f32>, chirality_flip: f32, promoter_param1: f32, modifier_param1: f32) -> f32 {
+    // Refactor: environment sensors now read from the env-resolution dye field.
+    // Directional sensors sample only the immediate left/right env texels relative to the organ orientation.
+    // The old "radius" parameter is repurposed as a signal gain multiplier.
     let combined_param = promoter_param1 + modifier_param1;
-    let radius = base_radius * abs(combined_param);
-    let signal_polarity = select(1.0, -1.0, combined_param < 0.0);
+    // Sign from combined_param; magnitude from abs(combined_param).
+    let sign_mult = select(1.0, -1.0, combined_param < 0.0);
+    let gain = max(0.0, signal_gain) * abs(combined_param);
 
-    var weighted_sum = 0.0;
-    var weight_total = 0.0;
+    // Keep seed in signature for compatibility (not used after refactor).
+    let _seed = seed;
 
-    for (var i = 0u; i < sample_count; i++) {
-        let h1 = hash_f32(seed * 1000u + i * 17u);
-        let h2 = hash_f32(seed * 1000u + i * 23u + 13u);
+    // One env cell in world units.
+    let cell = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
+    // Chirality flips left/right by reversing the perpendicular direction.
+    let chir = select(1.0, -1.0, chirality_flip < 0.0);
+    let dir = select(vec2<f32>(1.0, 0.0), normalize(sensor_perpendicular), length(sensor_perpendicular) > 1e-5) * chir;
 
-        let angle = h1 * 6.28318530718; // 2*PI
-        let dist = sqrt(h2) * radius;
+    let pos_left = center + dir * cell;
+    let pos_right = center - dir * cell;
 
-        let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
-        let sample_pos = center + offset;
-        if (!is_in_bounds(sample_pos)) { continue; }
-        let fidx = grid_index(sample_pos);
-
-        let sigma = radius * 0.15;
-        let distance_weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
-
-        let direction = select(vec2<f32>(0.0), normalize(offset), dist > 1e-5);
-        let directional_weight = dot(sensor_perpendicular, direction);
-        let weight = distance_weight * directional_weight;
-
-        var sample_value = 0.0;
-        // Sensors read from the dye layer instead of the raw environment grids.
-        // Reuse the existing `fluid_velocity` binding for this (it's a vec2 field).
-        // Dye channels: x = beta (red), y = alpha (green).
-        if (grid_type == 0u) { sample_value = fluid_velocity[fidx].y; }
-        else if (grid_type == 1u) { sample_value = fluid_velocity[fidx].x; }
-
-        if (debug_mode) {
-            let dot_val = directional_weight;
-            let red_intensity = clamp(dot_val, 0.0, 1.0);
-            let blue_intensity = clamp(-dot_val, 0.0, 1.0);
-            let debug_color = vec4<f32>(red_intensity, 0.0, blue_intensity, 0.7);
-            let sample_size = clamp(radius * 0.03, 2.0, 8.0);
-            draw_filled_circle(sample_pos, sample_size, debug_color);
-        }
-
-        weighted_sum += sample_value * weight;
-        weight_total += weight;
+    var v_left = 0.0;
+    var v_right = 0.0;
+    if (is_in_bounds(pos_left)) {
+        let idx = grid_index(pos_left);
+        if (grid_type == 0u) { v_left = fluid_velocity[idx].y; }
+        else if (grid_type == 1u) { v_left = fluid_velocity[idx].x; }
+    }
+    if (is_in_bounds(pos_right)) {
+        let idx = grid_index(pos_right);
+        if (grid_type == 0u) { v_right = fluid_velocity[idx].y; }
+        else if (grid_type == 1u) { v_right = fluid_velocity[idx].x; }
     }
 
-    return weighted_sum * signal_polarity;
+    if (debug_mode) {
+        // Left sample = red, right sample = blue.
+        draw_filled_circle(pos_left, 4.0, vec4<f32>(1.0, 0.0, 0.0, 0.7));
+        draw_filled_circle(pos_right, 4.0, vec4<f32>(0.0, 0.0, 1.0, 0.7));
+    }
+
+    // Left/right with polarity-controlled sign.
+    let diff = v_right - v_left;
+    return diff * gain * sign_mult;
 }
 
-fn sample_magnitude_only(center: vec2<f32>, base_radius: f32, seed: u32, grid_type: u32, debug_mode: bool, promoter_param1: f32, modifier_param1: f32) -> f32 {
-    let sample_count = 14u;
+fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_type: u32, debug_mode: bool, promoter_param1: f32, modifier_param1: f32) -> f32 {
+    // Refactor: intensity sensors sample only the current env texel.
+    // The old "radius" parameter is repurposed as a signal gain multiplier.
     let combined_param = promoter_param1 + modifier_param1;
-    let radius = base_radius * abs(combined_param);
-    let signal_polarity = select(1.0, -1.0, combined_param < 0.0);
+    // Keep polarity explicit (requested): sign comes from (p+m), magnitude from abs(p+m).
+    // Net multiplier = abs(p+m) * polarity == (p+m).
+    let polarity = select(1.0, -1.0, combined_param < 0.0);
+    let gain = max(0.0, signal_gain) * abs(combined_param);
+    let _seed = seed;
 
-    var weighted_sum = 0.0;
-    var weight_total = 0.0;
-
-    for (var i = 0u; i < sample_count; i++) {
-        let h1 = hash_f32(seed * 1000u + i * 17u);
-        let h2 = hash_f32(seed * 1000u + i * 23u + 13u);
-
-        let angle = h1 * 6.28318530718;
-        let dist = sqrt(h2) * radius;
-
-        let offset = vec2<f32>(cos(angle), sin(angle)) * dist;
-        let sample_pos = center + offset;
-        if (!is_in_bounds(sample_pos)) { continue; }
-        let fidx = grid_index(sample_pos);
-
-        let sigma = radius * 0.15;
-        let weight = exp(-(dist * dist) / (2.0 * sigma * sigma));
-
-        var sample_value = 0.0;
-        // Sensors read from the dye layer instead of the raw environment grids.
-        // Reuse the existing `fluid_velocity` binding for this (it's a vec2 field).
-        // Dye channels: x = beta (red), y = alpha (green).
-        if (grid_type == 0u) { sample_value = fluid_velocity[fidx].y; }
-        else if (grid_type == 1u) { sample_value = fluid_velocity[fidx].x; }
-
-        if (debug_mode) {
-            let debug_color = vec4<f32>(1.0, 0.7, 0.0, 0.7);
-            let sample_size = clamp(radius * 0.03, 2.0, 8.0);
-            draw_filled_circle(sample_pos, sample_size, debug_color);
-        }
-
-        weighted_sum += sample_value * weight;
-        weight_total += weight;
+    if (!is_in_bounds(center)) {
+        return 0.0;
     }
 
-    let result = select(0.0, weighted_sum / weight_total, weight_total > 1e-6);
-    return result * signal_polarity;
+    let idx = grid_index(center);
+    var v = 0.0;
+    if (grid_type == 0u) { v = fluid_velocity[idx].y; }
+    else if (grid_type == 1u) { v = fluid_velocity[idx].x; }
+
+    if (debug_mode) {
+        draw_filled_circle(center, 4.0, vec4<f32>(1.0, 0.7, 0.0, 0.7));
+    }
+
+    return v * gain * polarity;
 }
 
 fn sample_neighbors_color(center: vec2<f32>, base_radius: f32, debug_mode: bool, sensor_perpendicular: vec2<f32>, agent_color: vec3<f32>, neighbor_ids: ptr<function, array<u32, 64>>, neighbor_count: u32) -> f32 {

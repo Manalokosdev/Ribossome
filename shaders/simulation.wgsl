@@ -522,10 +522,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Second pass: calculate amplification and propagate signals (merged for efficiency)
+    // Track cumulative chirality so directional env sensors can swap left/right.
+    var chirality_flip_signal = 1.0;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part_pos = agents_out[agent_id].body[i].pos;
         let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
         let amino_props = get_amino_acid_properties(base_type);
+
+        if (base_type == 30u) {
+            chirality_flip_signal = -chirality_flip_signal;
+        }
 
         // Calculate amplification using enabler list (O(n +? e) instead of O(n-?))
         var amp = 0.0;
@@ -570,9 +576,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             new_beta = beta_from_left + beta_from_right;
         }
 
-        // Sensors: stochastic gaussian sampling with 50% smoothing
-        // Sample radius based on part size (larger radius for better field integration)
-        let sensor_radius = 500.0;
+        // Sensors:
+        // - Environment sensors now read from the (diffused) dye layer deterministically.
+        //   The old "sensor radius" is now interpreted as a signal gain multiplier.
+        //   Actual env-sensor strength is derived from promoter+modifier param1 inside the sampling helpers.
+        // - Neighbor/trail sensors still use a true spatial search radius.
+        let env_sensor_gain_mult = 1.0;
+        let neighbor_search_radius = 500.0;
 
         // Calculate sensor perpendicular orientation (pointing direction)
         var segment_dir = vec2<f32>(0.0);
@@ -616,7 +626,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let modifier_props = get_amino_acid_properties(modifier_index);
             let modifier_param1 = modifier_props.parameter1;
 
-            let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, perpendicular_world, promoter_param1, modifier_param1);
+            let sensed_value = sample_stochastic_gaussian(world_pos, env_sensor_gain_mult, sensor_seed, 0u, params.debug_mode != 0u, perpendicular_world, chirality_flip_signal, promoter_param1, modifier_param1);
             // Apply sqrt to increase sensitivity to low signals (0.01 -> 0.1, 0.25 -> 0.5, 1.0 -> 1.0)
             let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
             // Add sensor contribution to diffused signal (instead of mixing)
@@ -640,7 +650,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let modifier_props = get_amino_acid_properties(modifier_index);
             let modifier_param1 = modifier_props.parameter1;
 
-            let sensed_value = sample_stochastic_gaussian(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, perpendicular_world, promoter_param1, modifier_param1);
+            let sensed_value = sample_stochastic_gaussian(world_pos, env_sensor_gain_mult, sensor_seed, 1u, params.debug_mode != 0u, perpendicular_world, chirality_flip_signal, promoter_param1, modifier_param1);
             // Apply sqrt to increase sensitivity to low signals (0.01 -> 0.1, 0.25 -> 0.5, 1.0 -> 1.0)
             let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
             // Add sensor contribution to diffused signal (instead of mixing)
@@ -657,7 +667,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let perpendicular_local = normalize(vec2<f32>(-axis_local.y, axis_local.x));
             let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
 
-            let sensed_value = sample_neighbors_energy(world_pos, sensor_radius, params.debug_mode != 0u, perpendicular_world, &neighbor_ids, neighbor_count);
+            let sensed_value = sample_neighbors_energy(world_pos, neighbor_search_radius, params.debug_mode != 0u, perpendicular_world, &neighbor_ids, neighbor_count);
             // Normalize by a scaling factor (energy can be large, scale to -1..1 range)
             let normalized_value = tanh(sensed_value * 0.01); // tanh for soft clamping to -1..1
             // Split into alpha and beta based on sign (positive energy -> alpha, negative -> beta)
@@ -678,7 +688,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let modifier_props = get_amino_acid_properties(modifier_index);
             let modifier_param1 = modifier_props.parameter1;
 
-            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let sensed_value = sample_magnitude_only(world_pos, env_sensor_gain_mult, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
             let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
             new_alpha = new_alpha + nonlinear_value;
         }
@@ -696,7 +706,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let modifier_props = get_amino_acid_properties(modifier_index);
             let modifier_param1 = modifier_props.parameter1;
 
-            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let sensed_value = sample_magnitude_only(world_pos, env_sensor_gain_mult, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
             let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
             new_beta = new_beta + nonlinear_value;
         }
@@ -714,7 +724,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let modifier_props = get_amino_acid_properties(modifier_index);
             let modifier_param1 = modifier_props.parameter1;
 
-            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let sensed_value = sample_magnitude_only(world_pos, env_sensor_gain_mult, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
             let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
             new_alpha = new_alpha + nonlinear_value;
         }
@@ -732,7 +742,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let modifier_props = get_amino_acid_properties(modifier_index);
             let modifier_param1 = modifier_props.parameter1;
 
-            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let sensed_value = sample_magnitude_only(world_pos, env_sensor_gain_mult, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
             let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
             new_beta = new_beta + nonlinear_value;
         }
@@ -750,7 +760,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let modifier_props = get_amino_acid_properties(modifier_index);
             let modifier_param1 = modifier_props.parameter1;
 
-            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let sensed_value = sample_magnitude_only(world_pos, env_sensor_gain_mult, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
             let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
             new_alpha = new_alpha + nonlinear_value;
         }
@@ -768,7 +778,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let modifier_props = get_amino_acid_properties(modifier_index);
             let modifier_param1 = modifier_props.parameter1;
 
-            let sensed_value = sample_magnitude_only(world_pos, sensor_radius, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
+            let sensed_value = sample_magnitude_only(world_pos, env_sensor_gain_mult, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
             let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
             new_beta = new_beta + nonlinear_value;
         }
@@ -785,7 +795,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
 
             // Use agent_color calculated from color_sum_morphology
-            let sensed_value = sample_neighbors_color(sensor_world_pos, sensor_radius, params.debug_mode != 0u, perpendicular_world, agent_color, &neighbor_ids, neighbor_count);
+            let sensed_value = sample_neighbors_color(sensor_world_pos, neighbor_search_radius, params.debug_mode != 0u, perpendicular_world, agent_color, &neighbor_ids, neighbor_count);
 
             // Add agent color difference signal to alpha
             new_alpha += sensed_value;
@@ -803,7 +813,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent.rotation));
 
             // Use agent_color calculated from color_sum_morphology
-            let sensed_value = sample_neighbors_color(sensor_world_pos, sensor_radius, params.debug_mode != 0u, perpendicular_world, agent_color, &neighbor_ids, neighbor_count);
+            let sensed_value = sample_neighbors_color(sensor_world_pos, neighbor_search_radius, params.debug_mode != 0u, perpendicular_world, agent_color, &neighbor_ids, neighbor_count);
 
             // Add agent color difference signal to beta
             new_beta += sensed_value;
@@ -1606,8 +1616,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Random rotation
                 offspring.rotation = hash_f32(offspring_hash) * 6.28318530718;
 
-                // Spawn at same location as parent
-                offspring.position = agent.position;
+                // Spawn near parent with a small jitter to avoid perfect overlap (prevents extreme repulsion impulses)
+                {
+                    let jitter_angle = hash_f32(offspring_hash ^ 0xBADC0FFEu) * 6.28318530718;
+                    let jitter_dist = 5.0 + hash_f32(offspring_hash ^ 0x1B56C4E9u) * 10.0;
+                    let jitter = vec2<f32>(cos(jitter_angle), sin(jitter_angle)) * jitter_dist;
+                    offspring.position = clamp_position(agent.position + jitter);
+                }
                 offspring.velocity = vec2<f32>(0.0);
 
                 // Initialize offspring energy; final value assigned after viability check
