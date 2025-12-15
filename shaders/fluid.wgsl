@@ -55,7 +55,7 @@ const OBSTACLE_GAMMA_POWER: f32 = 0.0;
 // Optional: drive fluid using the gamma slope (heightmap-style downhill flow).
 // This uses the gradient of gamma (in fluid-cell space) as a force vector.
 const SLOPE_FORCE_ENABLED: bool = true;
-const SLOPE_FORCE_SCALE: f32 = 1.0;
+const SLOPE_FORCE_SCALE: f32 = 1000000.0;
 
 // ============================================================================
 // BINDINGS
@@ -377,7 +377,7 @@ fn gamma_slope_force(x: u32, y: u32) -> vec2<f32> {
     let idx = gamma_index(gx, gy);
 
     let slope_grad = gamma_slope_at_idx(idx);
-    return -sanitize_vec2(slope_grad) * SLOPE_FORCE_SCALE;
+    return sanitize_vec2(slope_grad) * SLOPE_FORCE_SCALE;
 }
 
 fn obstacle_strength(x: u32, y: u32) -> f32 {
