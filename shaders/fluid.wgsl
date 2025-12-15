@@ -47,15 +47,15 @@ const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 
 // Gamma-grid-driven obstacles
 // NOTE: Keep these as constants for now to avoid expanding uniform layouts.
-const OBSTACLES_ENABLED: bool = true;
+const OBSTACLES_ENABLED: bool = false;
 // Obstacle mapping: use gamma directly in [0,1] (optionally shaped by a power curve).
 // 0 = no obstacle, 1 = fully solid.
-const OBSTACLE_GAMMA_POWER: f32 = 1.0;
+const OBSTACLE_GAMMA_POWER: f32 = 0.0;
 
 // Optional: drive fluid using the gamma slope (heightmap-style downhill flow).
 // This uses the gradient of gamma (in fluid-cell space) as a force vector.
 const SLOPE_FORCE_ENABLED: bool = true;
-const SLOPE_FORCE_SCALE: f32 = 2500.0;
+const SLOPE_FORCE_SCALE: f32 = 1.0;
 
 // ============================================================================
 // BINDINGS
