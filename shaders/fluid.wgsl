@@ -50,14 +50,17 @@ const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
 const OBSTACLES_ENABLED: bool = true;
 // Permeability model: perm = 1 / (1 + k * |slope|)
 // Larger k => stronger blocking.
-const STEEPNESS_K: f32 = 2.0;
+const STEEPNESS_K: f32 = 20.0;
 // Treat cells with very low permeability as effectively solid.
 const SOLID_PERM_THRESHOLD: f32 = 0.02;
 
 // Optional: drive fluid using the gamma slope (heightmap-style downhill flow).
 // This uses the gradient of gamma (in fluid-cell space) as a force vector.
 const SLOPE_FORCE_ENABLED: bool = true;
-const SLOPE_FORCE_SCALE: f32 = 1000000.0;
+const SLOPE_FORCE_SCALE: f32 = 100.0;
+
+// Dye injection from environment layers (alpha/beta “oozing”)
+const OOZE_RATE: f32 = 2.0;
 
 // ============================================================================
 // BINDINGS
@@ -69,6 +72,10 @@ const SLOPE_FORCE_SCALE: f32 = 1000000.0;
 
 // Gamma grid (terrain) sampled as an obstacle field
 @group(0) @binding(2) var<storage, read> gamma_grid: array<f32>;
+
+// Alpha/Beta environment layers (one f32 per GAMMA_GRID_DIM cell)
+@group(0) @binding(10) var<storage, read> alpha_grid: array<f32>;
+@group(0) @binding(11) var<storage, read> beta_grid: array<f32>;
 
 // Intermediate force vectors buffer (vec2 per cell) - agents write propeller forces here
 @group(0) @binding(16) var<storage, read_write> fluid_force_vectors: array<vec2<f32>>;
@@ -82,8 +89,9 @@ const SLOPE_FORCE_SCALE: f32 = 1000000.0;
 @group(0) @binding(6) var<storage, read_write> divergence: array<f32>;
 
 // Dye concentration ping-pong buffers (f32 per cell) - for flow visualization
-@group(0) @binding(8) var<storage, read> dye_in: array<f32>;
-@group(0) @binding(9) var<storage, read_write> dye_out: array<f32>;
+// Two-channel dye per cell: x = beta (red), y = alpha (green)
+@group(0) @binding(8) var<storage, read> dye_in: array<vec2<f32>>;
+@group(0) @binding(9) var<storage, read_write> dye_out: array<vec2<f32>>;
 
 // Parameters
 struct FluidParams {
@@ -133,8 +141,8 @@ fn copy_dye_to_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    // Store dye concentration in x component, zero in y
-    fluid_forces[idx] = vec2<f32>(dye_in[idx], 0.0);
+    // Store dye (beta, alpha) directly for downstream visualization/debug
+    fluid_forces[idx] = dye_in[idx];
 }
 
 @compute @workgroup_size(16, 16)
@@ -201,7 +209,7 @@ fn randomize_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     fluid_forces[idx] = v * strength;
 }
 
-// Inject dye at locations where propellers are active (where forces are non-zero)
+// Inject dye from alpha/beta environment layers (“oozing”)
 @compute @workgroup_size(16, 16)
 fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
@@ -213,25 +221,24 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = grid_index(x, y);
 
     if (is_effectively_solid(x, y)) {
-        dye_out[idx] = 0.0;
+        dye_out[idx] = vec2<f32>(0.0, 0.0);
         return;
     }
 
-    // Check if there's a propeller force at this location
-    let force = fluid_force_vectors[idx];
-    let force_magnitude = length(force);
+    // Sample alpha/beta at the corresponding environment cell.
+    let env_idx = gamma_idx_for_fluid_cell(x, y);
+    let a = clamp(alpha_grid[env_idx], 0.0, 1.0);
+    let b = clamp(beta_grid[env_idx], 0.0, 1.0);
 
-    // If there's significant force, inject dye (concentration = 1.0)
-    // Otherwise, let existing dye decay slightly
-    var current_dye = dye_in[idx];
+    // Dye channels: beta -> red, alpha -> green
+    let ooze_beta = b;
+    let ooze_alpha = a;
 
-    if (force_magnitude > 1.0) {
-        // Strong dye injection at propeller locations
-        current_dye = min(current_dye + 1.0, 1.0);
-    } else {
-        // Slight decay over time
-        current_dye *= 0.995;
-    }
+    // Inject proportionally each frame, with mild decay so it doesn't stick forever.
+    let dt = clamp(params.dt, 0.0, MAX_DT);
+    var current_dye = dye_in[idx] * 0.995;
+    let injected = vec2<f32>(ooze_beta, ooze_alpha) * (OOZE_RATE * dt);
+    current_dye = min(current_dye + injected, vec2<f32>(1.0, 1.0));
 
     let perm = permeability(x, y);
     dye_out[idx] = current_dye * perm;
@@ -249,7 +256,7 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let idx = grid_index(x, y);
     if (is_effectively_solid(x, y)) {
-        dye_out[idx] = 0.0;
+        dye_out[idx] = vec2<f32>(0.0, 0.0);
         return;
     }
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
@@ -268,7 +275,7 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let decay_factor = 0.998;
 
     let perm = permeability(x, y);
-    dye_out[idx] = clamp(advected_dye * decay_factor * perm, 0.0, 1.0);
+    dye_out[idx] = clamp(advected_dye * decay_factor * perm, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
 }
 
 // Clear dye buffer (for reset)
@@ -281,7 +288,7 @@ fn clear_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let idx = grid_index(x, y);
-    dye_out[idx] = 0.0;
+    dye_out[idx] = vec2<f32>(0.0, 0.0);
 }
 
 // ============================================================================
@@ -457,13 +464,13 @@ fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
 }
 
 // Bilinear interpolation for dye concentration sampling
-fn sample_dye(pos: vec2<f32>) -> f32 {
+fn sample_dye(pos: vec2<f32>) -> vec2<f32> {
     // Match velocity advection boundary handling:
     // out-of-bounds sampling contributes no dye.
     let min_pos = 0.5;
     let max_pos = f32(FLUID_GRID_SIZE) - 0.5;
     if (pos.x < min_pos || pos.x > max_pos || pos.y < min_pos || pos.y > max_pos) {
-        return 0.0;
+        return vec2<f32>(0.0, 0.0);
     }
     let p = clamp(pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
 

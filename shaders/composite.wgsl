@@ -124,7 +124,8 @@ var<storage, read> agent_grid: array<vec4<f32>>;
 var<uniform> params: SimParams;
 
 @group(0) @binding(3)
-var<storage, read> fluid_dye: array<f32>;
+// Two-channel dye per cell: x = beta (red), y = alpha (green)
+var<storage, read> fluid_dye: array<vec2<f32>>;
 
 @compute @workgroup_size(16, 16)
 fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -200,14 +201,13 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let fluid_y = u32(clamp(world_pos.y / ws * grid_f, 0.0, max_idx_f));
             let fluid_idx = fluid_y * FLUID_GRID_SIZE + fluid_x;
 
-            // Sample dye concentration directly from fluid_dye buffer
-            let dye_concentration = fluid_dye[fluid_idx];
+            // Sample dye (beta=red, alpha=green) directly from fluid_dye buffer
+            let dye = fluid_dye[fluid_idx];
+            let dye_color = vec3<f32>(clamp(dye.x, 0.0, 1.0), clamp(dye.y, 0.0, 1.0), 0.0);
 
-            // Dye color: bright cyan/blue that fades to transparent
-            let dye_color = vec3<f32>(0.2, 0.7, 1.0);
-
-            // Alpha based on dye concentration - visible where dye exists
-            let fluid_alpha = clamp(dye_concentration * 0.8, 0.0, 0.8);
+            // Alpha based on strongest channel
+            let dye_strength = max(dye_color.r, dye_color.g);
+            let fluid_alpha = clamp(dye_strength * 0.8, 0.0, 0.8);
             result_color = mix(result_color, dye_color, fluid_alpha);
         }
     }
