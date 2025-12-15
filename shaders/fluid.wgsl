@@ -362,14 +362,6 @@ fn gamma_at_fluid_cell(x: u32, y: u32) -> f32 {
     return gamma_height_at_idx(gamma_index(gx, gy));
 }
 
-fn clamp_cell_u32(v: i32) -> u32 {
-    return u32(clamp(v, 0, i32(FLUID_GRID_SIZE) - 1));
-}
-
-fn gamma_at_fluid_cell_clamped(xi: i32, yi: i32) -> f32 {
-    return gamma_at_fluid_cell(clamp_cell_u32(xi), clamp_cell_u32(yi));
-}
-
 fn gamma_slope_force(x: u32, y: u32) -> vec2<f32> {
     if (!SLOPE_FORCE_ENABLED) {
         return vec2<f32>(0.0, 0.0);
