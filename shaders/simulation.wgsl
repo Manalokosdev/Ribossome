@@ -89,29 +89,33 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Check if this is a vampire mouth organ (type 33)
         if (base_type == 33u) {
-            // Calculate amplification from nearby enablers (inverted - they act as disablers for vampire mouths)
+            // Cooldown timer (stored in _pad.x) should tick regardless of enable state
+            var current_cooldown = agents_in[agent_id].body[i]._pad.x;
+            if (current_cooldown > 0.0) {
+                current_cooldown -= 1.0;
+                agents_in[agent_id].body[i]._pad.x = current_cooldown;
+            }
+
+            // Enabler gating like propellers:
+            // Vampire mouths only act when enablers (type 26) are nearby, and their effect
+            // scales with a quadratic amplification of proximity.
             let part_pos = agents_in[agent_id].body[i].pos;
-            var disabler_strength = 0.0;
+            var amp = 0.0;
             for (var j = 0u; j < min(body_count, MAX_BODY_PARTS); j++) {
                 let check_type = get_base_part_type(agents_in[agent_id].body[j].part_type);
-                if (check_type == 26u) {  // Enabler acts as disabler for vampire mouths
+                if (check_type == 26u) {  // Enabler
                     let enabler_pos = agents_in[agent_id].body[j].pos;
                     let d = length(part_pos - enabler_pos);
                     if (d < 20.0) {
-                        disabler_strength += max(0.0, 1.0 - d / 20.0);
+                        amp += max(0.0, 1.0 - d / 20.0);
                     }
                 }
             }
-            disabler_strength = min(disabler_strength, 1.0);
+            amp = min(amp, 1.0);
+            let quadratic_amp = amp * amp;
 
-            // Only work if NOT disabled (inverted logic)
-            if (disabler_strength < 0.99) {
-                // Decrement cooldown timer (stored in _pad.x)
-                var current_cooldown = agents_in[agent_id].body[i]._pad.x;
-                if (current_cooldown > 0.0) {
-                    current_cooldown -= 1.0;
-                    agents_in[agent_id].body[i]._pad.x = current_cooldown;
-                }
+            // Only work if enabled by nearby enablers
+            if (quadratic_amp > 0.0001) {
 
                 // Get mouth world position
                 let part_pos = part.pos;
@@ -171,12 +175,12 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Only proceed if we can drain this victim AND cooldown is ready
                     if (can_drain && current_cooldown <= 0.0) {
-                        // Vampire drains 50% of victim's energy (fixed rate, no distance falloff)
+                        // Vampire drain scales with enabler amplification (like propellers)
                         let victim_energy = agents_in[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
-                            // Absorb 50% of victim's energy
-                            let absorbed_energy = victim_energy * 0.5;
+                            // Absorb up to 50% of victim's energy
+                            let absorbed_energy = victim_energy * 0.5 * quadratic_amp;
 
                             // Victim loses 1.5x the absorbed energy (75% total damage)
                             let energy_damage = absorbed_energy * 1.5;
@@ -204,7 +208,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 agents_in[agent_id].body[i]._pad.y = 0.0;
             }
         } else {
-            // Not enough amplification - clear visualization
+            // Not a vampire mouth
             agents_in[agent_id].body[i]._pad.y = 0.0;
         }
     }
@@ -1942,132 +1946,66 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * GRID_SIZE + x;
 
-    // Get current values
+    // Fluid-vector convolution (decoupled from dye):
+    // Instead of advecting (which tends to look like global translation), we do a
+    // directionally-skewed blur kernel similar to the previous slope-based convolution.
+    // The fluid force-vector field defines a preferred blur direction and magnitude.
     let current_alpha = alpha_grid[idx];
     let current_beta = beta_grid[idx];
-    let current_gamma = gamma_grid[idx];
-    let slope_here = read_gamma_slope(idx);
 
-    var alpha_sum = 0.0;
-    var beta_sum = 0.0;
-    var gamma_sum = 0.0;
+    // Per-channel shift/blur strength.
+    let alpha_strength = clamp(params.alpha_blur, 0.0, 1.0);
+    let beta_strength = clamp(params.beta_blur, 0.0, 1.0);
+    // Repurpose gamma_blur as a simple persistence/decay multiplier (1.0 = no decay).
+    let persistence = clamp(params.gamma_blur, 0.0, 1.0);
 
-    for (var i = 0u; i < 9u; i++) {
-        let dx = i32(i % 3u) - 1;
-        let dy = i32(i / 3u) - 1;
-        let nx_i = clamp(i32(x) + dx, 0, i32(GRID_SIZE) - 1);
-        let ny_i = clamp(i32(y) + dy, 0, i32(GRID_SIZE) - 1);
-        let nidx = u32(ny_i) * GRID_SIZE + u32(nx_i);
-        let alpha_val = alpha_grid[nidx];
-        let beta_val = beta_grid[nidx];
-        let gamma_val = gamma_grid[nidx];
+    // Map env cell coords to fluid grid coords.
+    // NOTE: sample_grid_bilinear expects world-space in [0, SIM_SIZE).
+    let pos_cell = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
+    let cell_to_world = f32(SIM_SIZE) / f32(GRID_SIZE);
+    let pos_world = pos_cell * cell_to_world;
+    let env_to_fluid = f32(FLUID_GRID_SIZE) / f32(GRID_SIZE);
+    let fluid_pos = pos_cell * env_to_fluid;
+    let fx = clamp(i32(fluid_pos.x), 0, i32(FLUID_GRID_SIZE) - 1);
+    let fy = clamp(i32(fluid_pos.y), 0, i32(FLUID_GRID_SIZE) - 1);
+    let fluid_idx = u32(fy) * FLUID_GRID_SIZE + u32(fx);
 
-        alpha_sum += alpha_val;
-        beta_sum += beta_val;
-        gamma_sum += gamma_val;
-    }
+    // Use fluid forces as a direction field (converted to env-cell units).
+    // Keep it bounded so it behaves like a convolution offset, not advection.
+    let v = fluid_forces[fluid_idx] / env_to_fluid;
+    let vlen = length(v);
+    let dir = select(vec2<f32>(0.0, 0.0), v / vlen, vlen > 1e-6);
 
-    let alpha_avg = alpha_sum / 9.0;
-    let beta_avg = beta_sum / 9.0;
-    let gamma_avg = gamma_sum / 9.0;
+    // Map magnitude to a small sub-cell offset (in env-cell units).
+    // This keeps the effect local and prevents whole-field translation.
+    let dt = max(params.dt, 0.0);
+    let max_offset = 1.25;
+    let base_offset = clamp(vlen * dt * 0.002, 0.0, max_offset);
 
-    // Apply blur factor (0 = no blur/keep current, 1 = full blur)
-    let new_alpha = mix(current_alpha, alpha_avg, params.alpha_blur);
-    let new_beta = mix(current_beta, beta_avg, params.beta_blur);
-    let new_gamma = mix(current_gamma, gamma_avg, params.gamma_blur);
+    // Skewed 3-tap kernel along the direction (a directional blur).
+    // Equivalent to a convolution where the "center" is shifted by the vector field.
+    let o_a = dir * (base_offset * alpha_strength);
+    let o_b = dir * (base_offset * beta_strength);
 
-    let xi = i32(x);
-    let yi = i32(y);
-    let max_index = i32(GRID_SIZE) - 1;
-    let left_x = max(xi - 1, 0);
-    let right_x = min(xi + 1, max_index);
-    let up_y = max(yi - 1, 0);
-    let down_y = min(yi + 1, max_index);
+    // Convolution taps (along +/- direction).
+    // We bias weights toward center to keep things stable.
+    let w0 = 0.25;
+    let w1 = 0.50;
+    let w2 = 0.25;
 
-    let left_idx = u32(yi) * GRID_SIZE + u32(left_x);
-    let right_idx = u32(yi) * GRID_SIZE + u32(right_x);
-    let up_idx = u32(up_y) * GRID_SIZE + x;
-    let down_idx = u32(down_y) * GRID_SIZE + x;
+    let a_m = sample_grid_bilinear(pos_world - o_a * cell_to_world, 0u);
+    let a_0 = sample_grid_bilinear(pos_world, 0u);
+    let a_p = sample_grid_bilinear(pos_world + o_a * cell_to_world, 0u);
+    let b_m = sample_grid_bilinear(pos_world - o_b * cell_to_world, 1u);
+    let b_0 = sample_grid_bilinear(pos_world, 1u);
+    let b_p = sample_grid_bilinear(pos_world + o_b * cell_to_world, 1u);
 
-    let alpha_left = alpha_grid[left_idx];
-    let alpha_right = alpha_grid[right_idx];
-    let alpha_up = alpha_grid[up_idx];
-    let alpha_down = alpha_grid[down_idx];
-    let beta_left = beta_grid[left_idx];
-    let beta_right = beta_grid[right_idx];
-    let beta_up = beta_grid[up_idx];
-    let beta_down = beta_grid[down_idx];
+    let a_blur = clamp(a_m * w0 + a_0 * w1 + a_p * w2, 0.0, 1.0);
+    let b_blur = clamp(b_m * w0 + b_0 * w1 + b_p * w2, 0.0, 1.0);
 
-    let slope_left = read_gamma_slope(left_idx);
-    let slope_right = read_gamma_slope(right_idx);
-    let slope_up = read_gamma_slope(up_idx);
-    let slope_down = read_gamma_slope(down_idx);
-
-    let kernel_scale = 1.0 / 8.0;
-
-    // Alpha fluxes (mass-conserving advection along slopes)
-    let slope_here_alpha = slope_here * params.alpha_slope_bias;
-    let slope_left_alpha = slope_left * params.alpha_slope_bias;
-    let slope_right_alpha = slope_right * params.alpha_slope_bias;
-    let slope_up_alpha = slope_up * params.alpha_slope_bias;
-    let slope_down_alpha = slope_down * params.alpha_slope_bias;
-
-    var alpha_flux = 0.0;
-    if (right_x != xi) {
-        let flow_out = max(slope_here_alpha.x, 0.0) * current_alpha;
-        let flow_in = max(-slope_right_alpha.x, 0.0) * alpha_right;
-        alpha_flux += flow_out - flow_in;
-    }
-    if (left_x != xi) {
-        let flow_out = max(-slope_here_alpha.x, 0.0) * current_alpha;
-        let flow_in = max(slope_left_alpha.x, 0.0) * alpha_left;
-        alpha_flux += flow_out - flow_in;
-    }
-    if (down_y != yi) {
-        let flow_out = max(slope_here_alpha.y, 0.0) * current_alpha;
-        let flow_in = max(-slope_down_alpha.y, 0.0) * alpha_down;
-        alpha_flux += flow_out - flow_in;
-    }
-    if (up_y != yi) {
-        let flow_out = max(-slope_here_alpha.y, 0.0) * current_alpha;
-        let flow_in = max(slope_up_alpha.y, 0.0) * alpha_up;
-        alpha_flux += flow_out - flow_in;
-    }
-
-    // Alpha grid constrained to 0..1
-    var final_alpha = clamp(new_alpha - alpha_flux * kernel_scale, 0.0, 1.0);
-
-    // Beta fluxes reuse the same slope field with independent strength
-    let slope_here_beta = slope_here * params.beta_slope_bias;
-    let slope_left_beta = slope_left * params.beta_slope_bias;
-    let slope_right_beta = slope_right * params.beta_slope_bias;
-    let slope_up_beta = slope_up * params.beta_slope_bias;
-    let slope_down_beta = slope_down * params.beta_slope_bias;
-
-    var beta_flux = 0.0;
-    if (right_x != xi) {
-        let flow_out = max(slope_here_beta.x, 0.0) * current_beta;
-        let flow_in = max(-slope_right_beta.x, 0.0) * beta_right;
-        beta_flux += flow_out - flow_in;
-    }
-    if (left_x != xi) {
-        let flow_out = max(-slope_here_beta.x, 0.0) * current_beta;
-        let flow_in = max(slope_left_beta.x, 0.0) * beta_left;
-        beta_flux += flow_out - flow_in;
-    }
-    if (down_y != yi) {
-        let flow_out = max(slope_here_beta.y, 0.0) * current_beta;
-        let flow_in = max(-slope_down_beta.y, 0.0) * beta_down;
-        beta_flux += flow_out - flow_in;
-    }
-    if (up_y != yi) {
-        let flow_out = max(-slope_here_beta.y, 0.0) * current_beta;
-        let flow_in = max(slope_up_beta.y, 0.0) * beta_up;
-        beta_flux += flow_out - flow_in;
-    }
-
-    // Beta grid constrained to 0..1
-    var final_beta = clamp(new_beta - beta_flux * kernel_scale, 0.0, 1.0);
+    // Blend toward the convolution result; persistence applies as decay.
+    var final_alpha = clamp(mix(current_alpha, a_blur, alpha_strength) * persistence, 0.0, 1.0);
+    var final_beta = clamp(mix(current_beta, b_blur, beta_strength) * persistence, 0.0, 1.0);
 
     // Stochastic rain - randomly add food/poison droplets (saturated drops)
     // Use position and random seed to generate unique random values per cell
@@ -2095,10 +2033,10 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Apply the diffused values
+    // Apply the updated values in-place.
     alpha_grid[idx] = final_alpha;
     beta_grid[idx] = final_beta;
-    // Gamma also switched to 0..1
-    gamma_grid[idx] = clamp(new_gamma, 0.0, 1.0);
+    // Gamma is not modified by this pass.
 }
 
 @compute @workgroup_size(16, 16)
