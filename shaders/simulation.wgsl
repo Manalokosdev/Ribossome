@@ -374,8 +374,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             current_pos.y += sin(current_angle) * props.segment_length;
             agents_out[agent_id].body[i].pos = current_pos;
 
+            // Check organ type once for both data field and _pad handling
+            let is_organ = (base_type >= 20u);
+            let is_vampire_mouth = (base_type == 33u);
+
             // Data field: for vampire mouths (type 33), store packed world position for movement tracking
-            let is_vampire_mouth = get_base_part_type(agents_out[agent_id].body[i].part_type) == 33u;
             if (is_vampire_mouth) {
                 // Store current world position
                 let angle = agent_angle;
@@ -394,8 +397,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Persist smoothed angle in _pad.x for regular amino acids only
             // Organs (condensers, clocks) use _pad for their own state storage
             // EXCEPTION: Vampire mouths (type 33) need _pad.y preserved for visualization
-            let is_organ = (base_type >= 20u);
-            let is_vampire_mouth = (base_type == 33u);
             if (!is_organ) {
                 let keep_pad_y = agents_out[agent_id].body[i]._pad.y;
                 agents_out[agent_id].body[i]._pad = vec2<f32>(smoothed_signal, keep_pad_y);
