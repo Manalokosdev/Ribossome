@@ -176,21 +176,17 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Only proceed if we can drain this victim AND cooldown is ready
                     if (can_drain && current_cooldown <= 0.0) {
-                        // Vampire drain scales down with disabler suppression AND agent speed
+                        // Vampire drain scales down with disabler suppression AND mouth movement speed
                         let victim_energy = agents_in[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
-                            // Calculate speed-based absorption reduction (faster = less efficient)
-                            let agent_speed = length(agent.velocity);
-                            let normalized_speed = agent_speed / VEL_MAX;
-                            let speed_multiplier = exp(-8.0 * normalized_speed);
+                            // Calculate mouth speed-based absorption reduction (faster mouth = less efficient)
+                            // Use the movement_distance calculated from stored previous position
+                            let normalized_mouth_speed = min(movement_distance / VEL_MAX, 1.0);
+                            let speed_multiplier = exp(-8.0 * normalized_mouth_speed);
                             
-                            // Movement bonus: mouths that move through space are more effective
-                            // Normalized movement distance (0 to ~1 per frame at max speed)
-                            let movement_bonus = min(movement_distance / 10.0, 1.0) * 0.5 + 1.0; // 1.0x to 1.5x multiplier
-                            
-                            // Absorb up to 50% of victim's energy (reduced by speed, boosted by movement, affected by disabler)
-                            let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier * movement_bonus;
+                            // Absorb up to 50% of victim's energy (reduced by mouth speed and disabler)
+                            let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier;
 
                             // Victim loses 1.5x the absorbed energy (75% total damage)
                             let energy_damage = absorbed_energy * 1.5;
