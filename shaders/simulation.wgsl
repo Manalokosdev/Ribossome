@@ -185,10 +185,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let victim_energy = agents_in[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
-                            // Linear speed-based absorption reduction using RELATIVE mouth motion.
-                            // mouth_delta includes agent translation + rotation; subtract agent.velocity to isolate relative organ motion.
+                            // Linear speed-based absorption reduction using RELATIVE mouth-vs-victim velocity.
+                            // mouth_delta is mouth world motion per frame; victim.velocity is per-frame velocity.
                             let mouth_delta = mouth_world_pos - prev_world_pos;
-                            let rel_delta = mouth_delta - agents_in[agent_id].velocity;
+                            let victim_vel = agents_in[closest_victim_id].velocity;
+                            let rel_delta = mouth_delta - victim_vel;
                             let rel_speed = length(rel_delta);
                             let normalized_rel_speed = min(rel_speed / VEL_MAX, 1.0);
                             let speed_multiplier = clamp(1.0 - normalized_rel_speed, 0.0, 1.0);
