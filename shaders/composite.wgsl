@@ -35,6 +35,7 @@ struct SimParams {
     alpha_blur: f32,
     beta_blur: f32,
     gamma_blur: f32,
+    gamma_shift: f32,
     alpha_slope_bias: f32,
     beta_slope_bias: f32,
     alpha_multiplier: f32,

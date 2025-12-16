@@ -336,22 +336,6 @@ fn render_body_part_ctx(
         draw_asterisk_ctx(world_pos, star_size, vec4<f32>(orange_color, 0.9), ctx);
     }
 
-    // 8. ORGAN: Displacer (repulsion field) - diamond marker
-    if (amino_props.is_displacer) {
-        let blended_color_displacer = mix(amino_props.color, agent_color, params.agent_color_blend);
-        let diamond_size = max(get_part_visual_size(part.part_type) * 1.2, 3.0);
-        // Draw diamond as 4 lines forming a diamond shape
-        let half_s = diamond_size;
-        let top = world_pos + vec2<f32>(0.0, -half_s);
-        let right = world_pos + vec2<f32>(half_s, 0.0);
-        let bottom = world_pos + vec2<f32>(0.0, half_s);
-        let left = world_pos + vec2<f32>(-half_s, 0.0);
-        draw_thick_line_ctx(top, right, 1.0, vec4<f32>(blended_color_displacer, 0.9), ctx);
-        draw_thick_line_ctx(right, bottom, 1.0, vec4<f32>(blended_color_displacer, 0.9), ctx);
-        draw_thick_line_ctx(bottom, left, 1.0, vec4<f32>(blended_color_displacer, 0.9), ctx);
-        draw_thick_line_ctx(left, top, 1.0, vec4<f32>(blended_color_displacer, 0.9), ctx);
-    }
-
     // 9. ORGAN: Alpha/Beta Sensors - visual marker scaled by sensing radius
     if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor) {
         // Extract organ parameters to calculate actual sensor radius
@@ -1901,8 +1885,8 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                             base_color = base_color * 1.3;
                         }
 
-                        // For organs that need amplification (propeller, displacer, mouth, vampire mouth, agent sensors), calculate and apply
-                        let needs_amplification = props.is_propeller || props.is_displacer || props.is_mouth || base_type == 33u || base_type == 34u || base_type == 35u;
+                        // For organs that need amplification (propeller, mouth, vampire mouth, agent sensors), calculate and apply
+                        let needs_amplification = props.is_propeller || props.is_mouth || base_type == 33u || base_type == 34u || base_type == 35u;
                         if (part_count < body_count && needs_amplification) {
                             let part_pos = selected_agent_buffer[0].body[part_count].pos;
 

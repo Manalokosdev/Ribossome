@@ -1957,7 +1957,10 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Use fluid forces as a direction field (converted to env-cell units).
     // Keep it bounded so it behaves like a convolution offset, not advection.
-    let v = fluid_velocity[fluid_idx] / env_to_fluid;
+    let raw_v = fluid_velocity[fluid_idx];
+    let raw_vlen = length(raw_v);
+    // Apply deadzone BEFORE scaling to avoid precision artifacts at low speeds
+    let v = select(vec2<f32>(0.0, 0.0), raw_v / env_to_fluid, raw_vlen > 0.01);
     let vlen = length(v);
     let dir = select(vec2<f32>(0.0, 0.0), v / vlen, vlen > 1e-6);
 
