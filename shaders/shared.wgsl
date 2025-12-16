@@ -45,7 +45,7 @@ const INSPECTOR_WIDTH: u32 = 300u;    // Width of inspector panel on right side
 
 struct BodyPart {
     pos: vec2<f32>,           // relative position from agent center (8 bytes)
-    data: f32,                // generic data slot (was size, now computed on-demand) (4 bytes)
+    data: f32,                // generic data slot: vampire mouths = packed prev world pos (u16,u16); others = 0.0 (4 bytes)
     part_type: u32,           // bits 0-7 = base type (amino acid or organ), bits 8-15 = organ parameter
     alpha_signal: f32,        // alpha signal propagating through body (4 bytes)
     beta_signal: f32,         // beta signal propagating through body (4 bytes)
@@ -67,6 +67,28 @@ fn get_part_visual_size(part_type: u32) -> f32 {
         size *= 0.5;
     }
     return size;
+}
+
+// Pack 2D position into single f32 as two u16 values
+fn pack_position_to_f32(pos: vec2<f32>, world_size: f32) -> f32 {
+    // Normalize to [0, 1] range
+    let normalized = pos / world_size;
+    // Quantize to u16 range [0, 65535]
+    let x_u16 = u32(clamp(normalized.x, 0.0, 1.0) * 65535.0);
+    let y_u16 = u32(clamp(normalized.y, 0.0, 1.0) * 65535.0);
+    // Pack into u32: high 16 bits = x, low 16 bits = y
+    let packed = (x_u16 << 16u) | y_u16;
+    return bitcast<f32>(packed);
+}
+
+// Unpack f32 back to 2D position
+fn unpack_position_from_f32(packed: f32, world_size: f32) -> vec2<f32> {
+    let packed_u32 = bitcast<u32>(packed);
+    let x_u16 = (packed_u32 >> 16u) & 0xFFFFu;
+    let y_u16 = packed_u32 & 0xFFFFu;
+    // Convert back to [0, 1] range
+    let normalized = vec2<f32>(f32(x_u16) / 65535.0, f32(y_u16) / 65535.0);
+    return normalized * world_size;
 }
 
 // ============================================================================

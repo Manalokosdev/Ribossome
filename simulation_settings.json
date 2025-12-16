@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 3.0838885,
+  "camera_zoom": 3.9251192,
   "spawn_probability": 0.5,
   "death_probability": 0.001,
   "mutation_rate": 0.005,
@@ -24,7 +24,7 @@
   "prop_wash_strength": 0.5,
   "repulsion_strength": 5.0,
   "agent_repulsion_strength": 0.001,
-  "limit_fps": true,
+  "limit_fps": false,
   "limit_fps_25": false,
   "render_interval": 100,
   "gamma_debug_visual": false,

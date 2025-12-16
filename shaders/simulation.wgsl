@@ -185,8 +185,12 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let normalized_speed = agent_speed / VEL_MAX;
                             let speed_multiplier = exp(-8.0 * normalized_speed);
                             
-                            // Absorb up to 50% of victim's energy (reduced by speed and disabler)
-                            let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier;
+                            // Movement bonus: mouths that move through space are more effective
+                            // Normalized movement distance (0 to ~1 per frame at max speed)
+                            let movement_bonus = min(movement_distance / 10.0, 1.0) * 0.5 + 1.0; // 1.0x to 1.5x multiplier
+                            
+                            // Absorb up to 50% of victim's energy (reduced by speed, boosted by movement, affected by disabler)
+                            let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier * movement_bonus;
 
                             // Victim loses 1.5x the absorbed energy (75% total damage)
                             let energy_damage = absorbed_energy * 1.5;
@@ -374,8 +378,22 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             current_pos.y += sin(current_angle) * props.segment_length;
             agents_out[agent_id].body[i].pos = current_pos;
 
-            // Data field is now available for other uses (was size, now computed on-demand)
-            agents_out[agent_id].body[i].data = 0.0;
+            // Data field: for vampire mouths (type 33), store packed world position for movement tracking
+            let is_vampire_mouth = get_base_part_type(agents_out[agent_id].body[i].part_type) == 33u;
+            if (is_vampire_mouth) {
+                // Store current world position
+                let angle = agent_angle;
+                let cos_a = cos(angle);
+                let sin_a = sin(angle);
+                let world_offset = vec2<f32>(
+                    current_pos.x * cos_a - current_pos.y * sin_a,
+                    current_pos.x * sin_a + current_pos.y * cos_a
+                );
+                let mouth_world_pos = agent_pos + world_offset;
+                agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
+            } else {
+                agents_out[agent_id].body[i].data = 0.0;
+            }
 
             // Persist smoothed angle in _pad.x for regular amino acids only
             // Organs (condensers, clocks) use _pad for their own state storage
