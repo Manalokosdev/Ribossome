@@ -123,6 +123,10 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let rotated_pos = apply_agent_rotation(part_pos, agents_in[agent_id].rotation);
                 let mouth_world_pos = agents_in[agent_id].position + rotated_pos;
 
+                // Calculate movement distance from stored previous position
+                let prev_world_pos = unpack_position_from_f32(part.data, f32(SIM_SIZE));
+                let movement_distance = length(mouth_world_pos - prev_world_pos);
+
                 // Find closest victim within drain range
                 var closest_victim_id = 0xFFFFFFFFu;
                 var closest_dist = 999999.0;
@@ -213,6 +217,12 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else {
                 agents_in[agent_id].body[i]._pad.y = 0.0;
             }
+
+            // Store current position for next frame's movement calculation
+            let part_pos = part.pos;
+            let rotated_pos = apply_agent_rotation(part_pos, agents_in[agent_id].rotation);
+            let mouth_world_pos = agents_in[agent_id].position + rotated_pos;
+            agents_in[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
         } else {
             // Not a vampire mouth
             agents_in[agent_id].body[i]._pad.y = 0.0;
