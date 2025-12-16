@@ -185,10 +185,13 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let victim_energy = agents_in[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
-                            // Calculate mouth speed-based absorption reduction (faster mouth = less efficient)
-                            // Use the movement_distance calculated from stored previous position
-                            let normalized_mouth_speed = min(movement_distance / VEL_MAX, 1.0);
-                            let speed_multiplier = exp(-8.0 * normalized_mouth_speed);
+                            // Linear speed-based absorption reduction using RELATIVE mouth motion.
+                            // mouth_delta includes agent translation + rotation; subtract agent.velocity to isolate relative organ motion.
+                            let mouth_delta = mouth_world_pos - prev_world_pos;
+                            let rel_delta = mouth_delta - agents_in[agent_id].velocity;
+                            let rel_speed = length(rel_delta);
+                            let normalized_rel_speed = min(rel_speed / VEL_MAX, 1.0);
+                            let speed_multiplier = clamp(1.0 - normalized_rel_speed, 0.0, 1.0);
                             
                             // Absorb up to 50% of victim's energy (reduced by mouth speed and disabler)
                             let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier;
@@ -390,15 +393,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Data field: for vampire mouths (type 33), store packed world position for movement tracking
             if (is_vampire_mouth) {
-                // Store current world position
-                let angle = agent_angle;
-                let cos_a = cos(angle);
-                let sin_a = sin(angle);
-                let world_offset = vec2<f32>(
-                    current_pos.x * cos_a - current_pos.y * sin_a,
-                    current_pos.x * sin_a + current_pos.y * cos_a
-                );
-                let mouth_world_pos = agent_pos + world_offset;
+                // Store current world position (agent.position + rotated local offset)
+                let rotated_pos = apply_agent_rotation(current_pos, agent.rotation);
+                let mouth_world_pos = agent.position + rotated_pos;
                 agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
             } else {
                 agents_out[agent_id].body[i].data = 0.0;
