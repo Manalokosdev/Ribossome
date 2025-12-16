@@ -178,6 +178,7 @@ struct SimParams {
     alpha_blur: f32,
     beta_blur: f32,
     gamma_blur: f32,
+    gamma_shift: f32,
     alpha_slope_bias: f32,
     beta_slope_bias: f32,
     alpha_multiplier: f32,
@@ -379,7 +380,6 @@ struct AminoAcidProperties {
     alpha_right_mult: f32,
     beta_left_mult: f32,
     beta_right_mult: f32,
-    is_displacer: bool,
     is_inhibitor: bool,
     is_condenser: bool,
     is_clock: bool,
@@ -511,7 +511,6 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     p.is_agent_alpha_sensor = (f & (1u<<5))  != 0u;
     p.is_agent_beta_sensor  = (f & (1u<<6))  != 0u;
     p.is_clock              = (f & (1u<<7))  != 0u;
-    p.is_displacer          = (f & (1u<<8))  != 0u;
     p.is_inhibitor          = (f & (1u<<9))  != 0u; // enabler
     p.is_condenser          = (f & (1u<<10)) != 0u;
     p.is_trail_energy_sensor = (f & (1u<<11)) != 0u;

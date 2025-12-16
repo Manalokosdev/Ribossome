@@ -124,9 +124,12 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let rotated_pos = apply_agent_rotation(mouth_local_pos, agents_in[agent_id].rotation);
                 let mouth_world_pos = agents_in[agent_id].position + rotated_pos;
 
-                // Calculate movement distance from stored previous position
-                let prev_world_pos = unpack_position_from_f32(part.data, f32(SIM_SIZE));
-                let movement_distance = length(mouth_world_pos - prev_world_pos);
+                // Previous mouth world position (packed into part.data).
+                // If uninitialized, treat prev as current to avoid huge bogus deltas.
+                var prev_world_pos = unpack_position_from_f32(part.data, f32(SIM_SIZE));
+                if (part.data == 0.0) {
+                    prev_world_pos = mouth_world_pos;
+                }
 
                 // Find closest victim within drain range
                 var closest_victim_id = 0xFFFFFFFFu;
@@ -185,15 +188,16 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let victim_energy = agents_in[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
-                            // Linear speed-based absorption reduction using RELATIVE mouth-vs-victim velocity.
-                            // mouth_delta is mouth world motion per frame; victim.velocity is per-frame velocity.
-                            let mouth_delta = mouth_world_pos - prev_world_pos;
+                            // Linear speed-based absorption reduction using RELATIVE victim speed.
+                            // IMPORTANT: don't use mouth-tip delta here; rotation can make the tip move far
+                            // faster than VEL_MAX even when the agent is behaving normally, which would
+                            // zero-out vampire drains permanently.
+                            let agent_vel = agents_in[agent_id].velocity;
                             let victim_vel = agents_in[closest_victim_id].velocity;
-                            let rel_delta = mouth_delta - victim_vel;
-                            let rel_speed = length(rel_delta);
+                            let rel_speed = length(agent_vel - victim_vel);
                             let normalized_rel_speed = min(rel_speed / VEL_MAX, 1.0);
                             let speed_multiplier = clamp(1.0 - normalized_rel_speed, 0.0, 1.0);
-                            
+
                             // Absorb up to 50% of victim's energy (reduced by mouth speed and disabler)
                             let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier;
 
@@ -934,7 +938,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (base_type_slope == 32u) {
             // Get slope gradient at this position
             let world_pos = agent.position + apply_agent_rotation(part_pos, agent.rotation);
-            let slope_gradient = read_gamma_slope(grid_index(world_pos));
+            var slope_gradient = read_gamma_slope(grid_index(world_pos));
+
+            // Preserve historical behavior: slope sensors respond to both terrain slope AND
+            // the configured global vector force (gravity/wind).
+            if (params.vector_force_power > 0.0) {
+                let gravity_vector = vec2<f32>(
+                    params.vector_force_x * params.vector_force_power,
+                    params.vector_force_y * params.vector_force_power
+                );
+                slope_gradient += gravity_vector;
+            }
 
             // Calculate orientation vector (perpendicular to segment)
             var segment_dir = vec2<f32>(0.0);
@@ -1063,7 +1077,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part_weight = part_mass / total_mass;
 
         // Slope force per amino acid
-        let slope_gradient = read_gamma_slope(grid_index(world_pos));
+        var slope_gradient = read_gamma_slope(grid_index(world_pos));
+        // Preserve historical behavior: add global vector force at usage site.
+        if (params.vector_force_power > 0.0) {
+            let gravity_vector = vec2<f32>(
+                params.vector_force_x * params.vector_force_power,
+                params.vector_force_y * params.vector_force_power
+            );
+            slope_gradient += gravity_vector;
+        }
         let slope_force = -slope_gradient * params.gamma_strength * part_mass;
         force += slope_force;
         torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
@@ -1224,95 +1246,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-    // Displacer organ - sweeps material from one side to the other (directional transfer)
-        // Only works if agent has enough energy to cover the displacer's consumption cost
-        if (amino_props.is_displacer && agent.energy >= amino_props.energy_consumption) {
-            // Determine local segment axis using neighbour part
-            var segment_dir = vec2<f32>(0.0);
-            if (i > 0u) {
-                let prev = agents_out[agent_id].body[i-1u].pos;
-                segment_dir = part.pos - prev;
-            } else if (agents_out[agent_id].body_count > 1u) {
-                let next = agents_out[agent_id].body[1u].pos;
-                segment_dir = next - part.pos;
-            } else {
-                // Single-part body fallback
-                segment_dir = vec2<f32>(1.0, 0.0);
-            }
-            let seg_len = length(segment_dir);
-            let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
-            // Perpendicular (right-hand) to the segment axis is our sweep direction in local space
-            // Apply chirality flip to sweep direction
-            let sweep_local = normalize(vec2<f32>(-axis_local.y, axis_local.x)) * chirality_flip_physics;
-            // Rotate to world space
-            let sweep_dir_world = apply_agent_rotation(sweep_local, agent.rotation);
-
-            // Material transfer displacement: move from one side to the other
-            let sweep_dir_len = length(sweep_dir_world);
-            if (sweep_dir_len > 1e-5) {
-                let sweep_dir = sweep_dir_world / sweep_dir_len;
-                // Scale sweep by amplification
-                let sweep_strength = max(params.prop_wash_strength * amplification, 0.0);
-
-                if (sweep_strength > 0.0) {
-                    let clamped_pos = clamp_position(world_pos);
-                    let grid_scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-                    var gx = i32(clamped_pos.x / grid_scale);
-                    var gy = i32(clamped_pos.y / grid_scale);
-                    gx = clamp(gx, 0, i32(GRID_SIZE) - 1);
-                    gy = clamp(gy, 0, i32(GRID_SIZE) - 1);
-
-                    let center_idx = u32(gy) * GRID_SIZE + u32(gx);
-                    let distance = clamp(sweep_strength * 2.0, 1.0, 5.0);
-                    let target_world = clamped_pos + sweep_dir * distance * grid_scale;
-                    let target_gx = clamp(i32(round(target_world.x / grid_scale)), 0, i32(GRID_SIZE) - 1);
-                    let target_gy = clamp(i32(round(target_world.y / grid_scale)), 0, i32(GRID_SIZE) - 1);
-                    let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
-
-                    if (target_idx != center_idx) {
-                        var center_gamma = read_gamma_height(center_idx);
-                        var target_gamma = read_gamma_height(target_idx);
-                        var center_alpha = alpha_grid[center_idx];
-                        var target_alpha = alpha_grid[target_idx];
-                        var center_beta = beta_grid[center_idx];
-                        var target_beta = beta_grid[target_idx];
-
-                        let transfer_amount = sweep_strength * 1.0 * part_weight;
-                        if (transfer_amount > 0.0) {
-                            // Capacities adjusted for 0..1 range
-                            let alpha_capacity = max(0.0, 1.0 - target_alpha);
-                            let beta_capacity = max(0.0, 1.0 - target_beta);
-                            let gamma_capacity = max(0.0, 1.0 - target_gamma);
-
-                            let gamma_transfer = min(min(center_gamma, transfer_amount), gamma_capacity);
-                            let alpha_transfer = min(min(center_alpha, transfer_amount), alpha_capacity);
-                            let beta_transfer = min(min(center_beta, transfer_amount), beta_capacity);
-
-                            if (gamma_transfer > 0.0) {
-                                center_gamma = center_gamma - gamma_transfer;
-                                target_gamma = target_gamma + gamma_transfer;
-                                write_gamma_height(center_idx, center_gamma);
-                                write_gamma_height(target_idx, target_gamma);
-                            }
-
-                            if (alpha_transfer > 0.0) {
-                                center_alpha = clamp(center_alpha - alpha_transfer, 0.0, 1.0);
-                                target_alpha = clamp(target_alpha + alpha_transfer, 0.0, 1.0);
-                                alpha_grid[center_idx] = center_alpha;
-                                alpha_grid[target_idx] = target_alpha;
-                            }
-
-                            if (beta_transfer > 0.0) {
-                                center_beta = clamp(center_beta - beta_transfer, 0.0, 1.0);
-                                target_beta = clamp(target_beta + beta_transfer, 0.0, 1.0);
-                                beta_grid[center_idx] = center_beta;
-                                beta_grid[target_idx] = target_beta;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Displacer organ removed (was organ 25)
 
     }
 
@@ -1529,11 +1463,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let base_thrust = props.thrust_force * 3.0; // Max thrust with amp=1
             let thrust_ratio = propeller_thrust_magnitude[i] / base_thrust;
             let activity_cost = props.energy_consumption * thrust_ratio * 1.5;
-            organ_extra = props.energy_consumption + activity_cost; // Base + activity
-        } else if (props.is_displacer) {
-            // Displacers: base cost (always paid) + activity cost (from amplification)
-            let amp = amplification_per_part[i];
-            let activity_cost = props.energy_consumption * amp * amp * 1.5;
             organ_extra = props.energy_consumption + activity_cost; // Base + activity
         } else if (base_type == 33u) {
             // Vampire mouths: 3x base mouth cost (increased maintenance)
@@ -1990,7 +1919,7 @@ fn draw_line(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>) {
 // ============================================================================
 
 @compute @workgroup_size(16, 16)
-fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
     let y = gid.y;
 
@@ -2006,10 +1935,12 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     // The fluid force-vector field defines a preferred blur direction and magnitude.
     let current_alpha = alpha_grid[idx];
     let current_beta = beta_grid[idx];
+    let current_gamma = read_gamma_height(idx);
 
     // Per-channel shift/blur strength.
     let alpha_strength = clamp(params.alpha_blur, 0.0, 1.0);
     let beta_strength = clamp(params.beta_blur, 0.0, 1.0);
+    let gamma_strength = clamp(params.gamma_shift, 0.0, 1.0);
     // Repurpose gamma_blur as a simple persistence/decay multiplier (1.0 = no decay).
     let persistence = clamp(params.gamma_blur, 0.0, 1.0);
 
@@ -2037,30 +1968,43 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_offset = 1.25;
     let base_offset = clamp(vlen * 0.002, 0.0, max_offset);
 
-    // Skewed 3-tap kernel along the direction (a directional blur).
-    // Equivalent to a convolution where the "center" is shifted by the vector field.
+    // One-sided 3-tap kernel (UPWIND).
+    // To smear *along* the vector field, each cell must pull content from upstream
+    // (i.e., sample in the -direction). This avoids symmetric smearing and prevents
+    // backward blur against the plume direction.
     let o_a = dir * (base_offset * alpha_strength);
     let o_b = dir * (base_offset * beta_strength);
+    // Gamma terrain is typically much smoother than alpha/beta, so the same sub-cell offsets
+    // can be visually imperceptible. Use a slightly larger offset scale while keeping the same
+    // 0..1 strength semantics.
+    let gamma_offset_scale = 6.0;
+    let o_g = dir * (base_offset * gamma_strength * gamma_offset_scale);
 
-    // Convolution taps (along +/- direction).
-    // We bias weights toward center to keep things stable.
-    let w0 = 0.25;
-    let w1 = 0.50;
-    let w2 = 0.25;
+    // Taps at {0, -1, -2} (upstream) relative to the flow direction.
+    // Weights sum to 1 and bias to the current cell to keep it stable.
+    let w0 = 0.60;
+    let w1 = 0.30;
+    let w2 = 0.10;
 
-    let a_m = sample_grid_bilinear(pos_world - o_a * cell_to_world, 0u);
     let a_0 = sample_grid_bilinear(pos_world, 0u);
-    let a_p = sample_grid_bilinear(pos_world + o_a * cell_to_world, 0u);
-    let b_m = sample_grid_bilinear(pos_world - o_b * cell_to_world, 1u);
+    let a_m1 = sample_grid_bilinear(pos_world - o_a * cell_to_world, 0u);
+    let a_m2 = sample_grid_bilinear(pos_world - (o_a * 2.0) * cell_to_world, 0u);
     let b_0 = sample_grid_bilinear(pos_world, 1u);
-    let b_p = sample_grid_bilinear(pos_world + o_b * cell_to_world, 1u);
+    let b_m1 = sample_grid_bilinear(pos_world - o_b * cell_to_world, 1u);
+    let b_m2 = sample_grid_bilinear(pos_world - (o_b * 2.0) * cell_to_world, 1u);
+    let g_0 = sample_grid_bilinear(pos_world, 2u);
+    let g_m1 = sample_grid_bilinear(pos_world - o_g * cell_to_world, 2u);
+    let g_m2 = sample_grid_bilinear(pos_world - (o_g * 2.0) * cell_to_world, 2u);
 
-    let a_blur = clamp(a_m * w0 + a_0 * w1 + a_p * w2, 0.0, 1.0);
-    let b_blur = clamp(b_m * w0 + b_0 * w1 + b_p * w2, 0.0, 1.0);
+    let a_blur = clamp(a_0 * w0 + a_m1 * w1 + a_m2 * w2, 0.0, 1.0);
+    let b_blur = clamp(b_0 * w0 + b_m1 * w1 + b_m2 * w2, 0.0, 1.0);
+    let g_blur = clamp(g_0 * w0 + g_m1 * w1 + g_m2 * w2, 0.0, 1.0);
 
     // Blend toward the convolution result; persistence applies as decay.
     var final_alpha = clamp(mix(current_alpha, a_blur, alpha_strength) * persistence, 0.0, 1.0);
     var final_beta = clamp(mix(current_beta, b_blur, beta_strength) * persistence, 0.0, 1.0);
+    // Gamma shift is terrain transport; keep it bounded but do not apply persistence decay.
+    var final_gamma = clamp(mix(current_gamma, g_blur, gamma_strength), 0.0, 1.0);
 
     // Stochastic rain - randomly add food/poison droplets (saturated drops)
     // Use position and random seed to generate unique random values per cell
@@ -2087,11 +2031,28 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
         final_beta = 1.0;  // Saturated drop
     }
 
-    // Apply the diffused values
-    // Apply the updated values in-place.
-    alpha_grid[idx] = final_alpha;
-    beta_grid[idx] = final_beta;
-    // Gamma is not modified by this pass.
+    // IMPORTANT: Do NOT write alpha/beta in-place.
+    // This kernel samples neighboring cells (via sample_grid_bilinear), so doing an in-place
+    // update introduces cross-invocation races and directionally-biased artifacts.
+    // We stage results into trail_grid_inject (a scratch buffer that is overwritten later
+    // by the trail preparation pass).
+    trail_grid_inject[idx] = vec4<f32>(final_alpha, final_beta, final_gamma, 0.0);
+}
+
+@compute @workgroup_size(16, 16)
+fn diffuse_grids_stage2(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+
+    if (x >= GRID_SIZE || y >= GRID_SIZE) {
+        return;
+    }
+
+    let idx = y * GRID_SIZE + x;
+    let staged = trail_grid_inject[idx];
+    alpha_grid[idx] = staged.x;
+    beta_grid[idx] = staged.y;
+    write_gamma_height(idx, staged.z);
 }
 
 @compute @workgroup_size(16, 16)
@@ -2135,18 +2096,12 @@ fn compute_gamma_slope(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dy = dy_cardinal + dy_diagonal;
 
     let inv_cell_size = f32(GRID_SIZE) / params.grid_size;
-    var gradient = vec2<f32>(dx, dy) * inv_cell_size;
+    let gradient = vec2<f32>(dx, dy) * inv_cell_size;
 
-    // Add global vector force (gravity/wind) to slope gradient
-    // This makes slope sensors respond to both terrain slope AND gravity direction
-    if (params.vector_force_power > 0.0) {
-        let gravity_vector = vec2<f32>(
-            params.vector_force_x * params.vector_force_power,
-            params.vector_force_y * params.vector_force_power
-        );
-        gradient += gravity_vector;
-    }
-
+    // IMPORTANT: gamma_slope is *terrain-only*.
+    // Do NOT bake global vector forces (gravity/wind) into this buffer, because other
+    // systems (e.g. fluid permeability/obstacles) interpret slope magnitude as terrain steepness.
+    // If you want gravity to affect a particular sensor/force, add it at the usage site.
     write_gamma_slope(idx, gradient);
 }
 

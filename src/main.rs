@@ -756,6 +756,7 @@ struct SimParams {
     alpha_blur: f32,
     beta_blur: f32,
     gamma_blur: f32,
+    gamma_shift: f32,
     alpha_slope_bias: f32,
     beta_slope_bias: f32,
     alpha_multiplier: f32,
@@ -938,6 +939,7 @@ struct SimulationSettings {
     alpha_blur: f32,
     beta_blur: f32,
     gamma_blur: f32,
+    gamma_shift: f32,
     alpha_slope_bias: f32,
     beta_slope_bias: f32,
     alpha_multiplier: f32,
@@ -1034,6 +1036,7 @@ impl Default for SimulationSettings {
             alpha_blur: 0.05,
             beta_blur: 0.05,
             gamma_blur: 0.9995,
+            gamma_shift: 0.0,
             alpha_slope_bias: -5.0,
             beta_slope_bias: 5.0,
             alpha_multiplier: 0.0001,
@@ -1251,6 +1254,7 @@ impl SimulationSettings {
         self.alpha_blur = self.alpha_blur.clamp(0.0, 1.0);
         self.beta_blur = self.beta_blur.clamp(0.0, 1.0);
         self.gamma_blur = self.gamma_blur.clamp(0.0, 1.0);
+        self.gamma_shift = self.gamma_shift.clamp(0.0, 1.0);
         self.alpha_slope_bias = self.alpha_slope_bias.clamp(-10.0, 10.0);
         self.beta_slope_bias = self.beta_slope_bias.clamp(-10.0, 10.0);
         self.alpha_multiplier = self.alpha_multiplier.clamp(0.0, 0.001);
@@ -1312,6 +1316,11 @@ struct GpuState {
     visual_grid_buffer: wgpu::Buffer,
     agent_grid_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
+
+    // CPU-side mirror of the uniform params buffer.
+    // Some compute paths (e.g. snapshot-load spawning) can run before `update()` has populated
+    // the params buffer for the current frame.
+    sim_params_cpu: SimParams,
     environment_init_params_buffer: wgpu::Buffer,
     spawn_debug_counters: wgpu::Buffer, // [spawn_counter, debug_counter, alive_counter]
     alive_readbacks: [Arc<wgpu::Buffer>; 2],
@@ -1383,6 +1392,7 @@ struct GpuState {
     clear_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
     randomize_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
     diffuse_pipeline: wgpu::ComputePipeline,
+    diffuse_commit_pipeline: wgpu::ComputePipeline,
     diffuse_trails_pipeline: wgpu::ComputePipeline,
     clear_visual_pipeline: wgpu::ComputePipeline,
     motion_blur_pipeline: wgpu::ComputePipeline,
@@ -1497,6 +1507,7 @@ struct GpuState {
     alpha_blur: f32,
     beta_blur: f32,
     gamma_blur: f32,
+    gamma_shift: f32,
     alpha_slope_bias: f32,
     beta_slope_bias: f32,
     alpha_multiplier: f32,
@@ -1610,6 +1621,7 @@ impl GpuState {
         self.alpha_blur = settings.alpha_blur;
         self.beta_blur = settings.beta_blur;
         self.gamma_blur = settings.gamma_blur;
+        self.gamma_shift = settings.gamma_shift;
         self.alpha_slope_bias = settings.alpha_slope_bias;
         self.beta_slope_bias = settings.beta_slope_bias;
         self.alpha_multiplier = settings.alpha_multiplier;
@@ -1783,7 +1795,11 @@ impl GpuState {
 
         // Create instance and adapter
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: if cfg!(target_os = "windows") {
+                wgpu::Backends::VULKAN // Use Vulkan on Windows to support atomicCompareExchangeWeak
+            } else {
+                wgpu::Backends::PRIMARY
+            },
             ..Default::default()
         });
 
@@ -2144,6 +2160,7 @@ impl GpuState {
             alpha_blur: 0.05,
             beta_blur: 0.05,
             gamma_blur: 0.9995,
+            gamma_shift: 0.0,
             alpha_slope_bias: -5.0,
             beta_slope_bias: 5.0,
             alpha_multiplier: 0.0001, // Rain probability: 0.01% per cell per frame
@@ -2915,14 +2932,24 @@ impl GpuState {
         profiler.mark("process_agents pipeline");
 
         let diffuse_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Diffuse Pipeline"),
+            label: Some("Diffuse Pipeline (stage1)"),
             layout: Some(&compute_pipeline_layout),
             module: &shader,
-            entry_point: "diffuse_grids",
+            entry_point: "diffuse_grids_stage1",
             compilation_options: Default::default(),
             cache: None,
         });
-        profiler.mark("diffuse pipeline");
+        profiler.mark("diffuse pipeline stage1");
+
+        let diffuse_commit_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Diffuse Pipeline (stage2 commit)"),
+            layout: Some(&compute_pipeline_layout),
+            module: &shader,
+            entry_point: "diffuse_grids_stage2",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        profiler.mark("diffuse pipeline stage2");
 
         let diffuse_trails_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -3863,6 +3890,7 @@ impl GpuState {
             clear_fluid_force_vectors_pipeline,
             randomize_fluid_force_vectors_pipeline,
             diffuse_pipeline,
+            diffuse_commit_pipeline,
             diffuse_trails_pipeline,
             clear_visual_pipeline,
             motion_blur_pipeline,
@@ -3951,6 +3979,7 @@ impl GpuState {
             alpha_blur: settings.alpha_blur,
             beta_blur: settings.beta_blur,
             gamma_blur: settings.gamma_blur,
+            gamma_shift: settings.gamma_shift,
             alpha_slope_bias: settings.alpha_slope_bias,
             beta_slope_bias: settings.beta_slope_bias,
             alpha_multiplier: settings.alpha_multiplier,
@@ -4067,6 +4096,7 @@ impl GpuState {
             agent_color_blend: settings.agent_color_blend,
             settings_path: settings_path.clone(),
             last_saved_settings: settings.clone(),
+            sim_params_cpu: SimParams::zeroed(),
             destroyed: false,
         };
 
@@ -4676,6 +4706,7 @@ impl GpuState {
             alpha_blur: self.alpha_blur,
             beta_blur: self.beta_blur,
             gamma_blur: self.gamma_blur,
+            gamma_shift: self.gamma_shift,
             alpha_slope_bias: self.alpha_slope_bias,
             beta_slope_bias: self.beta_slope_bias,
             alpha_multiplier: self.alpha_multiplier,
@@ -4942,6 +4973,19 @@ impl GpuState {
             return;
         }
 
+        // The spawn/merge/compact shaders use `params.cpu_spawn_count`, `params.agent_count`, and
+        // `params.max_agents` for bounds checks. During snapshot load this path can run before
+        // `update()` has written a fresh params buffer, which would result in 0 spawns.
+        {
+            let mut params = self.sim_params_cpu;
+            params.max_agents = self.agent_buffer_capacity as u32;
+            params.cpu_spawn_count = cpu_spawn_count;
+            params.agent_count = self.agent_count;
+            self.sim_params_cpu = params;
+            self.queue
+                .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
+        }
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -5193,6 +5237,7 @@ impl GpuState {
             alpha_blur: self.alpha_blur,
             beta_blur: self.beta_blur,
             gamma_blur: self.gamma_blur,
+            gamma_shift: self.gamma_shift,
             alpha_slope_bias: self.alpha_slope_bias,
             beta_slope_bias: self.beta_slope_bias,
             alpha_multiplier: current_alpha,
@@ -5282,6 +5327,9 @@ impl GpuState {
             fluid_show: if self.fluid_show { 1 } else { 0 },
             fluid_wind_push_strength: self.fluid_wind_push_strength,
         };
+
+        // Keep CPU mirror in sync with the GPU uniform buffer.
+        self.sim_params_cpu = params;
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
@@ -5366,6 +5414,11 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
                 let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
+                cpass.dispatch_workgroups(groups_x, groups_y, 1);
+
+                // Commit staged alpha/beta back into the environment grids.
+                cpass.set_pipeline(&self.diffuse_commit_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
             }
 
@@ -5455,11 +5508,11 @@ impl GpuState {
                 cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
                 cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
-                // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(256)
+                // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(64)
                 // Agents will write propeller forces to fluid_force_vectors buffer with 100x boost
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
             }
         }
 
@@ -6135,9 +6188,12 @@ impl GpuState {
         encoder.copy_buffer_to_buffer(&self.beta_grid, 0, &self.beta_grid_readback, 0, grid_size_bytes);
         encoder.copy_buffer_to_buffer(&self.gamma_grid, 0, &self.gamma_grid_readback, 0, grid_size_bytes);
 
-        // Copy agents from GPU (use current buffer based on ping-pong)
+        // Copy agents from GPU.
+        // NOTE: Snapshot persistence expects agents to be materialized in buffer A.
+        // Saving from a ping-pong-selected buffer can capture an empty/inactive buffer during
+        // load/spawn transitions, producing "0 agents" snapshots.
         let agents_size_bytes = (std::mem::size_of::<Agent>() * self.agent_buffer_capacity) as u64;
-        let source_buffer = if self.ping_pong { &self.agents_buffer_b } else { &self.agents_buffer_a };
+        let source_buffer = &self.agents_buffer_a;
         encoder.copy_buffer_to_buffer(source_buffer, 0, &self.agents_readback, 0, agents_size_bytes);
 
         self.queue.submit(Some(encoder.finish()));
@@ -6239,6 +6295,12 @@ impl GpuState {
             self.spawn_request_count
         );
 
+        println!(
+            "Spawning snapshot agents immediately (capacity: {}, currently: {})",
+            self.agent_buffer_capacity,
+            self.agent_count
+        );
+
         // Spawn queued snapshot agents immediately (in batches), so the restored state is fully
         // materialized on the GPU before we write an autosave.
         while !self.cpu_spawn_queue.is_empty() {
@@ -6259,8 +6321,21 @@ impl GpuState {
                 .min(MAX_SPAWN_REQUESTS as u32)
                 .min(capacity_left as u32);
 
+            println!(
+                "  -> spawning batch of {} (queued remaining before: {})",
+                batch,
+                self.cpu_spawn_queue.len()
+            );
+
             // Use the reliable spawn-only path (works even when paused).
             self.process_spawn_requests_only(batch, false);
+
+            println!(
+                "  -> after batch: agent_count={}, alive_count={}, queued remaining={}",
+                self.agent_count,
+                self.alive_count,
+                self.cpu_spawn_queue.len()
+            );
         }
 
         // Update epoch from snapshot
@@ -7067,7 +7142,11 @@ fn main() {
 
     // Create WGPU resources once
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::PRIMARY,
+        backends: if cfg!(target_os = "windows") {
+            wgpu::Backends::VULKAN // Use Vulkan on Windows to support atomicCompareExchangeWeak
+        } else {
+            wgpu::Backends::PRIMARY
+        },
         ..Default::default()
     });
     let surface = instance.create_surface(window.clone()).unwrap();
@@ -8098,6 +8177,10 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(&mut state.beta_blur, 0.0..=1.0)
                                                                 .text("Beta Shift Strength"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.gamma_shift, 0.0..=1.0)
+                                                                .text("Gamma Shift Strength"),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.gamma_blur, 0.9..=1.0)

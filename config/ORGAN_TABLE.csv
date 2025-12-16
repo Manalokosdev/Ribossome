@@ -9,13 +9,13 @@ Modifier,Modifier_AA,V_Valine,M_Methionine,L_Leucine,P_Proline,K_Lysine,C_Cystei
 7,I,Alpha Magnitude Sensor,Alpha Magnitude Sensor,Propeller,Propeller,Enabler,Enabler,Pairing Sensor,Pairing Sensor
 8,K,Alpha Magnitude Sensor (var),Alpha Magnitude Sensor (var),Propeller,Propeller,Enabler,Enabler,Pairing Sensor,Pairing Sensor
 9,L,Agent Alpha Sensor,Agent Alpha Sensor,Propeller,Propeller,Enabler,Enabler,Trail Energy Sensor (alpha),Trail Energy Sensor (beta)
-10,M,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
-11,N,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
-12,P,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
-13,Q,Beta Sensor,Beta Sensor,Displacer,Displacer,Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
-14,R,Beta Sensor,Beta Sensor,Displacer,Displacer,Clock (alpha/green),Clock (beta/red),Chiral Flipper,Chiral Flipper
-15,S,Beta Sensor,Beta Sensor,Displacer,Displacer,Clock (alpha/green),Clock (beta/red),Chiral Flipper,Chiral Flipper
-16,T,Beta Magnitude Sensor,Beta Magnitude Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
-17,V,Beta Magnitude Sensor (var),Beta Magnitude Sensor (var),Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
-18,W,Energy Sensor,Energy Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
-19,Y,Agent Beta Sensor,Agent Beta Sensor,Displacer,Displacer,Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
+10,M,Beta Sensor,Beta Sensor,M (Methionine),M (Methionine),Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
+11,N,Beta Sensor,Beta Sensor,N (Asparagine),N (Asparagine),Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
+12,P,Beta Sensor,Beta Sensor,P (Proline),P (Proline),Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
+13,Q,Beta Sensor,Beta Sensor,Q (Glutamine),Q (Glutamine),Slope Sensor (alpha),Slope Sensor (beta),Trail Energy Sensor (alpha),Poison Resistance
+14,R,Beta Sensor,Beta Sensor,R (Arginine),R (Arginine),Clock (alpha/green),Clock (beta/red),Chiral Flipper,Chiral Flipper
+15,S,Beta Sensor,Beta Sensor,S (Serine),S (Serine),Clock (alpha/green),Clock (beta/red),Chiral Flipper,Chiral Flipper
+16,T,Beta Magnitude Sensor,Beta Magnitude Sensor,T (Threonine),T (Threonine),Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
+17,V,Beta Magnitude Sensor (var),Beta Magnitude Sensor (var),V (Valine),V (Valine),Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
+18,W,Beta Sensor,Beta Sensor,W (Tryptophan),W (Tryptophan),Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
+19,Y,Agent Beta Sensor,Agent Beta Sensor,Y (Tyrosine),Y (Tyrosine),Sine Gen (alpha/green),Sine Gen (beta/red),Chiral Flipper,Chiral Flipper
