@@ -96,16 +96,18 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 agents_in[agent_id].body[i]._pad.x = current_cooldown;
             }
 
+            // Local position (relative to agent center) for this mouth organ
+            let mouth_local_pos = part.pos;
+
             // Disabler gating:
             // Vampire mouths act by default, but are suppressed when "inhibitor/enabler" organs
             // (type 26) are placed nearby on the same agent body.
-            let part_pos = agents_in[agent_id].body[i].pos;
             var block = 0.0;
             for (var j = 0u; j < min(body_count, MAX_BODY_PARTS); j++) {
                 let check_type = get_base_part_type(agents_in[agent_id].body[j].part_type);
                 if (check_type == 26u) {  // "Enabler" used as disabler for vampire mouths
                     let disabler_pos = agents_in[agent_id].body[j].pos;
-                    let d = length(part_pos - disabler_pos);
+                    let d = length(mouth_local_pos - disabler_pos);
                     if (d < 20.0) {
                         block += max(0.0, 1.0 - d / 20.0);
                     }
@@ -119,8 +121,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (mouth_activity > 0.0001) {
 
                 // Get mouth world position
-                let part_pos = part.pos;
-                let rotated_pos = apply_agent_rotation(part_pos, agents_in[agent_id].rotation);
+                let rotated_pos = apply_agent_rotation(mouth_local_pos, agents_in[agent_id].rotation);
                 let mouth_world_pos = agents_in[agent_id].position + rotated_pos;
 
                 // Calculate movement distance from stored previous position
@@ -219,8 +220,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             // Store current position for next frame's movement calculation
-            let part_pos = part.pos;
-            let rotated_pos = apply_agent_rotation(part_pos, agents_in[agent_id].rotation);
+            let rotated_pos = apply_agent_rotation(mouth_local_pos, agents_in[agent_id].rotation);
             let mouth_world_pos = agents_in[agent_id].position + rotated_pos;
             agents_in[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
         } else {
