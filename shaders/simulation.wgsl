@@ -374,16 +374,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             current_pos.y += sin(current_angle) * props.segment_length;
             agents_out[agent_id].body[i].pos = current_pos;
 
-            // Update size
-            var rendered_size = props.thickness * 0.5;
-            let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor || props.is_agent_alpha_sensor || props.is_agent_beta_sensor || props.is_trail_energy_sensor;
-            if (is_sensor) {
-                rendered_size *= 2.0;
-            }
-            if (props.is_condenser) {
-                rendered_size *= 0.5;
-            }
-            agents_out[agent_id].body[i].size = rendered_size;
+            // Data field is now available for other uses (was size, now computed on-demand)
+            agents_out[agent_id].body[i].data = 0.0;
 
             // Persist smoothed angle in _pad.x for regular amino acids only
             // Organs (condensers, clocks) use _pad for their own state storage
@@ -1882,7 +1874,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Initialize body array to zeros
                 for (var bi = 0u; bi < MAX_BODY_PARTS; bi++) {
                     offspring.body[bi].pos = vec2<f32>(0.0);
-                    offspring.body[bi].size = 0.0;
+                    offspring.body[bi].data = 0.0;
                     offspring.body[bi].part_type = 0u;
                     offspring.body[bi].alpha_signal = 0.0;
                     offspring.body[bi].beta_signal = 0.0;
@@ -2763,7 +2755,7 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var i = 0u; i < MAX_BODY_PARTS; i++) {
         agent.body[i].pos = vec2<f32>(0.0);
-        agent.body[i].size = 0.0;
+        agent.body[i].data = 0.0;
         agent.body[i].part_type = 0u;
         agent.body[i].alpha_signal = 0.0;
         agent.body[i].beta_signal = 0.0;

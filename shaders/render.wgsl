@@ -108,7 +108,7 @@ fn render_body_part_ctx(
         let seed = base_type * 12345u + 67890u;
         let segment_length = length(world_pos - segment_start_world);
         let organ_width = segment_length * 0.15;
-        let line_width = part.size * 0.5;
+        let line_width = get_part_visual_size(part.part_type) * 0.5;
 
         let point_count = 4u + (base_type % 3u);
         var prev_pos = segment_start_world;
@@ -142,7 +142,7 @@ fn render_body_part_ctx(
         let g = max(a, 0.0);
         let bl = max(max(-a, 0.0), max(-b, 0.0));
         let dbg_color = vec4<f32>(r, g, bl, 1.0);
-        let thickness_dbg = max(part.size * 0.25, 0.5);
+        let thickness_dbg = max(get_part_visual_size(part.part_type) * 0.25, 0.5);
         draw_thick_line_ctx(segment_start_world, world_pos, thickness_dbg, dbg_color, ctx);
         if (!is_single && (is_first || is_last)) {
             draw_filled_circle_ctx(world_pos, thickness_dbg, dbg_color, ctx);
@@ -177,10 +177,11 @@ fn render_body_part_ctx(
         let perp_local = vec2<f32>(-axis_local.y, axis_local.x);
         let perp_world = apply_agent_rotation(perp_local, agent_rotation);
 
-        let half_length = part.size * 0.8;
+        let part_size = get_part_visual_size(part.part_type);
+        let half_length = part_size * 0.8;
         let p1 = world_pos - perp_world * half_length;
         let p2 = world_pos + perp_world * half_length;
-        let perp_thickness = part.size * 0.3;
+        let perp_thickness = part_size * 0.3;
         let blended_color_leucine = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_thick_line_ctx(p1, p2, perp_thickness, vec4<f32>(blended_color_leucine, 1.0), ctx);
     }
@@ -196,7 +197,7 @@ fn render_body_part_ctx(
         let is_alpha_discharging = (signed_alpha_charge > 0.0);
         let is_beta_discharging = (signed_beta_charge > 0.0);
 
-        let radius = max(part.size * 0.5, 3.0);
+        let radius = max(get_part_visual_size(part.part_type) * 0.5, 3.0);
 
         var fill_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         if (is_alpha_discharging || is_beta_discharging) {
@@ -281,7 +282,7 @@ fn render_body_part_ctx(
         let axis_world = apply_agent_rotation(axis_local, agent_rotation);
         let jet_dir = normalize(vec2<f32>(-axis_world.y, axis_world.x));
         let exhaust_dir = -jet_dir;
-        let propeller_strength = part.size * 2.5 * amplification;
+        let propeller_strength = get_part_visual_size(part.part_type) * 2.5 * amplification;
         let zoom_factor = clamp((params.camera_zoom - 2.0) / 8.0, 0.0, 1.0);
         let jet_length = propeller_strength * mix(0.6, 1.2, zoom_factor);
         let jet_seed = agent_id * 1000u + part_index * 17u;
@@ -292,14 +293,14 @@ fn render_body_part_ctx(
     // 7. ORGAN: Mouth (feeding organ) - asterisk marker
     if (amino_props.is_mouth) {
         // Regular mouths get small yellow asterisk
-        let mouth_radius = max(part.size * 1.5, 4.0);
+        let mouth_radius = max(get_part_visual_size(part.part_type) * 1.5, 4.0);
         let mouth_color = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
     }
 
     // Vampire mouths (organ 33) get special big flashing asterisks
     if (base_type == 33u) {
-        let mouth_radius = max(part.size * 6.0, 16.0);
+        let mouth_radius = max(get_part_visual_size(part.part_type) * 6.0, 16.0);
 
         // Draw blinking white asterisk when draining energy (_pad.y stores drain amount)
         let drain_amount = part._pad.y;
@@ -330,7 +331,7 @@ fn render_body_part_ctx(
 
     // Pairing state sensors (organ 36) get orange asterisks
     if (base_type == 36u) {
-        let star_size = max(part.size * 2.0, 6.0);
+        let star_size = max(get_part_visual_size(part.part_type) * 2.0, 6.0);
         let orange_color = vec3<f32>(1.0, 0.6, 0.0); // Orange
         draw_asterisk_ctx(world_pos, star_size, vec4<f32>(orange_color, 0.9), ctx);
     }
@@ -338,7 +339,7 @@ fn render_body_part_ctx(
     // 8. ORGAN: Displacer (repulsion field) - diamond marker
     if (amino_props.is_displacer) {
         let blended_color_displacer = mix(amino_props.color, agent_color, params.agent_color_blend);
-        let diamond_size = max(part.size * 1.2, 3.0);
+        let diamond_size = max(get_part_visual_size(part.part_type) * 1.2, 3.0);
         // Draw diamond as 4 lines forming a diamond shape
         let half_s = diamond_size;
         let top = world_pos + vec2<f32>(0.0, -half_s);
@@ -367,7 +368,7 @@ fn render_body_part_ctx(
         // Scale visual marker based on sensor radius (normalized to typical range)
         // Typical range: 0-300, so normalize and scale for visibility
         let visual_scale = clamp(sensor_radius / 200.0, 0.3, 4.0);
-        let marker_size = part.size * 3.0 * visual_scale; // Increased from 1.5x to 3.0x for better visibility
+        let marker_size = get_part_visual_size(part.part_type) * 3.0 * visual_scale; // Increased from 1.5x to 3.0x for better visibility
 
         // Check if this is a magnitude sensor (organs 38-41)
         let is_magnitude_sensor = (base_type >= 38u && base_type <= 41u);
@@ -429,7 +430,7 @@ fn render_body_part_ctx(
 
     // 9a. ORGAN: Agent Alpha/Beta Sensors (types 34, 35) - dark purple pentagon
     if (base_type == 34u || base_type == 35u) {
-        let pentagon_size = max(part.size * 0.80, 6.0);
+        let pentagon_size = max(get_part_visual_size(part.part_type) * 0.80, 6.0);
         let dark_purple = vec3<f32>(0.3, 0.0, 0.5); // Dark purple
         let blended_color = mix(dark_purple, agent_color, params.agent_color_blend * 0.3);
 
@@ -462,7 +463,7 @@ fn render_body_part_ctx(
 
         // Pulsate size based on signal output
         // Base size is larger (3x part size), then pulsate ±30%
-        let base_size = part.size * 3.0;
+        let base_size = get_part_visual_size(part.part_type) * 3.0;
         let size_multiplier = 1.0 + clock_signal * 0.3;
         let pulsating_size = base_size * size_multiplier;
 
@@ -484,7 +485,7 @@ fn render_body_part_ctx(
 
         // Triangle size scales with signal strength
         let signal_strength = abs(slope_signal);
-        let triangle_size = part.size * (2.0 + signal_strength);
+        let triangle_size = get_part_visual_size(part.part_type) * (2.0 + signal_strength);
 
         // Triangle points in slope direction (signal sign determines up/down)
         // Draw isosceles triangle
@@ -512,7 +513,7 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
     var max_dist = 20.0; // minimum radius
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
-        let dist = length(part.pos) + part.size;
+        let dist = length(part.pos) + get_part_visual_size(part.part_type);
         max_dist = max(max_dist, dist);
     }
 
@@ -2146,7 +2147,7 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (i < body_count) {
             let part = selected_agent_buffer[0].body[i];
             let dist = length(part.pos);
-            max_extent = max(max_extent, dist + part.size);
+            max_extent = max(max_extent, dist + get_part_visual_size(part.part_type));
         }
     }
     let available_space = f32(preview_size) * 0.45; // Half width, 90% of that

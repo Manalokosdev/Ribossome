@@ -45,13 +45,28 @@ const INSPECTOR_WIDTH: u32 = 300u;    // Width of inspector panel on right side
 
 struct BodyPart {
     pos: vec2<f32>,           // relative position from agent center (8 bytes)
-    size: f32,                // radius (4 bytes)
+    data: f32,                // generic data slot (was size, now computed on-demand) (4 bytes)
     part_type: u32,           // bits 0-7 = base type (amino acid or organ), bits 8-15 = organ parameter
     alpha_signal: f32,        // alpha signal propagating through body (4 bytes)
     beta_signal: f32,         // beta signal propagating through body (4 bytes)
     _pad: vec2<f32>,          // padding to 32 bytes (8 bytes)
                               // _pad.x = smoothed signal angle OR condenser charge OR clock signal OR vampire cooldown
                               // _pad.y = packed u16 prev_world_pos OR last drain amount (vampire mouths)
+}
+
+// Helper function to compute visual size from part properties
+fn get_part_visual_size(part_type: u32) -> f32 {
+    let base_type = get_base_part_type(part_type);
+    let props = get_amino_acid_properties(base_type);
+    var size = props.thickness * 0.5;
+    let is_sensor = props.is_alpha_sensor || props.is_beta_sensor || props.is_energy_sensor || props.is_agent_alpha_sensor || props.is_agent_beta_sensor || props.is_trail_energy_sensor;
+    if (is_sensor) {
+        size *= 2.0;
+    }
+    if (props.is_condenser) {
+        size *= 0.5;
+    }
+    return size;
 }
 
 // ============================================================================
