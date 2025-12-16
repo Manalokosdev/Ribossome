@@ -176,12 +176,17 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Only proceed if we can drain this victim AND cooldown is ready
                     if (can_drain && current_cooldown <= 0.0) {
-                        // Vampire drain scales down with disabler suppression
+                        // Vampire drain scales down with disabler suppression AND agent speed
                         let victim_energy = agents_in[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
-                            // Absorb up to 50% of victim's energy
-                            let absorbed_energy = victim_energy * 0.5 * mouth_activity;
+                            // Calculate speed-based absorption reduction (faster = less efficient)
+                            let agent_speed = length(agent.velocity);
+                            let normalized_speed = agent_speed / VEL_MAX;
+                            let speed_multiplier = exp(-8.0 * normalized_speed);
+                            
+                            // Absorb up to 50% of victim's energy (reduced by speed and disabler)
+                            let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier;
 
                             // Victim loses 1.5x the absorbed energy (75% total damage)
                             let energy_damage = absorbed_energy * 1.5;
