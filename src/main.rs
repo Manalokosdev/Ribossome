@@ -6234,16 +6234,49 @@ impl GpuState {
         // Update spawn request count so they get processed
         self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
 
+        println!(
+            "Queued {} agents from snapshot for spawning",
+            self.spawn_request_count
+        );
+
+        // Spawn queued snapshot agents immediately (in batches), so the restored state is fully
+        // materialized on the GPU before we write an autosave.
+        while !self.cpu_spawn_queue.is_empty() {
+            let capacity_left = self
+                .agent_buffer_capacity
+                .saturating_sub(self.agent_count as usize);
+            if capacity_left == 0 {
+                println!(
+                    "WARNING: Snapshot contains more agents than current capacity (agent_count: {}, capacity: {}). Remaining queued: {}",
+                    self.agent_count,
+                    self.agent_buffer_capacity,
+                    self.cpu_spawn_queue.len()
+                );
+                break;
+            }
+
+            let batch = (self.cpu_spawn_queue.len() as u32)
+                .min(MAX_SPAWN_REQUESTS as u32)
+                .min(capacity_left as u32);
+
+            // Use the reliable spawn-only path (works even when paused).
+            self.process_spawn_requests_only(batch, false);
+        }
+
         // Update epoch from snapshot
         self.epoch = snapshot.epoch;
 
-        // Immediately save to autosave to ensure continuity
+        // Immediately save to autosave to ensure continuity (after agents are spawned)
         let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
         if let Err(e) = self.save_snapshot_to_file(autosave_path) {
             eprintln!("ΓÜá Failed to update autosave after loading snapshot: {:?}", e);
         }
 
-        println!("Γ£ô Loaded settings and queued {} agents from snapshot", self.cpu_spawn_queue.len());
+        println!(
+            "Γ£ô Loaded settings and restored snapshot agents (alive_count: {}, agent_count: {})",
+            self.alive_count,
+            self.agent_count
+        );
 
         Ok(())
     }
