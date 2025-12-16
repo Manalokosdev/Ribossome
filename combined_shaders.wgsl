@@ -218,7 +218,7 @@ struct SimParams {
     inspector_zoom: f32,      // Inspector preview zoom level (1.0 = default)
     agent_trail_decay: f32,   // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
     _padding1: f32,
-    _padding2: f32,
+        fluid_wind_push_strength: f32,
 }
 
 struct EnvironmentInitParams {

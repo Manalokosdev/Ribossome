@@ -837,7 +837,9 @@ struct SimParams {
     inspector_zoom: f32,      // Inspector preview zoom level (1.0 = default)
     agent_trail_decay: f32,   // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
     fluid_show: u32,          // Show fluid simulation overlay
-    _padding2: f32,
+    // Global multiplier for how much the fluid vector field pushes agents.
+    // NOTE: This reuses the previous padding slot to avoid changing buffer layouts.
+    fluid_wind_push_strength: f32,
 }
 
 #[repr(C)]
@@ -958,6 +960,14 @@ struct SimulationSettings {
     slope_debug_visual: bool,
     rain_debug_visual: bool,  // Visualization mode for rain patterns
     fluid_show: bool,         // Show fluid simulation overlay
+    fluid_dt: f32,            // Fluid solver dt (used by stable-fluids steps)
+    fluid_decay: f32,         // Fluid decay/dissipation factor
+    fluid_jacobi_iters: u32,  // Pressure solve iterations
+    fluid_vorticity: f32,     // Vorticity confinement strength (0 disables)
+    fluid_viscosity: f32,     // Viscosity (nu) for velocity diffusion (0 disables)
+    fluid_ooze_rate: f32,     // Env alpha/beta -> fluid dye injection rate
+    fluid_ooze_fade_rate: f32, // Env dye fade rate (0 = no fade)
+    fluid_wind_push_strength: f32, // Global multiplier for how much fluid pushes agents
     vector_force_power: f32,  // Global force multiplier (0.0 = off)
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
     vector_force_y: f32,      // Force direction Y (-1.0 to 1.0)
@@ -1046,6 +1056,16 @@ impl Default for SimulationSettings {
             slope_debug_visual: false,
             rain_debug_visual: false,
             fluid_show: false,  // Fluid simulation overlay disabled by default
+            fluid_dt: 0.016,
+            fluid_decay: 0.995,
+            fluid_jacobi_iters: 31,
+            fluid_vorticity: 0.0,
+            fluid_viscosity: 0.05,
+            fluid_ooze_rate: 0.2,
+            // Matches the previous hardcoded ~0.999 per-step decay at dt≈0.016: exp(-0.0625*0.016)≈0.999
+            fluid_ooze_fade_rate: 0.0625,
+            // Matches the previous hardcoded scale used in shaders/simulation.wgsl.
+            fluid_wind_push_strength: 0.0005,
             vector_force_power: 0.0,  // Disabled by default
             vector_force_x: 0.0,
             vector_force_y: -1.0,     // Downward gravity when enabled
@@ -1257,6 +1277,15 @@ impl SimulationSettings {
         self.beta_rain_phase = self.beta_rain_phase.clamp(0.0, std::f32::consts::PI * 2.0);
         self.alpha_rain_freq = self.alpha_rain_freq.clamp(0.0, 100.0);
         self.beta_rain_freq = self.beta_rain_freq.clamp(0.0, 100.0);
+
+        self.fluid_dt = self.fluid_dt.clamp(0.001, 0.05);
+        self.fluid_decay = self.fluid_decay.clamp(0.9, 1.0);
+        self.fluid_jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
+        self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 10.0);
+        self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 1.0);
+        self.fluid_ooze_rate = self.fluid_ooze_rate.clamp(0.0, 5.0);
+        self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 10.0);
+        self.fluid_wind_push_strength = self.fluid_wind_push_strength.clamp(0.0, 2.0);
     }
 }
 
@@ -1330,6 +1359,7 @@ struct GpuState {
     fluid_copy_dye_to_forces_pipeline: wgpu::ComputePipeline,
     fluid_clear_forces_pipeline: wgpu::ComputePipeline,
     fluid_clear_force_vectors_pipeline: wgpu::ComputePipeline,
+    fluid_fumarole_pipeline: wgpu::ComputePipeline,
     fluid_clear_velocity_pipeline: wgpu::ComputePipeline,
     fluid_inject_dye_pipeline: wgpu::ComputePipeline,
     fluid_advect_dye_pipeline: wgpu::ComputePipeline,
@@ -1506,6 +1536,14 @@ struct GpuState {
     slope_debug_visual: bool,
     rain_debug_visual: bool,
     fluid_show: bool,  // Show fluid simulation overlay
+    fluid_dt: f32,
+    fluid_decay: f32,
+    fluid_jacobi_iters: u32,
+    fluid_vorticity: f32,
+    fluid_viscosity: f32,
+    fluid_ooze_rate: f32,
+    fluid_ooze_fade_rate: f32,
+    fluid_wind_push_strength: f32,
     vector_force_power: f32,
     vector_force_x: f32,
     vector_force_y: f32,
@@ -1553,94 +1591,14 @@ struct GpuState {
 
 impl GpuState {
     fn save_settings(&self, path: &Path) -> anyhow::Result<()> {
-        let settings = SimulationSettings {
-            camera_zoom: self.camera_zoom,
-            spawn_probability: self.spawn_probability,
-            death_probability: self.death_probability,
-            mutation_rate: self.mutation_rate,
-            auto_replenish: self.auto_replenish,
-            diffusion_interval: self.diffusion_interval,
-            slope_interval: self.slope_interval,
-            alpha_blur: self.alpha_blur,
-            beta_blur: self.beta_blur,
-            gamma_blur: self.gamma_blur,
-            alpha_slope_bias: self.alpha_slope_bias,
-            beta_slope_bias: self.beta_slope_bias,
-            alpha_multiplier: self.alpha_multiplier,
-            beta_multiplier: self.beta_multiplier,
-            alpha_rain_map_path: self.alpha_rain_map_path.clone(),
-            beta_rain_map_path: self.beta_rain_map_path.clone(),
-            chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
-            chemical_slope_scale_beta: self.chemical_slope_scale_beta,
-            alpha_noise_scale: self.alpha_noise_scale,
-            beta_noise_scale: self.beta_noise_scale,
-            gamma_noise_scale: self.gamma_noise_scale,
-            noise_power: self.noise_power,
-            food_power: self.food_power,
-            poison_power: self.poison_power,
-            amino_maintenance_cost: self.amino_maintenance_cost,
-            pairing_cost: self.pairing_cost,
-            prop_wash_strength: self.prop_wash_strength,
-            repulsion_strength: self.repulsion_strength,
-            agent_repulsion_strength: self.agent_repulsion_strength,
-            limit_fps: self.limit_fps,
-            limit_fps_25: self.limit_fps_25,
-            render_interval: self.render_interval,
-            gamma_debug_visual: self.gamma_debug_visual,
-            slope_debug_visual: self.slope_debug_visual,
-            rain_debug_visual: self.rain_debug_visual,
-            fluid_show: self.fluid_show,
-            vector_force_power: self.vector_force_power,
-            vector_force_x: self.vector_force_x,
-            vector_force_y: self.vector_force_y,
-            gamma_hidden: self.gamma_hidden,
-            debug_per_segment: self.debug_per_segment,
-            gamma_vis_min: self.gamma_vis_min,
-            gamma_vis_max: self.gamma_vis_max,
-            alpha_show: self.alpha_show,
-            beta_show: self.beta_show,
-            gamma_show: self.gamma_show,
-            slope_lighting: self.slope_lighting,
-            slope_lighting_strength: self.slope_lighting_strength,
-            trail_diffusion: self.trail_diffusion,
-            trail_decay: self.trail_decay,
-            trail_opacity: self.trail_opacity,
-            trail_show: self.trail_show,
-            interior_isotropic: self.interior_isotropic,
-            ignore_stop_codons: self.ignore_stop_codons,
-            require_start_codon: self.require_start_codon,
-            asexual_reproduction: self.asexual_reproduction,
-            alpha_rain_variation: self.alpha_rain_variation,
-            beta_rain_variation: self.beta_rain_variation,
-            alpha_rain_phase: self.alpha_rain_phase,
-            beta_rain_phase: self.beta_rain_phase,
-            alpha_rain_freq: self.alpha_rain_freq,
-            beta_rain_freq: self.beta_rain_freq,
-            difficulty: self.difficulty.clone(),
-            background_color: self.background_color,
-            alpha_blend_mode: self.alpha_blend_mode,
-            beta_blend_mode: self.beta_blend_mode,
-            gamma_blend_mode: self.gamma_blend_mode,
-            slope_blend_mode: self.slope_blend_mode,
-            alpha_color: self.alpha_color,
-            beta_color: self.beta_color,
-            gamma_color: self.gamma_color,
-            grid_interpolation: self.grid_interpolation,
-            alpha_gamma_adjust: self.alpha_gamma_adjust,
-            beta_gamma_adjust: self.beta_gamma_adjust,
-            gamma_gamma_adjust: self.gamma_gamma_adjust,
-            light_direction: self.light_direction,
-            light_power: self.light_power,
-            agent_blend_mode: self.agent_blend_mode,
-            agent_color: self.agent_color,
-            agent_color_blend: self.agent_color_blend,
-            agent_trail_decay: self.agent_trail_decay,
-        };
+        let settings = self.current_settings();
         settings.save_to_disk(path)
     }
 
-    fn load_settings(&mut self, path: &Path) -> anyhow::Result<()> {
-        let settings = SimulationSettings::load_from_disk(path)?;
+    fn apply_settings(&mut self, settings: &SimulationSettings) {
+        let mut settings = settings.clone();
+        settings.sanitize();
+
         self.camera_zoom = settings.camera_zoom;
         self.spawn_probability = settings.spawn_probability;
         self.death_probability = settings.death_probability;
@@ -1648,6 +1606,7 @@ impl GpuState {
         self.auto_replenish = settings.auto_replenish;
         self.diffusion_interval = settings.diffusion_interval;
         self.slope_interval = settings.slope_interval;
+
         self.alpha_blur = settings.alpha_blur;
         self.beta_blur = settings.beta_blur;
         self.gamma_blur = settings.gamma_blur;
@@ -1663,20 +1622,41 @@ impl GpuState {
         self.beta_noise_scale = settings.beta_noise_scale;
         self.gamma_noise_scale = settings.gamma_noise_scale;
         self.noise_power = settings.noise_power;
+
         self.food_power = settings.food_power;
         self.poison_power = settings.poison_power;
+
         self.amino_maintenance_cost = settings.amino_maintenance_cost;
         self.pairing_cost = settings.pairing_cost;
         self.prop_wash_strength = settings.prop_wash_strength;
         self.repulsion_strength = settings.repulsion_strength;
         self.agent_repulsion_strength = settings.agent_repulsion_strength;
+
         self.limit_fps = settings.limit_fps;
         self.limit_fps_25 = settings.limit_fps_25;
         self.render_interval = settings.render_interval;
+
         self.gamma_debug_visual = settings.gamma_debug_visual;
         self.slope_debug_visual = settings.slope_debug_visual;
+        self.rain_debug_visual = settings.rain_debug_visual;
+
+        self.fluid_show = settings.fluid_show;
+        self.fluid_dt = settings.fluid_dt;
+        self.fluid_decay = settings.fluid_decay;
+        self.fluid_jacobi_iters = settings.fluid_jacobi_iters;
+        self.fluid_vorticity = settings.fluid_vorticity;
+        self.fluid_viscosity = settings.fluid_viscosity;
+        self.fluid_ooze_rate = settings.fluid_ooze_rate;
+        self.fluid_ooze_fade_rate = settings.fluid_ooze_fade_rate;
+        self.fluid_wind_push_strength = settings.fluid_wind_push_strength;
+
+        self.vector_force_power = settings.vector_force_power;
+        self.vector_force_x = settings.vector_force_x;
+        self.vector_force_y = settings.vector_force_y;
+
         self.gamma_hidden = settings.gamma_hidden;
         self.debug_per_segment = settings.debug_per_segment;
+
         self.gamma_vis_min = settings.gamma_vis_min;
         self.gamma_vis_max = settings.gamma_vis_max;
         self.alpha_show = settings.alpha_show;
@@ -1684,13 +1664,17 @@ impl GpuState {
         self.gamma_show = settings.gamma_show;
         self.slope_lighting = settings.slope_lighting;
         self.slope_lighting_strength = settings.slope_lighting_strength;
+
         self.trail_diffusion = settings.trail_diffusion;
         self.trail_decay = settings.trail_decay;
         self.trail_opacity = settings.trail_opacity;
         self.trail_show = settings.trail_show;
+
         self.interior_isotropic = settings.interior_isotropic;
         self.ignore_stop_codons = settings.ignore_stop_codons;
         self.require_start_codon = settings.require_start_codon;
+        self.asexual_reproduction = settings.asexual_reproduction;
+
         self.alpha_rain_variation = settings.alpha_rain_variation;
         self.beta_rain_variation = settings.beta_rain_variation;
         self.alpha_rain_phase = settings.alpha_rain_phase;
@@ -1698,11 +1682,13 @@ impl GpuState {
         self.alpha_rain_freq = settings.alpha_rain_freq;
         self.beta_rain_freq = settings.beta_rain_freq;
         self.difficulty = settings.difficulty;
+
         self.background_color = settings.background_color;
         self.alpha_blend_mode = settings.alpha_blend_mode;
         self.beta_blend_mode = settings.beta_blend_mode;
         self.gamma_blend_mode = settings.gamma_blend_mode;
         self.slope_blend_mode = settings.slope_blend_mode;
+
         self.alpha_color = settings.alpha_color;
         self.beta_color = settings.beta_color;
         self.gamma_color = settings.gamma_color;
@@ -1710,19 +1696,29 @@ impl GpuState {
         self.alpha_gamma_adjust = settings.alpha_gamma_adjust;
         self.beta_gamma_adjust = settings.beta_gamma_adjust;
         self.gamma_gamma_adjust = settings.gamma_gamma_adjust;
+
         self.light_direction = settings.light_direction;
         self.light_power = settings.light_power;
+
         self.agent_blend_mode = settings.agent_blend_mode;
         self.agent_color = settings.agent_color;
         self.agent_color_blend = settings.agent_color_blend;
         self.agent_trail_decay = settings.agent_trail_decay;
 
+        // Apply FPS cap changes immediately.
+        self.update_present_mode();
+
         if let Some(path) = &self.alpha_rain_map_path.clone() {
-             let _ = self.load_alpha_rain_map(path);
+            let _ = self.load_alpha_rain_map(path);
         }
         if let Some(path) = &self.beta_rain_map_path.clone() {
-             let _ = self.load_beta_rain_map(path);
+            let _ = self.load_beta_rain_map(path);
         }
+    }
+
+    fn load_settings(&mut self, path: &Path) -> anyhow::Result<()> {
+        let settings = SimulationSettings::load_from_disk(path)?;
+           self.apply_settings(&settings);
 
         Ok(())
     }
@@ -2225,7 +2221,7 @@ impl GpuState {
             inspector_zoom: 1.0,
             agent_trail_decay: 1.0,  // Default to instant clear (original behavior)
             fluid_show: 0,  // Fluid visualization disabled by default
-            _padding2: 0.0,
+            fluid_wind_push_strength: 0.0005,
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2765,7 +2761,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: fluid_dye_a.as_entire_binding(),
+                    resource: fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -2844,7 +2840,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: fluid_dye_a.as_entire_binding(),
+                    resource: fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -3272,7 +3268,7 @@ impl GpuState {
         let fluid_params = FluidParams {
             time: 0.0,
             dt: 0.016,
-            decay: 0.9995,
+            decay: 0.995,
             grid_size: FLUID_GRID_SIZE,
             mouse: [0.0; 4],
             splat: [0.0; 4],
@@ -3516,6 +3512,15 @@ impl GpuState {
             layout: Some(&fluid_pipeline_layout),
             module: &fluid_shader,
             entry_point: "inject_test_force",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_fumarole_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Inject Fumarole Force Vector"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "inject_fumarole_force_vector",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -3981,6 +3986,14 @@ impl GpuState {
             slope_debug_visual: settings.slope_debug_visual,
             rain_debug_visual: settings.rain_debug_visual,
             fluid_show: settings.fluid_show,
+            fluid_dt: settings.fluid_dt,
+            fluid_decay: settings.fluid_decay,
+            fluid_jacobi_iters: settings.fluid_jacobi_iters,
+            fluid_vorticity: settings.fluid_vorticity,
+            fluid_viscosity: settings.fluid_viscosity,
+            fluid_ooze_rate: settings.fluid_ooze_rate,
+            fluid_ooze_fade_rate: settings.fluid_ooze_fade_rate,
+            fluid_wind_push_strength: settings.fluid_wind_push_strength,
             fluid_velocity_a,
             fluid_velocity_b,
             fluid_pressure_a,
@@ -4006,6 +4019,7 @@ impl GpuState {
             fluid_copy_dye_to_forces_pipeline,
             fluid_clear_forces_pipeline,
             fluid_clear_force_vectors_pipeline,
+            fluid_fumarole_pipeline,
             fluid_clear_velocity_pipeline,
             fluid_inject_dye_pipeline,
             fluid_advect_dye_pipeline,
@@ -4430,7 +4444,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.fluid_dye_a.as_entire_binding(),
+                    resource: self.fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -4508,7 +4522,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.fluid_dye_a.as_entire_binding(),
+                    resource: self.fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -4688,6 +4702,14 @@ impl GpuState {
             slope_debug_visual: self.slope_debug_visual,
             rain_debug_visual: self.rain_debug_visual,
             fluid_show: self.fluid_show,
+            fluid_dt: self.fluid_dt,
+            fluid_decay: self.fluid_decay,
+            fluid_jacobi_iters: self.fluid_jacobi_iters,
+            fluid_vorticity: self.fluid_vorticity,
+            fluid_viscosity: self.fluid_viscosity,
+            fluid_ooze_rate: self.fluid_ooze_rate,
+            fluid_ooze_fade_rate: self.fluid_ooze_fade_rate,
+            fluid_wind_push_strength: self.fluid_wind_push_strength,
             vector_force_power: self.vector_force_power,
             vector_force_x: self.vector_force_x,
             vector_force_y: self.vector_force_y,
@@ -5258,7 +5280,7 @@ impl GpuState {
             inspector_zoom: self.inspector_zoom,
             agent_trail_decay: self.agent_trail_decay,
             fluid_show: if self.fluid_show { 1 } else { 0 },
-            _padding2: 0.0,
+            fluid_wind_push_strength: self.fluid_wind_push_strength,
         };
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
@@ -5278,11 +5300,17 @@ impl GpuState {
 
             let fluid_params = FluidParams {
                 time: self.epoch as f32,
-                dt: 0.016,
-                decay: 0.995,
+                dt: self.fluid_dt,
+                decay: self.fluid_decay,
                 grid_size: FLUID_GRID_SIZE,
                 mouse: [0.0; 4],
-                splat: [0.0; 4],
+                // x = env ooze rate; y = env dye fade rate; z = vorticity confinement; w = viscosity (nu)
+                splat: [
+                    self.fluid_ooze_rate,
+                    self.fluid_ooze_fade_rate,
+                    self.fluid_vorticity,
+                    self.fluid_viscosity,
+                ],
             };
 
             self.queue.write_buffer(&self.fluid_params_buffer, 0, bytemuck::bytes_of(&fluid_params));
@@ -5453,6 +5481,11 @@ impl GpuState {
                     let bg_ba = &self.fluid_bind_group_ba;
 
                     // Combine force_vectors (written in simulation pass) into fluid_forces.
+                    // Inject a deterministic point-force "fumarole" for debugging/visual validation.
+                    cpass.set_pipeline(&self.fluid_fumarole_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(1, 1, 1);
+
                     cpass.set_pipeline(&self.fluid_generate_forces_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
@@ -5497,9 +5530,9 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
-                    // 7. Jacobi iterations for pressure (31 iterations)
-                    const JACOBI_ITERS: u32 = 31;
-                    for i in 0..JACOBI_ITERS {
+                    // 7. Jacobi iterations for pressure
+                    let jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
+                    for i in 0..jacobi_iters {
                         let bg = if (i & 1) == 0 { bg_ab } else { bg_ba };
                         cpass.set_pipeline(&self.fluid_jacobi_pressure_pipeline);
                         cpass.set_bind_group(0, bg, &[]);
@@ -5618,8 +5651,8 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
-                    const JACOBI_ITERS: u32 = 31;
-                    for i in 0..JACOBI_ITERS {
+                    let jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
+                    for i in 0..jacobi_iters {
                         let bg = if (i & 1) == 0 { bg_ab } else { bg_ba };
                         cpass.set_pipeline(&self.fluid_jacobi_pressure_pipeline);
                         cpass.set_bind_group(0, bg, &[]);
@@ -6182,86 +6215,7 @@ impl GpuState {
 
         // Apply loaded settings only if they exist in the snapshot (backwards compatibility)
         if let Some(settings) = &snapshot.settings {
-            self.camera_zoom = settings.camera_zoom;
-            self.spawn_probability = settings.spawn_probability;
-            self.death_probability = settings.death_probability;
-            self.mutation_rate = settings.mutation_rate;
-            self.auto_replenish = settings.auto_replenish;
-            self.diffusion_interval = settings.diffusion_interval;
-            self.slope_interval = settings.slope_interval;
-            self.alpha_blur = settings.alpha_blur;
-            self.beta_blur = settings.beta_blur;
-            self.gamma_blur = settings.gamma_blur;
-            self.alpha_slope_bias = settings.alpha_slope_bias;
-            self.beta_slope_bias = settings.beta_slope_bias;
-            self.alpha_multiplier = settings.alpha_multiplier;
-            self.beta_multiplier = settings.beta_multiplier;
-            self.alpha_rain_map_path = settings.alpha_rain_map_path.clone();
-            self.beta_rain_map_path = settings.beta_rain_map_path.clone();
-            self.chemical_slope_scale_alpha = settings.chemical_slope_scale_alpha;
-            self.chemical_slope_scale_beta = settings.chemical_slope_scale_beta;
-            self.alpha_noise_scale = settings.alpha_noise_scale;
-            self.beta_noise_scale = settings.beta_noise_scale;
-            self.gamma_noise_scale = settings.gamma_noise_scale;
-            self.noise_power = settings.noise_power;
-            self.food_power = settings.food_power;
-            self.poison_power = settings.poison_power;
-            self.amino_maintenance_cost = settings.amino_maintenance_cost;
-            self.pairing_cost = settings.pairing_cost;
-            self.prop_wash_strength = settings.prop_wash_strength;
-            self.repulsion_strength = settings.repulsion_strength;
-            self.agent_repulsion_strength = settings.agent_repulsion_strength;
-            self.limit_fps = settings.limit_fps;
-            self.limit_fps_25 = settings.limit_fps_25;
-            self.render_interval = settings.render_interval;
-            self.gamma_debug_visual = settings.gamma_debug_visual;
-            self.slope_debug_visual = settings.slope_debug_visual;
-            self.gamma_hidden = settings.gamma_hidden;
-            self.debug_per_segment = settings.debug_per_segment;
-            self.gamma_vis_min = settings.gamma_vis_min;
-            self.gamma_vis_max = settings.gamma_vis_max;
-            self.alpha_show = settings.alpha_show;
-            self.beta_show = settings.beta_show;
-            self.gamma_show = settings.gamma_show;
-            self.slope_lighting = settings.slope_lighting;
-            self.slope_lighting_strength = settings.slope_lighting_strength;
-            self.trail_diffusion = settings.trail_diffusion;
-            self.trail_decay = settings.trail_decay;
-            self.trail_opacity = settings.trail_opacity;
-            self.trail_show = settings.trail_show;
-            self.interior_isotropic = settings.interior_isotropic;
-            self.ignore_stop_codons = settings.ignore_stop_codons;
-            self.require_start_codon = settings.require_start_codon;
-            self.alpha_rain_variation = settings.alpha_rain_variation;
-            self.beta_rain_variation = settings.beta_rain_variation;
-            self.alpha_rain_phase = settings.alpha_rain_phase;
-            self.beta_rain_phase = settings.beta_rain_phase;
-            self.alpha_rain_freq = settings.alpha_rain_freq;
-            self.beta_rain_freq = settings.beta_rain_freq;
-            self.difficulty = settings.difficulty.clone();
-            self.background_color = settings.background_color;
-            self.alpha_blend_mode = settings.alpha_blend_mode;
-            self.beta_blend_mode = settings.beta_blend_mode;
-            self.gamma_blend_mode = settings.gamma_blend_mode;
-            self.slope_blend_mode = settings.slope_blend_mode;
-            self.alpha_color = settings.alpha_color;
-            self.beta_color = settings.beta_color;
-            self.gamma_color = settings.gamma_color;
-            self.grid_interpolation = settings.grid_interpolation;
-            self.alpha_gamma_adjust = settings.alpha_gamma_adjust;
-            self.beta_gamma_adjust = settings.beta_gamma_adjust;
-            self.gamma_gamma_adjust = settings.gamma_gamma_adjust;
-            self.light_direction = settings.light_direction;
-            self.agent_blend_mode = settings.agent_blend_mode;
-            self.agent_color = settings.agent_color;
-            self.agent_color_blend = settings.agent_color_blend;
-
-            if let Some(path) = &settings.alpha_rain_map_path {
-                 let _ = self.load_alpha_rain_map(path);
-            }
-            if let Some(path) = &settings.beta_rain_map_path {
-                 let _ = self.load_beta_rain_map(path);
-            }
+            self.apply_settings(settings);
         } else {
             println!("ΓÜá Loaded snapshot without settings (old format) - using current settings");
         }
@@ -6434,7 +6388,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.fluid_dye_a.as_entire_binding(),
+                    resource: self.fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -6514,7 +6468,7 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: self.fluid_dye_a.as_entire_binding(),
+                    resource: self.fluid_velocity_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -7654,6 +7608,7 @@ fn main() {
                                                     ("Evolution", egui::Color32::from_rgb(60, 55, 50)),
                                                     ("Difficulty", egui::Color32::from_rgb(60, 50, 50)),
                                                     ("Visualization", egui::Color32::from_rgb(55, 55, 55)),
+                                                    ("Fluid", egui::Color32::from_rgb(50, 55, 60)),
                                                 ];
 
                                                 for (idx, (name, color)) in tab_colors.iter().enumerate() {
@@ -7677,6 +7632,7 @@ fn main() {
                                                 3 => egui::Color32::from_rgb(60, 55, 50),  // Evolution - orange-gray
                                                 4 => egui::Color32::from_rgb(60, 50, 50),  // Difficulty - red-gray
                                                 5 => egui::Color32::from_rgb(55, 55, 55),  // Visualization - neutral gray
+                                                6 => egui::Color32::from_rgb(50, 55, 60),  // Fluid - blue-gray
                                                 _ => egui::Color32::from_rgb(50, 50, 50),
                                             };
 
@@ -7706,89 +7662,7 @@ fn main() {
                                                                     .add_filter("JSON", &["json"])
                                                                     .save_file()
                                                                 {
-                                                                    let settings = SimulationSettings {
-                                                                        camera_zoom: state.camera_zoom,
-                                                                        spawn_probability: state.spawn_probability,
-                                                                        death_probability: state.death_probability,
-                                                                        mutation_rate: state.mutation_rate,
-                                                                        auto_replenish: state.auto_replenish,
-                                                                        diffusion_interval: state.diffusion_interval,
-                                                                        slope_interval: state.slope_interval,
-                                                                        alpha_blur: state.alpha_blur,
-                                                                        beta_blur: state.beta_blur,
-                                                                        gamma_blur: state.gamma_blur,
-                                                                        alpha_slope_bias: state.alpha_slope_bias,
-                                                                        beta_slope_bias: state.beta_slope_bias,
-                                                                        alpha_multiplier: state.alpha_multiplier,
-                                                                        beta_multiplier: state.beta_multiplier,
-                                                                        alpha_rain_map_path: state.alpha_rain_map_path.clone(),
-                                                                        beta_rain_map_path: state.beta_rain_map_path.clone(),
-                                                                        chemical_slope_scale_alpha: state.chemical_slope_scale_alpha,
-                                                                        chemical_slope_scale_beta: state.chemical_slope_scale_beta,
-                                                                        alpha_noise_scale: state.alpha_noise_scale,
-                                                                        beta_noise_scale: state.beta_noise_scale,
-                                                                        gamma_noise_scale: state.gamma_noise_scale,
-                                                                        noise_power: state.noise_power,
-                                                                        food_power: state.food_power,
-                                                                        poison_power: state.poison_power,
-                                                                        amino_maintenance_cost: state.amino_maintenance_cost,
-                                                                        pairing_cost: state.pairing_cost,
-                                                                        prop_wash_strength: state.prop_wash_strength,
-                                                                        repulsion_strength: state.repulsion_strength,
-                                                                        agent_repulsion_strength: state.agent_repulsion_strength,
-                                                                        limit_fps: state.limit_fps,
-                                                                        limit_fps_25: state.limit_fps_25,
-                                                                        render_interval: state.render_interval,
-                                                                        gamma_debug_visual: state.gamma_debug_visual,
-                                                                        slope_debug_visual: state.slope_debug_visual,
-                                                                        rain_debug_visual: state.rain_debug_visual,
-                                                                        fluid_show: state.fluid_show,
-                                                                        vector_force_power: state.vector_force_power,
-                                                                        vector_force_x: state.vector_force_x,
-                                                                        vector_force_y: state.vector_force_y,
-                                                                        gamma_hidden: state.gamma_hidden,
-                                                                        debug_per_segment: state.debug_per_segment,
-                                                                        gamma_vis_min: state.gamma_vis_min,
-                                                                        gamma_vis_max: state.gamma_vis_max,
-                                                                        alpha_show: state.alpha_show,
-                                                                        beta_show: state.beta_show,
-                                                                        gamma_show: state.gamma_show,
-                                                                        slope_lighting: state.slope_lighting,
-                                                                        slope_lighting_strength: state.slope_lighting_strength,
-                                                                        trail_diffusion: state.trail_diffusion,
-                                                                        trail_decay: state.trail_decay,
-                                                                        trail_opacity: state.trail_opacity,
-                                                                        trail_show: state.trail_show,
-                                                                        interior_isotropic: state.interior_isotropic,
-                                                                        ignore_stop_codons: state.ignore_stop_codons,
-                                                                        require_start_codon: state.require_start_codon,
-                                                                        asexual_reproduction: state.asexual_reproduction,
-                                                                        alpha_rain_variation: state.alpha_rain_variation,
-                                                                        beta_rain_variation: state.beta_rain_variation,
-                                                                        alpha_rain_phase: state.alpha_rain_phase,
-                                                                        beta_rain_phase: state.beta_rain_phase,
-                                                                        alpha_rain_freq: state.alpha_rain_freq,
-                                                                        beta_rain_freq: state.beta_rain_freq,
-                                                                        difficulty: state.difficulty.clone(),
-                                                                        background_color: state.background_color,
-                                                                        alpha_blend_mode: state.alpha_blend_mode,
-                                                                        beta_blend_mode: state.beta_blend_mode,
-                                                                        gamma_blend_mode: state.gamma_blend_mode,
-                                                                        slope_blend_mode: state.slope_blend_mode,
-                                                                        alpha_color: state.alpha_color,
-                                                                        beta_color: state.beta_color,
-                                                                        gamma_color: state.gamma_color,
-                                                                        grid_interpolation: state.grid_interpolation,
-                                                                        alpha_gamma_adjust: state.alpha_gamma_adjust,
-                                                                        beta_gamma_adjust: state.beta_gamma_adjust,
-                                                                        gamma_gamma_adjust: state.gamma_gamma_adjust,
-                                                                        light_direction: state.light_direction,
-                                                                        light_power: state.light_power,
-                                                                        agent_blend_mode: state.agent_blend_mode,
-                                                                        agent_color: state.agent_color,
-                                                                        agent_color_blend: state.agent_color_blend,
-                                                                        agent_trail_decay: state.agent_trail_decay,
-                                                                    };
+                                                                    let settings = state.current_settings();
                                                                     if let Err(err) = settings.save_to_disk(&path) {
                                                                         eprintln!("Failed to save settings: {err:?}");
                                                                     }
@@ -7800,76 +7674,7 @@ fn main() {
                                                                     .pick_file()
                                                                 {
                                                                     if let Ok(settings) = SimulationSettings::load_from_disk(&path) {
-                                                                        state.camera_zoom = settings.camera_zoom;
-                                                                        state.spawn_probability = settings.spawn_probability;
-                                                                        state.death_probability = settings.death_probability;
-                                                                        state.mutation_rate = settings.mutation_rate;
-                                                                        state.auto_replenish = settings.auto_replenish;
-                                                                        state.diffusion_interval = settings.diffusion_interval;
-                                                                        state.slope_interval = settings.slope_interval;
-                                                                        state.alpha_blur = settings.alpha_blur;
-                                                                        state.beta_blur = settings.beta_blur;
-                                                                        state.gamma_blur = settings.gamma_blur;
-                                                                        state.alpha_slope_bias = settings.alpha_slope_bias;
-                                                                        state.beta_slope_bias = settings.beta_slope_bias;
-                                                                        state.alpha_multiplier = settings.alpha_multiplier;
-                                                                        state.beta_multiplier = settings.beta_multiplier;
-                                                                        state.alpha_rain_map_path = settings.alpha_rain_map_path.clone();
-                                                                        state.beta_rain_map_path = settings.beta_rain_map_path.clone();
-                                                                        state.chemical_slope_scale_alpha = settings.chemical_slope_scale_alpha;
-                                                                        state.chemical_slope_scale_beta = settings.chemical_slope_scale_beta;
-                                                                        state.food_power = settings.food_power;
-                                                                        state.poison_power = settings.poison_power;
-                                                                        state.amino_maintenance_cost = settings.amino_maintenance_cost;
-                                                                        state.pairing_cost = settings.pairing_cost;
-                                                                        state.prop_wash_strength = settings.prop_wash_strength;
-                                                                        state.repulsion_strength = settings.repulsion_strength;
-                                                                        state.limit_fps = settings.limit_fps;
-                                                                        state.limit_fps_25 = settings.limit_fps_25;
-                                                                        state.render_interval = settings.render_interval;
-                                                                        state.gamma_debug_visual = settings.gamma_debug_visual;
-                                                                        state.slope_debug_visual = settings.slope_debug_visual;
-                                                                        state.gamma_hidden = settings.gamma_hidden;
-                                                                        state.debug_per_segment = settings.debug_per_segment;
-                                                                        state.gamma_vis_min = settings.gamma_vis_min;
-                                                                        state.gamma_vis_max = settings.gamma_vis_max;
-                                                                        state.alpha_show = settings.alpha_show;
-                                                                        state.beta_show = settings.beta_show;
-                                                                        state.gamma_show = settings.gamma_show;
-                                                                        state.slope_lighting = settings.slope_lighting;
-                                                                        state.slope_lighting_strength = settings.slope_lighting_strength;
-                                                                        state.trail_diffusion = settings.trail_diffusion;
-                                                                        state.trail_decay = settings.trail_decay;
-                                                                        state.trail_opacity = settings.trail_opacity;
-                                                                        state.trail_show = settings.trail_show;
-                                                                        state.interior_isotropic = settings.interior_isotropic;
-                                                                        state.ignore_stop_codons = settings.ignore_stop_codons;
-                                                                        state.require_start_codon = settings.require_start_codon;
-                                                                        state.alpha_rain_variation = settings.alpha_rain_variation;
-                                                                        state.beta_rain_variation = settings.beta_rain_variation;
-                                                                        state.alpha_rain_phase = settings.alpha_rain_phase;
-                                                                        state.beta_rain_phase = settings.beta_rain_phase;
-                                                                        state.alpha_rain_freq = settings.alpha_rain_freq;
-                                                                        state.beta_rain_freq = settings.beta_rain_freq;
-                                                                        state.difficulty = settings.difficulty;
-                                                                        state.background_color = settings.background_color;
-                                                                        state.alpha_blend_mode = settings.alpha_blend_mode;
-                                                                        state.beta_blend_mode = settings.beta_blend_mode;
-                                                                        state.gamma_blend_mode = settings.gamma_blend_mode;
-                                                                        state.alpha_color = settings.alpha_color;
-                                                                        state.beta_color = settings.beta_color;
-                                                                        state.gamma_color = settings.gamma_color;
-                                                                        state.grid_interpolation = settings.grid_interpolation;
-                                                                        state.alpha_gamma_adjust = settings.alpha_gamma_adjust;
-                                                                        state.beta_gamma_adjust = settings.beta_gamma_adjust;
-                                                                        state.gamma_gamma_adjust = settings.gamma_gamma_adjust;
-
-                                                                        if let Some(path) = &settings.alpha_rain_map_path {
-                                                                            let _ = state.load_alpha_rain_map(path);
-                                                                        }
-                                                                        if let Some(path) = &settings.beta_rain_map_path {
-                                                                            let _ = state.load_beta_rain_map(path);
-                                                                        }
+                                                                        state.apply_settings(&settings);
                                                                     } else {
                                                                         eprintln!("Failed to load settings from {}", path.display());
                                                                     }
@@ -8236,31 +8041,6 @@ fn main() {
                                                                 .text("Vector Force Y"),
                                                         );
                                                         ui.label("Constant force applied to all agents (wind/gravity effect)");
-
-                                                        ui.separator();
-                                                        ui.heading("Trail Layer Controls");
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.trail_diffusion,
-                                                                0.0..=1.0,
-                                                            )
-                                                            .text("Trail Diffusion"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.trail_decay,
-                                                                0.0..=1.0,
-                                                            )
-                                                            .text("Trail Fade Rate"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.trail_opacity,
-                                                                0.0..=2.0,
-                                                            )
-                                                            .text("Trail Opacity"),
-                                                        );
-                                                        ui.checkbox(&mut state.trail_show, "Show Trail Only");
                                                     });
                                                 }
                                                 2 => {
@@ -8289,6 +8069,36 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(&mut state.gamma_blur, 0.9..=1.0)
                                                                 .text("Env Persistence"),
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.fluid_ooze_rate, 0.0..=5.0)
+                                                                .text("Env Ooze Rate"),
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_ooze_fade_rate,
+                                                                0.0..=10.0,
+                                                            )
+                                                            .text("Env Ooze Fade Rate"),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Slope Mixing");
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.chemical_slope_scale_alpha,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Alpha Slope Mix"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.chemical_slope_scale_beta,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Beta Slope Mix"),
                                                         );
 
                                                         ui.separator();
@@ -8835,9 +8645,97 @@ fn main() {
                                                         ).on_hover_text("0.0 = persistent trail, 1.0 = instant clear (no trail)");
 
                                                         ui.separator();
+                                                        ui.heading("Trail Layer");
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.trail_diffusion,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Trail Diffusion"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.trail_decay,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Trail Fade Rate"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.trail_opacity,
+                                                                0.0..=2.0,
+                                                            )
+                                                            .text("Trail Opacity"),
+                                                        );
+                                                        ui.checkbox(
+                                                            &mut state.trail_show,
+                                                            "Show Trails Only (overrides alpha/beta/gamma; black background)",
+                                                        );
+                                                        if state.trail_show {
+                                                            ui.label(
+                                                                "Note: This mode intentionally hides the other layers. Turn it off to see alpha/beta/gamma (and the fluid overlay) again.",
+                                                            );
+                                                        }
+
+                                                        ui.separator();
                                                         ui.heading("Fluid Simulation");
                                                         ui.checkbox(&mut state.fluid_show, "Show Fluid Overlay")
                                                             .on_hover_text("Visualize propeller-driven fluid simulation (experimental)");
+                                                    });
+                                                }
+                                                6 => {
+                                                    // Fluid tab
+                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                                        ui.heading("Fluid Configuration");
+
+                                                        ui.separator();
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.fluid_dt, 0.001..=0.05)
+                                                                .text("dt")
+                                                                .clamp_to_range(true),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.fluid_decay, 0.9..=1.0)
+                                                                .text("Decay")
+                                                                .clamp_to_range(true),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Pressure Jacobi Iters");
+                                                            ui.add(
+                                                                egui::DragValue::new(&mut state.fluid_jacobi_iters)
+                                                                    .clamp_range(1..=128)
+                                                                    .speed(1.0),
+                                                            );
+                                                        });
+                                                        ui.label("Higher iters = less compressible (more GPU cost)");
+
+                                                        ui.separator();
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.fluid_vorticity, 0.0..=10.0)
+                                                                .text("Vorticity")
+                                                                .clamp_to_range(true),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.fluid_viscosity, 0.0..=1.0)
+                                                                .text("Viscosity")
+                                                                .clamp_to_range(true),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Agent Wind");
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_wind_push_strength,
+                                                                0.0..=2.0,
+                                                            )
+                                                            .text("Fluid Push Strength")
+                                                            .clamp_to_range(true),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Global multiplier for how strongly the fluid vector field pushes agents (in addition to per-amino coupling).",
+                                                        );
                                                     });
                                                 }
                                                 _ => {}

@@ -42,8 +42,15 @@
 
 // Stability limits
 const MAX_DT: f32 = 0.02;         // Clamp dt spikes (e.g., window stalls)
-const MAX_FORCE: f32 = 20000.0;   // Clamp injected force magnitude per cell
-const MAX_VEL: f32 = 200.0;       // Clamp velocity magnitude per cell
+const MAX_FORCE: f32 = 200000.0;  // Clamp injected force magnitude per cell
+const MAX_VEL: f32 = 2000.0;      // Clamp velocity magnitude per cell
+
+// Debug / test driver: deterministic “fumarole” point force injector.
+// Single cell force vector at ~1/3 of the sim window.
+const FUMAROLE_ENABLED: bool = true;
+const FUMAROLE_FORCE: vec2<f32> = vec2<f32>(0.0, 1500000.0); // +Y in world/agent coords (updraft)
+const FUMAROLE_X_FRAC: f32 = 0.3333333;
+const FUMAROLE_Y_FRAC: f32 = 0.3333333;
 
 // Slope-driven obstacles (porous steepness)
 // If enabled, steeper terrain becomes less permeable (more like rock / barrier).
@@ -60,12 +67,10 @@ const SLOPE_FORCE_ENABLED: bool = true;
 const SLOPE_FORCE_SCALE: f32 = 100.0;
 
 // Dye injection from environment layers (alpha/beta “oozing”)
-const OOZE_RATE: f32 = 0.2;
+// Controlled at runtime via params.splat.x (see FluidParams.splat packing).
 
 // Dye persistence & diffusion tuning
-// Higher values fade less (closer to 1.0).
-const DYE_INJECT_DECAY: f32 = 1;
-const DYE_ADVECT_DECAY: f32 = 0.999;
+// Controlled at runtime via params.splat.y (fade rate, 0 = no fade).
 // 0..1: how much we blend towards a 4-neighbor blur each frame.
 const DYE_DIFFUSE_MIX: f32 = 0.01;
 
@@ -114,8 +119,8 @@ struct FluidParams {
     grid_size: u32,
     // mouse.xy in grid coords (0..grid), mouse.zw = mouse velocity in grid units/sec
     mouse: vec4<f32>,
-    // splat.x = radius (cells), splat.y = force scale,
-    // splat.z = vorticity confinement strength (0 disables), splat.w = mouse_down (0/1)
+    // splat.x = env ooze rate, splat.y = env dye fade rate,
+    // splat.z = vorticity confinement strength (0 disables), splat.w = viscosity (nu, 0 disables)
     splat: vec4<f32>,
 }
 @group(0) @binding(3) var<uniform> params: FluidParams;
@@ -185,6 +190,30 @@ fn clear_fluid_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
     fluid_force_vectors[idx] = vec2<f32>(0.0, 0.0);
 }
 
+// Inject a single point force into the intermediate force buffer.
+// This is meant as a deterministic test driver so you can see how the fluid affects agents.
+@compute @workgroup_size(1, 1, 1)
+fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (!FUMAROLE_ENABLED) {
+        return;
+    }
+
+    // Single-invocation kernel: only one thread writes the single-cell force.
+    if (gid.x != 0u || gid.y != 0u || gid.z != 0u) {
+        return;
+    }
+
+    let size_f = f32(FLUID_GRID_SIZE);
+    // Keep it away from the edges as requested.
+    let fx_i = clamp(i32(round(size_f * FUMAROLE_X_FRAC)), 1, i32(FLUID_GRID_SIZE) - 2);
+    let fy_i = clamp(i32(round(size_f * FUMAROLE_Y_FRAC)), 1, i32(FLUID_GRID_SIZE) - 2);
+    let fx = u32(fx_i);
+    let fy = u32(fy_i);
+
+    let idx = grid_index(fx, fy);
+    fluid_force_vectors[idx] = fluid_force_vectors[idx] + FUMAROLE_FORCE;
+}
+
 // Combine propeller forces with test force - reads from fluid_force_vectors, writes to fluid_forces
 @compute @workgroup_size(16, 16)
 fn inject_test_force(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -245,10 +274,11 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ooze_beta = b;
     let ooze_alpha = a;
 
-    // Inject proportionally each frame, with mild decay so it doesn't stick forever.
+    // Inject proportionally each frame.
     let dt = clamp(params.dt, 0.0, MAX_DT);
-    var current_dye = dye_in[idx] * DYE_INJECT_DECAY;
-    let injected = vec2<f32>(ooze_beta, ooze_alpha) * (OOZE_RATE * dt);
+    var current_dye = dye_in[idx];
+    let ooze_rate = max(params.splat.x, 0.0);
+    let injected = vec2<f32>(ooze_beta, ooze_alpha) * (ooze_rate * dt);
     current_dye = min(current_dye + injected, vec2<f32>(1.0, 1.0));
 
     // Dye ignores obstacles: don't attenuate by permeability.
@@ -287,8 +317,10 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Sample dye concentration at traced position using bilinear interpolation
     let advected_dye = sample_dye(trace_pos);
 
-    // Apply slight decay to make dye fade over time
-    let decay_factor = DYE_ADVECT_DECAY;
+    // Apply controllable decay to make dye fade over time
+    // splat.y is interpreted as a continuous-time fade rate: dye *= exp(-rate * dt)
+    let fade_rate = max(params.splat.y, 0.0);
+    let decay_factor = exp(-fade_rate * dt);
 
     // Extra diffusion: blend advected dye towards a local 4-neighbor blur.
     // This makes the dye spread out more instead of staying filament-thin.
@@ -1090,7 +1122,7 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let lap = (v_l + v_r + v_b + v_t) - 4.0 * v_c;
 
     // nu is in "cells^2 / second" with dx=1; lower values reduce blur.
-    let nu = 0.05;  // Reduced from 0.35 for less dissipation
+    let nu = max(params.splat.w, 0.0);
     let dt = clamp(params.dt, 0.0, MAX_DT);
     let a = nu * dt;
     velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v_c + a * lap), MAX_VEL) * perm;

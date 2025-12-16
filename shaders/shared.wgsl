@@ -217,7 +217,7 @@ struct SimParams {
     inspector_zoom: f32,
     agent_trail_decay: f32,
     fluid_show: u32,
-    _padding2: f32,
+    fluid_wind_push_strength: f32,
 }
 
 struct EnvironmentInitParams {
@@ -347,6 +347,7 @@ struct AminoAcidProperties {
     is_condenser: bool,
     is_clock: bool,
     parameter1: f32,
+    fluid_wind_coupling: f32,
 }
 
 // ============================================================================
@@ -461,6 +462,9 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     p.energy_absorption_rate = d[3].x; p.beta_absorption_rate = d[3].y; p.beta_damage = d[3].z; p.parameter1 = d[3].w;
     p.signal_decay = d[4].x; p.alpha_left_mult = d[4].y; p.alpha_right_mult = d[4].z; p.beta_left_mult = d[4].w;
     p.beta_right_mult = d[5].x;
+    // Stored in AMINO_DATA[t][5].y (spare slot). If left as 0.0, default to 1.0.
+    let raw_wind_coupling = d[5].y;
+    p.fluid_wind_coupling = select(1.0, raw_wind_coupling, raw_wind_coupling != 0.0);
 
     p.is_propeller          = (f & (1u<<0))  != 0u;
     p.is_mouth              = (f & (1u<<1))  != 0u;

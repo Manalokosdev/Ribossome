@@ -96,26 +96,27 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 agents_in[agent_id].body[i]._pad.x = current_cooldown;
             }
 
-            // Enabler gating like propellers:
-            // Vampire mouths only act when enablers (type 26) are nearby, and their effect
-            // scales with a quadratic amplification of proximity.
+            // Disabler gating:
+            // Vampire mouths act by default, but are suppressed when "inhibitor/enabler" organs
+            // (type 26) are placed nearby on the same agent body.
             let part_pos = agents_in[agent_id].body[i].pos;
-            var amp = 0.0;
+            var block = 0.0;
             for (var j = 0u; j < min(body_count, MAX_BODY_PARTS); j++) {
                 let check_type = get_base_part_type(agents_in[agent_id].body[j].part_type);
-                if (check_type == 26u) {  // Enabler
-                    let enabler_pos = agents_in[agent_id].body[j].pos;
-                    let d = length(part_pos - enabler_pos);
+                if (check_type == 26u) {  // "Enabler" used as disabler for vampire mouths
+                    let disabler_pos = agents_in[agent_id].body[j].pos;
+                    let d = length(part_pos - disabler_pos);
                     if (d < 20.0) {
-                        amp += max(0.0, 1.0 - d / 20.0);
+                        block += max(0.0, 1.0 - d / 20.0);
                     }
                 }
             }
-            amp = min(amp, 1.0);
-            let quadratic_amp = amp * amp;
+            block = min(block, 1.0);
+            let quadratic_block = block * block;
+            let mouth_activity = 1.0 - quadratic_block;
 
-            // Only work if enabled by nearby enablers
-            if (quadratic_amp > 0.0001) {
+            // Only work if not fully suppressed
+            if (mouth_activity > 0.0001) {
 
                 // Get mouth world position
                 let part_pos = part.pos;
@@ -175,12 +176,12 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Only proceed if we can drain this victim AND cooldown is ready
                     if (can_drain && current_cooldown <= 0.0) {
-                        // Vampire drain scales with enabler amplification (like propellers)
+                        // Vampire drain scales down with disabler suppression
                         let victim_energy = agents_in[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
                             // Absorb up to 50% of victim's energy
-                            let absorbed_energy = victim_energy * 0.5 * quadratic_amp;
+                            let absorbed_energy = victim_energy * 0.5 * mouth_activity;
 
                             // Victim loses 1.5x the absorbed energy (75% total damage)
                             let energy_damage = absorbed_energy * 1.5;
@@ -1039,6 +1040,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let world_pos = agent.position + rotated_midpoint;
 
         let part_mass = max(amino_props.mass, 0.01);
+        let part_weight = part_mass / total_mass;
 
         // Slope force per amino acid
         let slope_gradient = read_gamma_slope(grid_index(world_pos));
@@ -1046,10 +1048,41 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         force += slope_force;
         torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
 
+        // Fluid force per amino acid (apply at the same point as slope force)
+        if (params.fluid_wind_push_strength != 0.0) {
+            // Default regular amino acids to coupling=1.0 unless explicitly overridden.
+            let wind_coupling = select(
+                amino_props.fluid_wind_coupling,
+                1.0,
+                (base_type < 20u) && (amino_props.fluid_wind_coupling == 0.0)
+            );
+
+            if (wind_coupling != 0.0) {
+                // Avoid clamping OOB into edge cells (prevents artificial edge wind).
+                if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
+                    let grid_f = f32(FLUID_GRID_SIZE);
+                    let max_idx_f = grid_f - 1.0;
+                    let fluid_grid_x = u32(clamp(world_pos.x / f32(SIM_SIZE) * grid_f, 0.0, max_idx_f));
+                    let fluid_grid_y = u32(clamp(world_pos.y / f32(SIM_SIZE) * grid_f, 0.0, max_idx_f));
+                    let fluid_idx = fluid_grid_y * FLUID_GRID_SIZE + fluid_grid_x;
+
+                    // Fluid velocity is in fluid-cell units; convert to world-units per simulation tick.
+                    let v = fluid_velocity[fluid_idx];
+                    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+                    let v_frame = v * (cell_to_world);
+
+                    // Overdamped: choose force so resulting velocity contribution ~ v_frame scaled.
+                    let wind_force = v_frame * (wind_coupling * part_weight * params.fluid_wind_push_strength) * drag_coefficient;
+                    force += wind_force;
+                    torque += (r_com.x * wind_force.y - r_com.y * wind_force.x);
+                }
+            }
+        }
+
         // Cached amplification for this part (organs will use it, organs may ignore)
         let amplification = amplification_per_part[i];
 
-        let part_weight = part_mass / total_mass;
+
 
     // Propeller force - check if this amino acid provides thrust
     // Propellers only work if agent has enough energy to cover their consumption cost
@@ -1973,15 +2006,16 @@ fn diffuse_grids(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Use fluid forces as a direction field (converted to env-cell units).
     // Keep it bounded so it behaves like a convolution offset, not advection.
-    let v = fluid_forces[fluid_idx] / env_to_fluid;
+    let v = fluid_velocity[fluid_idx] / env_to_fluid;
     let vlen = length(v);
     let dir = select(vec2<f32>(0.0, 0.0), v / vlen, vlen > 1e-6);
 
     // Map magnitude to a small sub-cell offset (in env-cell units).
     // This keeps the effect local and prevents whole-field translation.
-    let dt = max(params.dt, 0.0);
+    // NOTE: The simulation tick is dt-free; scaling by params.dt makes this effect vanish
+    // when dt is 0/unused, so we treat this as a per-tick offset.
     let max_offset = 1.25;
-    let base_offset = clamp(vlen * dt * 0.002, 0.0, max_offset);
+    let base_offset = clamp(vlen * 0.002, 0.0, max_offset);
 
     // Skewed 3-tap kernel along the direction (a directional blur).
     // Equivalent to a convolution where the "center" is shifted by the vector field.
