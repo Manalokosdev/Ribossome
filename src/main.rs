@@ -44,6 +44,11 @@ const AUTO_SNAPSHOT_FILE_NAME: &str = "autosave_snapshot.png";
 const AUTO_SNAPSHOT_INTERVAL: u64 = 10000; // Save every 10,000 epochs
 const RAIN_THUMB_SIZE: usize = 128;
 
+// Selected-agent CPU readback: use a small ring buffer so we can request ~60Hz updates
+// without stalling on an in-flight map.
+const SELECTED_AGENT_READBACK_SLOTS: usize = 4;
+const SELECTED_AGENT_READBACK_INTERVAL_MS: u64 = 16; // ~60Hz
+
 // Shared genome/body sizing (must stay in sync with shader constants)
 const MAX_BODY_PARTS: usize = 64;
 const GENOME_BYTES: usize = 256; // ASCII bases including padding
@@ -361,6 +366,115 @@ fn rgb_to_color32_with_alpha(rgb: [f32; 3], alpha: f32) -> egui::Color32 {
         rgb_component(rgb[2]),
         rgb_component(alpha),
     )
+}
+
+#[inline]
+fn genome_get_base_ascii(genome: &[u32; GENOME_WORDS], idx: usize) -> u8 {
+    if idx >= GENOME_BYTES {
+        return b'X';
+    }
+    let word = genome[idx / 4];
+    let shift = (idx % 4) * 8;
+    ((word >> shift) & 0xFF) as u8
+}
+
+#[inline]
+fn genome_base_color(base: u8) -> egui::Color32 {
+    match base {
+        b'A' => egui::Color32::from_rgb(0, 255, 0),
+        b'U' => egui::Color32::from_rgb(0, 128, 255),
+        b'G' => egui::Color32::from_rgb(255, 166, 0),
+        b'C' => egui::Color32::from_rgb(255, 0, 0),
+        b'X' => egui::Color32::from_rgb(128, 128, 128),
+        _ => egui::Color32::from_rgb(80, 80, 80),
+    }
+}
+
+#[inline]
+fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
+    // 0–19: amino acids; 20–41: organs (colors mirror shaders/shared.wgsl AMINO_DATA[*][2].xyz)
+    if (base_type as usize) < AMINO_COLORS.len() {
+        return AMINO_COLORS[base_type as usize];
+    }
+
+    match base_type {
+        20 => [1.0, 1.0, 0.0],   // mouth
+        21 => [0.0, 0.0, 1.0],   // propeller
+        22 => [0.0, 1.0, 0.0],   // alpha sensor
+        23 => [1.0, 0.0, 0.0],   // beta sensor
+        24 => [0.6, 0.0, 0.8],   // energy sensor
+        25 => [0.0, 1.0, 1.0],   // legacy displacer (organ 25 removed; may appear in old snapshots)
+        26 => [1.0, 1.0, 1.0],   // enabler
+        27 => [0.5, 0.5, 0.5],
+        28 => [1.0, 0.5, 0.0],   // storage
+        29 => [1.0, 0.4, 0.7],   // poison resistance
+        30 => [1.0, 0.0, 1.0],   // chiral flipper
+        31 => [1.0, 0.0, 1.0],   // clock
+        32 => [0.0, 0.8, 0.8],   // slope sensor
+        33 => [1.0, 0.0, 0.0],   // vampire mouth
+        34 => [0.2, 0.0, 0.2],
+        35 => [0.26, 0.26, 0.26],
+        36 => [0.5, 0.5, 0.5],
+        37 => [0.8, 0.6, 0.2],
+        38 => [0.2, 0.9, 0.3],
+        39 => [0.3, 1.0, 0.4],
+        40 => [0.9, 0.2, 0.3],
+        41 => [1.0, 0.3, 0.4],
+        _ => DEFAULT_PART_COLOR,
+    }
+}
+
+#[inline]
+fn part_base_color32(base_type: u32) -> egui::Color32 {
+    rgb_to_color32(part_base_color_rgb(base_type))
+}
+
+#[inline]
+fn part_base_name(base_type: u32) -> &'static str {
+    match base_type {
+        0 => "A",
+        1 => "C",
+        2 => "D",
+        3 => "E",
+        4 => "F",
+        5 => "G",
+        6 => "H",
+        7 => "I",
+        8 => "K",
+        9 => "L",
+        10 => "M",
+        11 => "N",
+        12 => "P",
+        13 => "Q",
+        14 => "R",
+        15 => "S",
+        16 => "T",
+        17 => "V",
+        18 => "W",
+        19 => "Y",
+        20 => "Mouth",
+        21 => "Propeller",
+        22 => "Alpha Sensor",
+        23 => "Beta Sensor",
+        24 => "Energy Sensor",
+        25 => "Legacy Displacer",
+        26 => "Enabler",
+        28 => "Storage",
+        29 => "Poison Resistance",
+        30 => "Chiral Flipper",
+        31 => "Clock",
+        32 => "Slope Sensor",
+        33 => "Vampire Mouth",
+        34 => "Agent Alpha Sensor",
+        35 => "Agent Beta Sensor",
+        36 => "Pairing Sensor",
+        37 => "Trail Energy Sensor",
+        38 => "Alpha Magnitude Sensor",
+        39 => "Alpha Magnitude Sensor (var)",
+        40 => "Beta Magnitude Sensor",
+        41 => "Beta Magnitude Sensor (var)",
+        _ => "Organ",
+    }
 }
 
 struct RainThumbnail {
@@ -841,6 +955,10 @@ struct SimParams {
     // Global multiplier for how much the fluid vector field pushes agents.
     // NOTE: This reuses the previous padding slot to avoid changing buffer layouts.
     fluid_wind_push_strength: f32,
+
+    // Fluid-directed convolution strength (separate from classic diffusion blur).
+    alpha_fluid_convolution: f32,
+    beta_fluid_convolution: f32,
 }
 
 #[repr(C)]
@@ -938,6 +1056,8 @@ struct SimulationSettings {
     slope_interval: u32,
     alpha_blur: f32,
     beta_blur: f32,
+    alpha_fluid_convolution: Option<f32>,
+    beta_fluid_convolution: Option<f32>,
     gamma_blur: f32,
     gamma_shift: f32,
     alpha_slope_bias: f32,
@@ -1031,10 +1151,11 @@ impl Default for SimulationSettings {
             auto_replenish: true,
             diffusion_interval: 1,
             slope_interval: 1,
-            // Repurposed: env spreads by following the fluid-advected dye field.
-            // alpha_blur/beta_blur = follow strength, gamma_blur = persistence.
             alpha_blur: 0.05,
             beta_blur: 0.05,
+            // If omitted in older settings files, we fall back to alpha_blur/beta_blur.
+            alpha_fluid_convolution: Some(0.05),
+            beta_fluid_convolution: Some(0.05),
             gamma_blur: 0.9995,
             gamma_shift: 0.0,
             alpha_slope_bias: -5.0,
@@ -1253,6 +1374,12 @@ impl SimulationSettings {
         self.slope_interval = self.slope_interval.clamp(1, 64);
         self.alpha_blur = self.alpha_blur.clamp(0.0, 1.0);
         self.beta_blur = self.beta_blur.clamp(0.0, 1.0);
+        if let Some(v) = &mut self.alpha_fluid_convolution {
+            *v = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = &mut self.beta_fluid_convolution {
+            *v = v.clamp(0.0, 1.0);
+        }
         self.gamma_blur = self.gamma_blur.clamp(0.0, 1.0);
         self.gamma_shift = self.gamma_shift.clamp(0.0, 1.0);
         self.alpha_slope_bias = self.alpha_slope_bias.clamp(-10.0, 10.0);
@@ -1330,7 +1457,11 @@ struct GpuState {
     debug_readback: wgpu::Buffer,
     agents_readback: wgpu::Buffer, // Readback for agent inspection
     selected_agent_buffer: wgpu::Buffer, // GPU buffer for selected agent
-    selected_agent_readback: wgpu::Buffer, // CPU readback for selected agent
+    selected_agent_readbacks: Vec<Arc<wgpu::Buffer>>, // CPU readbacks (ring) for selected agent
+    selected_agent_readback_pending: Vec<Arc<Mutex<Option<Result<Agent, ()>>>>>,
+    selected_agent_readback_inflight: Vec<bool>,
+    selected_agent_readback_slot: usize,
+    selected_agent_readback_last_request: std::time::Instant,
     new_agents_buffer: wgpu::Buffer, // Buffer for spawned agents
     spawn_readback: wgpu::Buffer,  // Readback for spawn count
     spawn_requests_buffer: wgpu::Buffer, // CPU spawn requests seeds
@@ -1397,8 +1528,8 @@ struct GpuState {
     clear_visual_pipeline: wgpu::ComputePipeline,
     motion_blur_pipeline: wgpu::ComputePipeline,
     clear_agent_grid_pipeline: wgpu::ComputePipeline,
+    clear_inspector_preview_pipeline: wgpu::ComputePipeline,
     render_agents_pipeline: wgpu::ComputePipeline, // Render all agents to agent_grid
-    render_inspector_pipeline: wgpu::ComputePipeline,
     draw_inspector_agent_pipeline: wgpu::ComputePipeline,
     composite_agents_pipeline: wgpu::ComputePipeline,
     gamma_slope_pipeline: wgpu::ComputePipeline,
@@ -1413,12 +1544,14 @@ struct GpuState {
     populate_agent_spatial_grid_pipeline: wgpu::ComputePipeline, // Populate agent spatial grid
     drain_energy_pipeline: wgpu::ComputePipeline, // Vampire mouths drain energy from neighbors
     render_pipeline: wgpu::RenderPipeline,
+    inspector_overlay_pipeline: wgpu::RenderPipeline,
 
     // Bind groups
     compute_bind_group_a: wgpu::BindGroup,
     compute_bind_group_b: wgpu::BindGroup,
     composite_bind_group: wgpu::BindGroup,
     render_bind_group: wgpu::BindGroup,
+    inspector_overlay_bind_group: wgpu::BindGroup,
 
     // State
     ping_pong: bool,
@@ -1448,6 +1581,7 @@ struct GpuState {
     limit_fps: bool,
     limit_fps_25: bool,
     last_frame_time: std::time::Instant,
+    last_present_time: std::time::Instant,
 
     // Simulation speed control
     render_interval: u32, // Draw every N steps in fast mode
@@ -1506,6 +1640,8 @@ struct GpuState {
     // Environment field controls
     alpha_blur: f32,
     beta_blur: f32,
+    alpha_fluid_convolution: f32,
+    beta_fluid_convolution: f32,
     gamma_blur: f32,
     gamma_shift: f32,
     alpha_slope_bias: f32,
@@ -1600,6 +1736,8 @@ struct GpuState {
     destroyed: bool,
 }
 
+const FULL_SPEED_PRESENT_INTERVAL_MICROS: u64 = 16_667; // ~60 Hz
+
 impl GpuState {
     fn save_settings(&self, path: &Path) -> anyhow::Result<()> {
         let settings = self.current_settings();
@@ -1620,6 +1758,12 @@ impl GpuState {
 
         self.alpha_blur = settings.alpha_blur;
         self.beta_blur = settings.beta_blur;
+        self.alpha_fluid_convolution = settings
+            .alpha_fluid_convolution
+            .unwrap_or(settings.alpha_blur);
+        self.beta_fluid_convolution = settings
+            .beta_fluid_convolution
+            .unwrap_or(settings.beta_blur);
         self.gamma_blur = settings.gamma_blur;
         self.gamma_shift = settings.gamma_shift;
         self.alpha_slope_bias = settings.alpha_slope_bias;
@@ -1835,7 +1979,7 @@ impl GpuState {
 
     async fn new_with_resources(
         window: Arc<Window>,
-        instance: wgpu::Instance,
+        _instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
         adapter: wgpu::Adapter,
         device: wgpu::Device,
@@ -2239,6 +2383,8 @@ impl GpuState {
             agent_trail_decay: 1.0,  // Default to instant clear (original behavior)
             fluid_show: 0,  // Fluid visualization disabled by default
             fluid_wind_push_strength: 0.0005,
+            alpha_fluid_convolution: 0.05,
+            beta_fluid_convolution: 0.05,
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2299,12 +2445,21 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
-        let selected_agent_readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Selected Agent Readback"),
-            size: std::mem::size_of::<Agent>() as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let selected_agent_readbacks: Vec<Arc<wgpu::Buffer>> = (0..SELECTED_AGENT_READBACK_SLOTS)
+            .map(|i| {
+                Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Selected Agent Readback {i}")),
+                    size: std::mem::size_of::<Agent>() as u64,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }))
+            })
+            .collect();
+
+        let selected_agent_readback_pending: Vec<Arc<Mutex<Option<Result<Agent, ()>>>>> =
+            (0..SELECTED_AGENT_READBACK_SLOTS)
+                .map(|_| Arc::new(Mutex::new(None)))
+                .collect();
 
         // Spawn/death buffers
         let new_agents_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -3006,16 +3161,16 @@ impl GpuState {
             });
         profiler.mark("clear agent grid pipeline");
 
-        let render_inspector_pipeline =
+        let clear_inspector_preview_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("Render Inspector Pipeline"),
+                label: Some("Clear Inspector Preview Pipeline"),
                 layout: Some(&compute_pipeline_layout),
                 module: &shader,
-                entry_point: "render_inspector",
+                entry_point: "clear_inspector_preview",
                 compilation_options: Default::default(),
                 cache: None,
             });
-        profiler.mark("render inspector pipeline");
+        profiler.mark("clear inspector preview pipeline");
 
         let draw_inspector_agent_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -3275,6 +3430,91 @@ impl GpuState {
             cache: None,
         });
         profiler.mark("render pipeline");
+
+        // Inspector overlay render pipeline (fragment overlay for the inspector panel bars/labels)
+        let inspector_overlay_bind_group_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("Inspector Overlay Bind Group Layout"),
+                entries: &[
+                    // `params` (shared.wgsl: @group(0) @binding(6))
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // `selected_agent_buffer` (shared.wgsl: @group(0) @binding(12))
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 12,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            // WGSL declares `selected_agent_buffer` as read_write for the compute path.
+                            // The fragment overlay only reads it, but the pipeline layout must still match.
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            },
+        );
+
+        let inspector_overlay_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Inspector Overlay Bind Group"),
+            layout: &inspector_overlay_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: selected_agent_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let inspector_overlay_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Inspector Overlay Pipeline Layout"),
+                bind_group_layouts: &[&inspector_overlay_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let inspector_overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Inspector Overlay Pipeline"),
+            layout: Some(&inspector_overlay_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_inspector_overlay",
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_inspector_overlay",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        profiler.mark("inspector overlay pipeline");
 
         // ============================================================================
         // FLUID SIMULATION PIPELINES (buffers already created above, before bind groups)
@@ -3876,7 +4116,13 @@ impl GpuState {
             debug_readback,
             agents_readback,
             selected_agent_buffer,
-            selected_agent_readback,
+            selected_agent_readbacks,
+            selected_agent_readback_pending,
+            selected_agent_readback_inflight: vec![false; SELECTED_AGENT_READBACK_SLOTS],
+            selected_agent_readback_slot: 0,
+            // Allow immediate first readback.
+            selected_agent_readback_last_request: std::time::Instant::now()
+                - std::time::Duration::from_secs(1),
             new_agents_buffer,
             spawn_readback,
             spawn_requests_buffer,
@@ -3895,8 +4141,8 @@ impl GpuState {
             clear_visual_pipeline,
             motion_blur_pipeline,
             clear_agent_grid_pipeline,
+            clear_inspector_preview_pipeline,
             render_agents_pipeline,
-            render_inspector_pipeline,
             draw_inspector_agent_pipeline,
             composite_agents_pipeline,
             gamma_slope_pipeline,
@@ -3911,10 +4157,12 @@ impl GpuState {
             populate_agent_spatial_grid_pipeline,
             drain_energy_pipeline,
             render_pipeline,
+            inspector_overlay_pipeline,
             compute_bind_group_a,
             compute_bind_group_b,
             composite_bind_group,
             render_bind_group,
+            inspector_overlay_bind_group,
             ping_pong: false,
             agent_count: initial_agents as u32,
             alive_count: initial_agents as u32,
@@ -3936,6 +4184,8 @@ impl GpuState {
             limit_fps: settings.limit_fps,
             limit_fps_25: settings.limit_fps_25,
             last_frame_time: std::time::Instant::now(),
+            // Allow immediate first present.
+            last_present_time: std::time::Instant::now() - std::time::Duration::from_secs(1),
             render_interval: settings.render_interval,
             current_mode: if settings.limit_fps {
                 if settings.limit_fps_25 { 3 } else { 0 }
@@ -3978,6 +4228,12 @@ impl GpuState {
             visual_stride_pixels,
             alpha_blur: settings.alpha_blur,
             beta_blur: settings.beta_blur,
+            alpha_fluid_convolution: settings
+                .alpha_fluid_convolution
+                .unwrap_or(settings.alpha_blur),
+            beta_fluid_convolution: settings
+                .beta_fluid_convolution
+                .unwrap_or(settings.beta_blur),
             gamma_blur: settings.gamma_blur,
             gamma_shift: settings.gamma_shift,
             alpha_slope_bias: settings.alpha_slope_bias,
@@ -4705,6 +4961,8 @@ impl GpuState {
             slope_interval: self.slope_interval,
             alpha_blur: self.alpha_blur,
             beta_blur: self.beta_blur,
+            alpha_fluid_convolution: Some(self.alpha_fluid_convolution),
+            beta_fluid_convolution: Some(self.beta_fluid_convolution),
             gamma_blur: self.gamma_blur,
             gamma_shift: self.gamma_shift,
             alpha_slope_bias: self.alpha_slope_bias,
@@ -4827,6 +5085,30 @@ impl GpuState {
                 self.alive_readback_inflight[idx] = false;
             }
         }
+
+        // Selected agent readback is optional and should never stall the frame.
+        // Drain any completed slot(s); last completion wins.
+        for slot in 0..self.selected_agent_readbacks.len() {
+            let message = {
+                let mut guard = self.selected_agent_readback_pending[slot].lock().unwrap();
+                guard.take()
+            };
+            if let Some(result) = message {
+                if let Ok(agent) = result {
+                    // IMPORTANT:
+                    // Do NOT clear selection on alive==0.
+                    // The GPU tries to transfer selection on death; keeping the inspector open
+                    // avoids a close/freeze loop and lets the next readback show the new agent.
+                    self.selected_agent_data = Some(agent);
+
+                    // Update camera target if following this agent
+                    if self.follow_selected_agent {
+                        self.camera_target = agent.position;
+                    }
+                }
+                self.selected_agent_readback_inflight[slot] = false;
+            }
+        }
     }
 
     fn destroy_resources(&mut self) {
@@ -4836,6 +5118,9 @@ impl GpuState {
 
         // Ensure GPU work completes before releasing resources to avoid device validation issues.
         self.device.poll(wgpu::Maintain::Wait);
+
+        // Drain any completed readbacks so their callbacks can unmap buffers before destruction.
+        self.process_completed_alive_readbacks();
 
         self.agents_buffer_a.destroy();
         self.agents_buffer_b.destroy();
@@ -4856,7 +5141,9 @@ impl GpuState {
         self.debug_readback.destroy();
         self.agents_readback.destroy();
         self.selected_agent_buffer.destroy();
-        self.selected_agent_readback.destroy();
+        for buffer in &self.selected_agent_readbacks {
+            buffer.as_ref().destroy();
+        }
         self.new_agents_buffer.destroy();
         self.spawn_readback.destroy();
         self.spawn_requests_buffer.destroy();
@@ -4867,6 +5154,14 @@ impl GpuState {
         self.spawn_request_count = 0;
         self.selected_agent_index = None;
         self.selected_agent_data = None;
+        for inflight in &mut self.selected_agent_readback_inflight {
+            *inflight = false;
+        }
+        for pending in &self.selected_agent_readback_pending {
+            if let Ok(mut guard) = pending.lock() {
+                *guard = None;
+            }
+        }
 
         self.destroyed = true;
     }
@@ -4899,14 +5194,6 @@ impl GpuState {
         // alive counter lives in spawn_debug_counters[2] (u32) at byte offset 8
         encoder.copy_buffer_to_buffer(&self.spawn_debug_counters, 8, alive_buffer.as_ref(), 0, 4);
 
-        encoder.copy_buffer_to_buffer(
-            &self.selected_agent_buffer,
-            0,
-            &self.selected_agent_readback,
-            0,
-            std::mem::size_of::<Agent>() as u64,
-        );
-
         alive_buffer
     }
 
@@ -4928,7 +5215,6 @@ impl GpuState {
                         Ok(new_count)
                     }
                     Err(_) => {
-                        buffer_for_callback.unmap();
                         Err(())
                     }
                 };
@@ -4945,25 +5231,84 @@ impl GpuState {
             return;
         }
 
-        if self.selected_agent_index.is_some() {
-            let selected_slice = self.selected_agent_readback.slice(..);
-            selected_slice.map_async(wgpu::MapMode::Read, |_| {});
-            self.device.poll(wgpu::Maintain::Wait);
-            {
-                let selected_data = selected_slice.get_mapped_range();
-                if selected_data.len() >= std::mem::size_of::<Agent>() {
-                    let agent_bytes = &selected_data[..std::mem::size_of::<Agent>()];
-                    let agent: Agent = bytemuck::pod_read_unaligned(agent_bytes);
-                    self.selected_agent_data = Some(agent);
-
-                    // Update camera target if following this agent
-                    if self.follow_selected_agent {
-                        self.camera_target = agent.position;
-                    }
-                }
-            }
-            self.selected_agent_readback.unmap();
+        if self.selected_agent_index.is_none() {
+            return;
         }
+
+        // IMPORTANT: Never block the frame on a GPU->CPU readback.
+        // We request an async map at ~60Hz and consume the result in
+        // `process_completed_alive_readbacks()` (which polls with Maintain::Poll).
+        let now = std::time::Instant::now();
+        if now.duration_since(self.selected_agent_readback_last_request)
+            < std::time::Duration::from_millis(SELECTED_AGENT_READBACK_INTERVAL_MS)
+        {
+            return;
+        }
+
+        // Find a free slot (not currently mapped/in-flight).
+        let mut chosen: Option<usize> = None;
+        let slots = self.selected_agent_readbacks.len();
+        for offset in 0..slots {
+            let idx = (self.selected_agent_readback_slot + offset) % slots;
+            if !self.selected_agent_readback_inflight[idx] {
+                chosen = Some(idx);
+                break;
+            }
+        }
+        let Some(slot) = chosen else {
+            return;
+        };
+
+        self.selected_agent_readback_last_request = now;
+        self.selected_agent_readback_inflight[slot] = true;
+        self.selected_agent_readback_slot = (slot + 1) % self.selected_agent_readbacks.len();
+
+        // Copy the latest selected agent into this slot right before mapping.
+        {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Selected Agent Readback Encoder"),
+                });
+            encoder.copy_buffer_to_buffer(
+                &self.selected_agent_buffer,
+                0,
+                self.selected_agent_readbacks[slot].as_ref(),
+                0,
+                std::mem::size_of::<Agent>() as u64,
+            );
+            self.queue.submit(Some(encoder.finish()));
+        }
+
+        let slice_for_map = self.selected_agent_readbacks[slot].as_ref().slice(..);
+        let buffer_for_callback = self.selected_agent_readbacks[slot].clone();
+        let pending = self.selected_agent_readback_pending[slot].clone();
+
+        slice_for_map.map_async(wgpu::MapMode::Read, move |result| {
+            let message = match result {
+                Ok(()) => {
+                    let slice = buffer_for_callback.slice(..);
+                    let data = slice.get_mapped_range();
+
+                    let size = std::mem::size_of::<Agent>();
+                    let parsed = if data.len() >= size {
+                        let agent_bytes = &data[..size];
+                        Ok(bytemuck::pod_read_unaligned::<Agent>(agent_bytes))
+                    } else {
+                        Err(())
+                    };
+
+                    drop(data);
+                    buffer_for_callback.unmap();
+                    parsed
+                }
+                Err(_) => Err(()),
+            };
+
+            if let Ok(mut guard) = pending.lock() {
+                *guard = Some(message);
+            }
+        });
     }
 
     fn process_spawn_requests_only(&mut self, cpu_spawn_count: u32, do_readbacks: bool) {
@@ -5326,6 +5671,8 @@ impl GpuState {
             agent_trail_decay: self.agent_trail_decay,
             fluid_show: if self.fluid_show { 1 } else { 0 },
             fluid_wind_push_strength: self.fluid_wind_push_strength,
+            alpha_fluid_convolution: self.alpha_fluid_convolution,
+            beta_fluid_convolution: self.beta_fluid_convolution,
         };
 
         // Keep CPU mirror in sync with the GPU uniform buffer.
@@ -5459,28 +5806,6 @@ impl GpuState {
                 cpass.set_pipeline(&self.clear_agent_grid_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-
-                // Render inspector panel at reduced rate (~25fps to save GPU time)
-                // Update every 2-3 frames depending on main loop speed
-                let should_update_inspector = self.inspector_frame_counter % 2 == 0;
-                self.inspector_frame_counter = self.inspector_frame_counter.wrapping_add(1);
-
-                if should_update_inspector {
-                    // Render inspector panel background if an agent is selected
-                    cpass.set_pipeline(&self.render_inspector_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    // Inspector is 300 pixels wide, dispatch appropriate workgroups
-                    let inspector_width_workgroups = (300 + 15) / 16; // 16x16 workgroup size
-                    let inspector_height_workgroups = (self.surface_config.height + 15) / 16;
-                    cpass.dispatch_workgroups(inspector_width_workgroups, inspector_height_workgroups, 1);
-
-                    // Draw inspector agent closeup in preview window
-                    cpass.set_pipeline(&self.draw_inspector_agent_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    // Preview window is 280x280, dispatch appropriate workgroups
-                    let preview_workgroups = (280 + 15) / 16;
-                    cpass.dispatch_workgroups(preview_workgroups, preview_workgroups, 1);
-                }
             }
 
             // Run simulation compute passes, but skip everything when paused or no living agents
@@ -5728,6 +6053,20 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
             }
+
+            // Draw the selected agent into the inspector preview box (top of inspector).
+            // Clear the inspector area first to ensure a clean background.
+            if should_draw && self.selected_agent_index.is_some() {
+                cpass.set_pipeline(&self.clear_inspector_preview_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                let preview_groups_x = (300 + 15) / 16;
+                let preview_groups_y = (300 + 15) / 16;
+                cpass.dispatch_workgroups(preview_groups_x, preview_groups_y, 1);
+
+                cpass.set_pipeline(&self.draw_inspector_agent_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(1, 1, 1);
+            }
         }
 
         // End compute pass to ensure agent_grid writes are visible before composite reads
@@ -5862,6 +6201,28 @@ impl GpuState {
 
             rpass.set_pipeline(&self.render_pipeline);
             rpass.set_bind_group(0, &self.render_bind_group, &[]);
+            rpass.draw(0..6, 0..1);
+        }
+
+        // Render inspector overlay (fragment shader) on top of the main pass
+        if self.sim_params_cpu.selected_agent_index != 0xFFFFFFFFu32 {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Inspector Overlay Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            rpass.set_pipeline(&self.inspector_overlay_pipeline);
+            rpass.set_bind_group(0, &self.inspector_overlay_bind_group, &[]);
             rpass.draw(0..6, 0..1);
         }
 
@@ -6154,9 +6515,30 @@ impl GpuState {
                 agents_vec[idx].is_selected = 1;
                 self.selected_agent_index = Some(idx);
                 self.selected_agent_data = Some(agents_vec[idx]);
+
+                // Reset readback state so the UI updates quickly.
+                for inflight in &mut self.selected_agent_readback_inflight {
+                    *inflight = false;
+                }
+                self.selected_agent_readback_last_request = std::time::Instant::now()
+                    - std::time::Duration::from_secs(1);
+                for pending in &self.selected_agent_readback_pending {
+                    if let Ok(mut guard) = pending.lock() {
+                        *guard = None;
+                    }
+                }
             } else {
                 self.selected_agent_index = None;
                 self.selected_agent_data = None;
+
+                for inflight in &mut self.selected_agent_readback_inflight {
+                    *inflight = false;
+                }
+                for pending in &self.selected_agent_readback_pending {
+                    if let Ok(mut guard) = pending.lock() {
+                        *guard = None;
+                    }
+                }
             }
 
             drop(data);
@@ -6800,7 +7182,7 @@ fn reset_simulation_state(
 
 fn render_splash_screen(
     window: &Window,
-    instance: &wgpu::Instance,
+    _instance: &wgpu::Instance,
     surface: &wgpu::Surface,
     adapter: &wgpu::Adapter,
     device: &wgpu::Device,
@@ -7418,14 +7800,16 @@ fn main() {
                                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
                                 };
 
-                                // Check if mouse is over inspector area (rightmost 300px)
-                                let mouse_over_inspector = if let Some(mouse_pos) = state.last_mouse_pos {
-                                    mouse_pos[0] > (state.surface_config.width as f32 - 300.0)
+                                // Zoom inspector ONLY if mouse is over the preview box:
+                                // rightmost 300px, and y in [0..300) from the top.
+                                let mouse_over_inspector_preview = if let Some(mouse_pos) = state.last_mouse_pos {
+                                    let w = state.surface_config.width as f32;
+                                    mouse_pos[0] > (w - 300.0) && mouse_pos[1] >= 0.0 && mouse_pos[1] < 300.0
                                 } else {
                                     false
                                 };
 
-                                if mouse_over_inspector {
+                                if mouse_over_inspector_preview {
                                     // Zoom inspector
                                     state.inspector_zoom *= 1.0 + zoom_delta;
                                     state.inspector_zoom = state.inspector_zoom.clamp(0.1, 10.0);
@@ -7473,6 +7857,15 @@ fn main() {
                                 let frame_dt = (now - state.last_frame_time).as_secs_f32().clamp(0.001, 0.1);
                                 state.last_frame_time = now;
 
+                                // In Full Speed mode, avoid presenting hundreds of frames/sec.
+                                // We still run simulation updates as fast as possible, but only present ~60Hz.
+                                let do_present = if state.current_mode == 1 {
+                                    state.last_present_time.elapsed()
+                                        >= std::time::Duration::from_micros(FULL_SPEED_PRESENT_INTERVAL_MICROS)
+                                } else {
+                                    true
+                                };
+
                                 // Run one simulation step per frame
                                 let should_draw = if state.is_paused {
                                     // Always draw when paused so camera movement is visible
@@ -7480,6 +7873,9 @@ fn main() {
                                 } else if state.current_mode == 2 {
                                     // Fast Draw mode: draw every N steps
                                     state.frame_count % state.render_interval == 0
+                                } else if state.current_mode == 1 {
+                                    // Full Speed: only update visualization when we're going to present.
+                                    do_present
                                 } else {
                                     // VSync/Full Speed: always draw
                                     true
@@ -7529,9 +7925,10 @@ fn main() {
                                     state.last_epoch_count = state.epoch;
                                 }
 
-                                // Build egui UI
-                                let raw_input = egui_state.take_egui_input(&window);
-                                let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
+                                if do_present {
+                                    // Build egui UI
+                                    let raw_input = egui_state.take_egui_input(&window);
+                                    let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
                                     // Left side panel for simulation controls (only show if ui_visible)
                                     if state.ui_visible {
                                     egui::SidePanel::left("simulation_controls")
@@ -8169,14 +8566,38 @@ fn main() {
                                                         );
 
                                                         ui.separator();
-                                                        ui.heading("Fluid Spreading");
+                                                        ui.heading("Classic Diffusion");
                                                         ui.add(
                                                             egui::Slider::new(&mut state.alpha_blur, 0.0..=1.0)
-                                                                .text("Alpha Shift Strength"),
+                                                                .text("Alpha Diffuse")
+                                                                .custom_formatter(|n, _| format!("{:.3}", n)),
                                                         );
+                                                        ui.label("(controls 3×3 blur strength per update)");
                                                         ui.add(
                                                             egui::Slider::new(&mut state.beta_blur, 0.0..=1.0)
-                                                                .text("Beta Shift Strength"),
+                                                                .text("Beta Diffuse")
+                                                                .custom_formatter(|n, _| format!("{:.3}", n)),
+                                                        );
+                                                        ui.label("(controls 3×3 blur strength per update)");
+
+                                                        ui.separator();
+                                                        ui.heading("Fluid Convolution");
+                                                        ui.label("(directional smear along the fluid vector field)");
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.alpha_fluid_convolution,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Alpha Convolution Amount")
+                                                            .custom_formatter(|n, _| format!("{:.3}", n)),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.beta_fluid_convolution,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Beta Convolution Amount")
+                                                            .custom_formatter(|n, _| format!("{:.3}", n)),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.gamma_shift, 0.0..=1.0)
@@ -8216,6 +8637,20 @@ fn main() {
                                                             )
                                                             .text("Beta Slope Mix"),
                                                         );
+
+                                                        ui.separator();
+                                                        ui.heading("Slope Bias");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.alpha_slope_bias, -10.0..=10.0)
+                                                            .text("Alpha Slope Bias")
+                                                            .custom_formatter(|n, _| format!("{:.2}", n)),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.beta_slope_bias, -10.0..=10.0)
+                                                            .text("Beta Slope Bias")
+                                                            .custom_formatter(|n, _| format!("{:.2}", n)),
+                                                        );
+                                                        ui.label("(bias strength for slope-based shifting; sign flips direction)");
 
                                                         ui.separator();
                                                         ui.heading("Alpha Controls");
@@ -8420,10 +8855,6 @@ fn main() {
                                                             state.gamma_vis_max =
                                                                 state.gamma_vis_max.clamp(0.0, 1.0);
                                                         }
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.prop_wash_strength, 0.0..=5.0)
-                                                                .text("Prop Wash Strength"),
-                                                        );
                                                         ui.label(
                                                             "Slope force scales with the Obstacle / Terrain Force slider.",
                                                         );
@@ -8840,6 +9271,20 @@ fn main() {
                                                         );
 
                                                         ui.separator();
+                                                        ui.heading("Propellers");
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.prop_wash_strength,
+                                                                0.0..=5.0,
+                                                            )
+                                                            .text("Propeller Fluid Displacement")
+                                                            .clamp_to_range(true),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Global multiplier for how strongly propellers inject/drag the fluid field (higher = stronger wash).",
+                                                        );
+
+                                                        ui.separator();
                                                         ui.heading("Agent Wind");
                                                         ui.add(
                                                             egui::Slider::new(
@@ -8863,13 +9308,12 @@ fn main() {
                                     // Inspector overlay - energy and pairing bars (always visible when agent selected)
                                     if let Some(agent) = &state.selected_agent_data {
                                         let screen_width = state.surface_config.width as f32;
-                                        let screen_height = state.surface_config.height as f32;
                                         let inspector_x = screen_width - 300.0;
 
-                                        // Position bars below the agent preview window
-                                        // Agent preview is 280x280, positioned at (10, screen_height - 280 - 10)
-                                        // Bars should go at (10, screen_height - 280 - 10 + 280 + 10) = (10, screen_height - 10)
-                                        let bars_y = screen_height - 80.0; // 80px from bottom to leave room for bars
+                                        // Position bars below the agent preview window (preview is 300px tall at top-right).
+                                        let preview_height = 300.0;
+                                        let bar_spacing = 5.0;
+                                        let bars_y = preview_height + bar_spacing;
 
                                         egui::Area::new(egui::Id::new("inspector_bars"))
                                             .fixed_pos(egui::pos2(inspector_x + 10.0, bars_y))
@@ -8878,7 +9322,11 @@ fn main() {
 
                                                 // Energy bar
                                                 ui.vertical(|ui| {
-                                                    let energy_ratio = (agent.energy / agent.energy_capacity).clamp(0.0, 1.0);
+                                                    let energy_ratio = if agent.energy_capacity > 0.0 {
+                                                        (agent.energy / agent.energy_capacity).clamp(0.0, 1.0)
+                                                    } else {
+                                                        0.0
+                                                    };
                                                     let energy_color = if energy_ratio > 0.5 {
                                                         egui::Color32::from_rgb(0, 200, 0)
                                                     } else if energy_ratio > 0.25 {
@@ -8887,17 +9335,17 @@ fn main() {
                                                         egui::Color32::from_rgb(200, 0, 0)
                                                     };
 
-                                                    ui.label(egui::RichText::new(
-                                                        format!("Energy: {:.1}/{:.1}", agent.energy, agent.energy_capacity)
-                                                    ).color(egui::Color32::WHITE));
-
                                                     let progress_bar = egui::ProgressBar::new(energy_ratio)
                                                         .fill(energy_color)
-                                                        .animate(false);
+                                                        .animate(false)
+                                                        .text(format!(
+                                                            "Energy: {:.1}/{:.1}",
+                                                            agent.energy, agent.energy_capacity
+                                                        ));
                                                     ui.add(progress_bar);
                                                 });
 
-                                                ui.add_space(4.0);
+                                                ui.add_space(bar_spacing);
 
                                                 // Pairing state bar
                                                 ui.vertical(|ui| {
@@ -8909,48 +9357,154 @@ fn main() {
                                                     };
                                                     let pairing_color = egui::Color32::from_rgb(100, 150, 255);
 
-                                                    ui.label(egui::RichText::new(
-                                                        format!("Pairing: {}/{}", agent.pairing_counter, full_pairs)
-                                                    ).color(egui::Color32::WHITE));
-
                                                     let progress_bar = egui::ProgressBar::new(pairing_ratio)
                                                         .fill(pairing_color)
-                                                        .animate(false);
+                                                        .animate(false)
+                                                        .text(format!(
+                                                            "Pairing: {}/{}",
+                                                            agent.pairing_counter, full_pairs
+                                                        ));
                                                     ui.add(progress_bar);
                                                 });
+
+                                                ui.add_space(8.0);
+
+                                                // Genome (moved out of shader): 5x5 squares, 56 per line (280px wide)
+                                                {
+                                                    let bases_per_line = 56usize;
+                                                    let cell = 5.0;
+                                                    let lines = (GENOME_BYTES + bases_per_line - 1) / bases_per_line;
+                                                    let size = egui::vec2(280.0, lines as f32 * cell);
+                                                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                                                    let painter = ui.painter_at(rect);
+
+                                                    for idx in 0..GENOME_BYTES {
+                                                        let row = idx / bases_per_line;
+                                                        let col = idx % bases_per_line;
+                                                        let base = genome_get_base_ascii(&agent.genome, idx);
+                                                        let color = genome_base_color(base);
+
+                                                        let x0 = rect.left() + col as f32 * cell;
+                                                        let y0 = rect.top() + row as f32 * cell;
+                                                        let r = egui::Rect::from_min_size(
+                                                            egui::pos2(x0, y0),
+                                                            egui::vec2(cell, cell),
+                                                        );
+                                                        painter.rect_filled(r, 0.0, color);
+                                                    }
+                                                }
+
+                                                ui.add_space(8.0);
+
+                                                // Body part bars: type colors + combined per-part signals
+                                                {
+                                                    let body_count = (agent.body_count as usize).min(MAX_BODY_PARTS);
+                                                    if body_count > 0 {
+                                                        let bar_w = 280.0;
+                                                        let bar_h = 8.0;
+                                                        let seg_w = bar_w / body_count as f32;
+
+                                                        let draw_strip = |ui: &mut egui::Ui,
+                                                                              color_at: &dyn Fn(usize) -> egui::Color32| {
+                                                            let (rect, _) = ui.allocate_exact_size(
+                                                                egui::vec2(bar_w, bar_h),
+                                                                egui::Sense::hover(),
+                                                            );
+                                                            let painter = ui.painter_at(rect);
+                                                            painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 30));
+                                                            for i in 0..body_count {
+                                                                let x0 = rect.left() + i as f32 * seg_w;
+                                                                let r = egui::Rect::from_min_max(
+                                                                    egui::pos2(x0, rect.top()),
+                                                                    egui::pos2((x0 + seg_w).min(rect.right()), rect.bottom()),
+                                                                );
+                                                                painter.rect_filled(r, 0.0, color_at(i));
+                                                            }
+                                                        };
+
+                                                        // Organ + amino layout (base color)
+                                                        draw_strip(ui, &|i| {
+                                                            let part = &agent.body[i];
+                                                            part_base_color32(part.base_type())
+                                                        });
+
+                                                        ui.add_space(4.0);
+
+                                                        // Combined signal strip (debug-style):
+                                                        // - Beta: + = red, - = blue
+                                                        // - Alpha: + = green, - = magenta
+                                                        draw_strip(ui, &|i| {
+                                                            let part = &agent.body[i];
+                                                            let a = part.alpha_signal.clamp(-1.0, 1.0);
+                                                            let b = part.beta_signal.clamp(-1.0, 1.0);
+
+                                                            let alpha_pos = a.max(0.0);
+                                                            let alpha_neg = (-a).max(0.0);
+                                                            let beta_pos = b.max(0.0);
+                                                            let beta_neg = (-b).max(0.0);
+
+                                                            let r = (beta_pos + alpha_neg).min(1.0);
+                                                            let g = alpha_pos.min(1.0);
+                                                            let bl = (beta_neg + alpha_neg).min(1.0);
+
+                                                            egui::Color32::from_rgb(
+                                                                (r * 255.0) as u8,
+                                                                (g * 255.0) as u8,
+                                                                (bl * 255.0) as u8,
+                                                            )
+                                                        });
+
+                                                        ui.add_space(8.0);
+                                                        ui.label("Body (sequence):");
+
+                                                        let mut any_parts = false;
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.spacing_mut().item_spacing.x = 8.0;
+                                                            for i in 0..body_count {
+                                                                let base = agent.body[i].base_type();
+                                                                any_parts = true;
+                                                                let color = part_base_color32(base);
+                                                                let name = part_base_name(base);
+                                                                ui.colored_label(color, name);
+                                                            }
+                                                        });
+                                                        if !any_parts {
+                                                            ui.label("(none)");
+                                                        }
+                                                    }
+                                                }
                                             });
                                     }
                                 });
 
-                                // Handle platform output
-                                egui_state.handle_platform_output(&window, full_output.platform_output);
-                                state.persist_settings_if_changed();
+                                    // Handle platform output
+                                    egui_state.handle_platform_output(&window, full_output.platform_output);
+                                    state.persist_settings_if_changed();
 
-                                // Always render the simulation (cheap) and UI
-                                // In fast mode, we're just running update() faster between renders
+                                    // Tessellate and prepare render data
+                                    let clipped_primitives = egui_state.egui_ctx()
+                                        .tessellate(full_output.shapes, full_output.pixels_per_point);
+                                    let screen_descriptor = ScreenDescriptor {
+                                        size_in_pixels: [
+                                            state.surface_config.width,
+                                            state.surface_config.height,
+                                        ],
+                                        pixels_per_point: window.scale_factor() as f32,
+                                    };
 
-                                // Tessellate and prepare render data
-                                let clipped_primitives = egui_state.egui_ctx()
-                                    .tessellate(full_output.shapes, full_output.pixels_per_point);
-                                let screen_descriptor = ScreenDescriptor {
-                                    size_in_pixels: [
-                                        state.surface_config.width,
-                                        state.surface_config.height,
-                                    ],
-                                    pixels_per_point: window.scale_factor() as f32,
-                                };
-
-                                // Render with egui
-                                match state.render(
-                                    clipped_primitives,
-                                    full_output.textures_delta,
-                                    screen_descriptor,
-                                ) {
-                                    Ok(_) => {}
-                                    Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
-                                    Err(wgpu::SurfaceError::Outdated) => {}
-                                    Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
-                                    Err(e) => eprintln!("{:?}", e),
+                                    // Render with egui
+                                    state.last_present_time = now;
+                                    match state.render(
+                                        clipped_primitives,
+                                        full_output.textures_delta,
+                                        screen_descriptor,
+                                    ) {
+                                        Ok(_) => {}
+                                        Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
+                                        Err(wgpu::SurfaceError::Outdated) => {}
+                                        Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
+                                        Err(e) => eprintln!("{:?}", e),
+                                    }
                                 }
                             }
 
@@ -9040,7 +9594,19 @@ fn main() {
                                 let frame_dt = (now - state.last_frame_time).as_secs_f32().clamp(0.001, 0.1);
                                 state.last_frame_time = now;
 
-                                state.update(true, frame_dt); // Always do readbacks when not in fast mode
+                                // In Full Speed mode, avoid presenting hundreds of frames/sec.
+                                let do_present = if state.current_mode == 1 {
+                                    state.last_present_time.elapsed()
+                                        >= std::time::Duration::from_micros(FULL_SPEED_PRESENT_INTERVAL_MICROS)
+                                } else {
+                                    true
+                                };
+
+                                state.update(do_present, frame_dt);
+
+                                if !do_present {
+                                    return;
+                                }
 
                                 // Build egui UI
                                 let raw_input = egui_state.take_egui_input(&window);
@@ -9200,6 +9766,7 @@ fn main() {
                                 };
 
                                 // Render with egui
+                                state.last_present_time = now;
                                 match state.render(
                                     clipped_primitives,
                                     full_output.textures_delta,

@@ -256,6 +256,8 @@ struct SimParams {
     agent_trail_decay: f32,
     fluid_show: u32,
     fluid_wind_push_strength: f32,
+    alpha_fluid_convolution: f32,
+    beta_fluid_convolution: f32,
 }
 
 struct EnvironmentInitParams {
@@ -749,7 +751,7 @@ fn hash_f32(v: u32) -> f32 { return f32(hash(v)) / 4294967295.0; }
 
 // Sensor and sampling helpers
 fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, grid_type: u32, debug_mode: bool, sensor_perpendicular: vec2<f32>, chirality_flip: f32, promoter_param1: f32, modifier_param1: f32) -> f32 {
-    // Refactor: environment sensors now read from the env-resolution dye field.
+    // Environment sensors read from the (fluid-advected) alpha/beta dye field.
     // Directional sensors sample only the immediate left/right env texels relative to the organ orientation.
     // The old "radius" parameter is repurposed as a signal gain multiplier.
     let combined_param = promoter_param1 + modifier_param1;
@@ -760,8 +762,8 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
     // Keep seed in signature for compatibility (not used after refactor).
     let _seed = seed;
 
-    // One env cell in world units.
-    let cell = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
+    // One fluid cell in world units.
+    let cell = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
     // Chirality flips left/right by reversing the perpendicular direction.
     let chir = select(1.0, -1.0, chirality_flip < 0.0);
     let dir = select(vec2<f32>(1.0, 0.0), normalize(sensor_perpendicular), length(sensor_perpendicular) > 1e-5) * chir;
@@ -772,12 +774,14 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
     var v_left = 0.0;
     var v_right = 0.0;
     if (is_in_bounds(pos_left)) {
-        let idx = grid_index(pos_left);
+        let idx = fluid_grid_index(pos_left);
+        // Packed dye convention: alpha in .y, beta in .x
         if (grid_type == 0u) { v_left = fluid_velocity[idx].y; }
         else if (grid_type == 1u) { v_left = fluid_velocity[idx].x; }
     }
     if (is_in_bounds(pos_right)) {
-        let idx = grid_index(pos_right);
+        let idx = fluid_grid_index(pos_right);
+        // Packed dye convention: alpha in .y, beta in .x
         if (grid_type == 0u) { v_right = fluid_velocity[idx].y; }
         else if (grid_type == 1u) { v_right = fluid_velocity[idx].x; }
     }
@@ -794,7 +798,7 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
 }
 
 fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_type: u32, debug_mode: bool, promoter_param1: f32, modifier_param1: f32) -> f32 {
-    // Refactor: intensity sensors sample only the current env texel.
+    // Intensity sensors sample only the current env texel.
     // The old "radius" parameter is repurposed as a signal gain multiplier.
     let combined_param = promoter_param1 + modifier_param1;
     // Keep polarity explicit (requested): sign comes from (p+m), magnitude from abs(p+m).
@@ -807,8 +811,9 @@ fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_ty
         return 0.0;
     }
 
-    let idx = grid_index(center);
+    let idx = fluid_grid_index(center);
     var v = 0.0;
+    // Packed dye convention: alpha in .y, beta in .x
     if (grid_type == 0u) { v = fluid_velocity[idx].y; }
     else if (grid_type == 1u) { v = fluid_velocity[idx].x; }
 
@@ -1306,7 +1311,7 @@ fn translate_codon_step(genome: array<u32, GENOME_WORDS>, pos_b: u32, ignore_sto
             }
             else if (amino_type == 9u || amino_type == 12u) {
                 if (modifier < 10u) { organ_base_type = 21u; }
-                else { organ_base_type = 25u; }
+                else { organ_base_type = 0u; }
             }
             else if (amino_type == 8u || amino_type == 1u) {
                 if (modifier < 4u) { organ_base_type = 20u; }
@@ -1335,7 +1340,9 @@ fn translate_codon_step(genome: array<u32, GENOME_WORDS>, pos_b: u32, ignore_sto
                 final_part_type = encode_part_type(organ_base_type, param_value);
                 bases_consumed = 6u;
             } else {
-                bases_consumed = 6u; // consume both codons even if organ not formed
+                // No organ mapping: materialize as the amino acid following the promoter.
+                final_part_type = modifier;
+                bases_consumed = 6u;
             }
         }
     }

@@ -1240,7 +1240,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Write thrust force into the shared vec2 buffer.
                     // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
-                    let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1;
+                    let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength, 0.0);
                     fluid_forces[fluid_idx] = fluid_forces[fluid_idx] + scaled_force;
                 }
             }
@@ -1403,7 +1403,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Organ-specific energy costs
         var organ_extra = 0.0;
         if (props.is_mouth) {
-            organ_extra = props.energy_consumption;
+            // Vampire mouths have increased maintenance.
+            organ_extra = select(props.energy_consumption, props.energy_consumption * 3.0, base_type == 33u);
 
             // 3) Feeding: mouths consume from alpha/beta grids
             // Get enabler amplification for this mouth
@@ -1434,19 +1435,25 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let consumed_alpha = min(available_alpha, max_total * alpha_weight);
                 let consumed_beta  = min(available_beta,  max_total * beta_weight);
 
-                // Apply alpha consumption - energy gain now uses base food_power (speed already in consumption)
+                // Apply alpha consumption - energy gain uses base food_power (speed already in consumption)
                 if (consumed_alpha > 0.0) {
                     alpha_grid[idx] = clamp(available_alpha - consumed_alpha, 0.0, available_alpha);
-                    // Reduce energy gain exponentially per vampiric mouth: 1 mouth = 50%, 2 mouths = 25%, 3 mouths = 12.5%
-                    // Calculate vampiric mouth count on the fly
-                    var vampiric_count = 0u;
-                    for (var j = 0u; j < min(agents_out[agent_id].body_count, MAX_BODY_PARTS); j++) {
-                        if (get_base_part_type(agents_out[agent_id].body[j].part_type) == 33u) {
-                            vampiric_count += 1u;
+
+                    // Only vampire mouths (type 33) get their alpha energy gain reduced by the
+                    // number of vampire mouths. Normal mouths should not be penalized.
+                    var alpha_energy_multiplier = 1.0;
+                    if (base_type == 33u) {
+                        // Exponential reduction: 1 mouth = 50%, 2 mouths = 25%, 3 mouths = 12.5%
+                        var vampiric_count = 0u;
+                        for (var j = 0u; j < min(agents_out[agent_id].body_count, MAX_BODY_PARTS); j++) {
+                            if (get_base_part_type(agents_out[agent_id].body[j].part_type) == 33u) {
+                                vampiric_count += 1u;
+                            }
                         }
+                        alpha_energy_multiplier = pow(0.5, f32(vampiric_count));
                     }
-                    let vampiric_multiplier = pow(0.5, f32(vampiric_count));
-                    agent.energy += consumed_alpha * params.food_power * vampiric_multiplier;
+
+                    agent.energy += consumed_alpha * params.food_power * alpha_energy_multiplier;
                     total_consumed_alpha += consumed_alpha;
                 }
 
@@ -1464,9 +1471,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let thrust_ratio = propeller_thrust_magnitude[i] / base_thrust;
             let activity_cost = props.energy_consumption * thrust_ratio * 1.5;
             organ_extra = props.energy_consumption + activity_cost; // Base + activity
-        } else if (base_type == 33u) {
-            // Vampire mouths: 3x base mouth cost (increased maintenance)
-            organ_extra = props.energy_consumption * 3.0;
         } else {
             // Other organs use linear amplification scaling
             let amp = amplification_per_part[i];
@@ -1710,7 +1714,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     active_end = last_non_x;
                 }
 
-                // Optional insertion mutation: with small probability, insert 1..k new random bases at begin/end/middle
+                // Optional insertion mutation: with small probability, insert new random bases at begin/end/middle
+                // Keep indels codon-aligned (multiples of 3) to avoid catastrophic frameshifts.
                 // Then re-center the active gene region within the fixed GENOME_BYTES buffer with 'X' padding
                 {
                     let insert_seed = offspring_hash ^ 0xB5297A4Du;
@@ -1728,8 +1733,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         }
                         // Compute max insert size so we don't exceed GENOME_BYTES
                         let max_ins = select(GENOME_LENGTH - L, 0u, L >= GENOME_LENGTH);
-                        if (max_ins > 0u) {
-                            let k = 1u + (hash(insert_seed ^ 0x68E31DA4u) % min(5u, max_ins));
+                        // NOTE: Use k=3 so we preserve the codon frame.
+                        let k = 3u;
+                        if (max_ins >= k) {
                             // Choose insertion position: 0..L
                             let mode = hash(insert_seed ^ 0x1B56C4E9u) % 3u; // 0=begin,1=end,2=middle
                             var pos: u32 = 0u;
@@ -1773,6 +1779,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
 
                 // Optional deletion mutation: mirror insert behavior but remove bases from begin/end/middle
+                // Keep deletions codon-aligned (multiples of 3) to avoid catastrophic frameshifts.
                 {
                     let delete_seed = offspring_hash ^ 0xE7037ED1u;
                     let delete_roll = hash_f32(delete_seed);
@@ -1789,9 +1796,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         }
                         if (L > MIN_GENE_LENGTH) {
                             let removable = L - MIN_GENE_LENGTH;
-                            let max_del = min(5u, removable);
-                            if (max_del > 0u) {
-                                let k = 1u + (hash(delete_seed ^ 0x68E31DA4u) % max_del);
+                            // NOTE: Use k=3 so we preserve the codon frame.
+                            let k = 3u;
+                            if (removable >= k) {
                                 var pos: u32 = 0u;
                                 let mode = hash(delete_seed ^ 0x1B56C4E9u) % 3u; // 0=begin,1=end,2=middle
                                 if (mode == 0u) {
@@ -1972,12 +1979,131 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let current_beta = beta_grid[idx];
     let current_gamma = read_gamma_height(idx);
 
-    // Per-channel shift/blur strength.
-    let alpha_strength = clamp(params.alpha_blur, 0.0, 1.0);
-    let beta_strength = clamp(params.beta_blur, 0.0, 1.0);
+    // Per-channel strengths.
+    // Classic isotropic blur uses alpha_blur/beta_blur.
+    // Fluid-directed convolution uses alpha_fluid_convolution/beta_fluid_convolution.
+    let alpha_diffuse_strength = clamp(params.alpha_blur, 0.0, 1.0);
+    let beta_diffuse_strength = clamp(params.beta_blur, 0.0, 1.0);
+    let alpha_conv_strength = clamp(params.alpha_fluid_convolution, 0.0, 1.0);
+    let beta_conv_strength = clamp(params.beta_fluid_convolution, 0.0, 1.0);
     let gamma_strength = clamp(params.gamma_shift, 0.0, 1.0);
     // Repurpose gamma_blur as a simple persistence/decay multiplier (1.0 = no decay).
     let persistence = clamp(params.gamma_blur, 0.0, 1.0);
+
+    // Classic isotropic blur (3x3) + slope-based flux shift.
+    // This restores the previous diffusion/blur + slope shift behavior, then we layer
+    // the fluid-directed convolution on top.
+    var alpha_sum = 0.0;
+    var beta_sum = 0.0;
+    for (var i = 0u; i < 9u; i++) {
+        let dx = i32(i % 3u) - 1;
+        let dy = i32(i / 3u) - 1;
+        let nx_i = clamp(i32(x) + dx, 0, i32(GRID_SIZE) - 1);
+        let ny_i = clamp(i32(y) + dy, 0, i32(GRID_SIZE) - 1);
+        let nidx = u32(ny_i) * GRID_SIZE + u32(nx_i);
+        alpha_sum += alpha_grid[nidx];
+        beta_sum += beta_grid[nidx];
+    }
+
+    let alpha_avg = alpha_sum / 9.0;
+    let beta_avg = beta_sum / 9.0;
+
+    // Apply blur factor (0 = no blur/keep current, 1 = full blur)
+    let alpha_iso = mix(current_alpha, alpha_avg, alpha_diffuse_strength);
+    let beta_iso = mix(current_beta, beta_avg, beta_diffuse_strength);
+
+    // Slope-based flux shift (mass-conserving advection along slopes).
+    let slope_here = read_gamma_slope(idx);
+    let xi = i32(x);
+    let yi = i32(y);
+    let max_index = i32(GRID_SIZE) - 1;
+    let left_x = max(xi - 1, 0);
+    let right_x = min(xi + 1, max_index);
+    let up_y = max(yi - 1, 0);
+    let down_y = min(yi + 1, max_index);
+
+    let left_idx = u32(yi) * GRID_SIZE + u32(left_x);
+    let right_idx = u32(yi) * GRID_SIZE + u32(right_x);
+    let up_idx = u32(up_y) * GRID_SIZE + x;
+    let down_idx = u32(down_y) * GRID_SIZE + x;
+
+    let alpha_left = alpha_grid[left_idx];
+    let alpha_right = alpha_grid[right_idx];
+    let alpha_up = alpha_grid[up_idx];
+    let alpha_down = alpha_grid[down_idx];
+    let beta_left = beta_grid[left_idx];
+    let beta_right = beta_grid[right_idx];
+    let beta_up = beta_grid[up_idx];
+    let beta_down = beta_grid[down_idx];
+
+    let slope_left = read_gamma_slope(left_idx);
+    let slope_right = read_gamma_slope(right_idx);
+    let slope_up = read_gamma_slope(up_idx);
+    let slope_down = read_gamma_slope(down_idx);
+
+    let kernel_scale = 1.0 / 8.0;
+
+    // Alpha flux
+    let slope_here_alpha = slope_here * params.alpha_slope_bias;
+    let slope_left_alpha = slope_left * params.alpha_slope_bias;
+    let slope_right_alpha = slope_right * params.alpha_slope_bias;
+    let slope_up_alpha = slope_up * params.alpha_slope_bias;
+    let slope_down_alpha = slope_down * params.alpha_slope_bias;
+
+    var alpha_flux = 0.0;
+    if (right_x != xi) {
+        let flow_out = max(slope_here_alpha.x, 0.0) * current_alpha;
+        let flow_in = max(-slope_right_alpha.x, 0.0) * alpha_right;
+        alpha_flux += flow_out - flow_in;
+    }
+    if (left_x != xi) {
+        let flow_out = max(-slope_here_alpha.x, 0.0) * current_alpha;
+        let flow_in = max(slope_left_alpha.x, 0.0) * alpha_left;
+        alpha_flux += flow_out - flow_in;
+    }
+    if (down_y != yi) {
+        let flow_out = max(slope_here_alpha.y, 0.0) * current_alpha;
+        let flow_in = max(-slope_down_alpha.y, 0.0) * alpha_down;
+        alpha_flux += flow_out - flow_in;
+    }
+    if (up_y != yi) {
+        let flow_out = max(-slope_here_alpha.y, 0.0) * current_alpha;
+        let flow_in = max(slope_up_alpha.y, 0.0) * alpha_up;
+        alpha_flux += flow_out - flow_in;
+    }
+
+    // Beta flux
+    let slope_here_beta = slope_here * params.beta_slope_bias;
+    let slope_left_beta = slope_left * params.beta_slope_bias;
+    let slope_right_beta = slope_right * params.beta_slope_bias;
+    let slope_up_beta = slope_up * params.beta_slope_bias;
+    let slope_down_beta = slope_down * params.beta_slope_bias;
+
+    var beta_flux = 0.0;
+    if (right_x != xi) {
+        let flow_out = max(slope_here_beta.x, 0.0) * current_beta;
+        let flow_in = max(-slope_right_beta.x, 0.0) * beta_right;
+        beta_flux += flow_out - flow_in;
+    }
+    if (left_x != xi) {
+        let flow_out = max(-slope_here_beta.x, 0.0) * current_beta;
+        let flow_in = max(slope_left_beta.x, 0.0) * beta_left;
+        beta_flux += flow_out - flow_in;
+    }
+    if (down_y != yi) {
+        let flow_out = max(slope_here_beta.y, 0.0) * current_beta;
+        let flow_in = max(-slope_down_beta.y, 0.0) * beta_down;
+        beta_flux += flow_out - flow_in;
+    }
+    if (up_y != yi) {
+        let flow_out = max(-slope_here_beta.y, 0.0) * current_beta;
+        let flow_in = max(slope_up_beta.y, 0.0) * beta_up;
+        beta_flux += flow_out - flow_in;
+    }
+
+    // Base result after classic blur + slope shift.
+    let alpha_base = clamp(alpha_iso - alpha_flux * kernel_scale, 0.0, 1.0);
+    let beta_base = clamp(beta_iso - beta_flux * kernel_scale, 0.0, 1.0);
 
     // Map env cell coords to fluid grid coords.
     // NOTE: sample_grid_bilinear expects world-space in [0, SIM_SIZE).
@@ -2012,8 +2138,8 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // To smear *along* the vector field, each cell must pull content from upstream
     // (i.e., sample in the -direction). This avoids symmetric smearing and prevents
     // backward blur against the plume direction.
-    let o_a = dir * (base_offset * alpha_strength);
-    let o_b = dir * (base_offset * beta_strength);
+    let o_a = dir * (base_offset * alpha_conv_strength);
+    let o_b = dir * (base_offset * beta_conv_strength);
     // Gamma terrain is typically much smoother than alpha/beta, so the same sub-cell offsets
     // can be visually imperceptible. Use a slightly larger offset scale while keeping the same
     // 0..1 strength semantics.
@@ -2040,9 +2166,10 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b_blur = clamp(b_0 * w0 + b_m1 * w1 + b_m2 * w2, 0.0, 1.0);
     let g_blur = clamp(g_0 * w0 + g_m1 * w1 + g_m2 * w2, 0.0, 1.0);
 
-    // Blend toward the convolution result; persistence applies as decay.
-    var final_alpha = clamp(mix(current_alpha, a_blur, alpha_strength) * persistence, 0.0, 1.0);
-    var final_beta = clamp(mix(current_beta, b_blur, beta_strength) * persistence, 0.0, 1.0);
+    // Layer the fluid-directed convolution on top of the classic blur+slope result.
+    // Persistence applies as decay to alpha/beta.
+    var final_alpha = clamp(mix(alpha_base, a_blur, alpha_conv_strength) * persistence, 0.0, 1.0);
+    var final_beta = clamp(mix(beta_base, b_blur, beta_conv_strength) * persistence, 0.0, 1.0);
     // Gamma shift is terrain transport; keep it bounded but do not apply persistence decay.
     var final_gamma = clamp(mix(current_gamma, g_blur, gamma_strength), 0.0, 1.0);
 
