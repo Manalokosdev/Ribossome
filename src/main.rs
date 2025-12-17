@@ -9378,11 +9378,54 @@ fn main() {
                                                     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                                                     let painter = ui.painter_at(rect);
 
+                                                    // Find translated regions (between start and stop codons)
+                                                    let mut in_translation = false;
+                                                    let mut translation_map = vec![false; GENOME_BYTES];
+                                                    
+                                                    let mut i = 0;
+                                                    while i + 2 < GENOME_BYTES {
+                                                        let b0 = genome_get_base_ascii(&agent.genome, i);
+                                                        let b1 = genome_get_base_ascii(&agent.genome, i + 1);
+                                                        let b2 = genome_get_base_ascii(&agent.genome, i + 2);
+                                                        
+                                                        // Check for start codon (AUG)
+                                                        if !in_translation && b0 == b'A' && b1 == b'U' && b2 == b'G' {
+                                                            in_translation = true;
+                                                        }
+                                                        // Check for stop codons (UAA, UAG, UGA)
+                                                        else if in_translation && 
+                                                            ((b0 == b'U' && b1 == b'A' && (b2 == b'A' || b2 == b'G')) ||
+                                                             (b0 == b'U' && b1 == b'G' && b2 == b'A')) {
+                                                            // Mark this stop codon as translated, then stop
+                                                            translation_map[i] = true;
+                                                            translation_map[i + 1] = true;
+                                                            translation_map[i + 2] = true;
+                                                            in_translation = false;
+                                                            i += 3;
+                                                            continue;
+                                                        }
+                                                        
+                                                        if in_translation {
+                                                            translation_map[i] = true;
+                                                        }
+                                                        i += 1;
+                                                    }
+
                                                     for idx in 0..GENOME_BYTES {
                                                         let row = idx / bases_per_line;
                                                         let col = idx % bases_per_line;
                                                         let base = genome_get_base_ascii(&agent.genome, idx);
-                                                        let color = genome_base_color(base);
+                                                        let mut color = genome_base_color(base);
+                                                        
+                                                        // Darken untranslated regions
+                                                        if !translation_map[idx] {
+                                                            let (r, g, b, _) = color.to_tuple();
+                                                            color = egui::Color32::from_rgb(
+                                                                (r as f32 * 0.3) as u8,
+                                                                (g as f32 * 0.3) as u8,
+                                                                (b as f32 * 0.3) as u8,
+                                                            );
+                                                        }
 
                                                         let x0 = rect.left() + col as f32 * cell;
                                                         let y0 = rect.top() + row as f32 * cell;
@@ -9401,37 +9444,44 @@ fn main() {
                                                     let body_count = (agent.body_count as usize).min(MAX_BODY_PARTS);
                                                     if body_count > 0 {
                                                         let bar_w = 280.0;
-                                                        let organ_bar_h = 8.0;
-                                                        let amino_bar_h = 5.0;
-                                                        let seg_w = bar_w / body_count as f32;
+                                                        let bar_h = 8.0;
+                                                        
+                                                        // Calculate total width needed: aminos take 3 nucleotides, organs take 6
+                                                        let mut total_nucleotides = 0.0;
+                                                        for i in 0..body_count {
+                                                            let base_type = agent.body[i].base_type();
+                                                            total_nucleotides += if base_type < 20 { 3.0 } else { 6.0 };
+                                                        }
+                                                        let pixels_per_nucleotide = bar_w / total_nucleotides;
 
                                                         let draw_strip = |ui: &mut egui::Ui,
-                                                                              height: f32,
                                                                               color_at: &dyn Fn(usize) -> egui::Color32| {
                                                             let (rect, _) = ui.allocate_exact_size(
-                                                                egui::vec2(bar_w, height),
+                                                                egui::vec2(bar_w, bar_h),
                                                                 egui::Sense::hover(),
                                                             );
                                                             let painter = ui.painter_at(rect);
                                                             painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 30));
+                                                            
+                                                            let mut x_pos = rect.left();
                                                             for i in 0..body_count {
                                                                 let part = &agent.body[i];
                                                                 let base_type = part.base_type();
                                                                 let is_amino = base_type < 20;
-                                                                let bar_h = if is_amino { amino_bar_h } else { height };
+                                                                let nucleotide_count = if is_amino { 3.0 } else { 6.0 };
+                                                                let seg_w = nucleotide_count * pixels_per_nucleotide;
                                                                 
-                                                                let x0 = rect.left() + i as f32 * seg_w;
-                                                                let y_offset = (height - bar_h) / 2.0;
                                                                 let r = egui::Rect::from_min_max(
-                                                                    egui::pos2(x0, rect.top() + y_offset),
-                                                                    egui::pos2((x0 + seg_w).min(rect.right()), rect.top() + y_offset + bar_h),
+                                                                    egui::pos2(x_pos, rect.top()),
+                                                                    egui::pos2((x_pos + seg_w).min(rect.right()), rect.bottom()),
                                                                 );
                                                                 painter.rect_filled(r, 0.0, color_at(i));
+                                                                x_pos += seg_w;
                                                             }
                                                         };
 
                                                         // Organ + amino layout (base color)
-                                                        draw_strip(ui, organ_bar_h, &|i| {
+                                                        draw_strip(ui, &|i| {
                                                             let part = &agent.body[i];
                                                             let base_type = part.base_type();
                                                             if base_type < 20 {
@@ -9449,7 +9499,7 @@ fn main() {
                                                         // Combined signal strip (debug-style):
                                                         // - Beta: + = red, - = blue
                                                         // - Alpha: + = green, - = magenta
-                                                        draw_strip(ui, organ_bar_h, &|i| {
+                                                        draw_strip(ui, &|i| {
                                                             let part = &agent.body[i];
                                                             let a = part.alpha_signal.clamp(-1.0, 1.0);
                                                             let b = part.beta_signal.clamp(-1.0, 1.0);
