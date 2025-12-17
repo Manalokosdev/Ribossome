@@ -9401,31 +9401,47 @@ fn main() {
                                                     let body_count = (agent.body_count as usize).min(MAX_BODY_PARTS);
                                                     if body_count > 0 {
                                                         let bar_w = 280.0;
-                                                        let bar_h = 8.0;
+                                                        let organ_bar_h = 8.0;
+                                                        let amino_bar_h = 5.0;
                                                         let seg_w = bar_w / body_count as f32;
 
                                                         let draw_strip = |ui: &mut egui::Ui,
+                                                                              height: f32,
                                                                               color_at: &dyn Fn(usize) -> egui::Color32| {
                                                             let (rect, _) = ui.allocate_exact_size(
-                                                                egui::vec2(bar_w, bar_h),
+                                                                egui::vec2(bar_w, height),
                                                                 egui::Sense::hover(),
                                                             );
                                                             let painter = ui.painter_at(rect);
                                                             painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 30));
                                                             for i in 0..body_count {
+                                                                let part = &agent.body[i];
+                                                                let base_type = part.base_type();
+                                                                let is_amino = base_type < 20;
+                                                                let bar_h = if is_amino { amino_bar_h } else { height };
+                                                                
                                                                 let x0 = rect.left() + i as f32 * seg_w;
+                                                                let y_offset = (height - bar_h) / 2.0;
                                                                 let r = egui::Rect::from_min_max(
-                                                                    egui::pos2(x0, rect.top()),
-                                                                    egui::pos2((x0 + seg_w).min(rect.right()), rect.bottom()),
+                                                                    egui::pos2(x0, rect.top() + y_offset),
+                                                                    egui::pos2((x0 + seg_w).min(rect.right()), rect.top() + y_offset + bar_h),
                                                                 );
                                                                 painter.rect_filled(r, 0.0, color_at(i));
                                                             }
                                                         };
 
                                                         // Organ + amino layout (base color)
-                                                        draw_strip(ui, &|i| {
+                                                        draw_strip(ui, organ_bar_h, &|i| {
                                                             let part = &agent.body[i];
-                                                            part_base_color32(part.base_type())
+                                                            let base_type = part.base_type();
+                                                            if base_type < 20 {
+                                                                // Amino acids: shades of bright grey
+                                                                let shade = 160 + (base_type * 4) as u8;
+                                                                egui::Color32::from_rgb(shade, shade, shade)
+                                                            } else {
+                                                                // Organs: original colors
+                                                                part_base_color32(base_type)
+                                                            }
                                                         });
 
                                                         ui.add_space(4.0);
@@ -9433,7 +9449,7 @@ fn main() {
                                                         // Combined signal strip (debug-style):
                                                         // - Beta: + = red, - = blue
                                                         // - Alpha: + = green, - = magenta
-                                                        draw_strip(ui, &|i| {
+                                                        draw_strip(ui, organ_bar_h, &|i| {
                                                             let part = &agent.body[i];
                                                             let a = part.alpha_signal.clamp(-1.0, 1.0);
                                                             let b = part.beta_signal.clamp(-1.0, 1.0);
@@ -9463,7 +9479,14 @@ fn main() {
                                                             for i in 0..body_count {
                                                                 let base = agent.body[i].base_type();
                                                                 any_parts = true;
-                                                                let color = part_base_color32(base);
+                                                                let color = if base < 20 {
+                                                                    // Amino acids: shades of bright grey
+                                                                    let shade = 160 + (base * 4) as u8;
+                                                                    egui::Color32::from_rgb(shade, shade, shade)
+                                                                } else {
+                                                                    // Organs: original colors
+                                                                    part_base_color32(base)
+                                                                };
                                                                 let name = part_base_name(base);
                                                                 ui.colored_label(color, name);
                                                             }
