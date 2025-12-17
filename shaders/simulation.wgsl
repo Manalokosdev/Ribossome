@@ -1518,13 +1518,48 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        // If this was the selected agent, transfer selection to a random nearby agent
+        // If this was the selected agent, transfer selection to a random nearby agent.
+        // Also immediately invalidate the inspector buffer so it can't keep rendering a stale
+        // "alive" snapshot when readbacks are throttled.
         if (agent.is_selected == 1u) {
+            var dead_snapshot = agent;
+            dead_snapshot.alive = 0u;
+            dead_snapshot.is_selected = 0u;
+            dead_snapshot.rotation = 0.0;
+            selected_agent_buffer[0] = dead_snapshot;
+
+            // Robust selection transfer:
+            // - First, try a handful of hashed candidates.
+            // - If that fails (e.g. unlucky dead picks), do a short linear scan.
+            // This avoids losing selection and freezing the inspector.
             let transfer_hash = hash(agent_id * 2654435761u + params.random_seed);
-            let target_id = transfer_hash % params.agent_count;
-            if (target_id < params.agent_count && agents_in[target_id].alive == 1u) {
-                agents_out[target_id].is_selected = 1u;
+            var transferred = false;
+
+            if (params.agent_count > 0u) {
+                for (var t = 0u; t < 8u; t = t + 1u) {
+                    let cand = hash(transfer_hash + t * 747796405u) % params.agent_count;
+                    if (cand != agent_id && agents_in[cand].alive == 1u) {
+                        agents_out[cand].is_selected = 1u;
+                        transferred = true;
+                        break;
+                    }
+                }
+
+                if (!transferred) {
+                    // Wraparound scan from a hashed start (bounded to avoid GPU timeouts).
+                    let start = transfer_hash % params.agent_count;
+                    let limit = min(params.agent_count, 2048u);
+                    for (var i = 0u; i < limit; i = i + 1u) {
+                        let idx = (start + i) % params.agent_count;
+                        if (idx != agent_id && agents_in[idx].alive == 1u) {
+                            agents_out[idx].is_selected = 1u;
+                            transferred = true;
+                            break;
+                        }
+                    }
+                }
             }
+
             agent.is_selected = 0u;
         }
 
@@ -1959,8 +1994,10 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Keep it bounded so it behaves like a convolution offset, not advection.
     let raw_v = fluid_velocity[fluid_idx];
     let raw_vlen = length(raw_v);
-    // Apply deadzone BEFORE scaling to avoid precision artifacts at low speeds
-    let v = select(vec2<f32>(0.0, 0.0), raw_v / env_to_fluid, raw_vlen > 0.01);
+    // Smooth deadzone to avoid a hard cutoff line (banding) when speeds are near the threshold.
+    // Below ~0.005 the field contributes nothing; by ~0.02 it contributes fully.
+    let deadzone_t = smoothstep(0.005, 0.02, raw_vlen);
+    let v = (raw_v / env_to_fluid) * deadzone_t;
     let vlen = length(v);
     let dir = select(vec2<f32>(0.0, 0.0), v / vlen, vlen > 1e-6);
 
@@ -2549,6 +2586,10 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 }
 
+struct InspectorOverlayVertexOutput {
+    @builtin(position) position: vec4<f32>,
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
     // Full screen quad
@@ -2565,6 +2606,28 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
     var out: VertexOutput;
     out.position = vec4<f32>(pos, 0.0, 1.0);
     out.uv = (pos + 1.0) * 0.5;
+    return out;
+}
+
+@vertex
+fn vs_inspector_overlay(@builtin(vertex_index) vid: u32) -> InspectorOverlayVertexOutput {
+    // Quad covering only the inspector area (rightmost INSPECTOR_WIDTH pixels)
+    let safe_width = max(params.window_width, 1.0);
+    let inspector_w = f32(INSPECTOR_WIDTH);
+    let x0 = 1.0 - 2.0 * (inspector_w / safe_width);
+
+    var positions = array<vec2<f32>, 6>(
+        vec2<f32>(x0, -1.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(x0, -1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(x0, 1.0)
+    );
+
+    let pos = positions[vid];
+    var out: InspectorOverlayVertexOutput;
+    out.position = vec4<f32>(pos, 0.0, 1.0);
     return out;
 }
 
@@ -2592,6 +2655,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // which directly blends dye markers onto visual_grid before rendering
 
     return vec4<f32>(color.rgb, 1.0);
+}
+
+@fragment
+fn fs_inspector_overlay(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    if (params.draw_enabled == 0u) { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }
+    if (params.selected_agent_index == 0xFFFFFFFFu) { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }
+
+    let safe_width = max(params.window_width, 1.0);
+    let safe_height = max(params.window_height, 1.0);
+    let window_width = u32(safe_width);
+    let window_height = u32(safe_height);
+
+    let x = u32(pos.x);
+    let y = u32(pos.y);
+    if (y >= window_height) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // Map screen x into inspector-local x
+    let start_x = select(window_width - INSPECTOR_WIDTH, 0u, window_width < INSPECTOR_WIDTH);
+    if (x < start_x) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let local_x = x - start_x;
+
+    return inspector_panel_pixel(local_x, y);
 }
 
 // ============================================================================
