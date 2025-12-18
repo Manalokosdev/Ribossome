@@ -1110,8 +1110,8 @@ struct SimulationSettings {
     fluid_jacobi_iters: u32,  // Pressure solve iterations
     fluid_vorticity: f32,     // Vorticity confinement strength (0 disables)
     fluid_viscosity: f32,     // Viscosity (nu) for velocity diffusion (0 disables)
-    fluid_ooze_rate: f32,     // Env alpha/beta -> fluid dye injection rate
-    fluid_ooze_fade_rate: f32, // Env dye fade rate (0 = no fade)
+    fluid_ooze_rate: f32,      // Chem↔dye transfer: equilibrium speed (0-transfer point)
+    fluid_ooze_fade_rate: f32, // Chem↔dye transfer: max-lift speed (full lift past this)
     fluid_wind_push_strength: f32, // Global multiplier for how much fluid pushes agents
     vector_force_power: f32,  // Global force multiplier (0.0 = off)
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
@@ -1208,9 +1208,10 @@ impl Default for SimulationSettings {
             fluid_jacobi_iters: 31,
             fluid_vorticity: 0.0,
             fluid_viscosity: 0.05,
+            // Speed (in dye-cells/sec) where lift and deposition balance out.
             fluid_ooze_rate: 0.2,
-            // Matches the previous hardcoded ~0.999 per-step decay at dt≈0.016: exp(-0.0625*0.016)≈0.999
-            fluid_ooze_fade_rate: 0.0625,
+            // Speed (in dye-cells/sec) where lift saturates.
+            fluid_ooze_fade_rate: 0.6,
             // Matches the previous hardcoded scale used in shaders/simulation.wgsl.
             fluid_wind_push_strength: 0.0005,
             fluid_slope_force_scale: 100.0,
@@ -1435,7 +1436,7 @@ impl SimulationSettings {
         self.fluid_jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
         self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 50.0);
         self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 5.0);
-        self.fluid_ooze_rate = self.fluid_ooze_rate.clamp(0.0, 5.0);
+        self.fluid_ooze_rate = self.fluid_ooze_rate.clamp(0.0, 100.0);
         self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 100.0);
         self.fluid_wind_push_strength = self.fluid_wind_push_strength.clamp(0.0, 2.0);
         self.fluid_slope_force_scale = self.fluid_slope_force_scale.clamp(0.0, 500.0);
@@ -5693,7 +5694,7 @@ impl GpuState {
                 self.fluid_decay,          // decay
                 FLUID_GRID_SIZE as f32,    // grid_size (as f32)
                 0.0, 0.0, 0.0, 0.0,        // mouse
-                // splat: x=env ooze rate, y=env dye fade rate, z=vorticity confinement, w=viscosity
+                // splat: x=chem speed equil, y=chem speed max lift, z=vorticity confinement, w=viscosity
                 self.fluid_ooze_rate,
                 self.fluid_ooze_fade_rate,
                 self.fluid_vorticity,
@@ -8635,8 +8636,8 @@ fn main() {
                                                         );
 
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.fluid_ooze_rate, 0.0..=5.0)
-                                                                .text("Env Ooze Rate"),
+                                                            egui::Slider::new(&mut state.fluid_ooze_rate, 0.0..=100.0)
+                                                                .text("Chem Speed Equilibrium"),
                                                         );
 
                                                         ui.add(
@@ -8644,7 +8645,7 @@ fn main() {
                                                                 &mut state.fluid_ooze_fade_rate,
                                                                 0.0..=100.0,
                                                             )
-                                                            .text("Env Ooze Fade Rate"),
+                                                            .text("Chem Speed Max Lift"),
                                                         );
 
                                                         ui.separator();

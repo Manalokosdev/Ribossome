@@ -73,8 +73,8 @@ const SLOPE_STEER_ENABLED: bool = true;
 // - FP_FLUID_SLOPE_FORCE_SCALE: How strongly terrain slope drives fluid flow (default: 100.0)
 // - FP_FLUID_OBSTACLE_STRENGTH: Permeability model perm = 1 / (1 + k * |slope|), larger k => stronger blocking (default: 200.0)
 
-// Dye injection from environment layers (alpha/beta “oozing”)
-// Controlled at runtime via FP_SPLAT.x.
+// Environment chem ↔ dye exchange tuning
+// Controlled at runtime via FP_SPLAT.x/y.
 
 // Dye persistence & diffusion tuning
 // Controlled at runtime via FP_SPLAT.y (fade rate, 0 = no fade).
@@ -97,14 +97,19 @@ const DYE_DIFFUSE_MIX: f32 = 0.01;
 // - chem_grid[idx].y = beta  (poison)
 @group(0) @binding(10) var<storage, read_write> chem_grid: array<vec2<f32>>;
 
-// Fluid-driven erosion/deposition of the environment chem layers.
+// Fluid-driven lift/deposition of the environment chem layers.
 // Model: the advected dye field acts as the "carried" reservoir.
-// We reuse the existing runtime knobs:
-// - FP_SPLAT.x ("ooze_rate"): how quickly chem gets lifted into dye.
-// - FP_SPLAT.y ("ooze_fade") : how quickly dye settles back into chem.
+// Runtime knobs:
+// - FP_SPLAT.x (chem_speed_equil): speed where transfer is 0 (equilibrium)
+// - FP_SPLAT.y (chem_speed_max_lift): speed where transfer reaches max lift
 // NOTE: This is (chem + dye) mass-conserving, except for saturation at 1.0.
-const CHEM_DEPOSIT_SPEED_MIN: f32 = 0.05;
-const CHEM_DEPOSIT_SPEED_MAX: f32 = 0.60;
+// Single continuous transfer curve driven by dye-grid speed:
+// - speed = 0                      => max deposition
+// - speed = chem_speed_equil        => equilibrium (no lift/deposit)
+// - speed >= chem_speed_max_lift    => max lift
+// Overall transfer rate is controlled by CHEM_TRANSFER_RATE (fraction per second)
+// while the two UI sliders control only the curve shape (speed thresholds).
+const CHEM_TRANSFER_RATE: f32 = 4.0;
 const CHEM_MAX_STEP_FRAC: f32 = 0.25; // hard clamp per tick to avoid instability
 
 // Intermediate force vectors buffer (vec2 per cell) - agents write propeller forces here
@@ -355,7 +360,10 @@ fn randomize_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     fluid_forces[idx] = v * strength;
 }
 
-// Inject dye from alpha/beta environment layers (“oozing”)
+// Deprecated: legacy chem->dye injection pass.
+// We keep this kernel to preserve pipeline structure, but it no longer transfers
+// mass between chem and dye. All chem↔dye exchange is handled by advect_dye using
+// the single continuous speed transfer function.
 @compute @workgroup_size(16, 16)
 fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
@@ -367,39 +375,8 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = dye_grid_index(x, y);
 
-    // Sample alpha/beta from the corresponding environment cell (same resolution).
-    let env_idx = gamma_index(x, y);
-    let c = chem_grid[env_idx];
-    let a = clamp(c.x, 0.0, 1.0);
-    let b = clamp(c.y, 0.0, 1.0);
-
-    // Dye channels: beta -> red, alpha -> green
-    let ooze_beta = b;
-    let ooze_alpha = a;
-
-    // Lift (ooze) a fraction of local chem into dye.
-    // IMPORTANT: this is a conservative transfer: we subtract exactly what we add.
-    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
-    let ooze_rate = max(fp_vec4(FP_SPLAT).x, 0.0);
-    let lift_frac = clamp(ooze_rate * dt, 0.0, CHEM_MAX_STEP_FRAC);
-
-    var current_dye = clamp(dye_in[idx], vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
-
-    // Proposed lift amount in dye-channel order (x=beta, y=alpha).
-    let desired_lift = vec2<f32>(ooze_beta, ooze_alpha) * lift_frac;
-
-    // Clamp by available dye headroom (avoid destroying mass when dye is saturated).
-    let dye_headroom = vec2<f32>(1.0, 1.0) - current_dye;
-    let lift = min(desired_lift, max(dye_headroom, vec2<f32>(0.0, 0.0)));
-
-    // Apply transfer.
-    current_dye = current_dye + lift;
-    let new_alpha = max(a - lift.y, 0.0);
-    let new_beta = max(b - lift.x, 0.0);
-    chem_grid[env_idx] = vec2<f32>(new_alpha, new_beta);
-
-    // Dye ignores obstacles: don't attenuate by permeability.
-    dye_out[idx] = current_dye;
+    // Pass-through.
+    dye_out[idx] = clamp(dye_in[idx], vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
 }
 
 // Advect dye concentration using semi-Lagrangian method (same as velocity advection)
@@ -456,20 +433,30 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Use dye-grid velocity magnitude (in dye cells / sec) as the driver.
     let speed = length(vel_dye);
 
-    let ooze_rate = max(fp_vec4(FP_SPLAT).x, 0.0);
-    let ooze_fade = max(fp_vec4(FP_SPLAT).y, 0.0);
+    let chem_speed_equil_in = max(fp_vec4(FP_SPLAT).x, 0.0);
+    let chem_speed_max_lift_in = max(fp_vec4(FP_SPLAT).y, 0.0);
+
+    // Ensure a sane monotonic curve even if UI values are inverted.
+    let chem_speed_equil = clamp(chem_speed_equil_in, 1e-4, 1000.0);
+    let chem_speed_max_lift = max(chem_speed_max_lift_in, chem_speed_equil + 1e-4);
 
     // Each dye cell maps 1:1 to the environment chem cell at the same resolution.
     let env_idx = gamma_index(x, y);
     var chem = clamp(chem_grid[env_idx], vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
 
-    // Continuous lift/deposit blending based on speed.
-    // t=0   => max deposition, no lift
-    // t=1   => max lift, no deposition
-    // (No hard threshold: it's a smooth continuous interpolation.)
-    let t = smoothstep(CHEM_DEPOSIT_SPEED_MIN, CHEM_DEPOSIT_SPEED_MAX, speed);
+    // Single continuous transfer function based on speed.
+    // transfer in [-1, 1]
+    //  +1 => max deposition (dye -> chem)
+    //   0 => equilibrium
+    //  -1 => max lift (chem -> dye)
+    let deposit_strength = 1.0 - smoothstep(0.0, chem_speed_equil, speed);
+    let lift_strength = smoothstep(chem_speed_equil, chem_speed_max_lift, speed);
+    let transfer = clamp(deposit_strength - lift_strength, -1.0, 1.0);
 
-    let pickup_frac = clamp(ooze_rate * t * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    let pickup_strength = max(-transfer, 0.0);
+    let deposit_strength_pos = max(transfer, 0.0);
+
+    let pickup_frac = clamp(CHEM_TRANSFER_RATE * pickup_strength * dt, 0.0, CHEM_MAX_STEP_FRAC);
     let pickup_alpha = chem.x * pickup_frac;
     let pickup_beta = chem.y * pickup_frac;
     // Clamp by dye headroom to avoid losing mass due to saturation.
@@ -478,8 +465,8 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     chem = vec2<f32>(max(chem.x - pickup.y, 0.0), max(chem.y - pickup.x, 0.0));
     dye_val = dye_val + pickup;
 
-    // Deposit (settling): complementary to lift.
-    let deposit_frac = clamp(ooze_fade * (1.0 - t) * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    // Deposit (settling)
+    let deposit_frac = clamp(CHEM_TRANSFER_RATE * deposit_strength_pos * dt, 0.0, CHEM_MAX_STEP_FRAC);
 
     // Deposit only up to available headroom in chem to preserve mass.
     let alpha_headroom = 1.0 - chem.x;

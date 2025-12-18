@@ -1092,24 +1092,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Fluid force per amino acid (apply at the same point as slope force)
         if (params.fluid_wind_push_strength != 0.0) {
-            // Default regular amino acids to coupling=1.0 unless explicitly overridden.
+            // Default body parts (amino acids + organs) to coupling=1.0 unless explicitly overridden.
             let wind_coupling = select(
                 amino_props.fluid_wind_coupling,
                 1.0,
-                (base_type < 20u) && (amino_props.fluid_wind_coupling == 0.0)
+                (amino_props.fluid_wind_coupling == 0.0)
             );
 
             if (wind_coupling != 0.0) {
                 // Avoid clamping OOB into edge cells (prevents artificial edge wind).
                 if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
-                    let grid_f = f32(FLUID_GRID_SIZE);
-                    let max_idx_f = grid_f - 1.0;
-                    let fluid_grid_x = u32(clamp(world_pos.x / f32(SIM_SIZE) * grid_f, 0.0, max_idx_f));
-                    let fluid_grid_y = u32(clamp(world_pos.y / f32(SIM_SIZE) * grid_f, 0.0, max_idx_f));
-                    let fluid_idx = fluid_grid_y * FLUID_GRID_SIZE + fluid_grid_x;
-
                     // Fluid velocity is in fluid-cell units; convert to world-units per simulation tick.
-                    let v = fluid_velocity[fluid_idx];
+                    let v = sample_fluid_velocity_bilinear(world_pos);
                     let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
                     let v_frame = v * (cell_to_world);
 
@@ -1174,10 +1168,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (target_idx != center_idx) {
                         var center_gamma = read_gamma_height(center_idx);
                         var target_gamma = read_gamma_height(target_idx);
-                        var center_alpha = alpha_grid[center_idx];
-                        var target_alpha = alpha_grid[target_idx];
-                        var center_beta = beta_grid[center_idx];
-                        var target_beta = beta_grid[target_idx];
+                        var center_alpha = chem_grid[center_idx].x;
+                        var target_alpha = chem_grid[target_idx].x;
+                        var center_beta = chem_grid[center_idx].y;
+                        var target_beta = chem_grid[target_idx].y;
 
                         let transfer_amount = prop_strength * 0.05 * part_weight;
                         if (transfer_amount > 0.0) {
@@ -1200,15 +1194,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             if (alpha_transfer > 0.0) {
                                 center_alpha = clamp(center_alpha - alpha_transfer, 0.0, 1.0);
                                 target_alpha = clamp(target_alpha + alpha_transfer, 0.0, 1.0);
-                                alpha_grid[center_idx] = center_alpha;
-                                alpha_grid[target_idx] = target_alpha;
+                                let prev_c = chem_grid[center_idx];
+                                chem_grid[center_idx] = vec2<f32>(center_alpha, prev_c.y);
+                                let prev_t = chem_grid[target_idx];
+                                chem_grid[target_idx] = vec2<f32>(target_alpha, prev_t.y);
                             }
 
                             if (beta_transfer > 0.0) {
                                 center_beta = clamp(center_beta - beta_transfer, 0.0, 1.0);
                                 target_beta = clamp(target_beta + beta_transfer, 0.0, 1.0);
-                                beta_grid[center_idx] = center_beta;
-                                beta_grid[target_idx] = target_beta;
+                                let prev_c = chem_grid[center_idx];
+                                chem_grid[center_idx] = vec2<f32>(prev_c.x, center_beta);
+                                let prev_t = chem_grid[target_idx];
+                                chem_grid[target_idx] = vec2<f32>(prev_t.x, target_beta);
                             }
                         }
                     }
@@ -1306,6 +1304,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Overdamped rotation: angular_velocity = torque / rotational_drag
     let rotational_drag = moment_of_inertia * 20.0; // Increased rotational drag for stability
     var angular_velocity = torque / rotational_drag;
+
+    // Add spin from local fluid vorticity (curl). This makes vortices visibly rotate agents.
+    if (params.fluid_wind_push_strength != 0.0) {
+        // center_of_mass is local (0,0) in this phase; sample at agent world position.
+        let com_world = agent.position;
+        if (com_world.x >= 0.0 && com_world.x < f32(SIM_SIZE) && com_world.y >= 0.0 && com_world.y < f32(SIM_SIZE)) {
+            let curl = sample_fluid_curl(com_world);
+            angular_velocity += curl * params.fluid_wind_push_strength * WIND_CURL_ANGVEL_SCALE;
+        }
+    }
     angular_velocity = angular_velocity * ANGULAR_BLEND;
     angular_velocity = clamp(angular_velocity, -ANGVEL_MAX, ANGVEL_MAX);
 
@@ -1421,8 +1429,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Consume alpha and beta based on per-amino absorption rates
             // and local availability, scaled by speed (slower = more absorption)
-            let available_alpha = alpha_grid[idx];
-            let available_beta = beta_grid[idx];
+            let available_alpha = chem_grid[idx].x;
+            let available_beta = chem_grid[idx].y;
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed effects and amplification to the rates themselves
@@ -1446,7 +1454,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // Apply alpha consumption - energy gain uses base food_power (speed already in consumption)
                 if (consumed_alpha > 0.0) {
-                    alpha_grid[idx] = clamp(available_alpha - consumed_alpha, 0.0, available_alpha);
+                    let prev = chem_grid[idx];
+                    chem_grid[idx] = vec2<f32>(clamp(available_alpha - consumed_alpha, 0.0, available_alpha), prev.y);
 
                     // Mouth effectiveness rule:
                     // - Vampire mouths: alpha energy gain reduced by total vampire-mouth count.
@@ -1467,7 +1476,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // Apply beta consumption - damage uses poison_power, reduced by poison protection
                 if (consumed_beta > 0.0) {
-                    beta_grid[idx] = clamp(available_beta - consumed_beta, 0.0, available_beta);
+                    let prev = chem_grid[idx];
+                    chem_grid[idx] = vec2<f32>(prev.x, clamp(available_beta - consumed_beta, 0.0, available_beta));
                     agent.energy -= consumed_beta * params.poison_power * poison_multiplier;
                     total_consumed_beta += consumed_beta;
                 }
@@ -1523,9 +1533,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let part_rnd = f32(part_hash % 1000u) / 1000.0;
 
                 if (part_rnd < 0.5) {
-                    alpha_grid[idx] = min(alpha_grid[idx] + deposit_per_part, 1.0);
+                    let prev = chem_grid[idx];
+                    chem_grid[idx] = vec2<f32>(min(prev.x + deposit_per_part, 1.0), prev.y);
                 } else {
-                    beta_grid[idx] = min(beta_grid[idx] + deposit_per_part, 1.0);
+                    let prev = chem_grid[idx];
+                    chem_grid[idx] = vec2<f32>(prev.x, min(prev.y + deposit_per_part, 1.0));
                 }
             }
         }
@@ -1609,7 +1621,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gene_length > 0u && pairing_counter < gene_length) {
         // Try to increment the counter based on conditions
         let pos_idx = grid_index(agent.position);
-        let beta_concentration = beta_grid[pos_idx];
+        let beta_concentration = chem_grid[pos_idx].y;
         // Beta acts as pairing inhibitor
         let radiation_factor = 1.0 / max(1.0 + beta_concentration, 1.0);
         let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_counter * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;
@@ -1692,7 +1704,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // Sample beta concentration at parent's location to calculate radiation-induced mutation rate
                 let parent_idx = grid_index(agent.position);
-                let beta_concentration = beta_grid[parent_idx];
+                let beta_concentration = chem_grid[parent_idx].y;
 
                 // Beta acts as mutagenic radiation - increases mutation rate with power-of-5 curve
                 // This creates clear ecological zones: safe (beta 0-4), moderate (4-7), extreme (7-10)
@@ -1983,8 +1995,8 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Instead of advecting (which tends to look like global translation), we do a
     // directionally-skewed blur kernel similar to the previous slope-based convolution.
     // The fluid force-vector field defines a preferred blur direction and magnitude.
-    let current_alpha = alpha_grid[idx];
-    let current_beta = beta_grid[idx];
+    let current_alpha = chem_grid[idx].x;
+    let current_beta = chem_grid[idx].y;
     let current_gamma = read_gamma_height(idx);
 
     // Per-channel strengths.
@@ -2009,8 +2021,8 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
         let nx_i = clamp(i32(x) + dx, 0, i32(GRID_SIZE) - 1);
         let ny_i = clamp(i32(y) + dy, 0, i32(GRID_SIZE) - 1);
         let nidx = u32(ny_i) * GRID_SIZE + u32(nx_i);
-        alpha_sum += alpha_grid[nidx];
-        beta_sum += beta_grid[nidx];
+        alpha_sum += chem_grid[nidx].x;
+        beta_sum += chem_grid[nidx].y;
     }
 
     let alpha_avg = alpha_sum / 9.0;
@@ -2035,14 +2047,14 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let up_idx = u32(up_y) * GRID_SIZE + x;
     let down_idx = u32(down_y) * GRID_SIZE + x;
 
-    let alpha_left = alpha_grid[left_idx];
-    let alpha_right = alpha_grid[right_idx];
-    let alpha_up = alpha_grid[up_idx];
-    let alpha_down = alpha_grid[down_idx];
-    let beta_left = beta_grid[left_idx];
-    let beta_right = beta_grid[right_idx];
-    let beta_up = beta_grid[up_idx];
-    let beta_down = beta_grid[down_idx];
+    let alpha_left = chem_grid[left_idx].x;
+    let alpha_right = chem_grid[right_idx].x;
+    let alpha_up = chem_grid[up_idx].x;
+    let alpha_down = chem_grid[down_idx].x;
+    let beta_left = chem_grid[left_idx].y;
+    let beta_right = chem_grid[right_idx].y;
+    let beta_up = chem_grid[up_idx].y;
+    let beta_down = chem_grid[down_idx].y;
 
     let slope_left = read_gamma_slope(left_idx);
     let slope_right = read_gamma_slope(right_idx);
@@ -2113,20 +2125,16 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let alpha_base = clamp(alpha_iso - alpha_flux * kernel_scale, 0.0, 1.0);
     let beta_base = clamp(beta_iso - beta_flux * kernel_scale, 0.0, 1.0);
 
-    // Map env cell coords to fluid grid coords.
     // NOTE: sample_grid_bilinear expects world-space in [0, SIM_SIZE).
     let pos_cell = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
     let cell_to_world = f32(SIM_SIZE) / f32(GRID_SIZE);
     let pos_world = pos_cell * cell_to_world;
     let env_to_fluid = f32(FLUID_GRID_SIZE) / f32(GRID_SIZE);
-    let fluid_pos = pos_cell * env_to_fluid;
-    let fx = clamp(i32(fluid_pos.x), 0, i32(FLUID_GRID_SIZE) - 1);
-    let fy = clamp(i32(fluid_pos.y), 0, i32(FLUID_GRID_SIZE) - 1);
-    let fluid_idx = u32(fy) * FLUID_GRID_SIZE + u32(fx);
 
     // Use fluid forces as a direction field (converted to env-cell units).
     // Keep it bounded so it behaves like a convolution offset, not advection.
-    let raw_v = fluid_velocity[fluid_idx];
+    // Bilinear sampling reduces banding from the low-res fluid grid.
+    let raw_v = sample_fluid_velocity_bilinear(pos_world);
     let raw_vlen = length(raw_v);
     // Smooth deadzone to avoid a hard cutoff line (banding) when speeds are near the threshold.
     // Below ~0.005 the field contributes nothing; by ~0.02 it contributes fully.
@@ -2174,7 +2182,7 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let a_total = a_0 * w0 + a_m1 * w1 + a_m2 * w2;
     let b_total = b_0 * w0 + b_m1 * w1 + b_m2 * w2;
     let g_total = g_0 * w0 + g_m1 * w1 + g_m2 * w2;
-    
+
     // Apply conservation correction: maintain the current value when strength is zero
     let a_blur = clamp(mix(current_alpha, a_total, alpha_conv_strength), 0.0, 1.0);
     let b_blur = clamp(mix(current_beta, b_total, beta_conv_strength), 0.0, 1.0);
@@ -2196,18 +2204,22 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform alpha rain (food): remove spatial and beta-dependent gradients.
     // Each cell independently receives a saturated rain event with probability alpha_multiplier * 0.05.
     // (Scaling by 0.05 preserves prior expected value semantics.)
-    // Rain factor is read from the same packed source used by sensors:
-    // alpha in .y, beta in .x (see shared.wgsl sample_* helpers).
-    let packed = fluid_velocity[fluid_idx];
-    let alpha_rain_map = clamp(packed.y, 0.0, 1.0);
+    // Rain factor is read from the advected fluid dye buffer.
+    // IMPORTANT: fluid_dye is stored at environment resolution (GRID_SIZE^2),
+    // so it must be indexed by env idx, not by the low-res fluid grid.
+    // fluid_dye[idx].y = alpha, fluid_dye[idx].x = beta.
+    let dye_packed = fluid_dye[idx];
+    let alpha_rain_map = clamp(dye_packed.y, 0.0, 1.0);
 
-    // Make it rain more when local magnitude is low (stagnant areas).
+    // Make it rain more when local velocity magnitude is low (stagnant areas).
     // This is intentionally dt-free and uses a smooth threshold to avoid banding.
-    let local_mag = length(packed);
+    let local_mag = raw_vlen;
     let low_mag = 1.0 - smoothstep(0.02, 0.15, local_mag);
-    let alpha_rain_factor = clamp(alpha_rain_map * (1.0 + 2.0 * low_mag), 0.0, 1.0);
+    // Stronger precipitation in slow-flow regions.
+    // Shape: quadratic for a gentler mid-range and stronger near-still boost.
+    let precip_boost = mix(1.0, 8.0, low_mag * low_mag);
 
-    let alpha_probability_sat = params.alpha_multiplier * 0.05 * alpha_rain_factor;
+    let alpha_probability_sat = clamp(params.alpha_multiplier * 0.05 * alpha_rain_map * precip_boost, 0.0, 1.0);
     if (rain_chance < alpha_probability_sat) {
         final_alpha = 1.0;  // Saturated drop
     }
@@ -2215,8 +2227,8 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform beta rain (poison): also no vertical gradient. Probability = beta_multiplier * 0.05.
     let beta_seed = cell_seed * 1103515245u;
     let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
-    let beta_rain_factor = 1.0;
-    let beta_probability_sat = params.beta_multiplier * 0.05 * beta_rain_factor;
+    let beta_rain_map = clamp(dye_packed.x, 0.0, 1.0);
+    let beta_probability_sat = clamp(params.beta_multiplier * 0.05 * beta_rain_map * precip_boost, 0.0, 1.0);
     if (beta_rain_chance < beta_probability_sat) {
         final_beta = 1.0;  // Saturated drop
     }
@@ -2240,8 +2252,7 @@ fn diffuse_grids_stage2(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * GRID_SIZE + x;
     let staged = trail_grid_inject[idx];
-    alpha_grid[idx] = staged.x;
-    beta_grid[idx] = staged.y;
+    chem_grid[idx] = vec2<f32>(staged.x, staged.y);
     write_gamma_height(idx, staged.z);
 }
 
@@ -2534,8 +2545,9 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         gamma = clamp(sample_grid_bilinear(world_pos, 2u), 0.0, 1.0);
     } else {
         // Nearest neighbor (pixelated)
-        alpha = clamp(alpha_grid[grid_index(world_pos)], 0.0, 1.0);
-        beta = clamp(beta_grid[grid_index(world_pos)], 0.0, 1.0);
+        let c = chem_grid[grid_index(world_pos)];
+        alpha = clamp(c.x, 0.0, 1.0);
+        beta = clamp(c.y, 0.0, 1.0);
         gamma = clamp(read_gamma_height(grid_index(world_pos)), 0.0, 1.0);
     }
 
@@ -2848,8 +2860,7 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = y * GRID_SIZE + x;
 
     // Use constant values for fast startup (can be overridden by loading terrain images)
-    alpha_grid[idx] = environment_init.alpha_range.x; // Use minimum alpha value
-    beta_grid[idx] = environment_init.beta_range.x;   // Use minimum beta value
+    chem_grid[idx] = vec2<f32>(environment_init.alpha_range.x, environment_init.beta_range.x);
     gamma_grid[idx] = 0.0;
 
     gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = environment_init.slope_pair.x;
@@ -3068,9 +3079,11 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (mode == 1u) {
-        alpha_grid[idx] = output_value;
+        let prev = chem_grid[idx];
+        chem_grid[idx] = vec2<f32>(output_value, prev.y);
     } else if (mode == 2u) {
-        beta_grid[idx] = output_value;
+        let prev = chem_grid[idx];
+        chem_grid[idx] = vec2<f32>(prev.x, output_value);
     } else if (mode == 3u) {
         gamma_grid[idx] = output_value;
     }

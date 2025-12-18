@@ -29,6 +29,9 @@ const VELOCITY_BLEND: f32 = 0.6;      // 0..1, higher = quicker velocity changes
 const ANGULAR_BLEND: f32 = 0.6;       // 0..1, higher = quicker rotation changes
 const VEL_MAX: f32 = 24.0;             // Max linear speed per frame
 const ANGVEL_MAX: f32 = 1.5;         // Max angular change (radians) per frame
+// Convert local fluid vorticity (curl) into agent spin.
+// Torque-based spin still exists; this makes vortices visibly rotate agents.
+const WIND_CURL_ANGVEL_SCALE: f32 = 0.25;
 // Signal-to-angle shaping (no dt): cap amplitude and per-frame change
 const SIGNAL_GAIN: f32 =20;        // global scale for signal-driven angle (was 20.0)
 // Separate gains for alpha vs beta to restore original triple-contribution tunability
@@ -294,10 +297,16 @@ var<storage, read_write> agents_in: array<Agent>;
 var<storage, read_write> agents_out: array<Agent>;
 
 @group(0) @binding(2)
-var<storage, read_write> alpha_grid: array<f32>;  // 512x512 environment grid
+// Environment chemistry grid:
+// - chem_grid[idx].x = alpha (food)
+// - chem_grid[idx].y = beta  (poison)
+var<storage, read_write> chem_grid: array<vec2<f32>>;
 
 @group(0) @binding(3)
-var<storage, read_write> beta_grid: array<f32>;   // 512x512 environment grid
+// Fluid dye (advected):
+// - fluid_dye[idx].x = beta (red)
+// - fluid_dye[idx].y = alpha (green)
+var<storage, read> fluid_dye: array<vec2<f32>>;
 
 @group(0) @binding(4)
 var<storage, read_write> visual_grid: array<vec4<f32>>; // RGBA render target
@@ -313,7 +322,7 @@ var<uniform> params: SimParams;
 var<storage, read_write> trail_grid_inject: array<vec4<f32>>;
 
 @group(0) @binding(8)
-var<storage, read> fluid_velocity: array<vec2<f32>>; // 128x128 fluid velocity field for visualization (also used for dye when fluid_show enabled)
+var<storage, read> fluid_velocity: array<vec2<f32>>; // Fluid velocity field (vec2 per cell)
 
 @group(0) @binding(9)
 var<storage, read_write> new_agents: array<Agent>;  // Buffer for spawned agents
@@ -422,7 +431,7 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     array<vec4<f32>,6>( vec4<f32>(8.5, 4.0, -0.52, 0.02), vec4<f32>(0.14, -0.64, 0.0, 0.001), vec4<f32>(0.3, 0.3, 0.2, 0.0), vec4<f32>(0.0, 0.3, -0.48, -0.48), vec4<f32>(0.2, 0.8, 0.2, -0.1), vec4<f32>(1.1, 0.0, 0.0, 0.0) ),
     // 11 N - Enabler
     array<vec4<f32>,6>( vec4<f32>(16.0, 6.0, 0.21, 0.15), vec4<f32>(0.2, 0.3, 0.0, 0.001), vec4<f32>(0.1, 0.1, 0.2, 0.0), vec4<f32>(0.0, 0.0, 0.24, 0.24), vec4<f32>(0.2, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
-    // 12 P - Proline (Propeller)
+    // 12 P - Proline
     array<vec4<f32>,6>( vec4<f32>(16.0, 8.0, -0.333, 0.05), vec4<f32>(0.5, -0.1, 2.5, 0.01), vec4<f32>(0.1, 0.0, 0.2, 0.0), vec4<f32>(0.0, 0.3, -0.77, -0.77), vec4<f32>(0.2, 1.5, -0.5, 1.4), vec4<f32>(-0.4, 0.0, 0.0, 0.0) ),
     // 13 Q - Glutamine
     array<vec4<f32>,6>( vec4<f32>(8.5, 3.0, -0.221, 0.02), vec4<f32>(0.24, -0.4, 0.0, 0.001), vec4<f32>(0.34, 0.34, 0.34, 0.0), vec4<f32>(0.0, 0.3, 0.53, 0.53), vec4<f32>(0.2, 1.0, 0.0, 0.75), vec4<f32>(0.25, 0.0, 0.0, 0.0) ),
@@ -487,7 +496,7 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
 );
 
 var<private> AMINO_FLAGS: array<u32, AMINO_COUNT> = array<u32, AMINO_COUNT>(
-    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (1u<<9), (1u<<0), 0u, 0u, 0u, 0u, 0u, 0u, 0u, // 0–19
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (1u<<9), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, // 0–19
     (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<8), (1u<<9), 0u, 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3) // 20–41
 );
 
@@ -557,6 +566,54 @@ fn fluid_grid_index(pos: vec2<f32>) -> u32 {
     x = clamp(x, 0, i32(FLUID_GRID_SIZE) - 1);
     y = clamp(y, 0, i32(FLUID_GRID_SIZE) - 1);
     return u32(y) * FLUID_GRID_SIZE + u32(x);
+}
+
+fn sample_fluid_velocity_bilinear(pos_world: vec2<f32>) -> vec2<f32> {
+    let ws = f32(SIM_SIZE);
+    let grid_f = f32(FLUID_GRID_SIZE);
+
+    // Map world position to fluid-grid continuous coordinates.
+    // Clamp slightly inside the domain so floor/fract stay well-defined at the max edge.
+    let gx = clamp((pos_world.x / ws) * grid_f, 0.0, grid_f - 1e-4);
+    let gy = clamp((pos_world.y / ws) * grid_f, 0.0, grid_f - 1e-4);
+
+    let x0 = i32(floor(gx));
+    let y0 = i32(floor(gy));
+    let x1 = min(x0 + 1, i32(FLUID_GRID_SIZE) - 1);
+    let y1 = min(y0 + 1, i32(FLUID_GRID_SIZE) - 1);
+
+    let tx = fract(gx);
+    let ty = fract(gy);
+
+    let idx00 = u32(y0) * FLUID_GRID_SIZE + u32(x0);
+    let idx10 = u32(y0) * FLUID_GRID_SIZE + u32(x1);
+    let idx01 = u32(y1) * FLUID_GRID_SIZE + u32(x0);
+    let idx11 = u32(y1) * FLUID_GRID_SIZE + u32(x1);
+
+    let v00 = fluid_velocity[idx00];
+    let v10 = fluid_velocity[idx10];
+    let v01 = fluid_velocity[idx01];
+    let v11 = fluid_velocity[idx11];
+
+    let v0 = mix(v00, v10, tx);
+    let v1 = mix(v01, v11, tx);
+    return mix(v0, v1, ty);
+}
+
+// Signed 2D curl (vorticity) of the fluid velocity field at pos_world.
+// Units: 1/tick (velocity is in cells/tick; derivatives are per-cell).
+fn sample_fluid_curl(pos_world: vec2<f32>) -> f32 {
+    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+
+    // Central differences in cell space by sampling one cell away in world space.
+    let v_r = sample_fluid_velocity_bilinear(pos_world + vec2<f32>( cell_to_world, 0.0));
+    let v_l = sample_fluid_velocity_bilinear(pos_world + vec2<f32>(-cell_to_world, 0.0));
+    let v_t = sample_fluid_velocity_bilinear(pos_world + vec2<f32>(0.0,  cell_to_world));
+    let v_b = sample_fluid_velocity_bilinear(pos_world + vec2<f32>(0.0, -cell_to_world));
+
+    let dv_y_dx = (v_r.y - v_l.y) * 0.5;
+    let dv_x_dy = (v_t.x - v_b.x) * 0.5;
+    return dv_y_dx - dv_x_dy;
 }
 
 struct PartName {
@@ -646,9 +703,9 @@ fn sample_grid_bilinear(pos: vec2<f32>, grid_type: u32) -> f32 {
     var v11: f32;
 
     if (grid_type == 0u) {
-        v00 = alpha_grid[idx00]; v10 = alpha_grid[idx10]; v01 = alpha_grid[idx01]; v11 = alpha_grid[idx11];
+        v00 = chem_grid[idx00].x; v10 = chem_grid[idx10].x; v01 = chem_grid[idx01].x; v11 = chem_grid[idx11].x;
     } else if (grid_type == 1u) {
-        v00 = beta_grid[idx00]; v10 = beta_grid[idx10]; v01 = beta_grid[idx01]; v11 = beta_grid[idx11];
+        v00 = chem_grid[idx00].y; v10 = chem_grid[idx10].y; v01 = chem_grid[idx01].y; v11 = chem_grid[idx11].y;
     } else {
         v00 = read_gamma_height(idx00); v10 = read_gamma_height(idx10); v01 = read_gamma_height(idx01); v11 = read_gamma_height(idx11);
     }
@@ -691,9 +748,9 @@ fn sample_grid_bicubic(pos: vec2<f32>, grid_type: u32) -> f32 {
             let idx = u32(sy) * GRID_SIZE + u32(sx);
 
             if (grid_type == 0u) {
-                values[(j + 1) * 4 + (i + 1)] = alpha_grid[idx];
+                values[(j + 1) * 4 + (i + 1)] = chem_grid[idx].x;
             } else if (grid_type == 1u) {
-                values[(j + 1) * 4 + (i + 1)] = beta_grid[idx];
+                values[(j + 1) * 4 + (i + 1)] = chem_grid[idx].y;
             } else {
                 values[(j + 1) * 4 + (i + 1)] = read_gamma_height(idx);
             }
@@ -738,8 +795,8 @@ fn write_gamma_slope(idx: u32, slope: vec2<f32>) { gamma_grid[idx + GAMMA_SLOPE_
 fn read_combined_height(ix: i32, iy: i32) -> f32 {
     let idx = clamp_gamma_coords(ix, iy);
     var height = gamma_grid[idx];
-    if (params.chemical_slope_scale_alpha != 0.0) { height += alpha_grid[idx] * params.chemical_slope_scale_alpha; }
-    if (params.chemical_slope_scale_beta != 0.0) { height += beta_grid[idx] * params.chemical_slope_scale_beta; }
+    if (params.chemical_slope_scale_alpha != 0.0) { height += chem_grid[idx].x * params.chemical_slope_scale_alpha; }
+    if (params.chemical_slope_scale_beta != 0.0) { height += chem_grid[idx].y * params.chemical_slope_scale_beta; }
     return height;
 }
 
@@ -753,7 +810,7 @@ fn hash_f32(v: u32) -> f32 { return f32(hash(v)) / 4294967295.0; }
 
 // Sensor and sampling helpers
 fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, grid_type: u32, debug_mode: bool, sensor_perpendicular: vec2<f32>, chirality_flip: f32, promoter_param1: f32, modifier_param1: f32) -> f32 {
-    // Environment sensors read from the (fluid-advected) alpha/beta dye field.
+    // Environment sensors read from the advected fluid dye (fluid_dye).
     // Directional sensors sample only the immediate left/right env texels relative to the organ orientation.
     // The old "radius" parameter is repurposed as a signal gain multiplier.
     let combined_param = promoter_param1 + modifier_param1;
@@ -764,8 +821,9 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
     // Keep seed in signature for compatibility (not used after refactor).
     let _seed = seed;
 
-    // One fluid cell in world units.
-    let cell = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+    // One environment cell in world units.
+    // NOTE: fluid_dye is stored at ENV_GRID_SIZE resolution, so sampling must use env indexing.
+    let cell = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
     // Chirality flips left/right by reversing the perpendicular direction.
     let chir = select(1.0, -1.0, chirality_flip < 0.0);
     let dir = select(vec2<f32>(1.0, 0.0), normalize(sensor_perpendicular), length(sensor_perpendicular) > 1e-5) * chir;
@@ -776,16 +834,16 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
     var v_left = 0.0;
     var v_right = 0.0;
     if (is_in_bounds(pos_left)) {
-        let idx = fluid_grid_index(pos_left);
-        // Packed dye convention: alpha in .y, beta in .x
-        if (grid_type == 0u) { v_left = fluid_velocity[idx].y; }
-        else if (grid_type == 1u) { v_left = fluid_velocity[idx].x; }
+        let idx = grid_index(pos_left);
+        let d = fluid_dye[idx];
+        if (grid_type == 0u) { v_left = clamp(d.y, 0.0, 1.0); }
+        else if (grid_type == 1u) { v_left = clamp(d.x, 0.0, 1.0); }
     }
     if (is_in_bounds(pos_right)) {
-        let idx = fluid_grid_index(pos_right);
-        // Packed dye convention: alpha in .y, beta in .x
-        if (grid_type == 0u) { v_right = fluid_velocity[idx].y; }
-        else if (grid_type == 1u) { v_right = fluid_velocity[idx].x; }
+        let idx = grid_index(pos_right);
+        let d = fluid_dye[idx];
+        if (grid_type == 0u) { v_right = clamp(d.y, 0.0, 1.0); }
+        else if (grid_type == 1u) { v_right = clamp(d.x, 0.0, 1.0); }
     }
 
     if (debug_mode) {
@@ -800,7 +858,7 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
 }
 
 fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_type: u32, debug_mode: bool, promoter_param1: f32, modifier_param1: f32) -> f32 {
-    // Intensity sensors sample only the current env texel.
+    // Intensity sensors sample only the current fluid texel.
     // The old "radius" parameter is repurposed as a signal gain multiplier.
     let combined_param = promoter_param1 + modifier_param1;
     // Keep polarity explicit (requested): sign comes from (p+m), magnitude from abs(p+m).
@@ -813,11 +871,12 @@ fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_ty
         return 0.0;
     }
 
-    let idx = fluid_grid_index(center);
+    // NOTE: fluid_dye is stored at ENV_GRID_SIZE resolution.
+    let idx = grid_index(center);
+    let d = fluid_dye[idx];
     var v = 0.0;
-    // Packed dye convention: alpha in .y, beta in .x
-    if (grid_type == 0u) { v = fluid_velocity[idx].y; }
-    else if (grid_type == 1u) { v = fluid_velocity[idx].x; }
+    if (grid_type == 0u) { v = clamp(d.y, 0.0, 1.0); }
+    else if (grid_type == 1u) { v = clamp(d.x, 0.0, 1.0); }
 
     if (debug_mode) {
         draw_filled_circle(center, 4.0, vec4<f32>(1.0, 0.7, 0.0, 0.7));

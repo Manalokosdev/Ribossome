@@ -13,6 +13,10 @@
 
 // Standalone bindings for composite shader (not part of shared.wgsl)
 const SIM_SIZE: u32 = 30720u;
+// Visualization-only gain for fluid dye overlay. This does not affect simulation/sensing,
+// only how strongly the dye is displayed when params.fluid_show is enabled.
+// Keep this modest; the overlay also applies a tone-map to avoid blowout.
+const DYE_VIS_GAIN: f32 = 2.0;
 
 // Must match SimParams layout from main.rs up to fluid_show field
 struct SimParams {
@@ -184,13 +188,17 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let dye_y = u32(clamp(world_pos.y / ws * grid_f, 0.0, max_idx_f));
             let dye_idx = dye_y * GAMMA_GRID_DIM + dye_x;
 
-            // Sample dye (beta=red, alpha=green) directly from dye buffer
-            let dye = fluid_dye[dye_idx];
-            let dye_color = vec3<f32>(clamp(dye.x, 0.0, 1.0), clamp(dye.y, 0.0, 1.0), 0.0);
+            // Sample dye (beta=red, alpha=green) directly from dye buffer.
+            // Apply a visualization-only gain, then tone-map to avoid hard saturation.
+            let dye_raw = max(fluid_dye[dye_idx], vec2<f32>(0.0, 0.0));
+            let dye_lin = dye_raw * DYE_VIS_GAIN;
+            // Simple Reinhard tone map per-channel: x / (1 + x)
+            let dye_tm = dye_lin / (vec2<f32>(1.0, 1.0) + dye_lin);
+            let dye_color = vec3<f32>(dye_tm.x, dye_tm.y, 0.0);
 
-            // Alpha based on strongest channel
+            // Alpha based on strongest channel (post-tone-map), keep conservative.
             let dye_strength = max(dye_color.r, dye_color.g);
-            let fluid_alpha = clamp(dye_strength * 0.8, 0.0, 0.8);
+            let fluid_alpha = clamp(dye_strength * 0.7, 0.0, 0.65);
             under_color = mix(under_color, dye_color, fluid_alpha);
         }
     }
