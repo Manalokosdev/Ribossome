@@ -188,18 +188,50 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let dye_y = u32(clamp(world_pos.y / ws * grid_f, 0.0, max_idx_f));
             let dye_idx = dye_y * GAMMA_GRID_DIM + dye_x;
 
-            // Sample dye (beta=red, alpha=green) directly from dye buffer.
+            // Sample dye (x = beta, y = alpha) directly from dye buffer.
             // Apply a visualization-only gain, then tone-map to avoid hard saturation.
             let dye_raw = max(fluid_dye[dye_idx], vec2<f32>(0.0, 0.0));
             let dye_lin = dye_raw * DYE_VIS_GAIN;
             // Simple Reinhard tone map per-channel: x / (1 + x)
             let dye_tm = dye_lin / (vec2<f32>(1.0, 1.0) + dye_lin);
-            let dye_color = vec3<f32>(dye_tm.x, dye_tm.y, 0.0);
 
-            // Alpha based on strongest channel (post-tone-map), keep conservative.
-            let dye_strength = max(dye_color.r, dye_color.g);
-            let fluid_alpha = clamp(dye_strength * 0.7, 0.0, 0.65);
-            under_color = mix(under_color, dye_color, fluid_alpha);
+            // Composite dye using the same controls as alpha/beta environment layers:
+            // - params.alpha_color_* + params.alpha_blend_mode for dye alpha
+            // - params.beta_color_*  + params.beta_blend_mode  for dye beta
+            let alpha_color = vec3<f32>(
+                clamp(params.alpha_color_r, 0.0, 1.0),
+                clamp(params.alpha_color_g, 0.0, 1.0),
+                clamp(params.alpha_color_b, 0.0, 1.0)
+            );
+            let beta_color = vec3<f32>(
+                clamp(params.beta_color_r, 0.0, 1.0),
+                clamp(params.beta_color_g, 0.0, 1.0),
+                clamp(params.beta_color_b, 0.0, 1.0)
+            );
+
+            // Apply gamma adjustment to dye intensities for consistent look.
+            let dye_alpha = pow(dye_tm.y, params.alpha_gamma_adjust);
+            let dye_beta = pow(dye_tm.x, params.beta_gamma_adjust);
+
+            // Alpha dye layer
+            if (params.alpha_blend_mode == 0u) {
+                // Additive
+                under_color = under_color + alpha_color * dye_alpha;
+            } else {
+                // Multiply with inverted channel
+                under_color = under_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - alpha_color, dye_alpha);
+            }
+
+            // Beta dye layer
+            if (params.beta_blend_mode == 0u) {
+                // Additive
+                under_color = under_color + beta_color * dye_beta;
+            } else {
+                // Multiply with inverted channel
+                under_color = under_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - beta_color, dye_beta);
+            }
+
+            under_color = clamp(under_color, vec3<f32>(0.0), vec3<f32>(1.0));
         }
     }
 
