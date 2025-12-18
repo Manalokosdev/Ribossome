@@ -49,28 +49,29 @@ const MAX_VEL: f32 = 2000.0;      // Clamp velocity magnitude per cell
 // Single cell force vector at ~1/3 of the sim window.
 const FUMAROLE_ENABLED: bool = true;
 const FUMAROLE_FORCE: vec2<f32> = vec2<f32>(0.0, 1500000.0); // +Y in world/agent coords (updraft)
+const FUMAROLE_ALPHA_INJECTION: f32 = 0.1; // Alpha dye injected per frame at fumarole location
 const FUMAROLE_X_FRAC: f32 = 0.3333333;
 const FUMAROLE_Y_FRAC: f32 = 0.3333333;
 
 // Slope-driven obstacles (porous steepness)
 // If enabled, steeper terrain becomes less permeable (more like rock / barrier).
 const OBSTACLES_ENABLED: bool = true;
-// Permeability model: perm = 1 / (1 + k * |slope|)
-// Larger k => stronger blocking.
-const STEEPNESS_K: f32 = 200.0;
 // Treat cells with very low permeability as effectively solid.
 const SOLID_PERM_THRESHOLD: f32 = 0.02;
 
 // Optional: drive fluid using the gamma slope (heightmap-style downhill flow).
 // This uses the gradient of gamma (in fluid-cell space) as a force vector.
 const SLOPE_FORCE_ENABLED: bool = true;
-const SLOPE_FORCE_SCALE: f32 = 100.0;
+
+// Runtime-controlled parameters (flat params buffer):
+// - FP_FLUID_SLOPE_FORCE_SCALE: How strongly terrain slope drives fluid flow (default: 100.0)
+// - FP_FLUID_OBSTACLE_STRENGTH: Permeability model perm = 1 / (1 + k * |slope|), larger k => stronger blocking (default: 200.0)
 
 // Dye injection from environment layers (alpha/beta “oozing”)
-// Controlled at runtime via params.splat.x (see FluidParams.splat packing).
+// Controlled at runtime via FP_SPLAT.x.
 
 // Dye persistence & diffusion tuning
-// Controlled at runtime via params.splat.y (fade rate, 0 = no fade).
+// Controlled at runtime via FP_SPLAT.y (fade rate, 0 = no fade).
 // 0..1: how much we blend towards a 4-neighbor blur each frame.
 const DYE_DIFFUSE_MIX: f32 = 0.01;
 
@@ -112,18 +113,53 @@ const DYE_DIFFUSE_MIX: f32 = 0.01;
 @group(0) @binding(13) var<storage, read> trail_in: array<vec4<f32>>;
 
 // Parameters
-struct FluidParams {
-    time: f32,
-    dt: f32,
-    decay: f32,
-    grid_size: u32,
-    // mouse.xy in grid coords (0..grid), mouse.zw = mouse velocity in grid units/sec
-    mouse: vec4<f32>,
-    // splat.x = env ooze rate, splat.y = env dye fade rate,
-    // splat.z = vorticity confinement strength (0 disables), splat.w = viscosity (nu, 0 disables)
-    splat: vec4<f32>,
+// IMPORTANT: keep this as a flat float buffer (no Rust<->WGSL struct mirroring).
+// Packed as vec4<f32> to avoid uniform-array scalar stride pitfalls.
+// Layout (f32 indices):
+//  0 time
+//  1 dt
+//  2 decay
+//  3 grid_size (as f32)
+//  4..7  mouse (xy = pos in grid coords, zw = velocity in grid units/sec)
+//  8..11 splat (x=env ooze rate, y=env dye fade rate, z=vorticity strength, w=viscosity)
+//  12 fluid_slope_force_scale
+//  13 fluid_obstacle_strength
+//  14 vector_force_x
+//  15 vector_force_y
+//  16 vector_force_power
+// (padded to 5 vec4s / 20 floats)
+const FP_TIME: u32 = 0u;
+const FP_DT: u32 = 1u;
+const FP_DECAY: u32 = 2u;
+const FP_GRID_SIZE: u32 = 3u;
+const FP_MOUSE: u32 = 4u;
+const FP_SPLAT: u32 = 8u;
+const FP_FLUID_SLOPE_FORCE_SCALE: u32 = 12u;
+const FP_FLUID_OBSTACLE_STRENGTH: u32 = 13u;
+const FP_VECTOR_FORCE_X: u32 = 14u;
+const FP_VECTOR_FORCE_Y: u32 = 15u;
+const FP_VECTOR_FORCE_POWER: u32 = 16u;
+const FP_VEC4_COUNT: u32 = 5u;
+
+@group(0) @binding(3) var<uniform> params: array<vec4<f32>, FP_VEC4_COUNT>;
+
+fn fp_f32(i: u32) -> f32 {
+    let v = params[i >> 2u];
+    let lane = i & 3u;
+    if (lane == 0u) { return v.x; }
+    if (lane == 1u) { return v.y; }
+    if (lane == 2u) { return v.z; }
+    return v.w;
 }
-@group(0) @binding(3) var<uniform> params: FluidParams;
+
+fn fp_vec4(base: u32) -> vec4<f32> {
+    return vec4<f32>(
+        fp_f32(base + 0u),
+        fp_f32(base + 1u),
+        fp_f32(base + 2u),
+        fp_f32(base + 3u),
+    );
+}
 
 // Display/feedback texture (ping-pong) used for visualization.
 // This is in group(1) so it can coexist with the buffer-only group(0) layout.
@@ -212,6 +248,16 @@ fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = grid_index(fx, fy);
     fluid_force_vectors[idx] = fluid_force_vectors[idx] + FUMAROLE_FORCE;
+
+    // Inject alpha dye at fumarole location (convert to dye grid coordinates)
+    let fluid_to_dye = f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let dye_x = u32(clamp(f32(fx) * fluid_to_dye, 0.0, f32(GAMMA_GRID_DIM - 1u)));
+    let dye_y = u32(clamp(f32(fy) * fluid_to_dye, 0.0, f32(GAMMA_GRID_DIM - 1u)));
+    let dye_idx = dye_grid_index(dye_x, dye_y);
+    
+    // Inject alpha into the y channel (green = alpha)
+    let current = dye_out[dye_idx];
+    dye_out[dye_idx] = vec2<f32>(current.x, min(current.y + FUMAROLE_ALPHA_INJECTION, 1.0));
 }
 
 // Combine propeller forces with test force - reads from fluid_force_vectors, writes to fluid_forces
@@ -244,7 +290,7 @@ fn randomize_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = grid_index(x, y);
 
     // Deterministic per-frame seed from time (ms-ish).
-    let t = u32(params.time * 1000.0);
+    let t = u32(fp_f32(FP_TIME) * 1000.0);
     let r1 = rand01(idx ^ t ^ 0xA511E9B3u);
     let r2 = rand01(idx ^ t ^ 0x63D83595u);
     let v = vec2<f32>(r1 * 2.0 - 1.0, r2 * 2.0 - 1.0);
@@ -275,9 +321,9 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ooze_alpha = a;
 
     // Inject proportionally each frame.
-    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     var current_dye = dye_in[idx];
-    let ooze_rate = max(params.splat.x, 0.0);
+    let ooze_rate = max(fp_vec4(FP_SPLAT).x, 0.0);
     let injected = vec2<f32>(ooze_beta, ooze_alpha) * (ooze_rate * dt);
     current_dye = min(current_dye + injected, vec2<f32>(1.0, 1.0));
 
@@ -305,7 +351,7 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let fluid_pos = pos * dye_to_fluid;
 
     // Read current velocity
-    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let vel_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
 
     // Convert velocity to dye-grid units before tracing.
@@ -319,7 +365,7 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // Apply controllable decay to make dye fade over time
     // splat.y is interpreted as a continuous-time fade rate: dye *= exp(-rate * dt)
-    let fade_rate = max(params.splat.y, 0.0);
+    let fade_rate = max(fp_vec4(FP_SPLAT).y, 0.0);
     let decay_factor = exp(-fade_rate * dt);
 
     // Extra diffusion: blend advected dye towards a local 4-neighbor blur.
@@ -441,8 +487,13 @@ fn gamma_slope_force(x: u32, y: u32) -> vec2<f32> {
     // Uses the simulation-provided slope vector field (gamma+alpha+beta contributions).
     let idx = gamma_idx_for_fluid_cell(x, y);
 
-    let slope_grad = gamma_slope_at_idx(idx);
-    return sanitize_vec2(slope_grad) * SLOPE_FORCE_SCALE;
+    var slope_grad = gamma_slope_at_idx(idx);
+
+    // Add the global vector force (physics uses vector_force_x/y scaled by vector_force_power).
+    let global_vec = vec2<f32>(fp_f32(FP_VECTOR_FORCE_X), fp_f32(FP_VECTOR_FORCE_Y)) * fp_f32(FP_VECTOR_FORCE_POWER);
+    slope_grad = slope_grad + global_vec;
+
+    return sanitize_vec2(slope_grad) * fp_f32(FP_FLUID_SLOPE_FORCE_SCALE);
 }
 
 fn gamma_idx_for_fluid_cell(x: u32, y: u32) -> u32 {
@@ -462,8 +513,10 @@ fn slope_magnitude_at_fluid_cell(x: u32, y: u32) -> f32 {
 
 fn slope_permeability(x: u32, y: u32) -> f32 {
     // Porous steepness: flat = ~1, steep = smaller.
+    // Permeability model: perm = 1 / (1 + k * |slope|)
+    // Larger k => stronger blocking.
     let m = slope_magnitude_at_fluid_cell(x, y);
-    return 1.0 / (1.0 + STEEPNESS_K * m);
+    return 1.0 / (1.0 + fp_f32(FP_FLUID_OBSTACLE_STRENGTH) * m);
 }
 
 fn obstacle_strength(x: u32, y: u32) -> f32 {
@@ -630,7 +683,7 @@ fn advect_trail(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let fluid_to_dye = 1.0 / dye_to_fluid;
     let fluid_pos = pos * dye_to_fluid;
 
-    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let vel_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
     let vel_dye = vel_fluid * fluid_to_dye;
 
@@ -801,7 +854,7 @@ fn advect_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
     // Read current velocity
-    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let vel = clamp_vec2_len(sanitize_vec2(velocity_in[idx]), MAX_VEL);
 
     // Backward trace
@@ -916,7 +969,7 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     // Confinement force: epsilon * (n x w_k) in 2D
     // Equivalent: f = epsilon * vec2(n.y, -n.x) * w
-    let epsilon = params.splat.z;
+    let epsilon = fp_vec4(FP_SPLAT).z;
     if (abs(epsilon) < 1e-6) {
         velocity_out[idx] = velocity_in[idx];
         return;
@@ -924,7 +977,7 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let f = vec2<f32>(n.y, -n.x) * (w * epsilon);
 
     // Clamp per-frame change to keep confinement from injecting high-frequency “static”.
-    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     var dv = f * dt;
     let dv_len = length(dv);
     let max_dv = 2.0;
@@ -1079,7 +1132,7 @@ fn add_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     // Add force scaled by dt (clamped to avoid instability on dt spikes)
-    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let perm = permeability(x, y);
     let v0 = sanitize_vec2(velocity_in[idx]) * perm;
     let f_user = sanitize_vec2(fluid_forces[idx]);
@@ -1122,8 +1175,8 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let lap = (v_l + v_r + v_b + v_t) - 4.0 * v_c;
 
     // nu is in "cells^2 / second" with dx=1; lower values reduce blur.
-    let nu = max(params.splat.w, 0.0);
-    let dt = clamp(params.dt, 0.0, MAX_DT);
+    let nu = max(fp_vec4(FP_SPLAT).w, 0.0);
+    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let a = nu * dt;
     velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v_c + a * lap), MAX_VEL) * perm;
 }
@@ -1151,10 +1204,25 @@ fn enforce_boundaries(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // - tangential component is copied from the adjacent interior cell
     var v = sanitize_vec2(velocity_in[idx]);
 
-    // Left / right walls: set v.x = 0 and copy v.y from interior neighbor.
-    // At walls, enforce zero velocity completely (no-slip boundaries)
-    if (x == 0u || x == FLUID_GRID_SIZE - 1u || y == 0u || y == FLUID_GRID_SIZE - 1u) {
-        v = vec2<f32>(0.0, 0.0);
+    // Reflective boundaries: bounce the normal component to conserve energy
+    // This creates realistic spreading when plumes hit walls
+    let bounce_damping = 0.8; // Slight energy loss on bounce (1.0 = perfectly elastic)
+    
+    // Left wall (x=0): reflect horizontal velocity (bounce inward)
+    if (x == 0u) {
+        v.x = -v.x * bounce_damping;
+    }
+    // Right wall (x=max): reflect horizontal velocity (bounce inward)
+    if (x == FLUID_GRID_SIZE - 1u) {
+        v.x = -v.x * bounce_damping;
+    }
+    // Bottom wall (y=0): reflect vertical velocity (bounce upward)
+    if (y == 0u) {
+        v.y = -v.y * bounce_damping;
+    }
+    // Top wall (y=max): reflect vertical velocity (bounce downward)
+    if (y == FLUID_GRID_SIZE - 1u) {
+        v.y = -v.y * bounce_damping;
     }
 
     let perm = permeability(x, y);
@@ -1205,13 +1273,14 @@ fn advect_display_texture(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let vel = velocity_in[idx];
 
     // Semi-Lagrangian backtrace in grid/texel space.
-    let trace_pos = pos - vel * params.dt;
+    let dt = fp_f32(FP_DT);
+    let trace_pos = pos - vel * dt;
 
     let current = textureLoad(display_tex_in, vec2<i32>(i32(x), i32(y)), 0);
 
     // Avoid repeatedly resampling (which can slowly introduce/boost high-frequency noise)
     // when the flow is nearly stationary: just copy the exact texel.
-    let disp = length(vel) * params.dt;
+    let disp = length(vel) * dt;
     if (disp < 0.01) {
         textureStore(display_tex_out, vec2<i32>(i32(x), i32(y)), current);
         return;

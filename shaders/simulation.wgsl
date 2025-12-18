@@ -201,8 +201,8 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             // Absorb up to 50% of victim's energy (reduced by mouth speed and disabler)
                             let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier;
 
-                            // Victim loses 1.5x the absorbed energy (75% total damage)
-                            let energy_damage = absorbed_energy * 1.5;
+                            // Victim loses 2x the absorbed energy.
+                            let energy_damage = absorbed_energy * 2.0;
                             agents_in[closest_victim_id].energy = max(0.0, victim_energy - energy_damage);
 
                             total_energy_gained += absorbed_energy;
@@ -1336,6 +1336,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var total_consumed_alpha = 0.0;
     var total_consumed_beta = 0.0;
 
+    // Count vampire mouths once; used for mouth-effectiveness rules.
+    var vampiric_mouth_count = 0u;
+    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+        let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+        if (base_type == 33u) {
+            vampiric_mouth_count += 1u;
+        }
+    }
+
     // Single loop through all body parts
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
@@ -1439,18 +1448,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (consumed_alpha > 0.0) {
                     alpha_grid[idx] = clamp(available_alpha - consumed_alpha, 0.0, available_alpha);
 
-                    // Only vampire mouths (type 33) get their alpha energy gain reduced by the
-                    // number of vampire mouths. Normal mouths should not be penalized.
+                    // Mouth effectiveness rule:
+                    // - Vampire mouths: alpha energy gain reduced by total vampire-mouth count.
+                    // - Normal mouths: if the agent has any vampire mouths, reduce alpha energy gain
+                    //   by 30% per vampire mouth.
                     var alpha_energy_multiplier = 1.0;
                     if (base_type == 33u) {
                         // Exponential reduction: 1 mouth = 50%, 2 mouths = 25%, 3 mouths = 12.5%
-                        var vampiric_count = 0u;
-                        for (var j = 0u; j < min(agents_out[agent_id].body_count, MAX_BODY_PARTS); j++) {
-                            if (get_base_part_type(agents_out[agent_id].body[j].part_type) == 33u) {
-                                vampiric_count += 1u;
-                            }
-                        }
-                        alpha_energy_multiplier = pow(0.5, f32(vampiric_count));
+                        alpha_energy_multiplier = pow(0.5, f32(vampiric_mouth_count));
+                    } else if (vampiric_mouth_count > 0u) {
+                        // Linear penalty: each vampire mouth reduces normal-mouth energy gain by 30%.
+                        alpha_energy_multiplier = max(0.0, 1.0 - 0.3 * f32(vampiric_mouth_count));
                     }
 
                     agent.energy += consumed_alpha * params.food_power * alpha_energy_multiplier;
@@ -2162,16 +2170,23 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let g_m1 = sample_grid_bilinear(pos_world - o_g * cell_to_world, 2u);
     let g_m2 = sample_grid_bilinear(pos_world - (o_g * 2.0) * cell_to_world, 2u);
 
-    let a_blur = clamp(a_0 * w0 + a_m1 * w1 + a_m2 * w2, 0.0, 1.0);
-    let b_blur = clamp(b_0 * w0 + b_m1 * w1 + b_m2 * w2, 0.0, 1.0);
-    let g_blur = clamp(g_0 * w0 + g_m1 * w1 + g_m2 * w2, 0.0, 1.0);
+    // Normalize weights to conserve total quantity (sum of all values should remain constant)
+    let a_total = a_0 * w0 + a_m1 * w1 + a_m2 * w2;
+    let b_total = b_0 * w0 + b_m1 * w1 + b_m2 * w2;
+    let g_total = g_0 * w0 + g_m1 * w1 + g_m2 * w2;
+    
+    // Apply conservation correction: maintain the current value when strength is zero
+    let a_blur = clamp(mix(current_alpha, a_total, alpha_conv_strength), 0.0, 1.0);
+    let b_blur = clamp(mix(current_beta, b_total, beta_conv_strength), 0.0, 1.0);
+    let g_blur = clamp(mix(current_gamma, g_total, gamma_strength), 0.0, 1.0);
 
     // Layer the fluid-directed convolution on top of the classic blur+slope result.
+    // The a_blur/b_blur/g_blur values already incorporate the mix with current values.
     // Persistence applies as decay to alpha/beta.
     var final_alpha = clamp(mix(alpha_base, a_blur, alpha_conv_strength) * persistence, 0.0, 1.0);
     var final_beta = clamp(mix(beta_base, b_blur, beta_conv_strength) * persistence, 0.0, 1.0);
     // Gamma shift is terrain transport; keep it bounded but do not apply persistence decay.
-    var final_gamma = clamp(mix(current_gamma, g_blur, gamma_strength), 0.0, 1.0);
+    var final_gamma = clamp(g_blur, 0.0, 1.0);
 
     // Stochastic rain - randomly add food/poison droplets (saturated drops)
     // Use position and random seed to generate unique random values per cell
@@ -2181,8 +2196,17 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform alpha rain (food): remove spatial and beta-dependent gradients.
     // Each cell independently receives a saturated rain event with probability alpha_multiplier * 0.05.
     // (Scaling by 0.05 preserves prior expected value semantics.)
-    // NOTE: rain_map disabled (binding 16 repurposed for fluid simulation)
-    let alpha_rain_factor = 1.0;  // Was: clamp(rain_map[idx].x, 0.0, 1.0);
+    // Rain factor is read from the same packed source used by sensors:
+    // alpha in .y, beta in .x (see shared.wgsl sample_* helpers).
+    let packed = fluid_velocity[fluid_idx];
+    let alpha_rain_map = clamp(packed.y, 0.0, 1.0);
+
+    // Make it rain more when local magnitude is low (stagnant areas).
+    // This is intentionally dt-free and uses a smooth threshold to avoid banding.
+    let local_mag = length(packed);
+    let low_mag = 1.0 - smoothstep(0.02, 0.15, local_mag);
+    let alpha_rain_factor = clamp(alpha_rain_map * (1.0 + 2.0 * low_mag), 0.0, 1.0);
+
     let alpha_probability_sat = params.alpha_multiplier * 0.05 * alpha_rain_factor;
     if (rain_chance < alpha_probability_sat) {
         final_alpha = 1.0;  // Saturated drop
@@ -2191,8 +2215,7 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform beta rain (poison): also no vertical gradient. Probability = beta_multiplier * 0.05.
     let beta_seed = cell_seed * 1103515245u;
     let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
-    // NOTE: rain_map disabled (binding 16 repurposed for fluid simulation)
-    let beta_rain_factor = 1.0;  // Was: clamp(rain_map[idx].y, 0.0, 1.0);
+    let beta_rain_factor = 1.0;
     let beta_probability_sat = params.beta_multiplier * 0.05 * beta_rain_factor;
     if (beta_rain_chance < beta_probability_sat) {
         final_beta = 1.0;  // Saturated drop

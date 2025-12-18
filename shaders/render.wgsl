@@ -236,12 +236,24 @@ fn render_body_part_ctx(
     }
 
     // 5. ORGAN: Enabler field visualization
-    if (amino_props.is_inhibitor && params.camera_zoom > 5.0) {
+    // Always show in inspector mode, otherwise require zoom > 5
+    let is_inspector = ctx.use_inspector_coords.x >= 0.0;
+    let show_enabler = amino_props.is_inhibitor && (is_inspector || params.camera_zoom > 5.0);
+    
+    if (show_enabler) {
         let radius = 20.0;
         let segments = 32u;
         let zoom = params.camera_zoom;
-        let fade = clamp((zoom - 5.0) / 10.0, 0.0, 1.0);
-        let alpha = 0.15 * fade;
+        
+        // In inspector, use higher opacity for visibility; in main view, fade in based on zoom
+        var alpha: f32;
+        if (is_inspector) {
+            alpha = 0.4;  // Higher opacity for inspector visibility
+        } else {
+            let fade = clamp((zoom - 5.0) / 10.0, 0.0, 1.0);
+            alpha = 0.15 * fade;
+        }
+        
         let color = vec4<f32>(0.2, 0.3, 0.2, alpha);
         var prev = world_pos + vec2<f32>(radius, 0.0);
         for (var s = 1u; s <= segments; s++) {
@@ -503,18 +515,26 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
 
     let color = vec4<f32>(1.0, 1.0, 0.0, 1.0); // Yellow crosshair
 
-    // Draw crosshair with fixed radius (4 long arms)
-    let fixed_radius = 25.0;  // Fixed distance from center
-    let arm_length = 30.0;    // Length of each arm
+    // Convert center to screen space
+    let screen_center = world_to_screen(center_pos);
+    
+    // Draw crosshair with fixed screen-space size (zoom-independent)
+    let fixed_radius = 25.0;  // Fixed pixel distance from center
+    let arm_length = 30.0;    // Fixed pixel length of each arm
 
+    // Draw arms in screen space (pixels)
     // Top arm
-    draw_line(center_pos + vec2<f32>(0.0, fixed_radius), center_pos + vec2<f32>(0.0, fixed_radius + arm_length), color);
+    draw_screen_line(screen_center + vec2<i32>(0, i32(fixed_radius)), 
+                     screen_center + vec2<i32>(0, i32(fixed_radius + arm_length)), color);
     // Right arm
-    draw_line(center_pos + vec2<f32>(fixed_radius, 0.0), center_pos + vec2<f32>(fixed_radius + arm_length, 0.0), color);
+    draw_screen_line(screen_center + vec2<i32>(i32(fixed_radius), 0), 
+                     screen_center + vec2<i32>(i32(fixed_radius + arm_length), 0), color);
     // Bottom arm
-    draw_line(center_pos + vec2<f32>(0.0, -fixed_radius), center_pos + vec2<f32>(0.0, -fixed_radius - arm_length), color);
+    draw_screen_line(screen_center + vec2<i32>(0, -i32(fixed_radius)), 
+                     screen_center + vec2<i32>(0, -i32(fixed_radius + arm_length)), color);
     // Left arm
-    draw_line(center_pos + vec2<f32>(-fixed_radius, 0.0), center_pos + vec2<f32>(-fixed_radius - arm_length, 0.0), color);
+    draw_screen_line(screen_center + vec2<i32>(-i32(fixed_radius), 0), 
+                     screen_center + vec2<i32>(-i32(fixed_radius + arm_length), 0), color);
 }
 
 // ============================================================================
@@ -523,10 +543,62 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
 
 // Inspector rendering context (pass vec2(-1.0) for use_inspector_coords to disable)
 struct InspectorContext {
-    use_inspector_coords: vec2<f32>,  // if x >= 0, use inspector mode
+    // If x >= 0, use inspector mode.
+    // In inspector mode, this encodes a Y-clip range: [x, y) in screen pixels.
+    // Default vec2(0.0, window_height) means "full height".
+    use_inspector_coords: vec2<f32>,
     center: vec2<f32>,                // center of preview window
     scale: f32,                       // scale factor for inspector
     offset: vec2<f32>,                // offset to actual buffer position
+}
+
+fn inspector_clip_y(ctx: InspectorContext) -> vec2<i32> {
+    // Default to full window height when caller doesn't provide a valid range.
+    var y0: i32 = 0;
+    var y1: i32 = i32(params.window_height);
+    if (ctx.use_inspector_coords.y > ctx.use_inspector_coords.x) {
+        y0 = i32(ctx.use_inspector_coords.x);
+        y1 = i32(ctx.use_inspector_coords.y);
+    }
+    return vec2<i32>(y0, y1);
+}
+
+// Helper function to draw a line directly in screen-space coordinates (pixels)
+fn draw_screen_line(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
+    if (params.draw_enabled == 0u) { return; }
+    
+    let dx = abs(p1.x - p0.x);
+    let dy = abs(p1.y - p0.y);
+    var x = p0.x;
+    var y = p0.y;
+    let sx = select(-1, 1, p0.x < p1.x);
+    let sy = select(-1, 1, p0.y < p1.y);
+    var err = dx - dy;
+    
+    // Bresenham's line algorithm
+    loop {
+        // Draw pixel if within bounds
+        if (x >= 0 && x < i32(params.window_width) && y >= 0 && y < i32(params.window_height)) {
+            let idx = y * i32(params.window_width) + x;
+            if (idx >= 0 && idx < i32(arrayLength(&visual_grid))) {
+                visual_grid[idx] = color;
+            }
+        }
+        
+        if (x == p1.x && y == p1.y) {
+            break;
+        }
+        
+        let e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            x += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y += sy;
+        }
+    }
 }
 
 // Helper function to draw a thick line in screen space
@@ -654,9 +726,10 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
                 if (ctx.use_inspector_coords.x >= 0.0) {
                     // Inspector mode: offset to actual buffer position and check inspector bounds
                     let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                    let y_clip = inspector_clip_y(ctx);
                     // Allow drawing anywhere in the inspector area (300px wide, full height)
                     if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
-                        buffer_pos.y >= 0 && buffer_pos.y < i32(params.window_height)) {
+                        buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                         idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                         in_bounds = true;
                     }
@@ -712,8 +785,9 @@ fn draw_thin_line_ctx(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>, ctx: Inspe
 
         if (ctx.use_inspector_coords.x >= 0.0) {
             let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+            let y_clip = inspector_clip_y(ctx);
             if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
-                buffer_pos.y >= 0 && buffer_pos.y < i32(params.window_height)) {
+                buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                 idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                 in_bounds = true;
             }
@@ -859,8 +933,9 @@ fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32,
 
                 if (ctx.use_inspector_coords.x >= 0.0) {
                     let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                    let y_clip = inspector_clip_y(ctx);
                     if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
-                        buffer_pos.y >= 0 && buffer_pos.y < i32(params.window_height)) {
+                        buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                         idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                         in_bounds = true;
                     }
@@ -907,8 +982,9 @@ fn draw_filled_circle_optimized(center: vec2<i32>, radius: f32, color: vec4<f32>
                 if (ctx.use_inspector_coords.x >= 0.0) {
                     // Inspector mode
                     let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
-                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x + 280.0) &&
-                        buffer_pos.y >= i32(ctx.offset.y) && buffer_pos.y < i32(ctx.offset.y + 280.0)) {
+                    let y_clip = inspector_clip_y(ctx);
+                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                        buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                         idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                         in_bounds = true;
                     }
@@ -1025,8 +1101,9 @@ fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx:
                 if (ctx.use_inspector_coords.x >= 0.0) {
                     // Inspector mode
                     let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
-                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x + 280.0) &&
-                        buffer_pos.y >= i32(ctx.offset.y) && buffer_pos.y < i32(ctx.offset.y + 280.0)) {
+                    let y_clip = inspector_clip_y(ctx);
+                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                        buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                         idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                         in_bounds = true;
                     }
@@ -1212,8 +1289,9 @@ fn draw_cloud_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, seed: u32, c
 
                 if (ctx.use_inspector_coords.x >= 0.0) {
                     let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
-                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x + 280.0) &&
-                        buffer_pos.y >= i32(ctx.offset.y) && buffer_pos.y < i32(ctx.offset.y + 280.0)) {
+                    let y_clip = inspector_clip_y(ctx);
+                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                        buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                         idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                         in_bounds = true;
                     }
@@ -1552,11 +1630,6 @@ fn clear_agent_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Skip clearing the inspector area only when an agent is selected (to preserve inspector UI)
-    if (params.selected_agent_index != 0xFFFFFFFFu && x >= width - INSPECTOR_WIDTH) {
-        return;
-    }
-
     let agent_idx = y * params.visual_stride + x;
     // Fade the agent trail based on decay rate (1.0 = instant clear, 0.0 = no clear)
     let current_color = agent_grid[agent_idx];
@@ -1644,8 +1717,8 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Map to actual buffer position (rightmost area)
     let buffer_x = window_width - INSPECTOR_WIDTH + x;
 
-    // Transparent background (no background drawn)
-    var color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    // Dark background for inspector panel (very dark grey)
+    var color = vec4<f32>(0.02, 0.02, 0.02, 0.98);
 
     // No border drawn
 
@@ -2102,6 +2175,120 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent_grid[idx] = color;
 }
 
+// Fragment-friendly inspector renderer: returns the same per-pixel output as `render_inspector`,
+// but without writing into `agent_grid`.
+// Amino acid colors (A-Y, indices 0-19)
+const AMINO_COLORS: array<vec3<f32>, 20> = array<vec3<f32>, 20>(
+    vec3<f32>(0.3, 0.3, 0.3),      // A
+    vec3<f32>(1.0, 0.0, 0.0),      // C (beta sensor) - red
+    vec3<f32>(0.35, 0.35, 0.35),   // D
+    vec3<f32>(0.4, 0.4, 0.4),      // E
+    vec3<f32>(1.0, 0.4, 0.7),      // F (poison resistant) - pink
+    vec3<f32>(0.4, 0.4, 0.4),      // G
+    vec3<f32>(0.28, 0.28, 0.28),   // H
+    vec3<f32>(0.38, 0.38, 0.38),   // I
+    vec3<f32>(1.0, 1.0, 0.0),      // K (mouth) - yellow
+    vec3<f32>(0.0, 1.0, 1.0),      // L (chiral flipper) - cyan
+    vec3<f32>(0.8, 0.8, 0.2),      // M
+    vec3<f32>(0.47, 0.63, 0.47),   // N (enabler) - light green
+    vec3<f32>(0.0, 0.39, 1.0),     // P (propeller) - blue
+    vec3<f32>(0.34, 0.34, 0.34),   // Q
+    vec3<f32>(0.29, 0.29, 0.29),   // R
+    vec3<f32>(0.0, 1.0, 0.0),      // S (alpha sensor) - green
+    vec3<f32>(0.6, 0.2, 0.8),      // T (energy sensor) - purple
+    vec3<f32>(0.0, 1.0, 1.0),      // V (displacer) - cyan
+    vec3<f32>(1.0, 0.65, 0.0),     // W (storage) - orange
+    vec3<f32>(0.26, 0.26, 0.26)    // Y
+);
+
+// Get color for a genome base (A/U/G/C/X)
+fn base_color(base_ascii: u32) -> vec3<f32> {
+    if (base_ascii == 65u) { return vec3<f32>(0.0, 1.0, 0.0); }      // A - green
+    if (base_ascii == 85u) { return vec3<f32>(0.0, 0.5, 1.0); }      // U - blue
+    if (base_ascii == 71u) { return vec3<f32>(1.0, 0.65, 0.0); }     // G - orange
+    if (base_ascii == 67u) { return vec3<f32>(1.0, 0.0, 0.0); }      // C - red
+    if (base_ascii == 88u) { return vec3<f32>(0.5, 0.5, 0.5); }      // X - grey
+    return vec3<f32>(0.3, 0.3, 0.3); // default
+}
+
+fn inspector_panel_pixel(x: u32, y: u32) -> vec4<f32> {
+    if (params.draw_enabled == 0u) { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }
+    if (params.selected_agent_index == 0xFFFFFFFFu) { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }
+
+    let safe_width = max(params.window_width, 1.0);
+    let safe_height = max(params.window_height, 1.0);
+    let window_height = u32(safe_height);
+
+    if (x >= INSPECTOR_WIDTH || y >= window_height) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // Check if we're in the preview area (top 300x300 pixels)
+    let preview_width = 300u;
+    let preview_height = 300u;
+    if (y < preview_height && x < preview_width) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0); // Transparent - let the compute-rendered preview show through
+    }
+
+    // Get selected agent data from the selected_agent_buffer (binding 12)
+    let agent = selected_agent_buffer[0];
+
+    // If agent is dead, show empty inspector (just grey background)
+    if (agent.alive == 0u) {
+        return vec4<f32>(0.15, 0.15, 0.15, 0.85);
+    }
+
+    let margin = 10u;
+    let bar_height = 20u;
+    let bar_spacing = 5u;
+    // NOTE: Energy/pairing bars are now drawn in egui (for text labels).
+    // We keep the same reserved vertical spacing here so the genome grid starts below them.
+
+    // Energy bar at y=305..330
+    let energy_bar_y = preview_height + bar_spacing;
+
+    // Pairing bar at y=335..360
+    let pairing_bar_y = energy_bar_y + bar_height + bar_spacing;
+
+    // Genome + body/signal bars are drawn in egui.
+
+    // Default grey background
+    return vec4<f32>(0.15, 0.15, 0.15, 0.85);
+}
+
+// Clear the inspector preview region to opaque black (no border for now, for debugging)
+@compute @workgroup_size(16, 16)
+fn clear_inspector_preview(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (params.draw_enabled == 0u) { return; }
+    if (params.selected_agent_index == 0xFFFFFFFFu) { return; }
+
+    // Preview window at TOP of inspector: y in [0..300).
+    let preview_height = 300u;
+    let preview_width = INSPECTOR_WIDTH;
+    let local_x = gid.x;
+    let local_y = gid.y;
+    if (local_x >= preview_width || local_y >= preview_height) { return; }
+
+    let safe_width = max(params.window_width, 1.0);
+    let safe_height = max(params.window_height, 1.0);
+    let window_width = u32(safe_width);
+    let window_height = u32(safe_height);
+
+    // Inspector panel lives on the rightmost INSPECTOR_WIDTH pixels.
+    let buffer_offset_x = select(window_width - INSPECTOR_WIDTH, 0u, window_width < INSPECTOR_WIDTH);
+
+    // Write to buffer with Y-flip to account for texture coordinate system.
+    let x = buffer_offset_x + local_x;
+    let y = window_height - preview_height + local_y;
+    if (x >= window_width || y >= window_height) { return; }
+
+    // Simple black background for now (debugging)
+    let color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+
+    let idx = y * params.visual_stride + x;
+    agent_grid[idx] = color;
+}
+
 // Draw inspector agent (called after render_inspector, draws agent closeup in preview)
 @compute @workgroup_size(16, 16)
 fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -2116,14 +2303,15 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let body_count = min(selected_agent_buffer[0].body_count, MAX_BODY_PARTS);
     if (body_count == 0u) { return; }
 
-    // Preview window setup (now at bottom with same coordinates as render_inspector)
+    // Preview window setup (TOP of inspector; y grows downward)
     let preview_size = 280u;
     let preview_x_start = 10u;
     let safe_width = max(params.window_width, 1.0);
     let safe_height = max(params.window_height, 1.0);
     let window_width = u32(safe_width);
     let window_height = u32(safe_height);
-    let preview_y_start = window_height - preview_size - 10u;  // 10px from bottom
+    _ = window_height;
+    let preview_y_start = 10u;  // 10px from top
 
     // Calculate auto-scale to fit agent
     var max_extent = 0.0;
@@ -2143,14 +2331,19 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let preview_center_y = f32(preview_y_start + preview_size / 2u);
 
     // Calculate buffer offset (rightmost area)
-    let buffer_offset_x = f32(window_width - INSPECTOR_WIDTH);
+    let buffer_offset_u = select(window_width - INSPECTOR_WIDTH, 0u, window_width < INSPECTOR_WIDTH);
+    let buffer_offset_x = f32(buffer_offset_u);
 
-    // Create inspector context
+    // Create inspector context.
+    // Y-clip to preview box range. Buffer Y is flipped (bottom-origin), so we need to
+    // map preview Y range [0..300) to buffer rows [window_height-300..window_height).
+    let preview_buffer_y_start = f32(window_height - 300u);
+    let preview_buffer_y_end = f32(window_height);
     let ctx = InspectorContext(
-        vec2<f32>(0.0, 0.0),  // use_inspector_coords (x >= 0 enables inspector mode)
+        vec2<f32>(preview_buffer_y_start, preview_buffer_y_end),  // y-clip buffer range
         vec2<f32>(preview_center_x, preview_center_y),  // center of preview
         scale_factor,  // scale
-        vec2<f32>(buffer_offset_x, 0.0)  // offset to actual buffer position
+        vec2<f32>(buffer_offset_x, preview_buffer_y_start)  // offset to actual buffer position
     );
 
     // Calculate agent color
@@ -2194,98 +2387,6 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
             in_debug_mode,
             ctx
         );
-    }
-
-    // ============================================================================
-    // TEXT LABELS - Display agent information with scalable vector font
-    // ============================================================================
-    let text_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
-
-    // Direct pixel inspector context (origin at inspector top-left).
-    // Use scale of 0.33 to make lines thinner (1px * 0.33 G?? 0.33px which rounds to 1px)
-    let text_ctx = InspectorContext(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(0.0, 0.0),
-        0.33,
-        vec2<f32>(buffer_offset_x, 0.0)
-    );
-
-    let text_height = 14.0;  // Will be scaled down by ctx.scale
-    let char_width = 9.0;    // Approximate character width at this size (will be scaled)
-    let line_height = 18.0;  // Spacing between lines (will be scaled)
-    let max_width = 280.0;   // 300 - 20px padding
-
-    // Simple top-down layout with explicit Y positions
-    // Bars are at screen_height - 80, so text should start below that
-    // Offset from bottom: bars at -80px, so text starts at -80px + 80px (bar height) = top
-    // Actually place text starting from a safe position below bars
-    let energy_y = f32(window_height) - 280.0 - 10.0 + 280.0 + 90.0;  // Below bars (bars ~80px tall)
-    let organs_y = energy_y + 30.0;  // 30px below energy line
-
-    // ENERGY label
-    var energy_text: array<u32, 32>;
-    energy_text[0] = 69u;  // 'E'
-    energy_text[1] = 78u;  // 'N'
-    energy_text[2] = 69u;  // 'E'
-    energy_text[3] = 82u;  // 'R'
-    energy_text[4] = 71u;  // 'G'
-    energy_text[5] = 89u;  // 'Y'
-    energy_text[6] = 58u;  // ':'
-    energy_text[7] = 32u;  // ' '
-    let energy_prefix_len = 8u;
-    let energy_value_len = f32_to_string(selected_agent_buffer[0].energy, &energy_text, energy_prefix_len);
-    let energy_total_len = energy_prefix_len + energy_value_len;
-    let energy_pos = vec2<f32>(10.0, energy_y);
-    draw_string_vector(energy_pos, &energy_text, energy_total_len, text_height, text_color, text_ctx);
-
-    // Organ letters wrapped across multiple lines
-    var current_y = organs_y;
-    var current_x = 10.0;
-
-    for (var i = 0u; i < body_count; i++) {
-        let part = selected_agent_buffer[0].body[i];
-        let base_type = get_base_part_type(part.part_type);
-
-        // Get organ properties for color
-        let part_props = get_amino_acid_properties(base_type);
-        let letter_color = vec4<f32>(part_props.color, 1.0);
-
-        // Convert organ type to letter
-        var letter = 63u; // '?' default
-        if (base_type < 20u) {
-            // Amino acids A-T (0-19)
-            letter = 65u + base_type;  // 'A' + offset
-        } else {
-            // Organs - assign letters
-            switch (base_type) {
-                case 20u: { letter = 77u; }  // 'M' = Mouth
-                case 21u: { letter = 80u; }  // 'P' = Propeller
-                case 22u: { letter = 65u; }  // 'A' = Alpha Sensor
-                case 23u: { letter = 66u; }  // 'B' = Beta Sensor
-                case 24u: { letter = 69u; }  // 'E' = Energy Sensor
-                case 25u: { letter = 68u; }  // 'D' = Displacer
-                case 26u: { letter = 78u; }  // 'N' = eNabler
-                case 28u: { letter = 83u; }  // 'S' = Storage
-                case 29u: { letter = 82u; }  // 'R' = poison Resistance
-                case 30u: { letter = 67u; }  // 'C' = Chiral Flipper
-                case 31u: { letter = 88u; }  // 'X' = Clock
-                case 32u: { letter = 47u; }  // '/' = Slope Sensor
-                case 33u: { letter = 86u; }  // 'V' = Vampire mouth
-                case 34u: { letter = 60u; }  // '<' = Agent alpha sensor
-                case 35u: { letter = 62u; }  // '>' = Agent beta sensor
-                default: { letter = 63u; }   // '?' = unknown
-            }
-        }
-
-        // Check if we need to wrap to next line
-        if (current_x + char_width > max_width) {
-            current_x = 10.0;
-            current_y += line_height;  // Move down
-        }
-
-        // Draw the character with organ color
-        let char_pos = vec2<f32>(current_x, current_y);
-        current_x += draw_char_vector(char_pos, letter, text_height, letter_color, text_ctx);
     }
 }
 

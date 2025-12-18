@@ -23,6 +23,14 @@ use winit::{
     window::Window,
 };
 
+fn pack_f32_uniform(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
 const SIM_SIZE: f32 = 30720.0; // World size (must match shader SIM_SIZE)
 // Fluid simulation resolution (N x N). Keep this in sync with GPU buffer allocations and shader constants.
 const FLUID_GRID_SIZE: u32 = 512;
@@ -959,6 +967,9 @@ struct SimParams {
     // Fluid-directed convolution strength (separate from classic diffusion blur).
     alpha_fluid_convolution: f32,
     beta_fluid_convolution: f32,
+    // Fluid terrain influence parameters
+    fluid_slope_force_scale: f32,   // How strongly terrain slope drives fluid flow (default: 100.0)
+    fluid_obstacle_strength: f32,   // How strongly steep terrain blocks fluid (default: 200.0)
 }
 
 #[repr(C)]
@@ -1044,6 +1055,12 @@ struct DifficultySettings {
     beta_rain: AutoDifficultyParam,
 }
 
+// Default functions for backward compatibility with old settings files
+fn default_alpha_fluid_convolution() -> f32 { 0.05 }
+fn default_beta_fluid_convolution() -> f32 { 0.05 }
+fn default_fluid_slope_force_scale() -> f32 { 100.0 }
+fn default_fluid_obstacle_strength() -> f32 { 200.0 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 struct SimulationSettings {
@@ -1056,8 +1073,14 @@ struct SimulationSettings {
     slope_interval: u32,
     alpha_blur: f32,
     beta_blur: f32,
-    alpha_fluid_convolution: Option<f32>,
-    beta_fluid_convolution: Option<f32>,
+    #[serde(default = "default_alpha_fluid_convolution")]
+    alpha_fluid_convolution: f32,
+    #[serde(default = "default_beta_fluid_convolution")]
+    beta_fluid_convolution: f32,
+    #[serde(default = "default_fluid_slope_force_scale")]
+    fluid_slope_force_scale: f32,
+    #[serde(default = "default_fluid_obstacle_strength")]
+    fluid_obstacle_strength: f32,
     gamma_blur: f32,
     gamma_shift: f32,
     alpha_slope_bias: f32,
@@ -1153,9 +1176,9 @@ impl Default for SimulationSettings {
             slope_interval: 1,
             alpha_blur: 0.05,
             beta_blur: 0.05,
-            // If omitted in older settings files, we fall back to alpha_blur/beta_blur.
-            alpha_fluid_convolution: Some(0.05),
-            beta_fluid_convolution: Some(0.05),
+            // If omitted in older settings files, serde defaults handle it
+            alpha_fluid_convolution: 0.05,
+            beta_fluid_convolution: 0.05,
             gamma_blur: 0.9995,
             gamma_shift: 0.0,
             alpha_slope_bias: -5.0,
@@ -1190,6 +1213,8 @@ impl Default for SimulationSettings {
             fluid_ooze_fade_rate: 0.0625,
             // Matches the previous hardcoded scale used in shaders/simulation.wgsl.
             fluid_wind_push_strength: 0.0005,
+            fluid_slope_force_scale: 100.0,
+            fluid_obstacle_strength: 200.0,
             vector_force_power: 0.0,  // Disabled by default
             vector_force_x: 0.0,
             vector_force_y: -1.0,     // Downward gravity when enabled
@@ -1374,12 +1399,8 @@ impl SimulationSettings {
         self.slope_interval = self.slope_interval.clamp(1, 64);
         self.alpha_blur = self.alpha_blur.clamp(0.0, 1.0);
         self.beta_blur = self.beta_blur.clamp(0.0, 1.0);
-        if let Some(v) = &mut self.alpha_fluid_convolution {
-            *v = v.clamp(0.0, 1.0);
-        }
-        if let Some(v) = &mut self.beta_fluid_convolution {
-            *v = v.clamp(0.0, 1.0);
-        }
+        self.alpha_fluid_convolution = self.alpha_fluid_convolution.clamp(0.0, 1.0);
+        self.beta_fluid_convolution = self.beta_fluid_convolution.clamp(0.0, 1.0);
         self.gamma_blur = self.gamma_blur.clamp(0.0, 1.0);
         self.gamma_shift = self.gamma_shift.clamp(0.0, 1.0);
         self.alpha_slope_bias = self.alpha_slope_bias.clamp(-10.0, 10.0);
@@ -1410,13 +1431,15 @@ impl SimulationSettings {
         self.beta_rain_freq = self.beta_rain_freq.clamp(0.0, 100.0);
 
         self.fluid_dt = self.fluid_dt.clamp(0.001, 0.05);
-        self.fluid_decay = self.fluid_decay.clamp(0.9, 1.0);
+        self.fluid_decay = self.fluid_decay.clamp(0.5, 1.0);
         self.fluid_jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
-        self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 10.0);
-        self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 1.0);
+        self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 50.0);
+        self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 5.0);
         self.fluid_ooze_rate = self.fluid_ooze_rate.clamp(0.0, 5.0);
         self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 10.0);
         self.fluid_wind_push_strength = self.fluid_wind_push_strength.clamp(0.0, 2.0);
+        self.fluid_slope_force_scale = self.fluid_slope_force_scale.clamp(0.0, 500.0);
+        self.fluid_obstacle_strength = self.fluid_obstacle_strength.clamp(0.0, 1000.0);
     }
 }
 
@@ -1691,6 +1714,8 @@ struct GpuState {
     fluid_ooze_rate: f32,
     fluid_ooze_fade_rate: f32,
     fluid_wind_push_strength: f32,
+    fluid_slope_force_scale: f32,
+    fluid_obstacle_strength: f32,
     vector_force_power: f32,
     vector_force_x: f32,
     vector_force_y: f32,
@@ -1758,12 +1783,10 @@ impl GpuState {
 
         self.alpha_blur = settings.alpha_blur;
         self.beta_blur = settings.beta_blur;
-        self.alpha_fluid_convolution = settings
-            .alpha_fluid_convolution
-            .unwrap_or(settings.alpha_blur);
-        self.beta_fluid_convolution = settings
-            .beta_fluid_convolution
-            .unwrap_or(settings.beta_blur);
+        self.alpha_fluid_convolution = settings.alpha_fluid_convolution;
+        self.beta_fluid_convolution = settings.beta_fluid_convolution;
+        self.fluid_slope_force_scale = settings.fluid_slope_force_scale;
+        self.fluid_obstacle_strength = settings.fluid_obstacle_strength;
         self.gamma_blur = settings.gamma_blur;
         self.gamma_shift = settings.gamma_shift;
         self.alpha_slope_bias = settings.alpha_slope_bias;
@@ -2385,6 +2408,8 @@ impl GpuState {
             fluid_wind_push_strength: 0.0005,
             alpha_fluid_convolution: 0.05,
             beta_fluid_convolution: 0.05,
+            fluid_slope_force_scale: 100.0,
+            fluid_obstacle_strength: 200.0,
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3520,30 +3545,27 @@ impl GpuState {
         // FLUID SIMULATION PIPELINES (buffers already created above, before bind groups)
         // ============================================================================
 
-        // Fluid params buffer (moved from later - same params structure)
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        struct FluidParams {
-            time: f32,
-            dt: f32,
-            decay: f32,
-            grid_size: u32,
-            mouse: [f32; 4],
-            splat: [f32; 4],
-        }
-
-        let fluid_params = FluidParams {
-            time: 0.0,
-            dt: 0.016,
-            decay: 0.995,
-            grid_size: FLUID_GRID_SIZE,
-            mouse: [0.0; 4],
-            splat: [0.0; 4],
-        };
+        // Fluid params buffer (flat f32 array, packed as 5x vec4<f32> in WGSL).
+        // Indices must match shaders/fluid.wgsl FP_* constants.
+        let fluid_params_f32: [f32; 20] = [
+            0.0,                       // time
+            0.016,                     // dt
+            0.995,                     // decay
+            FLUID_GRID_SIZE as f32,    // grid_size (as f32)
+            0.0, 0.0, 0.0, 0.0,        // mouse
+            0.0, 0.0, 0.0, 0.0,        // splat
+            100.0,                     // fluid_slope_force_scale
+            200.0,                     // fluid_obstacle_strength
+            0.0,                       // vector_force_x
+            0.0,                       // vector_force_y
+            0.0,                       // vector_force_power
+            0.0, 0.0, 0.0,             // pad to 20 floats (5 vec4s)
+        ];
+        let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
 
         let fluid_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Fluid Params"),
-            contents: bytemuck::cast_slice(&[fluid_params]),
+            contents: &fluid_params_bytes,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -4228,12 +4250,8 @@ impl GpuState {
             visual_stride_pixels,
             alpha_blur: settings.alpha_blur,
             beta_blur: settings.beta_blur,
-            alpha_fluid_convolution: settings
-                .alpha_fluid_convolution
-                .unwrap_or(settings.alpha_blur),
-            beta_fluid_convolution: settings
-                .beta_fluid_convolution
-                .unwrap_or(settings.beta_blur),
+            alpha_fluid_convolution: settings.alpha_fluid_convolution,
+            beta_fluid_convolution: settings.beta_fluid_convolution,
             gamma_blur: settings.gamma_blur,
             gamma_shift: settings.gamma_shift,
             alpha_slope_bias: settings.alpha_slope_bias,
@@ -4279,6 +4297,8 @@ impl GpuState {
             fluid_ooze_rate: settings.fluid_ooze_rate,
             fluid_ooze_fade_rate: settings.fluid_ooze_fade_rate,
             fluid_wind_push_strength: settings.fluid_wind_push_strength,
+            fluid_slope_force_scale: settings.fluid_slope_force_scale,
+            fluid_obstacle_strength: settings.fluid_obstacle_strength,
             fluid_velocity_a,
             fluid_velocity_b,
             fluid_pressure_a,
@@ -4961,8 +4981,10 @@ impl GpuState {
             slope_interval: self.slope_interval,
             alpha_blur: self.alpha_blur,
             beta_blur: self.beta_blur,
-            alpha_fluid_convolution: Some(self.alpha_fluid_convolution),
-            beta_fluid_convolution: Some(self.beta_fluid_convolution),
+            alpha_fluid_convolution: self.alpha_fluid_convolution,
+            beta_fluid_convolution: self.beta_fluid_convolution,
+            fluid_slope_force_scale: self.fluid_slope_force_scale,
+            fluid_obstacle_strength: self.fluid_obstacle_strength,
             gamma_blur: self.gamma_blur,
             gamma_shift: self.gamma_shift,
             alpha_slope_bias: self.alpha_slope_bias,
@@ -5673,6 +5695,8 @@ impl GpuState {
             fluid_wind_push_strength: self.fluid_wind_push_strength,
             alpha_fluid_convolution: self.alpha_fluid_convolution,
             beta_fluid_convolution: self.beta_fluid_convolution,
+            fluid_slope_force_scale: self.fluid_slope_force_scale,
+            fluid_obstacle_strength: self.fluid_obstacle_strength,
         };
 
         // Keep CPU mirror in sync with the GPU uniform buffer.
@@ -5682,33 +5706,27 @@ impl GpuState {
 
         // Update fluid params with actual frame dt
         {
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct FluidParams {
-                time: f32,
-                dt: f32,
-                decay: f32,
-                grid_size: u32,
-                mouse: [f32; 4],
-                splat: [f32; 4],
-            }
-
-            let fluid_params = FluidParams {
-                time: self.epoch as f32,
-                dt: self.fluid_dt,
-                decay: self.fluid_decay,
-                grid_size: FLUID_GRID_SIZE,
-                mouse: [0.0; 4],
-                // x = env ooze rate; y = env dye fade rate; z = vorticity confinement; w = viscosity (nu)
-                splat: [
-                    self.fluid_ooze_rate,
-                    self.fluid_ooze_fade_rate,
-                    self.fluid_vorticity,
-                    self.fluid_viscosity,
-                ],
-            };
-
-            self.queue.write_buffer(&self.fluid_params_buffer, 0, bytemuck::bytes_of(&fluid_params));
+            let fluid_params_f32: [f32; 20] = [
+                self.epoch as f32,         // time
+                self.fluid_dt,             // dt
+                self.fluid_decay,          // decay
+                FLUID_GRID_SIZE as f32,    // grid_size (as f32)
+                0.0, 0.0, 0.0, 0.0,        // mouse
+                // splat: x=env ooze rate, y=env dye fade rate, z=vorticity confinement, w=viscosity
+                self.fluid_ooze_rate,
+                self.fluid_ooze_fade_rate,
+                self.fluid_vorticity,
+                self.fluid_viscosity,
+                self.fluid_slope_force_scale,
+                self.fluid_obstacle_strength,
+                self.vector_force_x,
+                self.vector_force_y,
+                self.vector_force_power,
+                0.0, 0.0, 0.0,             // pad
+            ];
+            let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
+            self.queue
+                .write_buffer(&self.fluid_params_buffer, 0, &fluid_params_bytes);
         }
 
         // Handle CPU spawns - only when not paused (consistent with autospawn)
@@ -9242,7 +9260,7 @@ fn main() {
                                                                 .clamp_to_range(true),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.fluid_decay, 0.9..=1.0)
+                                                            egui::Slider::new(&mut state.fluid_decay, 0.5..=1.0)
                                                                 .text("Decay")
                                                                 .clamp_to_range(true),
                                                         );
@@ -9260,12 +9278,12 @@ fn main() {
 
                                                         ui.separator();
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.fluid_vorticity, 0.0..=10.0)
+                                                            egui::Slider::new(&mut state.fluid_vorticity, 0.0..=50.0)
                                                                 .text("Vorticity")
                                                                 .clamp_to_range(true),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.fluid_viscosity, 0.0..=1.0)
+                                                            egui::Slider::new(&mut state.fluid_viscosity, 0.0..=5.0)
                                                                 .text("Viscosity")
                                                                 .clamp_to_range(true),
                                                         );
@@ -9297,6 +9315,31 @@ fn main() {
                                                         .on_hover_text(
                                                             "Global multiplier for how strongly the fluid vector field pushes agents (in addition to per-amino coupling).",
                                                         );
+
+                                                        ui.separator();
+                                                        ui.heading("Terrain Influence");
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_slope_force_scale,
+                                                                0.0..=500.0,
+                                                            )
+                                                            .text("Slope Flow Force")
+                                                            .clamp_to_range(true),
+                                                        )
+                                                        .on_hover_text(
+                                                            "How strongly terrain slope drives fluid downhill (0 = no slope flow, 100 = default, higher = stronger downhill flow).",
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_obstacle_strength,
+                                                                0.0..=1000.0,
+                                                            )
+                                                            .text("Obstacle Blocking")
+                                                            .clamp_to_range(true),
+                                                        )
+                                                        .on_hover_text(
+                                                            "How strongly steep terrain blocks fluid flow (0 = no blocking, 200 = default, higher = steeper slopes act more like solid walls).",
+                                                        );
                                                     });
                                                 }
                                                 _ => {}
@@ -9319,6 +9362,13 @@ fn main() {
                                             .fixed_pos(egui::pos2(inspector_x + 10.0, bars_y))
                                             .show(ctx, |ui| {
                                                 ui.set_width(280.0);
+                                                
+                                                // Add dark grey background frame
+                                                let frame = egui::Frame::none()
+                                                    .fill(egui::Color32::from_rgb(25, 25, 25))
+                                                    .inner_margin(egui::Margin::same(8.0));
+                                                
+                                                frame.show(ui, |ui| {
 
                                                 // Energy bar
                                                 ui.vertical(|ui| {
@@ -9547,6 +9597,8 @@ fn main() {
                                                     }
                                                 }
                                             });
+                                    
+                                    }); // Close the dark grey frame
                                     }
                                 });
 

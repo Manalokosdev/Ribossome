@@ -258,6 +258,8 @@ struct SimParams {
     fluid_wind_push_strength: f32,
     alpha_fluid_convolution: f32,
     beta_fluid_convolution: f32,
+    fluid_slope_force_scale: f32,
+    fluid_obstacle_strength: f32,
 }
 
 struct EnvironmentInitParams {
