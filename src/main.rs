@@ -274,10 +274,10 @@ const AMINO_FLAGS: [AminoVisualFlags; 20] = [
         is_beta_sensor: false,
         is_energy_sensor: false,
         is_inhibitor: false,
-        is_propeller: true,
+        is_propeller: false,
         is_condenser: false,
         is_displacer: false,
-    }, // P (propeller)
+    }, // P
     AminoVisualFlags {
         is_mouth: false,
         is_alpha_sensor: false,
@@ -1436,7 +1436,7 @@ impl SimulationSettings {
         self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 50.0);
         self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 5.0);
         self.fluid_ooze_rate = self.fluid_ooze_rate.clamp(0.0, 5.0);
-        self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 10.0);
+        self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 100.0);
         self.fluid_wind_push_strength = self.fluid_wind_push_strength.clamp(0.0, 2.0);
         self.fluid_slope_force_scale = self.fluid_slope_force_scale.clamp(0.0, 500.0);
         self.fluid_obstacle_strength = self.fluid_obstacle_strength.clamp(0.0, 1000.0);
@@ -1456,8 +1456,7 @@ struct GpuState {
     // Buffers
     agents_buffer_a: wgpu::Buffer,
     agents_buffer_b: wgpu::Buffer,
-    alpha_grid: wgpu::Buffer,
-    beta_grid: wgpu::Buffer,
+    chem_grid: wgpu::Buffer,
     rain_map_buffer: wgpu::Buffer,
     agent_spatial_grid_buffer: wgpu::Buffer,
     gamma_grid: wgpu::Buffer,
@@ -1490,8 +1489,7 @@ struct GpuState {
     spawn_requests_buffer: wgpu::Buffer, // CPU spawn requests seeds
 
     // Grid readback buffers for snapshot save
-    alpha_grid_readback: wgpu::Buffer,
-    beta_grid_readback: wgpu::Buffer,
+    chem_grid_readback: wgpu::Buffer,
     gamma_grid_readback: wgpu::Buffer,
 
     // Fluid simulation buffers (128x128 grid)
@@ -1522,6 +1520,7 @@ struct GpuState {
     fluid_copy_dye_to_forces_pipeline: wgpu::ComputePipeline,
     fluid_clear_forces_pipeline: wgpu::ComputePipeline,
     fluid_clear_force_vectors_pipeline: wgpu::ComputePipeline,
+    fluid_fumarole_dye_pipeline: wgpu::ComputePipeline,
     fluid_fumarole_pipeline: wgpu::ComputePipeline,
     fluid_clear_velocity_pipeline: wgpu::ComputePipeline,
     fluid_inject_dye_pipeline: wgpu::ComputePipeline,
@@ -2172,20 +2171,11 @@ impl GpuState {
         // Skip expensive Perlin noise generation at startup for faster launch (GPU kernels will write defaults)
         // Alpha grid previously initialized to 0.5 everywhere; this value is now written via an initialization compute pass.
 
-        let alpha_buffer_size = (grid_size * std::mem::size_of::<f32>()) as u64;
-        let alpha_grid = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Alpha Grid"),
-            size: alpha_buffer_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let beta_buffer_size = (grid_size * std::mem::size_of::<f32>()) as u64;
-        let beta_grid = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Beta Grid"),
-            size: beta_buffer_size,
+        // Packed environment chemistry grid (vec2 per cell): x=alpha, y=beta
+        let chem_buffer_size = (grid_size * std::mem::size_of::<[f32; 2]>()) as u64;
+        let chem_grid = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Chem Grid"),
+            size: chem_buffer_size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -2514,25 +2504,19 @@ impl GpuState {
         profiler.mark("Counters and readbacks");
 
         // Grid readback buffers for snapshot save
-        let grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
+        let chem_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 2]>()) as u64;
 
-        let alpha_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Alpha Grid Readback"),
-            size: grid_size_bytes,
+        let chem_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Chem Grid Readback"),
+            size: chem_grid_size_bytes,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let beta_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Beta Grid Readback"),
-            size: grid_size_bytes,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
+        let gamma_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
         let gamma_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Gamma Grid Readback"),
-            size: grid_size_bytes,
+            size: gamma_grid_size_bytes,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -2769,7 +2753,7 @@ impl GpuState {
                         binding: 3,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -2934,11 +2918,11 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: alpha_grid.as_entire_binding(),
+                    resource: chem_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: beta_grid.as_entire_binding(),
+                    resource: fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -3013,11 +2997,11 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: alpha_grid.as_entire_binding(),
+                    resource: chem_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: beta_grid.as_entire_binding(),
+                    resource: fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -3618,22 +3602,14 @@ impl GpuState {
                     },
                     count: None,
                 },
-                // Alpha/Beta environment layers (read-only) used for dye injection
+                // Packed environment chemistry grid (read-write):
+                // - read for dye injection
+                // - written by advect_dye() for fluid-driven erosion/deposition
                 wgpu::BindGroupLayoutEntry {
                     binding: 10,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 11,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -3750,8 +3726,7 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 0, resource: fluid_velocity_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: fluid_velocity_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: gamma_grid.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 10, resource: alpha_grid.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 11, resource: beta_grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: chem_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: fluid_params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_b.as_entire_binding() },
@@ -3772,8 +3747,7 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 0, resource: fluid_velocity_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: fluid_velocity_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: gamma_grid.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 10, resource: alpha_grid.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 11, resource: beta_grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: chem_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: fluid_params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: fluid_pressure_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: fluid_pressure_a.as_entire_binding() },
@@ -3810,6 +3784,15 @@ impl GpuState {
             layout: Some(&fluid_pipeline_layout),
             module: &fluid_shader,
             entry_point: "inject_fumarole_force_vector",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_fumarole_dye_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Inject Fumarole Dye"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "inject_fumarole_dye",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -4119,8 +4102,7 @@ impl GpuState {
             surface_config,
             agents_buffer_a,
             agents_buffer_b,
-            alpha_grid,
-            beta_grid,
+            chem_grid,
             rain_map_buffer,
             agent_spatial_grid_buffer,
             gamma_grid,
@@ -4148,8 +4130,7 @@ impl GpuState {
             new_agents_buffer,
             spawn_readback,
             spawn_requests_buffer,
-            alpha_grid_readback,
-            beta_grid_readback,
+            chem_grid_readback,
             gamma_grid_readback,
             visual_texture,
             visual_texture_view,
@@ -4325,6 +4306,7 @@ impl GpuState {
             fluid_clear_forces_pipeline,
             fluid_clear_force_vectors_pipeline,
             fluid_fumarole_pipeline,
+            fluid_fumarole_dye_pipeline,
             fluid_clear_velocity_pipeline,
             fluid_inject_dye_pipeline,
             fluid_advect_dye_pipeline,
@@ -4726,11 +4708,11 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.alpha_grid.as_entire_binding(),
+                    resource: self.chem_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: self.beta_grid.as_entire_binding(),
+                    resource: self.fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -4804,11 +4786,11 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.alpha_grid.as_entire_binding(),
+                    resource: self.chem_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: self.beta_grid.as_entire_binding(),
+                    resource: self.fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -5146,8 +5128,7 @@ impl GpuState {
 
         self.agents_buffer_a.destroy();
         self.agents_buffer_b.destroy();
-        self.alpha_grid.destroy();
-        self.beta_grid.destroy();
+        self.chem_grid.destroy();
         self.rain_map_buffer.destroy();
         self.agent_spatial_grid_buffer.destroy();
         self.gamma_grid.destroy();
@@ -5704,7 +5685,7 @@ impl GpuState {
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
-        // Update fluid params with actual frame dt
+        // Update fluid params (dt is the user-controlled fluid solver dt)
         {
             let fluid_params_f32: [f32; 20] = [
                 self.epoch as f32,         // time
@@ -5745,7 +5726,9 @@ impl GpuState {
             self.slope_counter = 0;
         }
         let run_diffusion = self.diffusion_counter == 0 && should_run_simulation;
-        let run_slope = self.slope_counter == 0 && should_run_simulation;
+        // Rebuild slope even when paused so UI changes (e.g. Alpha/Beta Slope Mix)
+        // take effect immediately and chem-driven height mixing can't get "stuck".
+        let run_slope = self.slope_counter == 0;
 
         let mut encoder = self
             .device
@@ -5955,6 +5938,12 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
 
+                    // 11b. Inject fumarole alpha dye into the final dye buffer (dye_a).
+                    // This keeps the point source visible even under strong local flow.
+                    cpass.set_pipeline(&self.fluid_fumarole_dye_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(1, 1, 1);
+
                     // 12. Advect agent trails with velocity field (trail_grid_inject -> trail_grid)
                     cpass.set_pipeline(&self.fluid_advect_trail_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
@@ -6008,6 +5997,7 @@ impl GpuState {
                 // Keep the fluid field evolving even in render-only mode
                 {
                     let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+                    let dye_workgroups = (GRID_DIM_U32 + 15) / 16;
                     let bg_ab = &self.fluid_bind_group_ab;
                     let bg_ba = &self.fluid_bind_group_ba;
 
@@ -6062,6 +6052,20 @@ impl GpuState {
                     cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // Keep dye evolving (and the fumarole visible) even in render-only mode.
+                    // This prevents the fluid dye overlay from staying at zero when paused.
+                    cpass.set_pipeline(&self.fluid_inject_dye_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_advect_dye_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_fumarole_dye_pipeline);
+                    cpass.set_bind_group(0, bg_ba, &[]);
+                    cpass.dispatch_workgroups(1, 1, 1);
                 }
             }
 
@@ -6156,11 +6160,11 @@ impl GpuState {
             }
         }
 
-        // Only update counters when simulation is running
+        // Diffusion is tied to simulation running; slope rebuild is allowed while paused.
         if should_run_simulation {
             self.diffusion_counter = (self.diffusion_counter + 1) % diffusion_interval;
-            self.slope_counter = (self.slope_counter + 1) % slope_interval;
         }
+        self.slope_counter = (self.slope_counter + 1) % slope_interval;
 
         self.kickoff_alive_readback(slot, alive_buffer);
 
@@ -6582,11 +6586,11 @@ impl GpuState {
             label: Some("Snapshot Readback Encoder"),
         });
 
-        let grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
+        let chem_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 2]>()) as u64;
+        let gamma_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
 
-        encoder.copy_buffer_to_buffer(&self.alpha_grid, 0, &self.alpha_grid_readback, 0, grid_size_bytes);
-        encoder.copy_buffer_to_buffer(&self.beta_grid, 0, &self.beta_grid_readback, 0, grid_size_bytes);
-        encoder.copy_buffer_to_buffer(&self.gamma_grid, 0, &self.gamma_grid_readback, 0, grid_size_bytes);
+        encoder.copy_buffer_to_buffer(&self.chem_grid, 0, &self.chem_grid_readback, 0, chem_grid_size_bytes);
+        encoder.copy_buffer_to_buffer(&self.gamma_grid, 0, &self.gamma_grid_readback, 0, gamma_grid_size_bytes);
 
         // Copy agents from GPU.
         // NOTE: Snapshot persistence expects agents to be materialized in buffer A.
@@ -6599,34 +6603,35 @@ impl GpuState {
         self.queue.submit(Some(encoder.finish()));
 
         // Map and read grids
-        let alpha_slice = self.alpha_grid_readback.slice(..);
-        let beta_slice = self.beta_grid_readback.slice(..);
+        let chem_slice = self.chem_grid_readback.slice(..);
         let gamma_slice = self.gamma_grid_readback.slice(..);
         let agents_slice = self.agents_readback.slice(..);
 
-        alpha_slice.map_async(wgpu::MapMode::Read, |_| {});
-        beta_slice.map_async(wgpu::MapMode::Read, |_| {});
+        chem_slice.map_async(wgpu::MapMode::Read, |_| {});
         gamma_slice.map_async(wgpu::MapMode::Read, |_| {});
         agents_slice.map_async(wgpu::MapMode::Read, |_| {});
 
         self.device.poll(wgpu::Maintain::Wait);
 
         let (alpha_grid, beta_grid, gamma_grid, agents_gpu) = {
-            let alpha_data = alpha_slice.get_mapped_range();
-            let beta_data = beta_slice.get_mapped_range();
+            let chem_data = chem_slice.get_mapped_range();
             let gamma_data = gamma_slice.get_mapped_range();
             let agents_data = agents_slice.get_mapped_range();
 
-            let alpha: Vec<f32> = bytemuck::cast_slice(&alpha_data).to_vec();
-            let beta: Vec<f32> = bytemuck::cast_slice(&beta_data).to_vec();
+            let chem: Vec<[f32; 2]> = bytemuck::cast_slice(&chem_data).to_vec();
+            let mut alpha: Vec<f32> = Vec::with_capacity(chem.len());
+            let mut beta: Vec<f32> = Vec::with_capacity(chem.len());
+            for v in &chem {
+                alpha.push(v[0]);
+                beta.push(v[1]);
+            }
             let gamma: Vec<f32> = bytemuck::cast_slice(&gamma_data).to_vec();
             let agents: Vec<Agent> = bytemuck::cast_slice(&agents_data).to_vec();
 
             (alpha, beta, gamma, agents)
         };
 
-        self.alpha_grid_readback.unmap();
-        self.beta_grid_readback.unmap();
+        self.chem_grid_readback.unmap();
         self.gamma_grid_readback.unmap();
         self.agents_readback.unmap();
 
@@ -6677,8 +6682,11 @@ impl GpuState {
         }
 
         // Upload grids to GPU
-        self.queue.write_buffer(&self.alpha_grid, 0, bytemuck::cast_slice(&alpha_grid));
-        self.queue.write_buffer(&self.beta_grid, 0, bytemuck::cast_slice(&beta_grid));
+        let mut chem_grid: Vec<[f32; 2]> = Vec::with_capacity(alpha_grid.len());
+        for i in 0..alpha_grid.len() {
+            chem_grid.push([alpha_grid[i], beta_grid[i]]);
+        }
+        self.queue.write_buffer(&self.chem_grid, 0, bytemuck::cast_slice(&chem_grid));
         self.queue.write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_grid));
 
         // Queue agents from snapshot for spawning
@@ -6872,11 +6880,11 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.alpha_grid.as_entire_binding(),
+                    resource: self.chem_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: self.beta_grid.as_entire_binding(),
+                    resource: self.fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -6952,11 +6960,11 @@ impl GpuState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.alpha_grid.as_entire_binding(),
+                    resource: self.chem_grid.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: self.beta_grid.as_entire_binding(),
+                    resource: self.fluid_dye_a.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -8634,7 +8642,7 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.fluid_ooze_fade_rate,
-                                                                0.0..=10.0,
+                                                                0.0..=100.0,
                                                             )
                                                             .text("Env Ooze Fade Rate"),
                                                         );
@@ -9362,12 +9370,12 @@ fn main() {
                                             .fixed_pos(egui::pos2(inspector_x + 10.0, bars_y))
                                             .show(ctx, |ui| {
                                                 ui.set_width(280.0);
-                                                
+
                                                 // Add dark grey background frame
                                                 let frame = egui::Frame::none()
                                                     .fill(egui::Color32::from_rgb(25, 25, 25))
                                                     .inner_margin(egui::Margin::same(8.0));
-                                                
+
                                                 frame.show(ui, |ui| {
 
                                                 // Energy bar
@@ -9431,19 +9439,19 @@ fn main() {
                                                     // Find translated regions (between start and stop codons)
                                                     let mut in_translation = false;
                                                     let mut translation_map = vec![false; GENOME_BYTES];
-                                                    
+
                                                     let mut i = 0;
                                                     while i + 2 < GENOME_BYTES {
                                                         let b0 = genome_get_base_ascii(&agent.genome, i);
                                                         let b1 = genome_get_base_ascii(&agent.genome, i + 1);
                                                         let b2 = genome_get_base_ascii(&agent.genome, i + 2);
-                                                        
+
                                                         // Check for start codon (AUG)
                                                         if !in_translation && b0 == b'A' && b1 == b'U' && b2 == b'G' {
                                                             in_translation = true;
                                                         }
                                                         // Check for stop codons (UAA, UAG, UGA)
-                                                        else if in_translation && 
+                                                        else if in_translation &&
                                                             ((b0 == b'U' && b1 == b'A' && (b2 == b'A' || b2 == b'G')) ||
                                                              (b0 == b'U' && b1 == b'G' && b2 == b'A')) {
                                                             // Mark this stop codon as translated, then stop
@@ -9454,7 +9462,7 @@ fn main() {
                                                             i += 3;
                                                             continue;
                                                         }
-                                                        
+
                                                         if in_translation {
                                                             translation_map[i] = true;
                                                         }
@@ -9466,7 +9474,7 @@ fn main() {
                                                         let col = idx % bases_per_line;
                                                         let base = genome_get_base_ascii(&agent.genome, idx);
                                                         let mut color = genome_base_color(base);
-                                                        
+
                                                         // Darken untranslated regions
                                                         if !translation_map[idx] {
                                                             let (r, g, b, _) = color.to_tuple();
@@ -9495,7 +9503,7 @@ fn main() {
                                                     if body_count > 0 {
                                                         let bar_w = 280.0;
                                                         let bar_h = 8.0;
-                                                        
+
                                                         // Calculate total width needed: aminos take 3 nucleotides, organs take 6
                                                         let mut total_nucleotides = 0.0;
                                                         for i in 0..body_count {
@@ -9512,7 +9520,7 @@ fn main() {
                                                             );
                                                             let painter = ui.painter_at(rect);
                                                             painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 30));
-                                                            
+
                                                             let mut x_pos = rect.left();
                                                             for i in 0..body_count {
                                                                 let part = &agent.body[i];
@@ -9520,7 +9528,7 @@ fn main() {
                                                                 let is_amino = base_type < 20;
                                                                 let nucleotide_count = if is_amino { 3.0 } else { 6.0 };
                                                                 let seg_w = nucleotide_count * pixels_per_nucleotide;
-                                                                
+
                                                                 let r = egui::Rect::from_min_max(
                                                                     egui::pos2(x_pos, rect.top()),
                                                                     egui::pos2((x_pos + seg_w).min(rect.right()), rect.bottom()),
@@ -9597,7 +9605,7 @@ fn main() {
                                                     }
                                                 }
                                             });
-                                    
+
                                     }); // Close the dark grey frame
                                     }
                                 });
