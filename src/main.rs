@@ -52,6 +52,95 @@ const AUTO_SNAPSHOT_FILE_NAME: &str = "autosave_snapshot.png";
 const AUTO_SNAPSHOT_INTERVAL: u64 = 10000; // Save every 10,000 epochs
 const RAIN_THUMB_SIZE: usize = 128;
 
+// Fumaroles (fluid-only). Keep in sync with shaders/fluid.wgsl.
+const MAX_FUMAROLES: usize = 64;
+const FUMAROLE_STRIDE_F32: usize = 10;
+const FUMAROLE_BUFFER_FLOATS: usize = 1 + MAX_FUMAROLES * FUMAROLE_STRIDE_F32;
+const FUMAROLE_BUFFER_BYTES: usize = FUMAROLE_BUFFER_FLOATS * 4;
+
+// Part base-angle override slots.
+// NOTE: Shader currently defines 42 part types, but we reserve 128 slots for future expansion.
+const PART_TYPE_COUNT: usize = 42;
+const PART_OVERRIDE_SLOTS: usize = 128;
+const PART_OVERRIDE_VEC4S: usize = (PART_OVERRIDE_SLOTS + 3) / 4; // 32
+const PART_OVERRIDES_CSV_PATH: &str = "config/part_base_angle_overrides.csv";
+
+const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
+    // 0–19 amino acids
+    "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y",
+    // 20–41 organs / specials (keep in sync with shaders/shared.wgsl table comments)
+    "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "DISPLACER", "ENABLER", "UNUSED_27",
+    "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "VAMPIRE_MOUTH", "AGENT_ALPHA_SENSOR",
+    "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
+    "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2",
+];
+
+fn pack_part_base_angle_overrides_vec4(overrides: &[f32; PART_OVERRIDE_SLOTS]) -> [[f32; 4]; PART_OVERRIDE_VEC4S] {
+    let mut out = [[f32::NAN; 4]; PART_OVERRIDE_VEC4S];
+    for i in 0..PART_OVERRIDE_SLOTS {
+        out[i / 4][i & 3] = overrides[i];
+    }
+    out
+}
+
+fn load_part_base_angle_overrides_csv(path: &Path) -> anyhow::Result<[f32; PART_OVERRIDE_SLOTS]> {
+    let text = fs::read_to_string(path)?;
+    let mut out = [f32::NAN; PART_OVERRIDE_SLOTS];
+
+    for (line_idx, raw_line) in text.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Allow a header line.
+        if line_idx == 0 && line.to_ascii_lowercase().contains("index") {
+            continue;
+        }
+
+        let mut parts = line.split(',').map(|s| s.trim());
+        let idx_str = parts.next().unwrap_or_default();
+        let col1 = parts.next().unwrap_or_default();
+        let col2 = parts.next().unwrap_or_default();
+        // Accept either:
+        // - index,value
+        // - index,name,value
+        let val_str = if !col2.is_empty() { col2 } else { col1 };
+        if idx_str.is_empty() {
+            continue;
+        }
+        let idx: usize = idx_str.parse()?;
+        if idx >= PART_OVERRIDE_SLOTS {
+            continue;
+        }
+        if val_str.is_empty() || val_str.eq_ignore_ascii_case("nan") {
+            out[idx] = f32::NAN;
+            continue;
+        }
+        out[idx] = val_str.parse::<f32>()?;
+    }
+
+    Ok(out)
+}
+
+fn save_part_base_angle_overrides_csv(path: &Path, overrides: &[f32; PART_OVERRIDE_SLOTS]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut out = String::new();
+    out.push_str("index,name,base_angle_rad\n");
+    for i in 0..PART_OVERRIDE_SLOTS {
+        let name = if i < PART_TYPE_COUNT { PART_TYPE_NAMES[i] } else { "" };
+        let v = overrides[i];
+        if v.is_nan() {
+            out.push_str(&format!("{},{},\n", i, name));
+        } else {
+            out.push_str(&format!("{},{},{:.8}\n", i, name, v));
+        }
+    }
+    fs::write(path, out)?;
+    Ok(())
+}
+
 // Selected-agent CPU readback: use a small ring buffer so we can request ~60Hz updates
 // without stalling on an in-flight map.
 const SELECTED_AGENT_READBACK_SLOTS: usize = 4;
@@ -1195,10 +1284,15 @@ struct EnvironmentInitParams {
     beta_noise_scale: f32,
     gamma_noise_scale: f32,
     noise_power: f32,
+
+    // Part base-angle overrides: packed vec4s with NaN sentinel (NaN = use shader default).
+    // 128 slots reserved.
+    part_angle_override: [[f32; 4]; PART_OVERRIDE_VEC4S],
 }
 
-// Keep host layout in sync with the WGSL uniform buffer (std140, 128 bytes total).
-const _: [(); 128] = [(); std::mem::size_of::<EnvironmentInitParams>()];
+// Keep host layout in sync with the WGSL uniform buffer (std140).
+// Previous EnvironmentInitParams was 128 bytes; we now append a 32x vec4 override table (512 bytes).
+const _: [(); 640] = [(); std::mem::size_of::<EnvironmentInitParams>()];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AutoDifficultyParam {
@@ -1267,6 +1361,66 @@ fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
 fn default_dye_alpha_color() -> [f32; 3] { [0.0, 1.0, 0.0] }
 fn default_dye_beta_color() -> [f32; 3] { [1.0, 0.0, 0.0] }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct FumaroleSettings {
+    enabled: bool,
+    // Position as fraction of the fluid grid (0..1).
+    x_frac: f32,
+    y_frac: f32,
+    // Direction in degrees (0..360). Converted to unit vector for the shader.
+    dir_degrees: f32,
+    // Force strength injected into the fluid.
+    strength: f32,
+    // Radius in fluid-cell units.
+    spread: f32,
+    // Dye injection rate (per second, scaled by dt in shader).
+    alpha_dye_rate: f32,
+    #[serde(default)]
+    beta_dye_rate: f32,
+    // 0..1 jitter applied to direction/strength/rate.
+    variation: f32,
+}
+
+impl Default for FumaroleSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            x_frac: 0.5,
+            y_frac: 0.5,
+            dir_degrees: 0.0,
+            strength: 200.0,
+            spread: 16.0,
+            alpha_dye_rate: 1.0,
+            beta_dye_rate: 0.0,
+            variation: 0.0,
+        }
+    }
+}
+
+impl FumaroleSettings {
+    fn sanitize(&mut self) {
+        self.x_frac = self.x_frac.clamp(0.0, 1.0);
+        self.y_frac = self.y_frac.clamp(0.0, 1.0);
+        if !self.dir_degrees.is_finite() {
+            self.dir_degrees = 0.0;
+        }
+        // Wrap into [0, 360).
+        self.dir_degrees = self.dir_degrees.rem_euclid(360.0);
+        self.strength = self.strength.clamp(0.0, 50_000.0);
+        self.spread = self.spread.clamp(0.0, FLUID_GRID_SIZE as f32);
+        // Backward-compat shim: older sessions may have used negative dye_rate to mean beta.
+        // If alpha_dye_rate is negative, migrate magnitude into beta and clamp alpha to 0.
+        if self.alpha_dye_rate < 0.0 {
+            self.beta_dye_rate = self.beta_dye_rate.max(-self.alpha_dye_rate);
+            self.alpha_dye_rate = 0.0;
+        }
+        self.alpha_dye_rate = self.alpha_dye_rate.clamp(0.0, 1000.0);
+        self.beta_dye_rate = self.beta_dye_rate.clamp(0.0, 1000.0);
+        self.variation = self.variation.clamp(0.0, 1.0);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -1369,6 +1523,10 @@ struct SimulationSettings {
     dye_alpha_color: [f32; 3],
     #[serde(default = "default_dye_beta_color")]
     dye_beta_color: [f32; 3],
+
+    // Fluid fumaroles (persisted in settings + snapshots). Sent to the fluid shader as a flat f32 buffer.
+    #[serde(default)]
+    fumaroles: Vec<FumaroleSettings>,
     grid_interpolation: u32,
     alpha_gamma_adjust: f32,
     beta_gamma_adjust: f32,
@@ -1497,6 +1655,8 @@ impl Default for SimulationSettings {
             gamma_noise_scale: 1.0,
             noise_power: 1.0,
             agent_trail_decay: 1.0,  // Default to instant clear (original behavior)
+
+            fumaroles: Vec::new(),
         }
     }
 }
@@ -1692,6 +1852,13 @@ impl SimulationSettings {
         self.fluid_slope_force_scale = self.fluid_slope_force_scale.clamp(0.0, 500.0);
         self.fluid_obstacle_strength = self.fluid_obstacle_strength.clamp(0.0, 1000.0);
 
+        if self.fumaroles.len() > MAX_FUMAROLES {
+            self.fumaroles.truncate(MAX_FUMAROLES);
+        }
+        for f in &mut self.fumaroles {
+            f.sanitize();
+        }
+
         for c in &mut self.dye_alpha_color {
             *c = c.clamp(0.0, 1.0);
         }
@@ -1730,6 +1897,7 @@ struct GpuState {
     // Some compute paths (e.g. snapshot-load spawning) can run before `update()` has populated
     // the params buffer for the current frame.
     sim_params_cpu: SimParams,
+    environment_init_cpu: EnvironmentInitParams,
     environment_init_params_buffer: wgpu::Buffer,
     spawn_debug_counters: wgpu::Buffer, // [spawn_counter, debug_counter, alive_counter]
     alive_readbacks: [Arc<wgpu::Buffer>; 2],
@@ -1763,6 +1931,11 @@ struct GpuState {
     fluid_dye_a: wgpu::Buffer,
     fluid_dye_b: wgpu::Buffer,
     fluid_params_buffer: wgpu::Buffer,
+    fluid_fumaroles_buffer: wgpu::Buffer,
+
+    // Part base-angle overrides (radians). NaN means: use shader default.
+    part_base_angle_overrides: [f32; PART_OVERRIDE_SLOTS],
+    part_base_angle_overrides_dirty: bool,
 
     // Fluid simulation pipelines
     fluid_generate_forces_pipeline: wgpu::ComputePipeline,
@@ -1910,6 +2083,7 @@ struct GpuState {
     egui_renderer: egui_wgpu::Renderer,
     ui_tab: usize, // 0=Simulation, 1=Agents, 2=Environment
     ui_visible: bool, // Toggle control panel visibility with spacebar
+    selected_fumarole_index: usize,
     // Debug
     debug_per_segment: bool,
     is_paused: bool,
@@ -1980,6 +2154,11 @@ struct GpuState {
     fluid_wind_push_strength: f32,
     fluid_slope_force_scale: f32,
     fluid_obstacle_strength: f32,
+
+    // Fluid fumaroles (runtime-editable list; persisted via SimulationSettings).
+    fumaroles: Vec<FumaroleSettings>,
+
+    // Part base-angle overrides are stored above with fixed 128-slot capacity.
     vector_force_power: f32,
     vector_force_x: f32,
     vector_force_y: f32,
@@ -2130,6 +2309,15 @@ impl GpuState {
         self.fluid_dye_escape_rate_beta = settings.fluid_dye_escape_rate_beta;
         self.fluid_wind_push_strength = settings.fluid_wind_push_strength;
 
+        self.fumaroles = settings.fumaroles;
+        if !self.fumaroles.is_empty() {
+            self.selected_fumarole_index = self
+                .selected_fumarole_index
+                .min(self.fumaroles.len().saturating_sub(1));
+        } else {
+            self.selected_fumarole_index = 0;
+        }
+
         self.vector_force_power = settings.vector_force_power;
         self.vector_force_x = settings.vector_force_x;
         self.vector_force_y = settings.vector_force_y;
@@ -2227,7 +2415,10 @@ impl GpuState {
             beta_noise_scale: self.beta_noise_scale,
             gamma_noise_scale: self.gamma_noise_scale,
             noise_power: self.noise_power,
+            part_angle_override: pack_part_base_angle_overrides_vec4(&self.part_base_angle_overrides),
         };
+
+        self.environment_init_cpu = params;
 
         self.queue.write_buffer(
             &self.environment_init_params_buffer,
@@ -2608,6 +2799,7 @@ impl GpuState {
             beta_noise_scale: 1.0,
             gamma_noise_scale: 1.0,
             noise_power: 1.0,
+            part_angle_override: pack_part_base_angle_overrides_vec4(&[f32::NAN; PART_OVERRIDE_SLOTS]),
         };
 
         let environment_init_params_buffer =
@@ -3930,6 +4122,12 @@ impl GpuState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        let fluid_fumaroles_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Fluid Fumaroles"),
+            contents: &vec![0u8; FUMAROLE_BUFFER_BYTES],
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
         // Load fluid shader (standalone) and inject compile-time constants.
         let fluid_shader_source_raw = std::fs::read_to_string("shaders/fluid.wgsl")
             .expect("Failed to load shaders/fluid.wgsl");
@@ -4092,6 +4290,17 @@ impl GpuState {
                     },
                     count: None,
                 },
+                // Fluid-only: packed fumarole list (see shaders/fluid.wgsl).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 17,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -4114,6 +4323,7 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 9, resource: fluid_dye_b.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 12, resource: trail_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 13, resource: trail_grid_inject.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 17, resource: fluid_fumaroles_buffer.as_entire_binding() },
             ],
         });
 
@@ -4135,6 +4345,7 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 9, resource: fluid_dye_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 12, resource: trail_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 13, resource: trail_grid_inject.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 17, resource: fluid_fumaroles_buffer.as_entire_binding() },
             ],
         });
 
@@ -4603,6 +4814,7 @@ impl GpuState {
             egui_renderer,
             ui_tab: 0, // Start on Simulation tab
             ui_visible: true, // Control panel visible by default
+            selected_fumarole_index: 0,
             debug_per_segment: settings.debug_per_segment,
             is_paused: false,
             snapshot_save_requested: false,
@@ -4664,6 +4876,8 @@ impl GpuState {
             fluid_wind_push_strength: settings.fluid_wind_push_strength,
             fluid_slope_force_scale: settings.fluid_slope_force_scale,
             fluid_obstacle_strength: settings.fluid_obstacle_strength,
+
+            fumaroles: settings.fumaroles.clone(),
             fluid_velocity_a,
             fluid_velocity_b,
             fluid_pressure_a,
@@ -4674,6 +4888,7 @@ impl GpuState {
             fluid_dye_a,
             fluid_dye_b,
             fluid_params_buffer,
+            fluid_fumaroles_buffer,
             fluid_generate_forces_pipeline,
             fluid_add_forces_pipeline,
             fluid_advect_velocity_pipeline,
@@ -4741,9 +4956,30 @@ impl GpuState {
             settings_path: settings_path.clone(),
             last_saved_settings: settings.clone(),
             sim_params_cpu: SimParams::zeroed(),
+            environment_init_cpu: environment_init,
+            part_base_angle_overrides: [f32::NAN; PART_OVERRIDE_SLOTS],
+            part_base_angle_overrides_dirty: false,
             destroyed: false,
         };
 
+        // Initialize override table (attempt to load from CSV if present).
+        state.part_base_angle_overrides = [f32::NAN; PART_OVERRIDE_SLOTS];
+        if let Ok(overrides) = load_part_base_angle_overrides_csv(Path::new(PART_OVERRIDES_CSV_PATH)) {
+            state.part_base_angle_overrides = overrides;
+            state.part_base_angle_overrides_dirty = true;
+        }
+
+        // Apply the overrides immediately (so first frame matches CSV/state).
+        if state.part_base_angle_overrides_dirty {
+            state.environment_init_cpu.part_angle_override =
+                pack_part_base_angle_overrides_vec4(&state.part_base_angle_overrides);
+            state.queue.write_buffer(
+                &state.environment_init_params_buffer,
+                0,
+                bytemuck::bytes_of(&state.environment_init_cpu),
+            );
+            state.part_base_angle_overrides_dirty = false;
+        }
         profiler.mark("GpuState constructed");
 
         state.update_present_mode();
@@ -5453,6 +5689,8 @@ impl GpuState {
             agent_color: self.agent_color,
             agent_color_blend: self.agent_color_blend,
             agent_trail_decay: self.agent_trail_decay,
+
+            fumaroles: self.fumaroles.clone(),
         }
     }
 
@@ -5824,6 +6062,19 @@ impl GpuState {
     }
 
     pub fn update(&mut self, should_draw: bool, frame_dt: f32) {
+        // Push base-angle overrides into the existing EnvironmentInitParams uniform.
+        // This avoids an extra binding while still allowing runtime edits.
+        if self.part_base_angle_overrides_dirty {
+            self.environment_init_cpu.part_angle_override =
+                pack_part_base_angle_overrides_vec4(&self.part_base_angle_overrides);
+            self.queue.write_buffer(
+                &self.environment_init_params_buffer,
+                0,
+                bytemuck::bytes_of(&self.environment_init_cpu),
+            );
+            self.part_base_angle_overrides_dirty = false;
+        }
+
         // Smooth camera following with continuous integration
         if self.follow_selected_agent {
             // Store previous camera position for motion blur
@@ -6129,6 +6380,38 @@ impl GpuState {
                 .write_buffer(&self.fluid_params_buffer, 0, &fluid_params_bytes);
         }
 
+        // Update fluid fumaroles buffer (flat float list consumed only by shaders/fluid.wgsl).
+        {
+            let mut data: Vec<f32> = vec![0.0; FUMAROLE_BUFFER_FLOATS];
+            let count = self.fumaroles.len().min(MAX_FUMAROLES);
+            data[0] = count as f32;
+
+            for (i, fum) in self.fumaroles.iter().take(MAX_FUMAROLES).enumerate() {
+                let mut fum = fum.clone();
+                fum.sanitize();
+
+                let base = 1 + i * FUMAROLE_STRIDE_F32;
+                let rad = fum.dir_degrees.to_radians();
+                let dir_x = rad.cos();
+                let dir_y = rad.sin();
+
+                data[base + 0] = if fum.enabled { 1.0 } else { 0.0 };
+                data[base + 1] = fum.x_frac;
+                data[base + 2] = fum.y_frac;
+                data[base + 3] = dir_x;
+                data[base + 4] = dir_y;
+                data[base + 5] = fum.strength;
+                data[base + 6] = fum.spread;
+                data[base + 7] = fum.alpha_dye_rate;
+                data[base + 8] = fum.beta_dye_rate;
+                data[base + 9] = fum.variation;
+            }
+
+            let bytes = pack_f32_uniform(&data);
+            self.queue
+                .write_buffer(&self.fluid_fumaroles_buffer, 0, &bytes);
+        }
+
         // Handle CPU spawns - only when not paused (consistent with autospawn)
         if !self.is_paused && cpu_spawn_count > 0 {
             // Use the reliable paused spawn path for all manual spawns
@@ -6412,80 +6695,6 @@ impl GpuState {
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
-
-                // Keep the fluid field evolving even in render-only mode
-                {
-                    let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
-                    let dye_workgroups = (GRID_DIM_U32 + 15) / 16;
-                    let bg_ab = &self.fluid_bind_group_ab;
-                    let bg_ba = &self.fluid_bind_group_ba;
-
-                    cpass.set_pipeline(&self.fluid_advect_velocity_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_add_forces_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_vorticity_confinement_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_diffuse_velocity_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_copy_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_divergence_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    let jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
-                    for i in 0..jacobi_iters {
-                        let bg = if (i & 1) == 0 { bg_ab } else { bg_ba };
-                        cpass.set_pipeline(&self.fluid_jacobi_pressure_pipeline);
-                        cpass.set_bind_group(0, bg, &[]);
-                        cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-                    }
-
-                    cpass.set_pipeline(&self.fluid_subtract_gradient_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    // Keep dye evolving (and the fumarole visible) even in render-only mode.
-                    // This prevents the fluid dye overlay from staying at zero when paused.
-                    cpass.set_pipeline(&self.fluid_inject_dye_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_advect_dye_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_fumarole_dye_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(1, 1, 1);
-                }
             }
 
             // Render all agents to agent_grid when drawing
@@ -9872,6 +10081,113 @@ fn main() {
                                                         .on_hover_text(
                                                             "How strongly steep terrain blocks fluid flow (0 = no blocking, 200 = default, higher = steeper slopes act more like solid walls).",
                                                         );
+
+                                                        ui.separator();
+                                                        ui.heading("Fumaroles");
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Add").clicked() {
+                                                                if state.fumaroles.len() < MAX_FUMAROLES {
+                                                                    state.fumaroles.push(FumaroleSettings::default());
+                                                                    state.selected_fumarole_index = state.fumaroles.len() - 1;
+                                                                }
+                                                            }
+                                                            let can_remove = !state.fumaroles.is_empty();
+                                                            if ui.add_enabled(can_remove, egui::Button::new("Remove")).clicked() {
+                                                                let idx = state
+                                                                    .selected_fumarole_index
+                                                                    .min(state.fumaroles.len().saturating_sub(1));
+                                                                if idx < state.fumaroles.len() {
+                                                                    state.fumaroles.remove(idx);
+                                                                }
+                                                                if state.fumaroles.is_empty() {
+                                                                    state.selected_fumarole_index = 0;
+                                                                } else {
+                                                                    state.selected_fumarole_index = state
+                                                                        .selected_fumarole_index
+                                                                        .min(state.fumaroles.len() - 1);
+                                                                }
+                                                            }
+                                                            ui.label(format!(
+                                                                "{}/{}",
+                                                                state.fumaroles.len(),
+                                                                MAX_FUMAROLES
+                                                            ));
+                                                        });
+
+                                                        if state.fumaroles.is_empty() {
+                                                            ui.label("No fumaroles configured.");
+                                                        } else {
+                                                            ui.label("Select:");
+                                                            egui::ScrollArea::vertical()
+                                                                .max_height(120.0)
+                                                                .show(ui, |ui| {
+                                                                    for i in 0..state.fumaroles.len() {
+                                                                        let on = state.fumaroles[i].enabled;
+                                                                        let label = if on {
+                                                                            format!("#{} (on)", i + 1)
+                                                                        } else {
+                                                                            format!("#{} (off)", i + 1)
+                                                                        };
+                                                                        if ui
+                                                                            .selectable_label(state.selected_fumarole_index == i, label)
+                                                                            .clicked()
+                                                                        {
+                                                                            state.selected_fumarole_index = i;
+                                                                        }
+                                                                    }
+                                                                });
+
+                                                            let idx = state
+                                                                .selected_fumarole_index
+                                                                .min(state.fumaroles.len().saturating_sub(1));
+                                                            let fum = &mut state.fumaroles[idx];
+
+                                                            ui.separator();
+                                                            ui.checkbox(&mut fum.enabled, "Enabled");
+                                                            ui.add(
+                                                                egui::Slider::new(&mut fum.x_frac, 0.0..=1.0)
+                                                                    .text("X (frac)")
+                                                                    .clamp_to_range(true),
+                                                            );
+                                                            ui.add(
+                                                                egui::Slider::new(&mut fum.y_frac, 0.0..=1.0)
+                                                                    .text("Y (frac)")
+                                                                    .clamp_to_range(true),
+                                                            );
+                                                            ui.add(
+                                                                egui::Slider::new(&mut fum.dir_degrees, 0.0..=360.0)
+                                                                    .text("Direction (deg)")
+                                                                    .clamp_to_range(true),
+                                                            );
+                                                            ui.add(
+                                                                egui::Slider::new(&mut fum.strength, 0.0..=50_000.0)
+                                                                    .text("Strength")
+                                                                    .logarithmic(true)
+                                                                    .clamp_to_range(true),
+                                                            );
+                                                            ui.add(
+                                                                egui::Slider::new(&mut fum.spread, 0.0..=FLUID_GRID_SIZE as f32)
+                                                                    .text("Spread (cells)")
+                                                                    .clamp_to_range(true),
+                                                            );
+                                                            ui.add(
+                                                                egui::Slider::new(&mut fum.alpha_dye_rate, 0.0..=1000.0)
+                                                                    .text("Alpha Dye Rate")
+                                                                    .logarithmic(true)
+                                                                    .clamp_to_range(true),
+                                                            );
+                                                            ui.add(
+                                                                egui::Slider::new(&mut fum.beta_dye_rate, 0.0..=1000.0)
+                                                                    .text("Beta Dye Rate")
+                                                                    .logarithmic(true)
+                                                                    .clamp_to_range(true),
+                                                            );
+                                                            ui.add(
+                                                                egui::Slider::new(&mut fum.variation, 0.0..=1.0)
+                                                                    .text("Variation")
+                                                                    .clamp_to_range(true),
+                                                            );
+                                                        }
                                                     });
                                                 }
                                                 _ => {}
@@ -10463,6 +10779,62 @@ fn main() {
                                                         plot_ui.line(Line::new(alpha_points).name("Alpha").color(Color32::GREEN));
                                                         plot_ui.line(Line::new(beta_points).name("Beta").color(Color32::RED));
                                                     });
+                                            });
+
+                                            ui.separator();
+                                            ui.collapsing("Part Base-Angle Overrides", |ui| {
+                                                ui.label("Overrides are in radians. NaN = use shader default.");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("Load CSV").clicked() {
+                                                        match load_part_base_angle_overrides_csv(Path::new(PART_OVERRIDES_CSV_PATH)) {
+                                                            Ok(ov) => {
+                                                                state.part_base_angle_overrides = ov;
+                                                                state.part_base_angle_overrides_dirty = true;
+                                                            }
+                                                            Err(err) => eprintln!("Failed to load {}: {err:?}", PART_OVERRIDES_CSV_PATH),
+                                                        }
+                                                    }
+                                                    if ui.button("Save CSV").clicked() {
+                                                        if let Err(err) = save_part_base_angle_overrides_csv(
+                                                            Path::new(PART_OVERRIDES_CSV_PATH),
+                                                            &state.part_base_angle_overrides,
+                                                        ) {
+                                                            eprintln!("Failed to save {}: {err:?}", PART_OVERRIDES_CSV_PATH);
+                                                        }
+                                                    }
+                                                    if ui.button("Clear").clicked() {
+                                                        state.part_base_angle_overrides = [f32::NAN; PART_OVERRIDE_SLOTS];
+                                                        state.part_base_angle_overrides_dirty = true;
+                                                    }
+                                                });
+
+                                                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                                                    for i in 0..PART_TYPE_COUNT {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(format!("{:02} {}", i, PART_TYPE_NAMES[i]));
+
+                                                            let mut enabled = !state.part_base_angle_overrides[i].is_nan();
+                                                            if ui.checkbox(&mut enabled, "override").changed() {
+                                                                state.part_base_angle_overrides[i] = if enabled { 0.0 } else { f32::NAN };
+                                                                state.part_base_angle_overrides_dirty = true;
+                                                            }
+
+                                                            if enabled {
+                                                                let mut v = state.part_base_angle_overrides[i];
+                                                                let changed = ui
+                                                                    .add(egui::DragValue::new(&mut v).speed(0.01))
+                                                                    .changed();
+                                                                ui.label(format!("({:.1}°)", v.to_degrees()));
+                                                                if changed {
+                                                                    state.part_base_angle_overrides[i] = v;
+                                                                    state.part_base_angle_overrides_dirty = true;
+                                                                }
+                                                            } else {
+                                                                ui.label("default");
+                                                            }
+                                                        });
+                                                    }
+                                                });
                                             });
 
                                             ui.separator();

@@ -295,6 +295,11 @@ struct EnvironmentInitParams {
     beta_noise_scale: f32,
     gamma_noise_scale: f32,
     noise_power: f32,
+
+    // Part base-angle override table.
+    // Packed as vec4<f32> (16-byte stride) with NaN sentinel = "use default".
+    // 128 slots reserved for future amino/organ expansion.
+    part_angle_override: array<vec4<f32>, 32>,
 }
 
 // ============================================================================
@@ -526,6 +531,20 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
 
     var p: AminoAcidProperties;
     p.segment_length = d[0].x; p.thickness = d[0].y; p.base_angle = d[0].z; p.mass = d[0].w;
+
+    // Optional base_angle override (NaN means: keep default)
+    {
+        let i = t;
+        let v = environment_init.part_angle_override[i / 4u];
+        let lane = i & 3u;
+        var ov = v.x;
+        if (lane == 1u) { ov = v.y; }
+        if (lane == 2u) { ov = v.z; }
+        if (lane == 3u) { ov = v.w; }
+        if (ov == ov) { // NaN check
+            p.base_angle = ov;
+        }
+    }
     p.alpha_sensitivity = d[1].x; p.beta_sensitivity = d[1].y; p.thrust_force = d[1].z; p.energy_consumption = d[1].w;
     p.color = d[2].xyz; p.energy_storage = d[2].w;
     p.energy_absorption_rate = d[3].x; p.beta_absorption_rate = d[3].y; p.beta_damage = d[3].z; p.parameter1 = d[3].w;

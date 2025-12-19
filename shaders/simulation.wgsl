@@ -162,9 +162,10 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let victim_grid_y = u32(clamp(victim_pos.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
                     let victim_grid_idx = victim_grid_y * SPATIAL_GRID_SIZE + victim_grid_x;
 
-                    // Atomic claim: mark victim with high bit to indicate it's being drained this frame
-                    // The high bit preserves the victim ID for physics (unmask with & 0x7FFFFFFF)
-                    // Once marked, the same vampire can drain with multiple mouths
+                    // Atomic claim: mark victim with high bit to indicate it's being drained this frame.
+                    // The high bit preserves the victim ID for physics (unmask with & 0x7FFFFFFF).
+                    // IMPORTANT: this claim must be exclusive across vampires to avoid
+                    // cross-invocation RMW races on victim energy.
                     let current_cell = atomicLoad(&agent_spatial_grid[victim_grid_idx]);
                     var can_drain = false;
 
@@ -178,8 +179,10 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[victim_grid_idx], closest_victim_id, claimed_victim_id);
                         can_drain = claim_result.exchanged;
                     } else if (cell_agent_id == closest_victim_id && is_claimed) {
-                        // Victim is already marked (claimed this frame) - allow same vampire to drain again
-                        can_drain = true;
+                        // Victim is already claimed this frame; do not drain.
+                        // Allowing drains here reintroduces multi-vampire races and lets vampires
+                        // over-collect energy due to last-writer-wins on victim energy.
+                        can_drain = false;
                     }
 
                     // Only proceed if we can drain this victim AND cooldown is ready
@@ -1099,7 +1102,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Default body parts (amino acids + organs) to coupling=1.0 unless explicitly overridden.
             let wind_coupling = select(
                 amino_props.fluid_wind_coupling,
-                1.0,
+                0.5,
                 (amino_props.fluid_wind_coupling == 0.0)
             );
 
@@ -1347,15 +1350,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var energy_consumption = params.energy_cost; // base maintenance (can be 0)
     var total_consumed_alpha = 0.0;
     var total_consumed_beta = 0.0;
-
-    // Count vampire mouths once; used for mouth-effectiveness rules.
-    var vampiric_mouth_count = 0u;
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
-        if (base_type == 33u) {
-            vampiric_mouth_count += 1u;
-        }
-    }
+    var local_alpha = 0.0;
 
     // Single loop through all body parts
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
@@ -1365,6 +1360,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let rotated_pos = apply_agent_rotation(part.pos, agent.rotation);
         let world_pos = agent.position + rotated_pos;
         let idx = grid_index(world_pos);
+
+        // Local alpha accumulation for reproduction gating: sample alpha at each part position.
+        // This includes amino acids and organs (mouths, etc.).
+        local_alpha += chem_grid[idx].x;
 
         // Calculate actual mouth speed for mouth organs (distance moved since last frame)
         // Only non-vampire mouths need to track previous position for speed-based absorption
@@ -1424,12 +1423,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Organ-specific energy costs
         var organ_extra = 0.0;
         if (props.is_mouth) {
-            // Vampire mouths have increased maintenance.
-            organ_extra = select(props.energy_consumption, props.energy_consumption * 3.0, base_type == 33u);
+            // Mouth energy cost:
+            // - Base maintenance is always paid.
+            // - Activity cost scales with enabler amplification (mouth effectiveness).
+            // - Vampire mouths (type 33) pay 3x the activity cost.
+            let base_maintenance = select(props.energy_consumption, props.energy_consumption * 3.0, base_type == 33u);
 
             // 3) Feeding: mouths consume from alpha/beta grids
             // Get enabler amplification for this mouth
             let amplification = amplification_per_part[i];
+
+            let activity_mult = select(1.0, 3.0, base_type == 33u);
+            let activity_cost = props.energy_consumption * amplification * 1.5 * activity_mult;
+            organ_extra = base_maintenance + activity_cost;
 
             // Consume alpha and beta based on per-amino absorption rates
             // and local availability, scaled by speed (slower = more absorption)
@@ -1438,8 +1444,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed effects and amplification to the rates themselves
-            let alpha_rate = max(props.energy_absorption_rate, 0.0) * speed_absorption_multiplier * amplification;
-            let beta_rate  = max(props.beta_absorption_rate, 0.0) * speed_absorption_multiplier * amplification;
+            // Vampire mouths absorb 50% of what a normal mouth would.
+            let mouth_absorption_multiplier = select(1.0, 0.5, base_type == 33u);
+            let alpha_rate = max(props.energy_absorption_rate, 0.0)
+                * speed_absorption_multiplier
+                * amplification
+                * mouth_absorption_multiplier;
+            let beta_rate  = max(props.beta_absorption_rate, 0.0)
+                * speed_absorption_multiplier
+                * amplification
+                * mouth_absorption_multiplier;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
@@ -1461,20 +1475,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let prev = chem_grid[idx];
                     chem_grid[idx] = vec2<f32>(clamp(available_alpha - consumed_alpha, 0.0, available_alpha), prev.y);
 
-                    // Mouth effectiveness rule:
-                    // - Vampire mouths: alpha energy gain reduced by total vampire-mouth count.
-                    // - Normal mouths: if the agent has any vampire mouths, reduce alpha energy gain
-                    //   by 30% per vampire mouth.
-                    var alpha_energy_multiplier = 1.0;
-                    if (base_type == 33u) {
-                        // Exponential reduction: 1 mouth = 50%, 2 mouths = 25%, 3 mouths = 12.5%
-                        alpha_energy_multiplier = pow(0.5, f32(vampiric_mouth_count));
-                    } else if (vampiric_mouth_count > 0u) {
-                        // Linear penalty: each vampire mouth reduces normal-mouth energy gain by 30%.
-                        alpha_energy_multiplier = max(0.0, 1.0 - 0.3 * f32(vampiric_mouth_count));
-                    }
-
-                    agent.energy += consumed_alpha * params.food_power * alpha_energy_multiplier;
+                    agent.energy += consumed_alpha * params.food_power;
                     total_consumed_alpha += consumed_alpha;
                 }
 
@@ -1491,7 +1492,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Since thrust already scales quadratically with amp, cost should scale linearly with thrust
             let base_thrust = props.thrust_force * 3.0; // Max thrust with amp=1
             let thrust_ratio = propeller_thrust_magnitude[i] / base_thrust;
-            let activity_cost = props.energy_consumption * thrust_ratio * 1.5;
+            // Reduce operational (thrust) cost by 1/3.
+            let activity_cost = props.energy_consumption * thrust_ratio * 1.0;
             organ_extra = props.energy_consumption + activity_cost; // Base + activity
         } else {
             // Other organs use linear amplification scaling
@@ -1623,6 +1625,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var energy_invested = 0.0; // Track energy spent on pairing for offspring
 
     if (gene_length > 0u && pairing_counter < gene_length) {
+        // If the agent has no energy capacity (no storage), it cannot sustain pairing/reproduction.
+        // This also prevents "capacity clamped to 0" agents from reproducing at zero energy.
+        if (capacity <= 0.0) {
+            // Keep pairing_counter unchanged.
+        } else {
         // Try to increment the counter based on conditions
         let pos_idx = grid_index(agent.position);
         let beta_concentration = chem_grid[pos_idx].y;
@@ -1633,12 +1640,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let energy_for_pair = max(agent.energy, 0.0);
 
         // Probability to increment counter
-        // Apply sqrt scaling: diminishing returns for high energy (sqrt(1)=1, sqrt(10)=3.16, sqrt(50)=7.07)
-        // This makes low energy more viable while still rewarding energy accumulation
-        let energy_scaled = sqrt(energy_for_pair + 1.0);
+        // Apply sqrt scaling: diminishing returns for high energy.
+        // IMPORTANT: do not add +1 here; at energy==0, pairing probability should be 0.
+        let energy_scaled = sqrt(energy_for_pair);
         // Apply radiation_factor (beta acts as reproductive inhibitor)
         // Poison protection also slows pairing by the same amount
-        let pair_p = clamp(params.spawn_probability * energy_scaled * 0.1 * radiation_factor * poison_multiplier, 0.0, 1.0);
+        // Scale pairing probability by summed local alpha across body parts.
+        // This makes reproduction more likely when many parts are in modest alpha,
+        // while still clamping to keep the probability bounded.
+        let local_alpha_mult = clamp(local_alpha, 0.0, 1.0);
+        let pair_p = clamp(params.spawn_probability * energy_scaled * 0.1 * radiation_factor * poison_multiplier * local_alpha_mult, 0.0, 1.0);
         if (rnd < pair_p) {
             // Pairing cost per increment
             let pairing_cost = params.pairing_cost;
@@ -1647,6 +1658,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 agent.energy -= pairing_cost;
                 energy_invested += pairing_cost;
             }
+        }
         }
     }
 

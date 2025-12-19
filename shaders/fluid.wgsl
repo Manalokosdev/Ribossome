@@ -45,14 +45,35 @@ const MAX_DT: f32 = 0.02;         // Clamp dt spikes (e.g., window stalls)
 const MAX_FORCE: f32 = 200000.0;  // Clamp injected force magnitude per cell
 const MAX_VEL: f32 = 2000.0;      // Clamp velocity magnitude per cell
 
-// Debug / test driver: deterministic “fumarole” point force injector.
-// Single cell force vector at ~1/3 of the sim window.
-const FUMAROLE_ENABLED: bool = true;
-const FUMAROLE_FORCE: vec2<f32> = vec2<f32>(0.0, 1500000.0); // +Y in world/agent coords (updraft)
-// Alpha dye injected as a continuous-time rate (per second), so it behaves consistently across frame rates.
-const FUMAROLE_ALPHA_INJECTION_RATE: f32 = 30.0;
-const FUMAROLE_X_FRAC: f32 = 0.3333333;
-const FUMAROLE_Y_FRAC: f32 = 0.3333333;
+// Fumaroles are configured at runtime from the UI / settings.
+// They are supplied via a flat f32 storage buffer (no struct mirroring).
+// Layout:
+//   fumaroles[0] = count (as f32)
+//   for each i in [0..count):
+//     base = 1 + i*FUM_STRIDE
+//     0 enabled (0/1)
+//     1 x_frac (0..1, fluid-grid fraction)
+//     2 y_frac (0..1, fluid-grid fraction)
+//     3 dir_x
+//     4 dir_y
+//     5 strength (force magnitude, written into force_vectors)
+//     6 spread (radius in fluid cells)
+//     7 alpha_dye_rate (1/sec)
+//     8 beta_dye_rate  (1/sec)
+//     9 variation (0..1: jitter applied per-cell to direction/strength/rate)
+const MAX_FUMAROLES: u32 = 64u;
+const FUM_STRIDE: u32 = 10u;
+
+const FUM_ENABLED: u32 = 0u;
+const FUM_X_FRAC: u32 = 1u;
+const FUM_Y_FRAC: u32 = 2u;
+const FUM_DIR_X: u32 = 3u;
+const FUM_DIR_Y: u32 = 4u;
+const FUM_STRENGTH: u32 = 5u;
+const FUM_SPREAD: u32 = 6u;
+const FUM_ALPHA_DYE_RATE: u32 = 7u;
+const FUM_BETA_DYE_RATE: u32 = 8u;
+const FUM_VARIATION: u32 = 9u;
 
 // Slope-driven obstacles (porous steepness)
 // If enabled, steeper terrain becomes less permeable (more like rock / barrier).
@@ -133,6 +154,9 @@ const CHEM_MAX_STEP_FRAC: f32 = 0.25; // hard clamp per tick to avoid instabilit
 @group(0) @binding(12) var<storage, read_write> trail_out: array<vec4<f32>>;
 @group(0) @binding(13) var<storage, read> trail_in: array<vec4<f32>>;
 
+// Fumarole list (flat float buffer). See layout comment above.
+@group(0) @binding(17) var<storage, read> fumaroles: array<f32>;
+
 // Parameters
 // IMPORTANT: keep this as a flat float buffer (no Rust<->WGSL struct mirroring).
 // Packed as vec4<f32> to avoid uniform-array scalar stride pitfalls.
@@ -190,6 +214,16 @@ fn fp_vec4(base: u32) -> vec4<f32> {
         fp_f32(base + 2u),
         fp_f32(base + 3u),
     );
+}
+
+fn fum_f32(base: u32, off: u32) -> f32 {
+    return fumaroles[base + off];
+}
+
+fn rotate2(v: vec2<f32>, a: f32) -> vec2<f32> {
+    let c = cos(a);
+    let s = sin(a);
+    return vec2<f32>(v.x * c - v.y * s, v.x * s + v.y * c);
 }
 
 // Display/feedback texture (ping-pong) used for visualization.
@@ -261,71 +295,165 @@ fn clear_fluid_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
 // This is meant as a deterministic test driver so you can see how the fluid affects agents.
 @compute @workgroup_size(1, 1, 1)
 fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (!FUMAROLE_ENABLED) {
-        return;
-    }
-
     // Single-invocation kernel: only one thread writes the single-cell force.
     if (gid.x != 0u || gid.y != 0u || gid.z != 0u) {
         return;
     }
 
-    let size_f = f32(FLUID_GRID_SIZE);
-    // Keep it away from the edges as requested.
-    let fx_i = clamp(i32(round(size_f * FUMAROLE_X_FRAC)), 1, i32(FLUID_GRID_SIZE) - 2);
-    let fy_i = clamp(i32(round(size_f * FUMAROLE_Y_FRAC)), 1, i32(FLUID_GRID_SIZE) - 2);
-    let fx = u32(fx_i);
-    let fy = u32(fy_i);
-
-    let idx = grid_index(fx, fy);
-    fluid_force_vectors[idx] = fluid_force_vectors[idx] + FUMAROLE_FORCE;
-}
-
-// Inject alpha dye at the fumarole location.
-// IMPORTANT: This must run *after* inject_dye(), otherwise inject_dye() will overwrite dye_out.
-@compute @workgroup_size(1, 1, 1)
-fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (!FUMAROLE_ENABLED) {
+    let count_f = fumaroles[0u];
+    let count = u32(clamp(floor(count_f + 0.0001), 0.0, f32(MAX_FUMAROLES)));
+    if (count == 0u) {
         return;
     }
 
+    let size_f = f32(FLUID_GRID_SIZE);
+    // Use coarse time buckets so variation doesn't flicker every single frame.
+    let time_bucket = u32(fp_f32(FP_TIME)) / 16u;
+
+    for (var i = 0u; i < count; i = i + 1u) {
+        let base = 1u + i * FUM_STRIDE;
+        let enabled = fum_f32(base, FUM_ENABLED);
+        if (enabled < 0.5) {
+            continue;
+        }
+
+        let x_frac = clamp(fum_f32(base, FUM_X_FRAC), 0.0, 1.0);
+        let y_frac = clamp(fum_f32(base, FUM_Y_FRAC), 0.0, 1.0);
+
+        // Keep it away from edges to avoid boundary artifacts.
+        let fx_i = clamp(i32(round(size_f * x_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
+        let fy_i = clamp(i32(round(size_f * y_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
+
+        var dir = vec2<f32>(fum_f32(base, FUM_DIR_X), fum_f32(base, FUM_DIR_Y));
+        let dir_len = length(dir);
+        dir = select(dir / max(dir_len, 1e-8), vec2<f32>(0.0, 1.0), dir_len < 1e-5);
+
+        let base_strength = max(fum_f32(base, FUM_STRENGTH), 0.0);
+        let spread_f = max(fum_f32(base, FUM_SPREAD), 0.0);
+        let variation = clamp(fum_f32(base, FUM_VARIATION), 0.0, 1.0);
+
+        // Variation should be per-cell (spatially randomized), not once-per-fumarole.
+        let seed_base = hash_u32(i * 0x9E3779B9u ^ time_bucket * 0x85EBCA6Bu ^ 0xC2B2AE35u);
+
+        // Spread in fluid-cell units.
+        let r = i32(clamp(round(spread_f), 0.0, 64.0));
+        if (r <= 0) {
+            let idx = grid_index(u32(fx_i), u32(fy_i));
+
+            let seed0 = hash_u32(seed_base ^ idx);
+            let seed1 = hash_u32(seed0 ^ 0xA511E9B3u);
+            let seed2 = hash_u32(seed0 ^ 0x63D83595u);
+            let ang = (rand01(seed1) * 2.0 - 1.0) * 3.14159265 * variation;
+            let strength_jitter = 1.0 + (rand01(seed2) * 2.0 - 1.0) * variation;
+
+            let dir_j = normalize(rotate2(dir, ang));
+            let strength = base_strength * max(strength_jitter, 0.0);
+            fluid_force_vectors[idx] = fluid_force_vectors[idx] + dir_j * strength;
+        } else {
+            for (var dy: i32 = -r; dy <= r; dy = dy + 1) {
+                for (var dx: i32 = -r; dx <= r; dx = dx + 1) {
+                    let xi = clamp(fx_i + dx, 1, i32(FLUID_GRID_SIZE) - 2);
+                    let yi = clamp(fy_i + dy, 1, i32(FLUID_GRID_SIZE) - 2);
+                    let idx = grid_index(u32(xi), u32(yi));
+
+                    let seed0 = hash_u32(seed_base ^ idx);
+                    let seed1 = hash_u32(seed0 ^ 0xA511E9B3u);
+                    let seed2 = hash_u32(seed0 ^ 0x63D83595u);
+                    let ang = (rand01(seed1) * 2.0 - 1.0) * 3.14159265 * variation;
+                    let strength_jitter = 1.0 + (rand01(seed2) * 2.0 - 1.0) * variation;
+                    let dir_j = normalize(rotate2(dir, ang));
+                    let strength = base_strength * max(strength_jitter, 0.0);
+
+                    let dist = length(vec2<f32>(f32(dx), f32(dy)));
+                    // Smooth falloff (stronger core): w in [0..1]
+                    let w0 = clamp(1.0 - dist / (f32(r) + 0.001), 0.0, 1.0);
+                    let w = w0 * w0;
+
+                    fluid_force_vectors[idx] = fluid_force_vectors[idx] + dir_j * (strength * w);
+                }
+            }
+        }
+    }
+}
+
+// Inject dye at the fumarole location.
+// IMPORTANT: This must run *after* inject_dye(), otherwise inject_dye() will overwrite dye_out.
+@compute @workgroup_size(1, 1, 1)
+fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Single-invocation kernel: only one thread writes the single-cell dye.
     if (gid.x != 0u || gid.y != 0u || gid.z != 0u) {
         return;
     }
 
-    let size_f = f32(FLUID_GRID_SIZE);
-    let fx_i = clamp(i32(round(size_f * FUMAROLE_X_FRAC)), 1, i32(FLUID_GRID_SIZE) - 2);
-    let fy_i = clamp(i32(round(size_f * FUMAROLE_Y_FRAC)), 1, i32(FLUID_GRID_SIZE) - 2);
-    let fx = u32(fx_i);
-    let fy = u32(fy_i);
+    let count_f = fumaroles[0u];
+    let count = u32(clamp(floor(count_f + 0.0001), 0.0, f32(MAX_FUMAROLES)));
+    if (count == 0u) {
+        return;
+    }
 
-    // Convert to dye grid coordinates.
-    let fluid_to_dye = f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
-    let dye_x0 = i32(clamp(f32(fx) * fluid_to_dye, 0.0, f32(GAMMA_GRID_DIM - 1u)));
-    let dye_y0 = i32(clamp(f32(fy) * fluid_to_dye, 0.0, f32(GAMMA_GRID_DIM - 1u)));
-
-    // At 2048x2048 dye resolution, a single cell is extremely small.
-    // Use a larger footprint so the source stays readable and doesn't appear to "vanish"
-    // when local flow/agent wash disperses it.
-    let R: i32 = 16;
-
-    // Frame-rate independent injection: amount = rate * dt.
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
-    let injected_amount = max(FUMAROLE_ALPHA_INJECTION_RATE, 0.0) * dt;
-    for (var dy: i32 = -R; dy <= R; dy = dy + 1) {
-        for (var dx: i32 = -R; dx <= R; dx = dx + 1) {
-            let xi = clamp(dye_x0 + dx, 0, i32(GAMMA_GRID_DIM) - 1);
-            let yi = clamp(dye_y0 + dy, 0, i32(GAMMA_GRID_DIM) - 1);
-            let dye_idx = dye_grid_index(u32(xi), u32(yi));
+    let size_f = f32(FLUID_GRID_SIZE);
+    let fluid_to_dye = f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let time_bucket = u32(fp_f32(FP_TIME)) / 16u;
 
-            // Simple falloff: center strongest, edges weaker.
-            let dist = length(vec2<f32>(f32(dx), f32(dy)));
-            let w = clamp(1.0 - dist / (f32(R) + 0.001), 0.0, 1.0);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let base = 1u + i * FUM_STRIDE;
+        let enabled = fum_f32(base, FUM_ENABLED);
+        if (enabled < 0.5) {
+            continue;
+        }
 
-            // Inject alpha into the y channel (green = alpha).
-            let current = dye_out[dye_idx];
-            dye_out[dye_idx] = vec2<f32>(current.x, min(current.y + injected_amount * w, 1.0));
+        let x_frac = clamp(fum_f32(base, FUM_X_FRAC), 0.0, 1.0);
+        let y_frac = clamp(fum_f32(base, FUM_Y_FRAC), 0.0, 1.0);
+
+        let fx_i = clamp(i32(round(size_f * x_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
+        let fy_i = clamp(i32(round(size_f * y_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
+
+        // Convert to dye grid coordinates.
+        let dye_x0 = i32(clamp(f32(fx_i) * fluid_to_dye, 0.0, f32(GAMMA_GRID_DIM - 1u)));
+        let dye_y0 = i32(clamp(f32(fy_i) * fluid_to_dye, 0.0, f32(GAMMA_GRID_DIM - 1u)));
+
+        let spread_f = max(fum_f32(base, FUM_SPREAD), 0.0);
+        // Map fluid-cell radius to dye-cell radius.
+        let r_dye = i32(clamp(round(spread_f * fluid_to_dye), 1.0, 128.0));
+
+        let base_rate_alpha = max(fum_f32(base, FUM_ALPHA_DYE_RATE), 0.0);
+        let base_rate_beta = max(fum_f32(base, FUM_BETA_DYE_RATE), 0.0);
+        let variation = clamp(fum_f32(base, FUM_VARIATION), 0.0, 1.0);
+
+        if (base_rate_alpha <= 0.0 && base_rate_beta <= 0.0) {
+            continue;
+        }
+
+        let seed_base = hash_u32(i * 0x9E3779B9u ^ time_bucket * 0x85EBCA6Bu ^ 0x27D4EB2Fu);
+
+        for (var dy: i32 = -r_dye; dy <= r_dye; dy = dy + 1) {
+            for (var dx: i32 = -r_dye; dx <= r_dye; dx = dx + 1) {
+                let xi = clamp(dye_x0 + dx, 0, i32(GAMMA_GRID_DIM) - 1);
+                let yi = clamp(dye_y0 + dy, 0, i32(GAMMA_GRID_DIM) - 1);
+                let dye_idx = dye_grid_index(u32(xi), u32(yi));
+
+                let seed0 = hash_u32(seed_base ^ dye_idx);
+                let seed1 = hash_u32(seed0 ^ 0xB7E15162u);
+                let rate_jitter = 1.0 + (rand01(seed1) * 2.0 - 1.0) * variation;
+                let jitter = max(rate_jitter, 0.0);
+
+                // Frame-rate independent injection: amount = rate * dt.
+                let injected_amount_alpha = base_rate_alpha * jitter * dt;
+                let injected_amount_beta = base_rate_beta * jitter * dt;
+                if (injected_amount_alpha <= 0.0 && injected_amount_beta <= 0.0) {
+                    continue;
+                }
+
+                let dist = length(vec2<f32>(f32(dx), f32(dy)));
+                let w0 = clamp(1.0 - dist / (f32(r_dye) + 0.001), 0.0, 1.0);
+                let w = w0 * w0;
+
+                let current = dye_out[dye_idx];
+                let next_beta = min(current.x + injected_amount_beta * w, 1.0);
+                let next_alpha = min(current.y + injected_amount_alpha * w, 1.0);
+                dye_out[dye_idx] = vec2<f32>(next_beta, next_alpha);
+            }
         }
     }
 }
