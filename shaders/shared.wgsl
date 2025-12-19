@@ -263,6 +263,17 @@ struct SimParams {
     beta_fluid_convolution: f32,
     fluid_slope_force_scale: f32,
     fluid_obstacle_strength: f32,
+
+    // Fluid dye visualization colors (independent from environment alpha/beta colors).
+    // Stored as two 16-byte blocks for stable uniform alignment.
+    dye_alpha_color_r: f32,
+    dye_alpha_color_g: f32,
+    dye_alpha_color_b: f32,
+    _pad_dye_alpha_color: f32,
+    dye_beta_color_r: f32,
+    dye_beta_color_g: f32,
+    dye_beta_color_b: f32,
+    _pad_dye_beta_color: f32,
 }
 
 struct EnvironmentInitParams {
@@ -307,6 +318,14 @@ var<storage, read_write> chem_grid: array<vec2<f32>>;
 // - fluid_dye[idx].x = beta (red)
 // - fluid_dye[idx].y = alpha (green)
 var<storage, read> fluid_dye: array<vec2<f32>>;
+
+@group(0) @binding(18)
+// Rain map (static probability field), sampled as a texture so it doesn't consume
+// a storage-buffer slot (wgpu has a low max_storage_buffers_per_shader_stage limit).
+// RG channels:
+// - .x = alpha (food) rain multiplier
+// - .y = beta  (poison) rain multiplier
+var rain_map_tex: texture_2d<f32>;
 
 @group(0) @binding(4)
 var<storage, read_write> visual_grid: array<vec4<f32>>; // RGBA render target
@@ -355,7 +374,7 @@ var<storage, read_write> agent_spatial_grid: array<atomic<u32>>; // Agent index 
 // Spatial grid special markers
 const SPATIAL_GRID_EMPTY: u32 = 0xFFFFFFFFu;     // No agent in this cell
 const SPATIAL_GRID_CLAIMED: u32 = 0xFFFFFFFEu;   // Cell claimed by vampire (victim being drained)
-const VAMPIRE_MOUTH_COOLDOWN: f32 = 60.0;         // Frames between drains (1 second at 60fps)
+const VAMPIRE_MOUTH_COOLDOWN: f32 = 2.0;          // Frames between drains
 const VAMPIRE_NEWBORN_GRACE_FRAMES: u32 = 60u;    // Newborn agents ignore/are immune to vampire drain for 1 second
 
 // Fluid constants
@@ -810,7 +829,11 @@ fn hash_f32(v: u32) -> f32 { return f32(hash(v)) / 4294967295.0; }
 
 // Sensor and sampling helpers
 fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, grid_type: u32, debug_mode: bool, sensor_perpendicular: vec2<f32>, chirality_flip: f32, promoter_param1: f32, modifier_param1: f32) -> f32 {
-    // Environment sensors read from the advected fluid dye (fluid_dye).
+    // Environment sensors read from the sum of:
+    // - the advected fluid dye (fluid_dye)
+    // - the live environment chemistry grid (chem_grid)
+    // This makes sensing robust even when dye is allowed to decay/escape,
+    // at the cost of some nondeterminism (agent ordering effects on chem_grid writes).
     // Directional sensors sample only the immediate left/right env texels relative to the organ orientation.
     // The old "radius" parameter is repurposed as a signal gain multiplier.
     let combined_param = promoter_param1 + modifier_param1;
@@ -836,14 +859,16 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
     if (is_in_bounds(pos_left)) {
         let idx = grid_index(pos_left);
         let d = fluid_dye[idx];
-        if (grid_type == 0u) { v_left = clamp(d.y, 0.0, 1.0); }
-        else if (grid_type == 1u) { v_left = clamp(d.x, 0.0, 1.0); }
+        let c = chem_grid[idx];
+        if (grid_type == 0u) { v_left = clamp(d.y + c.x, 0.0, 1.0); }
+        else if (grid_type == 1u) { v_left = clamp(d.x + c.y, 0.0, 1.0); }
     }
     if (is_in_bounds(pos_right)) {
         let idx = grid_index(pos_right);
         let d = fluid_dye[idx];
-        if (grid_type == 0u) { v_right = clamp(d.y, 0.0, 1.0); }
-        else if (grid_type == 1u) { v_right = clamp(d.x, 0.0, 1.0); }
+        let c = chem_grid[idx];
+        if (grid_type == 0u) { v_right = clamp(d.y + c.x, 0.0, 1.0); }
+        else if (grid_type == 1u) { v_right = clamp(d.x + c.y, 0.0, 1.0); }
     }
 
     if (debug_mode) {
@@ -858,7 +883,8 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
 }
 
 fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_type: u32, debug_mode: bool, promoter_param1: f32, modifier_param1: f32) -> f32 {
-    // Intensity sensors sample only the current fluid texel.
+    // Intensity sensors sample the sum of the current fluid dye texel + chem texel.
+    // See sample_stochastic_gaussian() for the determinism tradeoff.
     // The old "radius" parameter is repurposed as a signal gain multiplier.
     let combined_param = promoter_param1 + modifier_param1;
     // Keep polarity explicit (requested): sign comes from (p+m), magnitude from abs(p+m).
@@ -874,9 +900,10 @@ fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_ty
     // NOTE: fluid_dye is stored at ENV_GRID_SIZE resolution.
     let idx = grid_index(center);
     let d = fluid_dye[idx];
+    let c = chem_grid[idx];
     var v = 0.0;
-    if (grid_type == 0u) { v = clamp(d.y, 0.0, 1.0); }
-    else if (grid_type == 1u) { v = clamp(d.x, 0.0, 1.0); }
+    if (grid_type == 0u) { v = clamp(d.y + c.x, 0.0, 1.0); }
+    else if (grid_type == 1u) { v = clamp(d.x + c.y, 0.0, 1.0); }
 
     if (debug_mode) {
         draw_filled_circle(center, 4.0, vec4<f32>(1.0, 0.7, 0.0, 0.7));
@@ -1356,6 +1383,13 @@ fn translate_codon_step(genome: array<u32, GENOME_WORDS>, pos_b: u32, ignore_sto
         let second_codon_has_x = (b3 == 88u || b4 == 88u || b5 == 88u);
 
         if (!second_codon_has_x) {
+            // If the modifier codon is a stop codon, do not allow it to synthesize an organ.
+            // - Normal mode: consume only the promoter (3 bases) so the stop codon terminates on the next step.
+            // - Debug mode (ignore_stop_codons): skip over the stop codon (consume 6 bases) but still emit the promoter amino.
+            if (genome_is_stop_codon_at(genome, pos_b + 3u)) {
+                final_part_type = amino_type;
+                bases_consumed = select(3u, 6u, ignore_stop_codons);
+            } else {
             let codon2 = genome_get_codon_ascii(genome, pos_b + 3u);
             let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
             var organ_base_type = 0u;
@@ -1404,6 +1438,7 @@ fn translate_codon_step(genome: array<u32, GENOME_WORDS>, pos_b: u32, ignore_sto
                 // No organ mapping: materialize as the amino acid following the promoter.
                 final_part_type = modifier;
                 bases_consumed = 6u;
+            }
             }
         }
     }

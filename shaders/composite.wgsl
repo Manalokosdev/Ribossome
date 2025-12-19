@@ -18,7 +18,7 @@ const SIM_SIZE: u32 = 30720u;
 // Keep this modest; the overlay also applies a tone-map to avoid blowout.
 const DYE_VIS_GAIN: f32 = 2.0;
 
-// Must match SimParams layout from main.rs up to fluid_show field
+// Must match SimParams layout from main.rs.
 struct SimParams {
     dt: f32,
     frame_dt: f32,
@@ -116,7 +116,20 @@ struct SimParams {
     inspector_zoom: f32,
     agent_trail_decay: f32,
     fluid_show: u32,
-    // Don't need fields after fluid_show
+    fluid_wind_push_strength: f32,
+    alpha_fluid_convolution: f32,
+    beta_fluid_convolution: f32,
+    fluid_slope_force_scale: f32,
+    fluid_obstacle_strength: f32,
+
+    dye_alpha_color_r: f32,
+    dye_alpha_color_g: f32,
+    dye_alpha_color_b: f32,
+    _pad_dye_alpha_color: f32,
+    dye_beta_color_r: f32,
+    dye_beta_color_g: f32,
+    dye_beta_color_b: f32,
+    _pad_dye_beta_color: f32,
 }
 
 @group(0) @binding(0)
@@ -195,18 +208,16 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Simple Reinhard tone map per-channel: x / (1 + x)
             let dye_tm = dye_lin / (vec2<f32>(1.0, 1.0) + dye_lin);
 
-            // Composite dye using the same controls as alpha/beta environment layers:
-            // - params.alpha_color_* + params.alpha_blend_mode for dye alpha
-            // - params.beta_color_*  + params.beta_blend_mode  for dye beta
+            // Composite dye using independent dye colors, but reusing alpha/beta blend mode + gamma controls.
             let alpha_color = vec3<f32>(
-                clamp(params.alpha_color_r, 0.0, 1.0),
-                clamp(params.alpha_color_g, 0.0, 1.0),
-                clamp(params.alpha_color_b, 0.0, 1.0)
+                clamp(params.dye_alpha_color_r, 0.0, 1.0),
+                clamp(params.dye_alpha_color_g, 0.0, 1.0),
+                clamp(params.dye_alpha_color_b, 0.0, 1.0)
             );
             let beta_color = vec3<f32>(
-                clamp(params.beta_color_r, 0.0, 1.0),
-                clamp(params.beta_color_g, 0.0, 1.0),
-                clamp(params.beta_color_b, 0.0, 1.0)
+                clamp(params.dye_beta_color_r, 0.0, 1.0),
+                clamp(params.dye_beta_color_g, 0.0, 1.0),
+                clamp(params.dye_beta_color_b, 0.0, 1.0)
             );
 
             // Apply gamma adjustment to dye intensities for consistent look.

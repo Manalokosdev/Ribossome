@@ -74,10 +74,9 @@ const SLOPE_STEER_ENABLED: bool = true;
 // - FP_FLUID_OBSTACLE_STRENGTH: Permeability model perm = 1 / (1 + k * |slope|), larger k => stronger blocking (default: 200.0)
 
 // Environment chem ↔ dye exchange tuning
-// Controlled at runtime via FP_SPLAT.x/y.
+// Controlled at runtime via FP_SPLAT.x/y and FP_CHEM_OOZE_STILL_RATE.
 
 // Dye persistence & diffusion tuning
-// Controlled at runtime via FP_SPLAT.y (fade rate, 0 = no fade).
 // 0..1: how much we blend towards a 4-neighbor blur each frame.
 const DYE_DIFFUSE_MIX: f32 = 0.01;
 
@@ -143,13 +142,18 @@ const CHEM_MAX_STEP_FRAC: f32 = 0.25; // hard clamp per tick to avoid instabilit
 //  2 decay
 //  3 grid_size (as f32)
 //  4..7  mouse (xy = pos in grid coords, zw = velocity in grid units/sec)
-//  8..11 splat (x=env ooze rate, y=env dye fade rate, z=vorticity strength, w=viscosity)
+//  8..11 splat (x=ALPHA chem speed equil, y=ALPHA chem speed max lift, z=vorticity strength, w=viscosity)
 //  12 fluid_slope_force_scale
 //  13 fluid_obstacle_strength
 //  14 vector_force_x
 //  15 vector_force_y
 //  16 vector_force_power
-// (padded to 5 vec4s / 20 floats)
+//  17 chem_ooze_still_rate
+//  18 BETA chem speed equil
+//  19 BETA chem speed max lift
+//  20 dye_escape_rate_alpha (1/sec)
+//  21 dye_escape_rate_beta (1/sec)
+// (padded to 6 vec4s / 24 floats)
 const FP_TIME: u32 = 0u;
 const FP_DT: u32 = 1u;
 const FP_DECAY: u32 = 2u;
@@ -161,7 +165,12 @@ const FP_FLUID_OBSTACLE_STRENGTH: u32 = 13u;
 const FP_VECTOR_FORCE_X: u32 = 14u;
 const FP_VECTOR_FORCE_Y: u32 = 15u;
 const FP_VECTOR_FORCE_POWER: u32 = 16u;
-const FP_VEC4_COUNT: u32 = 5u;
+const FP_CHEM_OOZE_STILL_RATE: u32 = 17u;
+const FP_CHEM_SPEED_EQUIL_BETA: u32 = 18u;
+const FP_CHEM_SPEED_MAX_LIFT_BETA: u32 = 19u;
+const FP_DYE_ESCAPE_RATE_ALPHA: u32 = 20u;
+const FP_DYE_ESCAPE_RATE_BETA: u32 = 21u;
+const FP_VEC4_COUNT: u32 = 6u;
 
 @group(0) @binding(3) var<uniform> params: array<vec4<f32>, FP_VEC4_COUNT>;
 
@@ -433,48 +442,101 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Use dye-grid velocity magnitude (in dye cells / sec) as the driver.
     let speed = length(vel_dye);
 
-    let chem_speed_equil_in = max(fp_vec4(FP_SPLAT).x, 0.0);
-    let chem_speed_max_lift_in = max(fp_vec4(FP_SPLAT).y, 0.0);
+    let chem_speed_equil_alpha_in = max(fp_vec4(FP_SPLAT).x, 0.0);
+    let chem_speed_max_lift_alpha_in = max(fp_vec4(FP_SPLAT).y, 0.0);
+    let chem_speed_equil_beta_in = max(fp_f32(FP_CHEM_SPEED_EQUIL_BETA), 0.0);
+    let chem_speed_max_lift_beta_in = max(fp_f32(FP_CHEM_SPEED_MAX_LIFT_BETA), 0.0);
 
-    // Ensure a sane monotonic curve even if UI values are inverted.
-    let chem_speed_equil = clamp(chem_speed_equil_in, 1e-4, 1000.0);
-    let chem_speed_max_lift = max(chem_speed_max_lift_in, chem_speed_equil + 1e-4);
+    // Ensure sane monotonic curves even if UI values are inverted.
+    let chem_speed_equil_alpha = clamp(chem_speed_equil_alpha_in, 1e-4, 1000.0);
+    let chem_speed_max_lift_alpha = max(chem_speed_max_lift_alpha_in, chem_speed_equil_alpha + 1e-4);
+    let chem_speed_equil_beta = clamp(chem_speed_equil_beta_in, 1e-4, 1000.0);
+    let chem_speed_max_lift_beta = max(chem_speed_max_lift_beta_in, chem_speed_equil_beta + 1e-4);
 
     // Each dye cell maps 1:1 to the environment chem cell at the same resolution.
     let env_idx = gamma_index(x, y);
     var chem = clamp(chem_grid[env_idx], vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
 
-    // Single continuous transfer function based on speed.
-    // transfer in [-1, 1]
+    // Baseline chem→dye ooze in still water, so sensors can detect signals without flow.
+    // IMPORTANT: this is intentionally NON-depleting (does not remove chem from the grid).
+    // Think of it as a sensing/bleed copy into the advected dye layer.
+    let ooze_rate = max(fp_f32(FP_CHEM_OOZE_STILL_RATE), 0.0);
+    let stillness_alpha = 1.0 - smoothstep(0.0, chem_speed_equil_alpha, speed);
+    let stillness_beta = 1.0 - smoothstep(0.0, chem_speed_equil_beta, speed);
+    let ooze_frac_alpha = clamp(ooze_rate * stillness_alpha * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    let ooze_frac_beta = clamp(ooze_rate * stillness_beta * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    if (ooze_frac_alpha > 0.0) {
+        // Alpha: chem.x -> dye.y
+        let alpha_headroom = 1.0 - dye_val.y;
+        let ooze_alpha = min(chem.x * ooze_frac_alpha, max(alpha_headroom, 0.0));
+        dye_val.y = min(dye_val.y + ooze_alpha, 1.0);
+    }
+    if (ooze_frac_beta > 0.0) {
+        // Beta: chem.y -> dye.x
+        let beta_headroom = 1.0 - dye_val.x;
+        let ooze_beta = min(chem.y * ooze_frac_beta, max(beta_headroom, 0.0));
+        dye_val.x = min(dye_val.x + ooze_beta, 1.0);
+    }
+
+    // Channel-specific continuous transfer functions based on speed.
+    // transfer_* in [-1, 1]
     //  +1 => max deposition (dye -> chem)
     //   0 => equilibrium
     //  -1 => max lift (chem -> dye)
-    let deposit_strength = 1.0 - smoothstep(0.0, chem_speed_equil, speed);
-    let lift_strength = smoothstep(chem_speed_equil, chem_speed_max_lift, speed);
-    let transfer = clamp(deposit_strength - lift_strength, -1.0, 1.0);
+    let deposit_strength_alpha = 1.0 - smoothstep(0.0, chem_speed_equil_alpha, speed);
+    let lift_strength_alpha = smoothstep(chem_speed_equil_alpha, chem_speed_max_lift_alpha, speed);
+    let transfer_alpha = clamp(deposit_strength_alpha - lift_strength_alpha, -1.0, 1.0);
 
-    let pickup_strength = max(-transfer, 0.0);
-    let deposit_strength_pos = max(transfer, 0.0);
+    let deposit_strength_beta = 1.0 - smoothstep(0.0, chem_speed_equil_beta, speed);
+    let lift_strength_beta = smoothstep(chem_speed_equil_beta, chem_speed_max_lift_beta, speed);
+    let transfer_beta = clamp(deposit_strength_beta - lift_strength_beta, -1.0, 1.0);
 
-    let pickup_frac = clamp(CHEM_TRANSFER_RATE * pickup_strength * dt, 0.0, CHEM_MAX_STEP_FRAC);
-    let pickup_alpha = chem.x * pickup_frac;
-    let pickup_beta = chem.y * pickup_frac;
+    let pickup_strength_alpha = max(-transfer_alpha, 0.0);
+    let pickup_strength_beta = max(-transfer_beta, 0.0);
+    let deposit_strength_alpha_pos = max(transfer_alpha, 0.0);
+    let deposit_strength_beta_pos = max(transfer_beta, 0.0);
+
+    // Pickup (chem -> dye)
+    let pickup_frac_alpha = clamp(CHEM_TRANSFER_RATE * pickup_strength_alpha * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    let pickup_frac_beta = clamp(CHEM_TRANSFER_RATE * pickup_strength_beta * dt, 0.0, CHEM_MAX_STEP_FRAC);
+
+    let pickup_alpha_raw = chem.x * pickup_frac_alpha;
+    let pickup_beta_raw = chem.y * pickup_frac_beta;
+
     // Clamp by dye headroom to avoid losing mass due to saturation.
-    let dye_headroom = vec2<f32>(1.0, 1.0) - dye_val;
-    let pickup = min(vec2<f32>(pickup_beta, pickup_alpha), max(dye_headroom, vec2<f32>(0.0, 0.0)));
-    chem = vec2<f32>(max(chem.x - pickup.y, 0.0), max(chem.y - pickup.x, 0.0));
-    dye_val = dye_val + pickup;
+    let dye_headroom_alpha = max(1.0 - dye_val.y, 0.0);
+    let dye_headroom_beta = max(1.0 - dye_val.x, 0.0);
+    let pickup_alpha = min(pickup_alpha_raw, dye_headroom_alpha);
+    let pickup_beta = min(pickup_beta_raw, dye_headroom_beta);
 
-    // Deposit (settling)
-    let deposit_frac = clamp(CHEM_TRANSFER_RATE * deposit_strength_pos * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    chem.x = max(chem.x - pickup_alpha, 0.0);
+    chem.y = max(chem.y - pickup_beta, 0.0);
+    dye_val.y = min(dye_val.y + pickup_alpha, 1.0);
+    dye_val.x = min(dye_val.x + pickup_beta, 1.0);
+
+    // Deposit (dye -> chem)
+    let deposit_frac_alpha = clamp(CHEM_TRANSFER_RATE * deposit_strength_alpha_pos * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    let deposit_frac_beta = clamp(CHEM_TRANSFER_RATE * deposit_strength_beta_pos * dt, 0.0, CHEM_MAX_STEP_FRAC);
 
     // Deposit only up to available headroom in chem to preserve mass.
-    let alpha_headroom = 1.0 - chem.x;
-    let beta_headroom = 1.0 - chem.y;
-    let deposit_alpha = min(dye_val.y * deposit_frac, max(alpha_headroom, 0.0));
-    let deposit_beta = min(dye_val.x * deposit_frac, max(beta_headroom, 0.0));
-    chem = vec2<f32>(chem.x + deposit_alpha, chem.y + deposit_beta);
-    dye_val = vec2<f32>(max(dye_val.x - deposit_beta, 0.0), max(dye_val.y - deposit_alpha, 0.0));
+    let chem_headroom_alpha = max(1.0 - chem.x, 0.0);
+    let chem_headroom_beta = max(1.0 - chem.y, 0.0);
+    let deposit_alpha = min(dye_val.y * deposit_frac_alpha, chem_headroom_alpha);
+    let deposit_beta = min(dye_val.x * deposit_frac_beta, chem_headroom_beta);
+    chem.x = chem.x + deposit_alpha;
+    chem.y = chem.y + deposit_beta;
+    dye_val.y = max(dye_val.y - deposit_alpha, 0.0);
+    dye_val.x = max(dye_val.x - deposit_beta, 0.0);
+
+    // === Dye escape/decay (non-precipitating sink) ===
+    // This counteracts still-water ooze by letting dye fade away without
+    // depositing back into the chem grids.
+    let escape_rate_alpha = max(fp_f32(FP_DYE_ESCAPE_RATE_ALPHA), 0.0);
+    let escape_rate_beta = max(fp_f32(FP_DYE_ESCAPE_RATE_BETA), 0.0);
+    let escape_factor_alpha = exp(-escape_rate_alpha * dt);
+    let escape_factor_beta = exp(-escape_rate_beta * dt);
+    dye_val.y = dye_val.y * escape_factor_alpha;
+    dye_val.x = dye_val.x * escape_factor_beta;
 
     chem_grid[env_idx] = chem;
     dye_out[idx] = clamp(dye_val, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));

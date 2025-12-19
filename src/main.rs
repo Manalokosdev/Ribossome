@@ -615,6 +615,195 @@ fn codon_to_amino_acid(b0: u8, b1: u8, b2: u8) -> usize {
     0 // Ala
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TranslationStepCpu {
+    bases_consumed: usize,
+    is_stop: bool,
+    is_valid: bool,
+}
+
+#[inline]
+fn genome_find_first_coding_triplet_cpu(genome: &[u32; GENOME_WORDS]) -> Option<usize> {
+    for i in 0..=(GENOME_BYTES.saturating_sub(3)) {
+        let b0 = genome_get_base_ascii(genome, i);
+        let b1 = genome_get_base_ascii(genome, i + 1);
+        let b2 = genome_get_base_ascii(genome, i + 2);
+        if b0 == b'X' || b1 == b'X' || b2 == b'X' {
+            continue;
+        }
+        return Some(i);
+    }
+    None
+}
+
+#[inline]
+fn genome_find_start_codon_cpu(genome: &[u32; GENOME_WORDS]) -> Option<usize> {
+    for i in 0..=(GENOME_BYTES.saturating_sub(3)) {
+        let b0 = genome_get_base_ascii(genome, i);
+        let b1 = genome_get_base_ascii(genome, i + 1);
+        let b2 = genome_get_base_ascii(genome, i + 2);
+        if b0 == b'A' && b1 == b'U' && b2 == b'G' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+#[inline]
+fn genome_is_stop_codon_triplet(b0: u8, b1: u8, b2: u8) -> bool {
+    // UAA, UAG, UGA
+    (b0 == b'U' && b1 == b'A' && (b2 == b'A' || b2 == b'G')) || (b0 == b'U' && b1 == b'G' && b2 == b'A')
+}
+
+#[inline]
+fn translate_codon_step_cpu(
+    genome: &[u32; GENOME_WORDS],
+    pos_b: usize,
+    ignore_stop_codons: bool,
+) -> TranslationStepCpu {
+    if pos_b + 2 >= GENOME_BYTES {
+        return TranslationStepCpu {
+            bases_consumed: 3,
+            is_stop: false,
+            is_valid: false,
+        };
+    }
+
+    let b0 = genome_get_base_ascii(genome, pos_b);
+    let b1 = genome_get_base_ascii(genome, pos_b + 1);
+    let b2 = genome_get_base_ascii(genome, pos_b + 2);
+    let has_x = b0 == b'X' || b1 == b'X' || b2 == b'X';
+    let is_stop = !has_x && genome_is_stop_codon_triplet(b0, b1, b2);
+
+    if has_x || is_stop {
+        // Mirrors WGSL: X always terminates; stop codons only translate when ignore_stop_codons=true.
+        return TranslationStepCpu {
+            bases_consumed: 3,
+            is_stop,
+            is_valid: ignore_stop_codons && !has_x,
+        };
+    }
+
+    let amino_type = codon_to_amino_acid(b0, b1, b2);
+    let is_promoter = matches!(amino_type, 9 | 12 | 8 | 1 | 17 | 10 | 6 | 13);
+
+    let mut bases_consumed = 3usize;
+    if is_promoter && pos_b + 5 < GENOME_BYTES {
+        let b3 = genome_get_base_ascii(genome, pos_b + 3);
+        let b4 = genome_get_base_ascii(genome, pos_b + 4);
+        let b5 = genome_get_base_ascii(genome, pos_b + 5);
+        let second_has_x = b3 == b'X' || b4 == b'X' || b5 == b'X';
+        if !second_has_x {
+            let second_is_stop = genome_is_stop_codon_triplet(b3, b4, b5);
+            if second_is_stop {
+                // Match WGSL: stop codon can't act as organ modifier.
+                // Normal mode: consume only promoter (stop will terminate next step).
+                // Debug ignore-stop mode: skip over stop codon (consume 6) but still no organ.
+                bases_consumed = if ignore_stop_codons { 6 } else { 3 };
+            } else {
+            bases_consumed = 6;
+            }
+        }
+    }
+
+    TranslationStepCpu {
+        bases_consumed,
+        is_stop: false,
+        is_valid: true,
+    }
+}
+
+fn build_translation_map_for_inspector(
+    genome: &[u32; GENOME_WORDS],
+    body_count: usize,
+    require_start_codon: bool,
+    ignore_stop_codons: bool,
+) -> Vec<bool> {
+    let mut map = vec![false; GENOME_BYTES];
+    if body_count == 0 {
+        return map;
+    }
+
+    let gene_start = genome_find_first_coding_triplet_cpu(genome);
+    let translation_start = if require_start_codon {
+        genome_find_start_codon_cpu(genome)
+    } else {
+        gene_start
+    };
+
+    let Some(translation_start) = translation_start else {
+        return map;
+    };
+
+    // Mark the start codon itself as part of the active translation region (even though it is not a body part).
+    if require_start_codon && translation_start + 2 < GENOME_BYTES {
+        map[translation_start] = true;
+        map[translation_start + 1] = true;
+        map[translation_start + 2] = true;
+    }
+
+    let mut pos_b = translation_start + if require_start_codon { 3 } else { 0 };
+    let mut parts_emitted = 0usize;
+    while parts_emitted < body_count {
+        let step = translate_codon_step_cpu(genome, pos_b, ignore_stop_codons);
+        if !step.is_valid {
+            break;
+        }
+        let end = (pos_b + step.bases_consumed).min(GENOME_BYTES);
+        for i in pos_b..end {
+            map[i] = true;
+        }
+        pos_b = end;
+        parts_emitted += 1;
+    }
+
+    // If the next codon is a stop codon and stop codons terminate translation, mark it as active too.
+    let tail = translate_codon_step_cpu(genome, pos_b, ignore_stop_codons);
+    if !tail.is_valid && tail.is_stop {
+        if pos_b + 2 < GENOME_BYTES {
+            map[pos_b] = true;
+            map[pos_b + 1] = true;
+            map[pos_b + 2] = true;
+        }
+    }
+
+    map
+}
+
+fn compute_body_part_nucleotide_spans_for_inspector(
+    genome: &[u32; GENOME_WORDS],
+    body_count: usize,
+    require_start_codon: bool,
+    ignore_stop_codons: bool,
+) -> Vec<f32> {
+    if body_count == 0 {
+        return Vec::new();
+    }
+
+    let gene_start = genome_find_first_coding_triplet_cpu(genome);
+    let translation_start = if require_start_codon {
+        genome_find_start_codon_cpu(genome)
+    } else {
+        gene_start
+    };
+
+    let Some(translation_start) = translation_start else {
+        return Vec::new();
+    };
+
+    let mut spans = Vec::with_capacity(body_count);
+    let mut pos_b = translation_start + if require_start_codon { 3 } else { 0 };
+    for _ in 0..body_count {
+        let step = translate_codon_step_cpu(genome, pos_b, ignore_stop_codons);
+        if !step.is_valid {
+            break;
+        }
+        spans.push(step.bases_consumed as f32);
+        pos_b = (pos_b + step.bases_consumed).min(GENOME_BYTES);
+    }
+    spans
+}
+
 fn paint_cloud(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: egui::Color32, seed: u64) {
     // Draw multiple overlapping circles to create a fluffy cloud appearance - matching GPU shader
     // GPU draws 8 puffs + 1 central circle
@@ -970,6 +1159,17 @@ struct SimParams {
     // Fluid terrain influence parameters
     fluid_slope_force_scale: f32,   // How strongly terrain slope drives fluid flow (default: 100.0)
     fluid_obstacle_strength: f32,   // How strongly steep terrain blocks fluid (default: 200.0)
+
+    // Fluid dye visualization colors (independent from environment alpha/beta colors).
+    // Stored as two 16-byte blocks for stable uniform alignment.
+    dye_alpha_color_r: f32,
+    dye_alpha_color_g: f32,
+    dye_alpha_color_b: f32,
+    _pad_dye_alpha_color: f32,
+    dye_beta_color_r: f32,
+    dye_beta_color_g: f32,
+    dye_beta_color_b: f32,
+    _pad_dye_beta_color: f32,
 }
 
 #[repr(C)]
@@ -1060,6 +1260,13 @@ fn default_alpha_fluid_convolution() -> f32 { 0.05 }
 fn default_beta_fluid_convolution() -> f32 { 0.05 }
 fn default_fluid_slope_force_scale() -> f32 { 100.0 }
 fn default_fluid_obstacle_strength() -> f32 { 200.0 }
+fn default_fluid_ooze_still_rate() -> f32 { 1.0 }
+fn default_fluid_ooze_rate_beta_unset() -> f32 { -1.0 }
+fn default_fluid_ooze_fade_rate_beta_unset() -> f32 { -1.0 }
+fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
+fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
+fn default_dye_alpha_color() -> [f32; 3] { [0.0, 1.0, 0.0] }
+fn default_dye_beta_color() -> [f32; 3] { [1.0, 0.0, 0.0] }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -1110,8 +1317,18 @@ struct SimulationSettings {
     fluid_jacobi_iters: u32,  // Pressure solve iterations
     fluid_vorticity: f32,     // Vorticity confinement strength (0 disables)
     fluid_viscosity: f32,     // Viscosity (nu) for velocity diffusion (0 disables)
-    fluid_ooze_rate: f32,      // Chem↔dye transfer: equilibrium speed (0-transfer point)
-    fluid_ooze_fade_rate: f32, // Chem↔dye transfer: max-lift speed (full lift past this)
+    fluid_ooze_rate: f32,      // Chem↔dye transfer (ALPHA): equilibrium speed (0-transfer point)
+    fluid_ooze_fade_rate: f32, // Chem↔dye transfer (ALPHA): max-lift speed (full lift past this)
+    #[serde(default = "default_fluid_ooze_rate_beta_unset")]
+    fluid_ooze_rate_beta: f32, // Chem↔dye transfer (BETA): equilibrium speed (0-transfer point)
+    #[serde(default = "default_fluid_ooze_fade_rate_beta_unset")]
+    fluid_ooze_fade_rate_beta: f32, // Chem↔dye transfer (BETA): max-lift speed (full lift past this)
+    #[serde(default = "default_fluid_ooze_still_rate")]
+    fluid_ooze_still_rate: f32, // Chem→dye baseline ooze in still water (per-second fraction)
+    #[serde(default = "default_fluid_dye_escape_rate")]
+    fluid_dye_escape_rate: f32, // Dye decay (ALPHA): removes dye without depositing back into chem (1/sec)
+    #[serde(default = "default_fluid_dye_escape_rate_beta_unset")]
+    fluid_dye_escape_rate_beta: f32, // Dye decay (BETA): removes dye without depositing back into chem (1/sec)
     fluid_wind_push_strength: f32, // Global multiplier for how much fluid pushes agents
     vector_force_power: f32,  // Global force multiplier (0.0 = off)
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
@@ -1148,6 +1365,10 @@ struct SimulationSettings {
     alpha_color: [f32; 3],
     beta_color: [f32; 3],
     gamma_color: [f32; 3],
+    #[serde(default = "default_dye_alpha_color")]
+    dye_alpha_color: [f32; 3],
+    #[serde(default = "default_dye_beta_color")]
+    dye_beta_color: [f32; 3],
     grid_interpolation: u32,
     alpha_gamma_adjust: f32,
     beta_gamma_adjust: f32,
@@ -1212,6 +1433,15 @@ impl Default for SimulationSettings {
             fluid_ooze_rate: 0.2,
             // Speed (in dye-cells/sec) where lift saturates.
             fluid_ooze_fade_rate: 0.6,
+            // Beta channel uses alpha defaults unless overridden.
+            fluid_ooze_rate_beta: default_fluid_ooze_rate_beta_unset(),
+            fluid_ooze_fade_rate_beta: default_fluid_ooze_fade_rate_beta_unset(),
+            // Baseline chem→dye seepage in still water so sensors can read signals without flow.
+            fluid_ooze_still_rate: default_fluid_ooze_still_rate(),
+            // Dye escape: removes dye without precipitation (independent sink).
+            fluid_dye_escape_rate: default_fluid_dye_escape_rate(),
+            // Beta channel uses alpha defaults unless overridden.
+            fluid_dye_escape_rate_beta: default_fluid_dye_escape_rate_beta_unset(),
             // Matches the previous hardcoded scale used in shaders/simulation.wgsl.
             fluid_wind_push_strength: 0.0005,
             fluid_slope_force_scale: 100.0,
@@ -1251,6 +1481,8 @@ impl Default for SimulationSettings {
             alpha_color: [0.0, 1.0, 0.0], // green
             beta_color: [1.0, 0.0, 0.0],  // red
             gamma_color: [0.0, 0.0, 1.0], // blue
+            dye_alpha_color: default_dye_alpha_color(),
+            dye_beta_color: default_dye_beta_color(),
             grid_interpolation: 1, // bilinear by default
             alpha_gamma_adjust: 1.0,  // Linear (no adjustment)
             beta_gamma_adjust: 1.0,   // Linear (no adjustment)
@@ -1436,11 +1668,36 @@ impl SimulationSettings {
         self.fluid_jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
         self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 50.0);
         self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 5.0);
+
+        // Back-compat: older settings files won't have beta thresholds.
+        // Use -1 sentinel defaults to mean "inherit alpha".
+        if self.fluid_ooze_rate_beta < 0.0 {
+            self.fluid_ooze_rate_beta = self.fluid_ooze_rate;
+        }
+        if self.fluid_ooze_fade_rate_beta < 0.0 {
+            self.fluid_ooze_fade_rate_beta = self.fluid_ooze_fade_rate;
+        }
+        if self.fluid_dye_escape_rate_beta < 0.0 {
+            self.fluid_dye_escape_rate_beta = self.fluid_dye_escape_rate;
+        }
+
         self.fluid_ooze_rate = self.fluid_ooze_rate.clamp(0.0, 100.0);
         self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 100.0);
+        self.fluid_ooze_rate_beta = self.fluid_ooze_rate_beta.clamp(0.0, 100.0);
+        self.fluid_ooze_fade_rate_beta = self.fluid_ooze_fade_rate_beta.clamp(0.0, 100.0);
+        self.fluid_ooze_still_rate = self.fluid_ooze_still_rate.clamp(0.0, 100.0);
+        self.fluid_dye_escape_rate = self.fluid_dye_escape_rate.clamp(0.0, 50.0);
+        self.fluid_dye_escape_rate_beta = self.fluid_dye_escape_rate_beta.clamp(0.0, 50.0);
         self.fluid_wind_push_strength = self.fluid_wind_push_strength.clamp(0.0, 2.0);
         self.fluid_slope_force_scale = self.fluid_slope_force_scale.clamp(0.0, 500.0);
         self.fluid_obstacle_strength = self.fluid_obstacle_strength.clamp(0.0, 1000.0);
+
+        for c in &mut self.dye_alpha_color {
+            *c = c.clamp(0.0, 1.0);
+        }
+        for c in &mut self.dye_beta_color {
+            *c = c.clamp(0.0, 1.0);
+        }
     }
 }
 
@@ -1459,6 +1716,8 @@ struct GpuState {
     agents_buffer_b: wgpu::Buffer,
     chem_grid: wgpu::Buffer,
     rain_map_buffer: wgpu::Buffer,
+    rain_map_texture: wgpu::Texture,
+    rain_map_texture_view: wgpu::TextureView,
     agent_spatial_grid_buffer: wgpu::Buffer,
     gamma_grid: wgpu::Buffer,
     trail_grid: wgpu::Buffer,
@@ -1713,6 +1972,11 @@ struct GpuState {
     fluid_viscosity: f32,
     fluid_ooze_rate: f32,
     fluid_ooze_fade_rate: f32,
+    fluid_ooze_rate_beta: f32,
+    fluid_ooze_fade_rate_beta: f32,
+    fluid_ooze_still_rate: f32,
+    fluid_dye_escape_rate: f32,
+    fluid_dye_escape_rate_beta: f32,
     fluid_wind_push_strength: f32,
     fluid_slope_force_scale: f32,
     fluid_obstacle_strength: f32,
@@ -1746,6 +2010,8 @@ struct GpuState {
     alpha_color: [f32; 3],
     beta_color: [f32; 3],
     gamma_color: [f32; 3],
+    dye_alpha_color: [f32; 3],
+    dye_beta_color: [f32; 3],
     grid_interpolation: u32, // 0=nearest, 1=bilinear, 2=bicubic
     alpha_gamma_adjust: f32,
     beta_gamma_adjust: f32,
@@ -1764,6 +2030,36 @@ struct GpuState {
 const FULL_SPEED_PRESENT_INTERVAL_MICROS: u64 = 16_667; // ~60 Hz
 
 impl GpuState {
+    fn write_rain_map_texture(&self) {
+        // Expand interleaved alpha/beta into RGBA32F (alpha->R, beta->G).
+        // This is only called on map load/clear, so a temporary allocation is fine.
+        let mut rgba: Vec<f32> = Vec::with_capacity(GRID_CELL_COUNT * 4);
+        for i in 0..GRID_CELL_COUNT {
+            let a = self.rain_map_data[i * 2];
+            let b = self.rain_map_data[i * 2 + 1];
+            rgba.extend_from_slice(&[a, b, 0.0, 0.0]);
+        }
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.rain_map_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&rgba),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(GRID_DIM_U32 * 16),
+                rows_per_image: Some(GRID_DIM_U32),
+            },
+            wgpu::Extent3d {
+                width: GRID_DIM_U32,
+                height: GRID_DIM_U32,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     fn save_settings(&self, path: &Path) -> anyhow::Result<()> {
         let settings = self.current_settings();
         settings.save_to_disk(path)
@@ -1827,6 +2123,11 @@ impl GpuState {
         self.fluid_viscosity = settings.fluid_viscosity;
         self.fluid_ooze_rate = settings.fluid_ooze_rate;
         self.fluid_ooze_fade_rate = settings.fluid_ooze_fade_rate;
+        self.fluid_ooze_rate_beta = settings.fluid_ooze_rate_beta;
+        self.fluid_ooze_fade_rate_beta = settings.fluid_ooze_fade_rate_beta;
+        self.fluid_ooze_still_rate = settings.fluid_ooze_still_rate;
+        self.fluid_dye_escape_rate = settings.fluid_dye_escape_rate;
+        self.fluid_dye_escape_rate_beta = settings.fluid_dye_escape_rate_beta;
         self.fluid_wind_push_strength = settings.fluid_wind_push_strength;
 
         self.vector_force_power = settings.vector_force_power;
@@ -1871,6 +2172,8 @@ impl GpuState {
         self.alpha_color = settings.alpha_color;
         self.beta_color = settings.beta_color;
         self.gamma_color = settings.gamma_color;
+        self.dye_alpha_color = settings.dye_alpha_color;
+        self.dye_beta_color = settings.dye_beta_color;
         self.grid_interpolation = settings.grid_interpolation;
         self.alpha_gamma_adjust = settings.alpha_gamma_adjust;
         self.beta_gamma_adjust = settings.beta_gamma_adjust;
@@ -2191,12 +2494,54 @@ impl GpuState {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        // Rain map texture used by shaders (avoids extra storage buffer binding).
+        let rain_map_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Rain Map Texture"),
+            size: wgpu::Extent3d {
+                width: GRID_DIM_U32,
+                height: GRID_DIM_U32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let rain_map_texture_view = rain_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         // Initialize with uniform rain (1.0 for both alpha and beta)
         let uniform_rain: Vec<f32> = (0..GRID_CELL_COUNT).flat_map(|_| [1.0f32, 1.0f32]).collect();
         queue.write_buffer(
             &rain_map_buffer,
             0,
             bytemuck::cast_slice(&uniform_rain),
+        );
+
+        // Seed the texture with uniform rain too (RGBA32F: r=alpha, g=beta).
+        let uniform_rain_rgba: Vec<f32> = (0..GRID_CELL_COUNT)
+            .flat_map(|_| [1.0f32, 1.0f32, 0.0f32, 0.0f32])
+            .collect();
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &rain_map_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&uniform_rain_rgba),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(GRID_DIM_U32 * 16),
+                rows_per_image: Some(GRID_DIM_U32),
+            },
+            wgpu::Extent3d {
+                width: GRID_DIM_U32,
+                height: GRID_DIM_U32,
+                depth_or_array_layers: 1,
+            },
         );
         profiler.mark("Rain map buffer");
 
@@ -2401,6 +2746,14 @@ impl GpuState {
             beta_fluid_convolution: 0.05,
             fluid_slope_force_scale: 100.0,
             fluid_obstacle_strength: 200.0,
+            dye_alpha_color_r: 0.0,
+            dye_alpha_color_g: 1.0,
+            dye_alpha_color_b: 0.0,
+            _pad_dye_alpha_color: 0.0,
+            dye_beta_color_r: 1.0,
+            dye_beta_color_g: 0.0,
+            dye_beta_color_b: 0.0,
+            _pad_dye_beta_color: 0.0,
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2900,6 +3253,16 @@ impl GpuState {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 18,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        },
+                        count: None,
+                    },
                 ],
             });
         profiler.mark("Compute bind layout");
@@ -2981,6 +3344,10 @@ impl GpuState {
                     binding: 17,
                     resource: agent_spatial_grid_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
+                },
             ],
         });
 
@@ -3059,6 +3426,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 17,
                     resource: agent_spatial_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
                 },
             ],
         });
@@ -3532,7 +3903,7 @@ impl GpuState {
 
         // Fluid params buffer (flat f32 array, packed as 5x vec4<f32> in WGSL).
         // Indices must match shaders/fluid.wgsl FP_* constants.
-        let fluid_params_f32: [f32; 20] = [
+        let fluid_params_f32: [f32; 24] = [
             0.0,                       // time
             0.016,                     // dt
             0.995,                     // decay
@@ -3544,7 +3915,12 @@ impl GpuState {
             0.0,                       // vector_force_x
             0.0,                       // vector_force_y
             0.0,                       // vector_force_power
-            0.0, 0.0, 0.0,             // pad to 20 floats (5 vec4s)
+            0.0,                       // chem_ooze_still_rate
+            0.0,                       // beta chem speed equil
+            0.0,                       // beta chem speed max lift
+            0.0,                       // dye_escape_rate_alpha
+            0.0,                       // dye_escape_rate_beta
+            0.0, 0.0,                  // pad to 24 floats (6 vec4s)
         ];
         let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
 
@@ -4105,6 +4481,8 @@ impl GpuState {
             agents_buffer_b,
             chem_grid,
             rain_map_buffer,
+            rain_map_texture,
+            rain_map_texture_view,
             agent_spatial_grid_buffer,
             gamma_grid,
             trail_grid,
@@ -4278,6 +4656,11 @@ impl GpuState {
             fluid_viscosity: settings.fluid_viscosity,
             fluid_ooze_rate: settings.fluid_ooze_rate,
             fluid_ooze_fade_rate: settings.fluid_ooze_fade_rate,
+            fluid_ooze_rate_beta: settings.fluid_ooze_rate_beta,
+            fluid_ooze_fade_rate_beta: settings.fluid_ooze_fade_rate_beta,
+            fluid_ooze_still_rate: settings.fluid_ooze_still_rate,
+            fluid_dye_escape_rate: settings.fluid_dye_escape_rate,
+            fluid_dye_escape_rate_beta: settings.fluid_dye_escape_rate_beta,
             fluid_wind_push_strength: settings.fluid_wind_push_strength,
             fluid_slope_force_scale: settings.fluid_slope_force_scale,
             fluid_obstacle_strength: settings.fluid_obstacle_strength,
@@ -4344,6 +4727,8 @@ impl GpuState {
             alpha_color: settings.alpha_color,
             beta_color: settings.beta_color,
             gamma_color: settings.gamma_color,
+            dye_alpha_color: settings.dye_alpha_color,
+            dye_beta_color: settings.dye_beta_color,
             grid_interpolation: settings.grid_interpolation,
             alpha_gamma_adjust: settings.alpha_gamma_adjust,
             beta_gamma_adjust: settings.beta_gamma_adjust,
@@ -4526,6 +4911,7 @@ impl GpuState {
             0,
             bytemuck::cast_slice(&self.rain_map_data),
         );
+        self.write_rain_map_texture();
         self.alpha_rain_map_path = Some(path.to_path_buf());
         self.alpha_rain_thumbnail = Some(RainThumbnail::new(thumbnail));
         println!("Loaded alpha rain map from {}", path.display());
@@ -4547,6 +4933,7 @@ impl GpuState {
             0,
             bytemuck::cast_slice(&self.rain_map_data),
         );
+        self.write_rain_map_texture();
         self.beta_rain_map_path = Some(path.to_path_buf());
         self.beta_rain_thumbnail = Some(RainThumbnail::new(thumbnail));
         println!("Loaded beta rain map from {}", path.display());
@@ -4565,6 +4952,7 @@ impl GpuState {
             0,
             bytemuck::cast_slice(&self.rain_map_data),
         );
+        self.write_rain_map_texture();
         self.alpha_rain_map_path = None;
         self.alpha_rain_thumbnail = None;
         println!("Cleared alpha rain map (uniform probability)");
@@ -4582,6 +4970,7 @@ impl GpuState {
             0,
             bytemuck::cast_slice(&self.rain_map_data),
         );
+        self.write_rain_map_texture();
         self.beta_rain_map_path = None;
         self.beta_rain_thumbnail = None;
         println!("Cleared beta rain map (uniform probability)");
@@ -4771,6 +5160,10 @@ impl GpuState {
                     binding: 17,
                     resource: self.agent_spatial_grid_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
+                },
             ],
         });
         self.compute_bind_group_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4848,6 +5241,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 17,
                     resource: self.agent_spatial_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
                 },
             ],
         });
@@ -5003,6 +5400,11 @@ impl GpuState {
             fluid_viscosity: self.fluid_viscosity,
             fluid_ooze_rate: self.fluid_ooze_rate,
             fluid_ooze_fade_rate: self.fluid_ooze_fade_rate,
+            fluid_ooze_rate_beta: self.fluid_ooze_rate_beta,
+            fluid_ooze_fade_rate_beta: self.fluid_ooze_fade_rate_beta,
+            fluid_ooze_still_rate: self.fluid_ooze_still_rate,
+            fluid_dye_escape_rate: self.fluid_dye_escape_rate,
+            fluid_dye_escape_rate_beta: self.fluid_dye_escape_rate_beta,
             fluid_wind_push_strength: self.fluid_wind_push_strength,
             vector_force_power: self.vector_force_power,
             vector_force_x: self.vector_force_x,
@@ -5039,6 +5441,8 @@ impl GpuState {
             alpha_color: self.alpha_color,
             beta_color: self.beta_color,
             gamma_color: self.gamma_color,
+            dye_alpha_color: self.dye_alpha_color,
+            dye_beta_color: self.dye_beta_color,
             grid_interpolation: self.grid_interpolation,
             alpha_gamma_adjust: self.alpha_gamma_adjust,
             beta_gamma_adjust: self.beta_gamma_adjust,
@@ -5679,6 +6083,14 @@ impl GpuState {
             beta_fluid_convolution: self.beta_fluid_convolution,
             fluid_slope_force_scale: self.fluid_slope_force_scale,
             fluid_obstacle_strength: self.fluid_obstacle_strength,
+            dye_alpha_color_r: self.dye_alpha_color[0],
+            dye_alpha_color_g: self.dye_alpha_color[1],
+            dye_alpha_color_b: self.dye_alpha_color[2],
+            _pad_dye_alpha_color: 0.0,
+            dye_beta_color_r: self.dye_beta_color[0],
+            dye_beta_color_g: self.dye_beta_color[1],
+            dye_beta_color_b: self.dye_beta_color[2],
+            _pad_dye_beta_color: 0.0,
         };
 
         // Keep CPU mirror in sync with the GPU uniform buffer.
@@ -5688,13 +6100,13 @@ impl GpuState {
 
         // Update fluid params (dt is the user-controlled fluid solver dt)
         {
-            let fluid_params_f32: [f32; 20] = [
+            let fluid_params_f32: [f32; 24] = [
                 self.epoch as f32,         // time
                 self.fluid_dt,             // dt
                 self.fluid_decay,          // decay
                 FLUID_GRID_SIZE as f32,    // grid_size (as f32)
                 0.0, 0.0, 0.0, 0.0,        // mouse
-                // splat: x=chem speed equil, y=chem speed max lift, z=vorticity confinement, w=viscosity
+                // splat: x=ALPHA chem speed equil, y=ALPHA chem speed max lift, z=vorticity confinement, w=viscosity
                 self.fluid_ooze_rate,
                 self.fluid_ooze_fade_rate,
                 self.fluid_vorticity,
@@ -5704,7 +6116,13 @@ impl GpuState {
                 self.vector_force_x,
                 self.vector_force_y,
                 self.vector_force_power,
-                0.0, 0.0, 0.0,             // pad
+                self.fluid_ooze_still_rate,
+                self.fluid_ooze_rate_beta,
+                self.fluid_ooze_fade_rate_beta,
+                self.fluid_dye_escape_rate,
+                self.fluid_dye_escape_rate_beta,
+                0.0,
+                0.0,
             ];
             let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
             self.queue
@@ -6943,6 +7361,10 @@ impl GpuState {
                     binding: 17,
                     resource: self.agent_spatial_grid_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
+                },
             ],
         });
 
@@ -7022,6 +7444,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 17,
                     resource: self.agent_spatial_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
                 },
             ],
         });
@@ -8637,7 +9063,7 @@ fn main() {
 
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_ooze_rate, 0.0..=100.0)
-                                                                .text("Chem Speed Equilibrium"),
+                                                                .text("Chem Speed Equilibrium (Alpha)"),
                                                         );
 
                                                         ui.add(
@@ -8645,7 +9071,46 @@ fn main() {
                                                                 &mut state.fluid_ooze_fade_rate,
                                                                 0.0..=100.0,
                                                             )
-                                                            .text("Chem Speed Max Lift"),
+                                                            .text("Chem Speed Max Lift (Alpha)"),
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.fluid_ooze_rate_beta, 0.0..=100.0)
+                                                                .text("Chem Speed Equilibrium (Beta)"),
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_ooze_fade_rate_beta,
+                                                                0.0..=100.0,
+                                                            )
+                                                            .text("Chem Speed Max Lift (Beta)"),
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_ooze_still_rate,
+                                                                0.0..=100.0,
+                                                            )
+                                                            .text("Chem Ooze Rate (Still)"),
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_dye_escape_rate,
+                                                                0.0..=20.0,
+                                                            )
+                                                            .text("Dye Escape Rate (Alpha)")
+                                                            .custom_formatter(|n, _| format!("{:.3}", n)),
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_dye_escape_rate_beta,
+                                                                0.0..=20.0,
+                                                            )
+                                                            .text("Dye Escape Rate (Beta)")
+                                                            .custom_formatter(|n, _| format!("{:.3}", n)),
                                                         );
 
                                                         ui.separator();
@@ -9255,6 +9720,64 @@ fn main() {
                                                         ui.heading("Fluid Simulation");
                                                         ui.checkbox(&mut state.fluid_show, "Show Fluid Overlay")
                                                             .on_hover_text("Visualize propeller-driven fluid simulation (experimental)");
+
+                                                        ui.add_space(4.0);
+                                                        ui.label("Fluid Dye Compositing");
+                                                        ui.label("Note: dye uses independent colors, but reuses Alpha/Beta blend + gamma controls.");
+
+                                                        ui.separator();
+                                                        ui.label("Dye Alpha");
+                                                        ui.horizontal(|ui| {
+                                                            ui.radio_value(&mut state.alpha_blend_mode, 0, "Additive");
+                                                            ui.radio_value(&mut state.alpha_blend_mode, 1, "Multiply");
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Color:");
+                                                            let mut alpha_color = [
+                                                                (state.dye_alpha_color[0] * 255.0) as u8,
+                                                                (state.dye_alpha_color[1] * 255.0) as u8,
+                                                                (state.dye_alpha_color[2] * 255.0) as u8,
+                                                            ];
+                                                            if ui.color_edit_button_srgb(&mut alpha_color).changed() {
+                                                                state.dye_alpha_color = [
+                                                                    alpha_color[0] as f32 / 255.0,
+                                                                    alpha_color[1] as f32 / 255.0,
+                                                                    alpha_color[2] as f32 / 255.0,
+                                                                ];
+                                                            }
+                                                        });
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.alpha_gamma_adjust, 0.1..=5.0)
+                                                                .text("Gamma Adjustment")
+                                                                .logarithmic(true),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.label("Dye Beta");
+                                                        ui.horizontal(|ui| {
+                                                            ui.radio_value(&mut state.beta_blend_mode, 0, "Additive");
+                                                            ui.radio_value(&mut state.beta_blend_mode, 1, "Multiply");
+                                                        });
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Color:");
+                                                            let mut beta_color = [
+                                                                (state.dye_beta_color[0] * 255.0) as u8,
+                                                                (state.dye_beta_color[1] * 255.0) as u8,
+                                                                (state.dye_beta_color[2] * 255.0) as u8,
+                                                            ];
+                                                            if ui.color_edit_button_srgb(&mut beta_color).changed() {
+                                                                state.dye_beta_color = [
+                                                                    beta_color[0] as f32 / 255.0,
+                                                                    beta_color[1] as f32 / 255.0,
+                                                                    beta_color[2] as f32 / 255.0,
+                                                                ];
+                                                            }
+                                                        });
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.beta_gamma_adjust, 0.1..=5.0)
+                                                                .text("Gamma Adjustment")
+                                                                .logarithmic(true),
+                                                        );
                                                     });
                                                 }
                                                 6 => {
@@ -9437,38 +9960,17 @@ fn main() {
                                                     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                                                     let painter = ui.painter_at(rect);
 
-                                                    // Find translated regions (between start and stop codons)
-                                                    let mut in_translation = false;
-                                                    let mut translation_map = vec![false; GENOME_BYTES];
-
-                                                    let mut i = 0;
-                                                    while i + 2 < GENOME_BYTES {
-                                                        let b0 = genome_get_base_ascii(&agent.genome, i);
-                                                        let b1 = genome_get_base_ascii(&agent.genome, i + 1);
-                                                        let b2 = genome_get_base_ascii(&agent.genome, i + 2);
-
-                                                        // Check for start codon (AUG)
-                                                        if !in_translation && b0 == b'A' && b1 == b'U' && b2 == b'G' {
-                                                            in_translation = true;
-                                                        }
-                                                        // Check for stop codons (UAA, UAG, UGA)
-                                                        else if in_translation &&
-                                                            ((b0 == b'U' && b1 == b'A' && (b2 == b'A' || b2 == b'G')) ||
-                                                             (b0 == b'U' && b1 == b'G' && b2 == b'A')) {
-                                                            // Mark this stop codon as translated, then stop
-                                                            translation_map[i] = true;
-                                                            translation_map[i + 1] = true;
-                                                            translation_map[i + 2] = true;
-                                                            in_translation = false;
-                                                            i += 3;
-                                                            continue;
-                                                        }
-
-                                                        if in_translation {
-                                                            translation_map[i] = true;
-                                                        }
-                                                        i += 1;
-                                                    }
+                                                    // Match the simulation's translation rules (shared.wgsl::translate_codon_step):
+                                                    // - Optional AUG requirement
+                                                    // - Optional stop-codon ignore
+                                                    // - Promoters consume 6 bases (promoter+modifier), even if the result is an amino
+                                                    // - Translation does not "restart" after a stop
+                                                    let translation_map = build_translation_map_for_inspector(
+                                                        &agent.genome,
+                                                        (agent.body_count as usize).min(MAX_BODY_PARTS),
+                                                        state.require_start_codon,
+                                                        state.ignore_stop_codons,
+                                                    );
 
                                                     for idx in 0..GENOME_BYTES {
                                                         let row = idx / bases_per_line;
@@ -9505,11 +10007,25 @@ fn main() {
                                                         let bar_w = 280.0;
                                                         let bar_h = 8.0;
 
-                                                        // Calculate total width needed: aminos take 3 nucleotides, organs take 6
+                                                        let nucleotide_spans = compute_body_part_nucleotide_spans_for_inspector(
+                                                            &agent.genome,
+                                                            body_count,
+                                                            state.require_start_codon,
+                                                            state.ignore_stop_codons,
+                                                        );
+
+                                                        // Calculate total width needed using the same translation stepping as the sim.
+                                                        // This matters because promoters can consume 6 bases even when the emitted
+                                                        // part is an amino acid (organ mapping failure fallback).
                                                         let mut total_nucleotides = 0.0;
                                                         for i in 0..body_count {
-                                                            let base_type = agent.body[i].base_type();
-                                                            total_nucleotides += if base_type < 20 { 3.0 } else { 6.0 };
+                                                            total_nucleotides += nucleotide_spans
+                                                                .get(i)
+                                                                .copied()
+                                                                .unwrap_or_else(|| {
+                                                                    let base_type = agent.body[i].base_type();
+                                                                    if base_type < 20 { 3.0 } else { 6.0 }
+                                                                });
                                                         }
                                                         let pixels_per_nucleotide = bar_w / total_nucleotides;
 
@@ -9526,8 +10042,10 @@ fn main() {
                                                             for i in 0..body_count {
                                                                 let part = &agent.body[i];
                                                                 let base_type = part.base_type();
-                                                                let is_amino = base_type < 20;
-                                                                let nucleotide_count = if is_amino { 3.0 } else { 6.0 };
+                                                                let nucleotide_count = nucleotide_spans
+                                                                    .get(i)
+                                                                    .copied()
+                                                                    .unwrap_or_else(|| if base_type < 20 { 3.0 } else { 6.0 });
                                                                 let seg_w = nucleotide_count * pixels_per_nucleotide;
 
                                                                 let r = egui::Rect::from_min_max(
@@ -9813,7 +10331,98 @@ fn main() {
                                                             state.gamma_vis_min.clamp(0.0, 1.0);
                                                         state.gamma_vis_max =
                                                             state.gamma_vis_max.clamp(0.0, 1.0);
-                                                    }                                            ui.separator();
+                                                    }
+
+                                            ui.collapsing("Compositing", |ui| {
+                                                ui.checkbox(&mut state.fluid_show, "Show Fluid Overlay")
+                                                    .on_hover_text("Fluid dye overlay compositing uses Alpha/Beta colors + blend modes");
+
+                                                ui.separator();
+                                                ui.label("Alpha layer");
+                                                ui.checkbox(&mut state.alpha_show, "Show Alpha");
+                                                ui.horizontal(|ui| {
+                                                    ui.radio_value(&mut state.alpha_blend_mode, 0, "Add");
+                                                    ui.radio_value(&mut state.alpha_blend_mode, 1, "Multiply");
+                                                });
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Color");
+                                                    let mut alpha_color = [
+                                                        (state.alpha_color[0] * 255.0) as u8,
+                                                        (state.alpha_color[1] * 255.0) as u8,
+                                                        (state.alpha_color[2] * 255.0) as u8,
+                                                    ];
+                                                    if ui.color_edit_button_srgb(&mut alpha_color).changed() {
+                                                        state.alpha_color = [
+                                                            alpha_color[0] as f32 / 255.0,
+                                                            alpha_color[1] as f32 / 255.0,
+                                                            alpha_color[2] as f32 / 255.0,
+                                                        ];
+                                                    }
+                                                });
+                                                ui.add(
+                                                    egui::Slider::new(&mut state.alpha_gamma_adjust, 0.1..=5.0)
+                                                        .text("Gamma")
+                                                        .logarithmic(true),
+                                                );
+
+                                                ui.separator();
+                                                ui.label("Beta layer");
+                                                ui.checkbox(&mut state.beta_show, "Show Beta");
+                                                ui.horizontal(|ui| {
+                                                    ui.radio_value(&mut state.beta_blend_mode, 0, "Add");
+                                                    ui.radio_value(&mut state.beta_blend_mode, 1, "Multiply");
+                                                });
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Color");
+                                                    let mut beta_color = [
+                                                        (state.beta_color[0] * 255.0) as u8,
+                                                        (state.beta_color[1] * 255.0) as u8,
+                                                        (state.beta_color[2] * 255.0) as u8,
+                                                    ];
+                                                    if ui.color_edit_button_srgb(&mut beta_color).changed() {
+                                                        state.beta_color = [
+                                                            beta_color[0] as f32 / 255.0,
+                                                            beta_color[1] as f32 / 255.0,
+                                                            beta_color[2] as f32 / 255.0,
+                                                        ];
+                                                    }
+                                                });
+                                                ui.add(
+                                                    egui::Slider::new(&mut state.beta_gamma_adjust, 0.1..=5.0)
+                                                        .text("Gamma")
+                                                        .logarithmic(true),
+                                                );
+
+                                                ui.separator();
+                                                ui.label("Gamma layer");
+                                                ui.checkbox(&mut state.gamma_show, "Show Gamma");
+                                                ui.horizontal(|ui| {
+                                                    ui.radio_value(&mut state.gamma_blend_mode, 0, "Add");
+                                                    ui.radio_value(&mut state.gamma_blend_mode, 1, "Multiply");
+                                                });
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Color");
+                                                    let mut gamma_color = [
+                                                        (state.gamma_color[0] * 255.0) as u8,
+                                                        (state.gamma_color[1] * 255.0) as u8,
+                                                        (state.gamma_color[2] * 255.0) as u8,
+                                                    ];
+                                                    if ui.color_edit_button_srgb(&mut gamma_color).changed() {
+                                                        state.gamma_color = [
+                                                            gamma_color[0] as f32 / 255.0,
+                                                            gamma_color[1] as f32 / 255.0,
+                                                            gamma_color[2] as f32 / 255.0,
+                                                        ];
+                                                    }
+                                                });
+                                                ui.add(
+                                                    egui::Slider::new(&mut state.gamma_gamma_adjust, 0.1..=5.0)
+                                                        .text("Gamma")
+                                                        .logarithmic(true),
+                                                );
+                                            });
+
+                                            ui.separator();
                                             ui.collapsing("Evolution", |ui| {
                                                 ui.label("Rain Cycling");
                                                 ui.add(egui::Slider::new(&mut state.alpha_rain_variation, 0.0..=1.0).text("Alpha Var %"));

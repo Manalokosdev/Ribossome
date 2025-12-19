@@ -1019,7 +1019,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Agent-to-agent repulsion (simplified: once per agent pair, using total masses)
     for (var n = 0u; n < neighbor_count; n++) {
-        let neighbor = agents_out[neighbor_ids[n]];
+        // IMPORTANT: read neighbors from agents_in (stable snapshot).
+        // Reading from agents_out here creates a cross-invocation race (other agents are
+        // writing their own agents_out entries concurrently), which can introduce artifacts
+        // like directional drift/banding.
+        let neighbor = agents_in[neighbor_ids[n]];
 
         let delta = agent.position - neighbor.position;
         let dist = length(delta);
@@ -2204,12 +2208,11 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform alpha rain (food): remove spatial and beta-dependent gradients.
     // Each cell independently receives a saturated rain event with probability alpha_multiplier * 0.05.
     // (Scaling by 0.05 preserves prior expected value semantics.)
-    // Rain factor is read from the advected fluid dye buffer.
-    // IMPORTANT: fluid_dye is stored at environment resolution (GRID_SIZE^2),
-    // so it must be indexed by env idx, not by the low-res fluid grid.
-    // fluid_dye[idx].y = alpha, fluid_dye[idx].x = beta.
-    let dye_packed = fluid_dye[idx];
-    let alpha_rain_map = clamp(dye_packed.y, 0.0, 1.0);
+    // Rain factor is read from the dedicated rain map texture (independent of fluid dyes).
+    // IMPORTANT: rain_map_tex is stored at environment resolution (GRID_SIZE^2).
+    // RG channels: x=alpha, y=beta.
+    let rain_packed = textureLoad(rain_map_tex, vec2<i32>(i32(x), i32(y)), 0).xy;
+    let alpha_rain_map = clamp(rain_packed.x, 0.0, 1.0);
 
     // Make it rain more when local velocity magnitude is low (stagnant areas).
     // This is intentionally dt-free and uses a smooth threshold to avoid banding.
@@ -2227,7 +2230,7 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Uniform beta rain (poison): also no vertical gradient. Probability = beta_multiplier * 0.05.
     let beta_seed = cell_seed * 1103515245u;
     let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
-    let beta_rain_map = clamp(dye_packed.x, 0.0, 1.0);
+    let beta_rain_map = clamp(rain_packed.y, 0.0, 1.0);
     let beta_probability_sat = clamp(params.beta_multiplier * 0.05 * beta_rain_map * precip_boost, 0.0, 1.0);
     if (beta_rain_chance < beta_probability_sat) {
         final_beta = 1.0;  // Saturated drop
