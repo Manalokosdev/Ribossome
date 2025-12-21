@@ -6551,10 +6551,18 @@ impl GpuState {
                 self.pending_spawn_upload = false;
             }
 
-            let bg_swap = if self.ping_pong {
-                &self.compute_bind_group_a
+            // Spawn-only path can run while paused and skips the normal A->B process pass.
+            // That means the "current" agent data lives in the ping-pong-selected input buffer
+            // (A when ping_pong=false, B when ping_pong=true). Compact must read from that buffer,
+            // otherwise each batch will compact an empty/stale buffer and overwrite prior batches.
+            //
+            // We also materialize results back into agents_buffer_a (the snapshot/save canonical).
+            let (bg_compact_merge, wrote_to_a_directly) = if self.ping_pong {
+                // Current is B, output is A.
+                (&self.compute_bind_group_b, true)
             } else {
-                &self.compute_bind_group_b
+                // Current is A, output is B (will be copied back into A).
+                (&self.compute_bind_group_a, false)
             };
 
             {
@@ -6564,25 +6572,42 @@ impl GpuState {
                 });
 
                 cpass.set_pipeline(&self.compact_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
+                cpass.set_bind_group(0, bg_compact_merge, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
 
                 cpass.set_pipeline(&self.cpu_spawn_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
+                cpass.set_bind_group(0, bg_compact_merge, &[]);
                 cpass.dispatch_workgroups((cpu_spawn_count + 63) / 64, 1, 1);
 
                 cpass.set_pipeline(&self.merge_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
+                cpass.set_bind_group(0, bg_compact_merge, &[]);
                 cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
 
                 let init_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
                 cpass.set_pipeline(&self.initialize_dead_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
+                cpass.set_bind_group(0, bg_compact_merge, &[]);
                 cpass.dispatch_workgroups(init_groups, 1, 1);
 
                 cpass.set_pipeline(&self.finalize_merge_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
+                cpass.set_bind_group(0, bg_compact_merge, &[]);
                 cpass.dispatch_workgroups(1, 1, 1);
+            }
+
+            // Ensure agents are materialized in buffer A for snapshot/save and for subsequent
+            // snapshot-load batches.
+            if !wrote_to_a_directly {
+                let expected_alive = (self.agent_count + cpu_spawn_count)
+                    .min(self.agent_buffer_capacity as u32);
+                let bytes = (expected_alive as u64) * (std::mem::size_of::<Agent>() as u64);
+                if bytes > 0 {
+                    encoder.copy_buffer_to_buffer(
+                        &self.agents_buffer_b,
+                        0,
+                        &self.agents_buffer_a,
+                        0,
+                        bytes,
+                    );
+                }
             }
         }
 
