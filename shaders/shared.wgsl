@@ -319,7 +319,7 @@ struct EnvironmentInitParams {
 // ============================================================================
 
 @group(0) @binding(0)
-var<storage, read_write> agents_in: array<Agent>;
+var<storage, read> agents_in: array<Agent>;
 
 @group(0) @binding(1)
 var<storage, read_write> agents_out: array<Agent>;
@@ -334,7 +334,8 @@ var<storage, read_write> chem_grid: array<vec2<f32>>;
 // Fluid dye (advected):
 // - fluid_dye[idx].x = beta (red)
 // - fluid_dye[idx].y = alpha (green)
-var<storage, read> fluid_dye: array<vec2<f32>>;
+// - fluid_dye[idx].z = gamma (blue)
+var<storage, read> fluid_dye: array<vec4<f32>>;
 
 @group(0) @binding(18)
 // Rain map (static probability field), sampled as a texture so it doesn't consume
@@ -866,7 +867,7 @@ fn read_gamma_texel(ix: i32, iy: i32) -> f32 {
 }
 
 fn read_gamma_height(idx: u32) -> f32 { return gamma_grid[idx]; }
-fn write_gamma_height(idx: u32, value: f32) { gamma_grid[idx] = clamp(value, 0.0, 1.0); }
+fn write_gamma_height(idx: u32, value: f32) { gamma_grid[idx] = max(value, 0.0); }
 fn read_gamma_slope(idx: u32) -> vec2<f32> { return vec2<f32>(gamma_grid[idx + GAMMA_SLOPE_X_OFFSET], gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET]); }
 fn write_gamma_slope(idx: u32, slope: vec2<f32>) { gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = slope.x; gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET] = slope.y; }
 

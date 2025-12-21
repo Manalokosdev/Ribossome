@@ -110,7 +110,7 @@ const DYE_DIFFUSE_MIX: f32 = 0.01;
 @group(0) @binding(1) var<storage, read_write> velocity_out: array<vec2<f32>>;
 
 // Gamma grid (terrain) sampled as an obstacle field
-@group(0) @binding(2) var<storage, read> gamma_grid: array<f32>;
+@group(0) @binding(2) var<storage, read_write> gamma_grid: array<f32>;
 
 // Environment chemistry grid:
 // - chem_grid[idx].x = alpha (food)
@@ -132,6 +132,11 @@ const DYE_DIFFUSE_MIX: f32 = 0.01;
 const CHEM_TRANSFER_RATE: f32 = 4.0;
 const CHEM_MAX_STEP_FRAC: f32 = 0.25; // hard clamp per tick to avoid instability
 
+// Create a small plateau (deadband) around equilibrium speed where lift/deposit is ~0.
+// This avoids jittery flip-flopping when speed hovers near the equilibrium point.
+// Width is expressed as a fraction of the equilibrium speed.
+const CHEM_EQUIL_PLATEAU_FRAC: f32 = 0.15;
+
 // Intermediate force vectors buffer (vec2 per cell) - agents write propeller forces here
 @group(0) @binding(16) var<storage, read_write> fluid_force_vectors: array<vec2<f32>>;
 
@@ -144,9 +149,13 @@ const CHEM_MAX_STEP_FRAC: f32 = 0.25; // hard clamp per tick to avoid instabilit
 @group(0) @binding(6) var<storage, read_write> divergence: array<f32>;
 
 // Dye concentration ping-pong buffers (f32 per cell) - for flow visualization
-// Two-channel dye per cell: x = beta (red), y = alpha (green)
-@group(0) @binding(8) var<storage, read> dye_in: array<vec2<f32>>;
-@group(0) @binding(9) var<storage, read_write> dye_out: array<vec2<f32>>;
+// Three-channel dye per env cell stored as vec4:
+// - x = beta (red)
+// - y = alpha (green)
+// - z = gamma (blue)
+// - w = unused
+@group(0) @binding(8) var<storage, read> dye_in: array<vec4<f32>>;
+@group(0) @binding(9) var<storage, read_write> dye_out: array<vec4<f32>>;
 
 // Agent trail dye (RGBA) advected by the fluid velocity.
 // trail_in is prepared by the simulation pass (copy/decay + agent deposits).
@@ -178,7 +187,9 @@ const CHEM_MAX_STEP_FRAC: f32 = 0.25; // hard clamp per tick to avoid instabilit
 //  20 dye_escape_rate_alpha (1/sec)
 //  21 dye_escape_rate_beta (1/sec)
 //  22 dye_deposit_scale (0..1) - scales dye -> chem deposition
-// (padded to 6 vec4s / 24 floats)
+//  23 GAMMA speed equil
+//  24 GAMMA speed max lift
+// (padded to 7 vec4s / 28 floats)
 const FP_TIME: u32 = 0u;
 const FP_DT: u32 = 1u;
 const FP_DECAY: u32 = 2u;
@@ -196,7 +207,9 @@ const FP_CHEM_SPEED_MAX_LIFT_BETA: u32 = 19u;
 const FP_DYE_ESCAPE_RATE_ALPHA: u32 = 20u;
 const FP_DYE_ESCAPE_RATE_BETA: u32 = 21u;
 const FP_DYE_DEPOSIT_SCALE: u32 = 22u;
-const FP_VEC4_COUNT: u32 = 6u;
+const FP_CHEM_SPEED_EQUIL_GAMMA: u32 = 23u;
+const FP_CHEM_SPEED_MAX_LIFT_GAMMA: u32 = 24u;
+const FP_VEC4_COUNT: u32 = 7u;
 
 @group(0) @binding(3) var<uniform> params: array<vec4<f32>, FP_VEC4_COUNT>;
 
@@ -265,7 +278,7 @@ fn copy_dye_to_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Dye buffers are GAMMA_GRID_DIM^2, so map the current fluid cell to an env cell.
     let env_idx = gamma_idx_for_fluid_cell(x, y);
     // Store dye (beta, alpha) directly for downstream visualization/debug.
-    fluid_forces[idx] = dye_in[env_idx];
+    fluid_forces[idx] = dye_in[env_idx].xy;
 }
 
 @compute @workgroup_size(16, 16)
@@ -293,12 +306,13 @@ fn clear_fluid_force_vectors(@builtin(global_invocation_id) gid: vec3<u32>) {
     fluid_force_vectors[idx] = vec2<f32>(0.0, 0.0);
 }
 
-// Inject a single point force into the intermediate force buffer.
-// This is meant as a deterministic test driver so you can see how the fluid affects agents.
-@compute @workgroup_size(1, 1, 1)
+// Inject fumarole forces into the intermediate force buffer.
+// IMPORTANT: This must be parallel. A single-threaded nested loop here will tank FPS.
+@compute @workgroup_size(16, 16)
 fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
-    // Single-invocation kernel: only one thread writes the single-cell force.
-    if (gid.x != 0u || gid.y != 0u || gid.z != 0u) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
         return;
     }
 
@@ -311,6 +325,12 @@ fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size_f = f32(FLUID_GRID_SIZE);
     // Use coarse time buckets so variation doesn't flicker every single frame.
     let time_bucket = u32(fp_f32(FP_TIME)) / 16u;
+
+    let xi = i32(x);
+    let yi = i32(y);
+    let idx = grid_index(x, y);
+
+    var added = vec2<f32>(0.0, 0.0);
 
     for (var i = 0u; i < count; i = i + 1u) {
         let base = 1u + i * FUM_STRIDE;
@@ -326,64 +346,80 @@ fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
         let fx_i = clamp(i32(round(size_f * x_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
         let fy_i = clamp(i32(round(size_f * y_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
 
+        let dx = xi - fx_i;
+        let dy = yi - fy_i;
+
+        let base_strength = max(fum_f32(base, FUM_STRENGTH), 0.0);
+        if (base_strength <= 0.0) {
+            continue;
+        }
+
+        let spread_f = max(fum_f32(base, FUM_SPREAD), 0.0);
+        let r = i32(clamp(round(spread_f), 0.0, 64.0));
+
+        // Avoid out-of-bounds / boundary artifacts.
+        if (xi <= 0 || yi <= 0 || xi >= i32(FLUID_GRID_SIZE) - 1 || yi >= i32(FLUID_GRID_SIZE) - 1) {
+            continue;
+        }
+
+        if (r <= 0) {
+            if (dx != 0 || dy != 0) {
+                continue;
+            }
+        } else {
+            if (abs(dx) > r || abs(dy) > r) {
+                continue;
+            }
+            let dist2 = f32(dx * dx + dy * dy);
+            let rr = f32(r * r);
+            if (dist2 > rr) {
+                continue;
+            }
+        }
+
         var dir = vec2<f32>(fum_f32(base, FUM_DIR_X), fum_f32(base, FUM_DIR_Y));
         let dir_len = length(dir);
         dir = select(dir / max(dir_len, 1e-8), vec2<f32>(0.0, 1.0), dir_len < 1e-5);
 
-        let base_strength = max(fum_f32(base, FUM_STRENGTH), 0.0);
-        let spread_f = max(fum_f32(base, FUM_SPREAD), 0.0);
         let variation = clamp(fum_f32(base, FUM_VARIATION), 0.0, 1.0);
-
-        // Variation should be per-cell (spatially randomized), not once-per-fumarole.
         let seed_base = hash_u32(i * 0x9E3779B9u ^ time_bucket * 0x85EBCA6Bu ^ 0xC2B2AE35u);
 
-        // Spread in fluid-cell units.
-        let r = i32(clamp(round(spread_f), 0.0, 64.0));
-        if (r <= 0) {
-            let idx = grid_index(u32(fx_i), u32(fy_i));
+        var dir_j = dir;
+        var strength = base_strength;
 
+        if (variation > 1e-5) {
             let seed0 = hash_u32(seed_base ^ idx);
             let seed1 = hash_u32(seed0 ^ 0xA511E9B3u);
             let seed2 = hash_u32(seed0 ^ 0x63D83595u);
             let ang = (rand01(seed1) * 2.0 - 1.0) * 3.14159265 * variation;
             let strength_jitter = 1.0 + (rand01(seed2) * 2.0 - 1.0) * variation;
-
-            let dir_j = normalize(rotate2(dir, ang));
-            let strength = base_strength * max(strength_jitter, 0.0);
-            fluid_force_vectors[idx] = fluid_force_vectors[idx] + dir_j * strength;
-        } else {
-            for (var dy: i32 = -r; dy <= r; dy = dy + 1) {
-                for (var dx: i32 = -r; dx <= r; dx = dx + 1) {
-                    let xi = clamp(fx_i + dx, 1, i32(FLUID_GRID_SIZE) - 2);
-                    let yi = clamp(fy_i + dy, 1, i32(FLUID_GRID_SIZE) - 2);
-                    let idx = grid_index(u32(xi), u32(yi));
-
-                    let seed0 = hash_u32(seed_base ^ idx);
-                    let seed1 = hash_u32(seed0 ^ 0xA511E9B3u);
-                    let seed2 = hash_u32(seed0 ^ 0x63D83595u);
-                    let ang = (rand01(seed1) * 2.0 - 1.0) * 3.14159265 * variation;
-                    let strength_jitter = 1.0 + (rand01(seed2) * 2.0 - 1.0) * variation;
-                    let dir_j = normalize(rotate2(dir, ang));
-                    let strength = base_strength * max(strength_jitter, 0.0);
-
-                    let dist = length(vec2<f32>(f32(dx), f32(dy)));
-                    // Smooth falloff (stronger core): w in [0..1]
-                    let w0 = clamp(1.0 - dist / (f32(r) + 0.001), 0.0, 1.0);
-                    let w = w0 * w0;
-
-                    fluid_force_vectors[idx] = fluid_force_vectors[idx] + dir_j * (strength * w);
-                }
-            }
+            dir_j = normalize(rotate2(dir, ang));
+            strength = base_strength * max(strength_jitter, 0.0);
         }
+
+        var w = 1.0;
+        if (r > 0) {
+            let dist = sqrt(f32(dx * dx + dy * dy));
+            let w0 = clamp(1.0 - dist / (f32(r) + 0.001), 0.0, 1.0);
+            w = w0 * w0;
+        }
+
+        added = added + dir_j * (strength * w);
+    }
+
+    if (added.x != 0.0 || added.y != 0.0) {
+        fluid_force_vectors[idx] = fluid_force_vectors[idx] + added;
     }
 }
 
 // Inject dye at the fumarole location.
 // IMPORTANT: This must run *after* inject_dye(), otherwise inject_dye() will overwrite dye_out.
-@compute @workgroup_size(1, 1, 1)
+// IMPORTANT: This must be parallel. A single-threaded nested loop here will tank FPS.
+@compute @workgroup_size(16, 16)
 fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
-    // Single-invocation kernel: only one thread writes the single-cell dye.
-    if (gid.x != 0u || gid.y != 0u || gid.z != 0u) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= GAMMA_GRID_DIM || y >= GAMMA_GRID_DIM) {
         return;
     }
 
@@ -398,10 +434,23 @@ fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fluid_to_dye = f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
     let time_bucket = u32(fp_f32(FP_TIME)) / 16u;
 
+    let xi = i32(x);
+    let yi = i32(y);
+    let dye_idx = dye_grid_index(x, y);
+
+    var add_beta = 0.0;
+    var add_alpha = 0.0;
+
     for (var i = 0u; i < count; i = i + 1u) {
         let base = 1u + i * FUM_STRIDE;
         let enabled = fum_f32(base, FUM_ENABLED);
         if (enabled < 0.5) {
+            continue;
+        }
+
+        let base_rate_alpha = max(fum_f32(base, FUM_ALPHA_DYE_RATE), 0.0);
+        let base_rate_beta = max(fum_f32(base, FUM_BETA_DYE_RATE), 0.0);
+        if (base_rate_alpha <= 0.0 && base_rate_beta <= 0.0) {
             continue;
         }
 
@@ -419,44 +468,45 @@ fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Map fluid-cell radius to dye-cell radius.
         let r_dye = i32(clamp(round(spread_f * fluid_to_dye), 1.0, 128.0));
 
-        let base_rate_alpha = max(fum_f32(base, FUM_ALPHA_DYE_RATE), 0.0);
-        let base_rate_beta = max(fum_f32(base, FUM_BETA_DYE_RATE), 0.0);
-        let variation = clamp(fum_f32(base, FUM_VARIATION), 0.0, 1.0);
-
-        if (base_rate_alpha <= 0.0 && base_rate_beta <= 0.0) {
+        let dx = xi - dye_x0;
+        let dy = yi - dye_y0;
+        if (abs(dx) > r_dye || abs(dy) > r_dye) {
             continue;
         }
 
-        let seed_base = hash_u32(i * 0x9E3779B9u ^ time_bucket * 0x85EBCA6Bu ^ 0x27D4EB2Fu);
-
-        for (var dy: i32 = -r_dye; dy <= r_dye; dy = dy + 1) {
-            for (var dx: i32 = -r_dye; dx <= r_dye; dx = dx + 1) {
-                let xi = clamp(dye_x0 + dx, 0, i32(GAMMA_GRID_DIM) - 1);
-                let yi = clamp(dye_y0 + dy, 0, i32(GAMMA_GRID_DIM) - 1);
-                let dye_idx = dye_grid_index(u32(xi), u32(yi));
-
-                let seed0 = hash_u32(seed_base ^ dye_idx);
-                let seed1 = hash_u32(seed0 ^ 0xB7E15162u);
-                let rate_jitter = 1.0 + (rand01(seed1) * 2.0 - 1.0) * variation;
-                let jitter = max(rate_jitter, 0.0);
-
-                // Frame-rate independent injection: amount = rate * dt.
-                let injected_amount_alpha = base_rate_alpha * jitter * dt;
-                let injected_amount_beta = base_rate_beta * jitter * dt;
-                if (injected_amount_alpha <= 0.0 && injected_amount_beta <= 0.0) {
-                    continue;
-                }
-
-                let dist = length(vec2<f32>(f32(dx), f32(dy)));
-                let w0 = clamp(1.0 - dist / (f32(r_dye) + 0.001), 0.0, 1.0);
-                let w = w0 * w0;
-
-                let current = dye_out[dye_idx];
-                let next_beta = min(current.x + injected_amount_beta * w, 1.0);
-                let next_alpha = min(current.y + injected_amount_alpha * w, 1.0);
-                dye_out[dye_idx] = vec2<f32>(next_beta, next_alpha);
-            }
+        let dist2 = f32(dx * dx + dy * dy);
+        let rr = f32(r_dye * r_dye);
+        if (dist2 > rr) {
+            continue;
         }
+
+        let dist = sqrt(dist2);
+        let w0 = clamp(1.0 - dist / (f32(r_dye) + 0.001), 0.0, 1.0);
+        let w = w0 * w0;
+
+        let variation = clamp(fum_f32(base, FUM_VARIATION), 0.0, 1.0);
+        var jitter = 1.0;
+        if (variation > 1e-5) {
+            let seed_base = hash_u32(i * 0x9E3779B9u ^ time_bucket * 0x85EBCA6Bu ^ 0x27D4EB2Fu);
+            let seed0 = hash_u32(seed_base ^ dye_idx);
+            let seed1 = hash_u32(seed0 ^ 0xB7E15162u);
+            let rate_jitter = 1.0 + (rand01(seed1) * 2.0 - 1.0) * variation;
+            jitter = max(rate_jitter, 0.0);
+        }
+
+        // Frame-rate independent injection: amount = rate * dt.
+        add_alpha = add_alpha + base_rate_alpha * jitter * dt * w;
+        add_beta = add_beta + base_rate_beta * jitter * dt * w;
+    }
+
+    if (add_alpha != 0.0 || add_beta != 0.0) {
+        let current = dye_out[dye_idx];
+        dye_out[dye_idx] = vec4<f32>(
+            min(current.x + add_beta, 1.0),
+            min(current.y + add_alpha, 1.0),
+            current.z,
+            current.w
+        );
     }
 }
 
@@ -515,7 +565,7 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = dye_grid_index(x, y);
 
     // Pass-through.
-    dye_out[idx] = clamp(dye_in[idx], vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    dye_out[idx] = clamp(dye_in[idx], vec4<f32>(0.0), vec4<f32>(1.0));
 }
 
 // Advect dye concentration using semi-Lagrangian method (same as velocity advection)
@@ -566,26 +616,54 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let advected_diffused = mix(advected_dye, neighbor_blur, clamp(DYE_DIFFUSE_MIX, 0.0, 1.0));
 
     // Dye ignores obstacles: don't attenuate by permeability.
-    var dye_val = clamp(advected_diffused, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    var dye_val = clamp(advected_diffused, vec4<f32>(0.0), vec4<f32>(1.0));
 
     // === Chem erosion/deposition coupling (mass-conserving) ===
     // Use dye-grid velocity magnitude (in dye cells / sec) as the driver.
-    let speed = length(vel_dye);
+    // IMPORTANT: We deliberately low-pass filter the fluid velocity magnitude here.
+    // The pressure-projection on a collocated grid can exhibit subtle cell-aligned
+    // checkerboarding/odd-even artifacts; using a small 2x2 box filter on |v| makes
+    // the lift/deposit thresholding much less likely to imprint the FLUID_GRID_SIZE
+    // lattice onto the (higher-res) dye/chem grids.
+    let v00 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
+    let v10 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(0.5, 0.0))), MAX_VEL);
+    let v01 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(0.0, 0.5))), MAX_VEL);
+    let v11 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(0.5, 0.5))), MAX_VEL);
+    let speed_fluid = 0.25 * (length(v00) + length(v10) + length(v01) + length(v11));
+    let speed = speed_fluid * fluid_to_dye;
 
     let chem_speed_equil_alpha_in = max(fp_vec4(FP_SPLAT).x, 0.0);
     let chem_speed_max_lift_alpha_in = max(fp_vec4(FP_SPLAT).y, 0.0);
     let chem_speed_equil_beta_in = max(fp_f32(FP_CHEM_SPEED_EQUIL_BETA), 0.0);
     let chem_speed_max_lift_beta_in = max(fp_f32(FP_CHEM_SPEED_MAX_LIFT_BETA), 0.0);
+    let chem_speed_equil_gamma_in = max(fp_f32(FP_CHEM_SPEED_EQUIL_GAMMA), 0.0);
+    let chem_speed_max_lift_gamma_in = max(fp_f32(FP_CHEM_SPEED_MAX_LIFT_GAMMA), 0.0);
 
     // Ensure sane monotonic curves even if UI values are inverted.
     let chem_speed_equil_alpha = clamp(chem_speed_equil_alpha_in, 1e-4, 1000.0);
-    let chem_speed_max_lift_alpha = max(chem_speed_max_lift_alpha_in, chem_speed_equil_alpha + 1e-4);
     let chem_speed_equil_beta = clamp(chem_speed_equil_beta_in, 1e-4, 1000.0);
-    let chem_speed_max_lift_beta = max(chem_speed_max_lift_beta_in, chem_speed_equil_beta + 1e-4);
+    let chem_speed_equil_gamma = clamp(chem_speed_equil_gamma_in, 1e-4, 1000.0);
+
+    // Plateau band around equilibrium where transfer should be ~0.
+    let plateau_half_alpha = max(chem_speed_equil_alpha * CHEM_EQUIL_PLATEAU_FRAC, 1e-4);
+    let plateau_half_beta = max(chem_speed_equil_beta * CHEM_EQUIL_PLATEAU_FRAC, 1e-4);
+    let plateau_half_gamma = max(chem_speed_equil_gamma * CHEM_EQUIL_PLATEAU_FRAC, 1e-4);
+    let chem_speed_equil_low_alpha = max(chem_speed_equil_alpha - plateau_half_alpha, 1e-4);
+    let chem_speed_equil_high_alpha = chem_speed_equil_alpha + plateau_half_alpha;
+    let chem_speed_equil_low_beta = max(chem_speed_equil_beta - plateau_half_beta, 1e-4);
+    let chem_speed_equil_high_beta = chem_speed_equil_beta + plateau_half_beta;
+    let chem_speed_equil_low_gamma = max(chem_speed_equil_gamma - plateau_half_gamma, 1e-4);
+    let chem_speed_equil_high_gamma = chem_speed_equil_gamma + plateau_half_gamma;
+
+    // Max lift must be above the top of the plateau.
+    let chem_speed_max_lift_alpha = max(chem_speed_max_lift_alpha_in, chem_speed_equil_high_alpha + 1e-4);
+    let chem_speed_max_lift_beta = max(chem_speed_max_lift_beta_in, chem_speed_equil_high_beta + 1e-4);
+    let chem_speed_max_lift_gamma = max(chem_speed_max_lift_gamma_in, chem_speed_equil_high_gamma + 1e-4);
 
     // Each dye cell maps 1:1 to the environment chem cell at the same resolution.
     let env_idx = gamma_index(x, y);
     var chem = clamp(chem_grid[env_idx], vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    var gamma_height = max(gamma_grid[env_idx], 0.0);
 
     // Baseline chem→dye ooze in still water, so sensors can detect signals without flow.
     // IMPORTANT: this is intentionally NON-depleting (does not remove chem from the grid).
@@ -593,8 +671,10 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ooze_rate = max(fp_f32(FP_CHEM_OOZE_STILL_RATE), 0.0);
     let stillness_alpha = 1.0 - smoothstep(0.0, chem_speed_equil_alpha, speed);
     let stillness_beta = 1.0 - smoothstep(0.0, chem_speed_equil_beta, speed);
+    let stillness_gamma = 1.0 - smoothstep(0.0, chem_speed_equil_gamma, speed);
     let ooze_frac_alpha = clamp(ooze_rate * stillness_alpha * dt, 0.0, CHEM_MAX_STEP_FRAC);
     let ooze_frac_beta = clamp(ooze_rate * stillness_beta * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    let ooze_frac_gamma = clamp(ooze_rate * stillness_gamma * dt, 0.0, CHEM_MAX_STEP_FRAC);
     if (ooze_frac_alpha > 0.0) {
         // Alpha: chem.x -> dye.y
         let alpha_headroom = 1.0 - dye_val.y;
@@ -607,18 +687,28 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let ooze_beta = min(chem.y * ooze_frac_beta, max(beta_headroom, 0.0));
         dye_val.x = min(dye_val.x + ooze_beta, 1.0);
     }
+    if (ooze_frac_gamma > 0.0) {
+        // Gamma: gamma -> dye.z
+        let gamma_headroom = 1.0 - dye_val.z;
+        let ooze_gamma = min(gamma_height * ooze_frac_gamma, max(gamma_headroom, 0.0));
+        dye_val.z = min(dye_val.z + ooze_gamma, 1.0);
+    }
 
     // Channel-specific continuous transfer functions based on speed.
     // transfer_* in [-1, 1]
     //  +1 => max deposition (dye -> chem)
     //   0 => equilibrium
     //  -1 => max lift (chem -> dye)
-    let deposit_strength_alpha = 1.0 - smoothstep(0.0, chem_speed_equil_alpha, speed);
-    let lift_strength_alpha = smoothstep(chem_speed_equil_alpha, chem_speed_max_lift_alpha, speed);
+    // Plateau behavior:
+    // - deposit ramps down to 0 by chem_speed_equil_low_*
+    // - lift ramps up from 0 starting at chem_speed_equil_high_*
+    // => near equilibrium, both are ~0 => net transfer ~0.
+    let deposit_strength_alpha = 1.0 - smoothstep(0.0, chem_speed_equil_low_alpha, speed);
+    let lift_strength_alpha = smoothstep(chem_speed_equil_high_alpha, chem_speed_max_lift_alpha, speed);
     let transfer_alpha = clamp(deposit_strength_alpha - lift_strength_alpha, -1.0, 1.0);
 
-    let deposit_strength_beta = 1.0 - smoothstep(0.0, chem_speed_equil_beta, speed);
-    let lift_strength_beta = smoothstep(chem_speed_equil_beta, chem_speed_max_lift_beta, speed);
+    let deposit_strength_beta = 1.0 - smoothstep(0.0, chem_speed_equil_low_beta, speed);
+    let lift_strength_beta = smoothstep(chem_speed_equil_high_beta, chem_speed_max_lift_beta, speed);
     let transfer_beta = clamp(deposit_strength_beta - lift_strength_beta, -1.0, 1.0);
 
     let pickup_strength_alpha = max(-transfer_alpha, 0.0);
@@ -669,8 +759,41 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     dye_val.y = dye_val.y * escape_factor_alpha;
     dye_val.x = dye_val.x * escape_factor_beta;
 
+    // Reuse alpha escape rate for gamma to counteract the still-water ooze.
+    dye_val.z = dye_val.z * escape_factor_alpha;
+
+    // === Gamma lift/deposition coupling (mass-conserving) ===
+    // Treat gamma height as the "bed" reservoir and dye_val.z as the carried reservoir.
+    // Uses the gamma transfer curve thresholds.
+    let deposit_strength_gamma = 1.0 - smoothstep(0.0, chem_speed_equil_low_gamma, speed);
+    let lift_strength_gamma = smoothstep(chem_speed_equil_high_gamma, chem_speed_max_lift_gamma, speed);
+    let transfer_gamma = clamp(deposit_strength_gamma - lift_strength_gamma, -1.0, 1.0);
+
+    let pickup_strength_gamma = max(-transfer_gamma, 0.0);
+    let deposit_strength_gamma_pos = max(transfer_gamma, 0.0);
+
+    let pickup_frac_gamma = clamp(CHEM_TRANSFER_RATE * pickup_strength_gamma * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    let deposit_frac_gamma = clamp(CHEM_TRANSFER_RATE * deposit_strength_gamma_pos * dt, 0.0, CHEM_MAX_STEP_FRAC);
+
+    // Pickup (gamma -> dye.z)
+    // IMPORTANT: pickup is proportional-to-height, but capped to avoid over-eroding tall gamma.
+    // This also avoids hard frontiers near 0 height that absolute pickup can create.
+    let gamma_pickup_frac = min(pickup_frac_gamma, 0.05);
+    let pickup_gamma_raw = gamma_height * gamma_pickup_frac;
+    let dye_headroom_gamma = max(1.0 - dye_val.z, 0.0);
+    let pickup_gamma = min(min(pickup_gamma_raw, dye_headroom_gamma), gamma_height);
+    gamma_height = max(gamma_height - pickup_gamma, 0.0);
+    dye_val.z = min(dye_val.z + pickup_gamma, 1.0);
+
+    // Deposit (dye.z -> gamma)
+    // Gamma height is unbounded; do not limit deposition by a [0..1] headroom.
+    let deposit_gamma = (dye_val.z * deposit_frac_gamma) * dye_deposit_scale;
+    gamma_height = gamma_height + deposit_gamma;
+    dye_val.z = max(dye_val.z - deposit_gamma, 0.0);
+
     chem_grid[env_idx] = chem;
-    dye_out[idx] = clamp(dye_val, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    gamma_grid[env_idx] = gamma_height;
+    dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
 }
 
 // Clear dye buffer (for reset)
@@ -683,7 +806,7 @@ fn clear_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let idx = dye_grid_index(x, y);
-    dye_out[idx] = vec2<f32>(0.0, 0.0);
+    dye_out[idx] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
 // ============================================================================
@@ -977,13 +1100,13 @@ fn sample_velocity(pos: vec2<f32>) -> vec2<f32> {
 }
 
 // Bilinear interpolation for dye concentration sampling
-fn sample_dye(pos: vec2<f32>) -> vec2<f32> {
+fn sample_dye(pos: vec2<f32>) -> vec4<f32> {
     // Dye is sampled in dye-grid coordinates (GAMMA_GRID_DIM).
     // Out-of-bounds contributes no dye.
     let min_pos = 0.5;
     let max_pos = f32(GAMMA_GRID_DIM) - 0.5;
     if (pos.x < min_pos || pos.x > max_pos || pos.y < min_pos || pos.y > max_pos) {
-        return vec2<f32>(0.0, 0.0);
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     let p = clamp(pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
 

@@ -143,8 +143,11 @@ var<storage, read> agent_grid: array<vec4<f32>>;
 var<uniform> params: SimParams;
 
 @group(0) @binding(3)
-// Two-channel dye per cell: x = beta (red), y = alpha (green)
-var<storage, read> fluid_dye: array<vec2<f32>>;
+// Three-channel dye per env cell stored as vec4:
+// - x = beta (red)
+// - y = alpha (green)
+// - z = gamma (blue)
+var<storage, read> fluid_dye: array<vec4<f32>>;
 
 @compute @workgroup_size(16, 16)
 fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -204,7 +207,7 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Sample dye (x = beta, y = alpha) directly from dye buffer.
             // Apply a visualization-only gain, then tone-map to avoid hard saturation.
-            let dye_raw = max(fluid_dye[dye_idx], vec2<f32>(0.0, 0.0));
+            let dye_raw = max(fluid_dye[dye_idx].xy, vec2<f32>(0.0, 0.0));
             let dye_lin = dye_raw * DYE_VIS_GAIN;
             // Simple Reinhard tone map per-channel: x / (1 + x)
             let dye_tm = dye_lin / (vec2<f32>(1.0, 1.0) + dye_lin);

@@ -1825,6 +1825,8 @@ fn default_fluid_obstacle_strength() -> f32 { 200.0 }
 fn default_fluid_ooze_still_rate() -> f32 { 1.0 }
 fn default_fluid_ooze_rate_beta_unset() -> f32 { -1.0 }
 fn default_fluid_ooze_fade_rate_beta_unset() -> f32 { -1.0 }
+fn default_fluid_ooze_rate_gamma_unset() -> f32 { -1.0 }
+fn default_fluid_ooze_fade_rate_gamma_unset() -> f32 { -1.0 }
 fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
 fn default_dye_alpha_color() -> [f32; 3] { [0.0, 1.0, 0.0] }
@@ -1948,6 +1950,10 @@ struct SimulationSettings {
     fluid_ooze_rate_beta: f32, // Chem↔dye transfer (BETA): equilibrium speed (0-transfer point)
     #[serde(default = "default_fluid_ooze_fade_rate_beta_unset")]
     fluid_ooze_fade_rate_beta: f32, // Chem↔dye transfer (BETA): max-lift speed (full lift past this)
+    #[serde(default = "default_fluid_ooze_rate_gamma_unset")]
+    fluid_ooze_rate_gamma: f32, // Gamma lift/deposition: equilibrium speed (0-transfer point)
+    #[serde(default = "default_fluid_ooze_fade_rate_gamma_unset")]
+    fluid_ooze_fade_rate_gamma: f32, // Gamma lift/deposition: max-lift speed (full lift past this)
     #[serde(default = "default_fluid_ooze_still_rate")]
     fluid_ooze_still_rate: f32, // Chem→dye baseline ooze in still water (per-second fraction)
     #[serde(default = "default_fluid_dye_escape_rate")]
@@ -1971,6 +1977,8 @@ struct SimulationSettings {
     trail_decay: f32,
     trail_opacity: f32,
     trail_show: bool,
+    #[serde(default)]
+    trail_show_energy: bool,
     interior_isotropic: bool,
     ignore_stop_codons: bool,
     require_start_codon: bool,
@@ -2066,6 +2074,9 @@ impl Default for SimulationSettings {
             // Beta channel uses alpha defaults unless overridden.
             fluid_ooze_rate_beta: default_fluid_ooze_rate_beta_unset(),
             fluid_ooze_fade_rate_beta: default_fluid_ooze_fade_rate_beta_unset(),
+            // Gamma uses alpha defaults unless overridden.
+            fluid_ooze_rate_gamma: default_fluid_ooze_rate_gamma_unset(),
+            fluid_ooze_fade_rate_gamma: default_fluid_ooze_fade_rate_gamma_unset(),
             // Baseline chem→dye seepage in still water so sensors can read signals without flow.
             fluid_ooze_still_rate: default_fluid_ooze_still_rate(),
             // Dye escape: removes dye without precipitation (independent sink).
@@ -2092,6 +2103,7 @@ impl Default for SimulationSettings {
             trail_decay: 0.995,
             trail_opacity: 0.5,
             trail_show: false,
+            trail_show_energy: false,
             interior_isotropic: false, // Use asymmetric left/right multipliers from amino acids
             ignore_stop_codons: false, // Stop codons (UAA, UAG, UGA) terminate translation
             require_start_codon: true, // Translation starts at AUG (Methionine)
@@ -2314,10 +2326,21 @@ impl SimulationSettings {
             self.fluid_dye_escape_rate_beta = self.fluid_dye_escape_rate;
         }
 
+        // Back-compat: older settings files won't have gamma thresholds.
+        // Use -1 sentinel defaults to mean "inherit alpha".
+        if self.fluid_ooze_rate_gamma < 0.0 {
+            self.fluid_ooze_rate_gamma = self.fluid_ooze_rate;
+        }
+        if self.fluid_ooze_fade_rate_gamma < 0.0 {
+            self.fluid_ooze_fade_rate_gamma = self.fluid_ooze_fade_rate;
+        }
+
         self.fluid_ooze_rate = self.fluid_ooze_rate.clamp(0.0, 100.0);
-        self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 100.0);
+        self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 500.0);
         self.fluid_ooze_rate_beta = self.fluid_ooze_rate_beta.clamp(0.0, 100.0);
-        self.fluid_ooze_fade_rate_beta = self.fluid_ooze_fade_rate_beta.clamp(0.0, 100.0);
+        self.fluid_ooze_fade_rate_beta = self.fluid_ooze_fade_rate_beta.clamp(0.0, 500.0);
+        self.fluid_ooze_rate_gamma = self.fluid_ooze_rate_gamma.clamp(0.0, 100.0);
+        self.fluid_ooze_fade_rate_gamma = self.fluid_ooze_fade_rate_gamma.clamp(0.0, 500.0);
         self.fluid_ooze_still_rate = self.fluid_ooze_still_rate.clamp(0.0, 100.0);
         self.fluid_dye_escape_rate = self.fluid_dye_escape_rate.clamp(0.0, 50.0);
         self.fluid_dye_escape_rate_beta = self.fluid_dye_escape_rate_beta.clamp(0.0, 50.0);
@@ -2635,6 +2658,8 @@ struct GpuState {
     fluid_ooze_fade_rate: f32,
     fluid_ooze_rate_beta: f32,
     fluid_ooze_fade_rate_beta: f32,
+    fluid_ooze_rate_gamma: f32,
+    fluid_ooze_fade_rate_gamma: f32,
     fluid_ooze_still_rate: f32,
     fluid_dye_escape_rate: f32,
     fluid_dye_escape_rate_beta: f32,
@@ -2662,6 +2687,7 @@ struct GpuState {
     trail_decay: f32,
     trail_opacity: f32,
     trail_show: bool,
+    trail_show_energy: bool,
     interior_isotropic: bool,
     ignore_stop_codons: bool,
     require_start_codon: bool,
@@ -2792,6 +2818,8 @@ impl GpuState {
         self.fluid_ooze_fade_rate = settings.fluid_ooze_fade_rate;
         self.fluid_ooze_rate_beta = settings.fluid_ooze_rate_beta;
         self.fluid_ooze_fade_rate_beta = settings.fluid_ooze_fade_rate_beta;
+        self.fluid_ooze_rate_gamma = settings.fluid_ooze_rate_gamma;
+        self.fluid_ooze_fade_rate_gamma = settings.fluid_ooze_fade_rate_gamma;
         self.fluid_ooze_still_rate = settings.fluid_ooze_still_rate;
         self.fluid_dye_escape_rate = settings.fluid_dye_escape_rate;
         self.fluid_dye_escape_rate_beta = settings.fluid_dye_escape_rate_beta;
@@ -2825,6 +2853,7 @@ impl GpuState {
         self.trail_decay = settings.trail_decay;
         self.trail_opacity = settings.trail_opacity;
         self.trail_show = settings.trail_show;
+        self.trail_show_energy = settings.trail_show_energy;
 
         self.interior_isotropic = settings.interior_isotropic;
         self.ignore_stop_codons = settings.ignore_stop_codons;
@@ -3632,7 +3661,8 @@ impl GpuState {
         let fluid_scalar_size = (fluid_grid_cells * std::mem::size_of::<f32>()) as u64;
         // Dye is stored at environment-grid resolution (GAMMA_GRID_DIM x GAMMA_GRID_DIM).
         // This replaces the previous fluid-resolution dye buffers without adding any new bindings.
-        let fluid_dye_size = (env_grid_cells * std::mem::size_of::<[f32; 2]>()) as u64;
+        // Stored as vec4<f32> per cell to carry beta/alpha/gamma with 16-byte stride.
+        let fluid_dye_size = (env_grid_cells * std::mem::size_of::<[f32; 4]>()) as u64;
 
         let fluid_velocity_a = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fluid Velocity A"),
@@ -3762,7 +3792,7 @@ impl GpuState {
                         binding: 0,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false }, // Changed to allow drain_energy kernel to write
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -4586,9 +4616,9 @@ impl GpuState {
         // FLUID SIMULATION PIPELINES (buffers already created above, before bind groups)
         // ============================================================================
 
-        // Fluid params buffer (flat f32 array, packed as 6x vec4<f32> in WGSL).
+        // Fluid params buffer (flat f32 array, packed as vec4<f32> array in WGSL).
         // Indices must match shaders/fluid.wgsl FP_* constants.
-        let fluid_params_f32: [f32; 24] = [
+        let fluid_params_f32: [f32; 28] = [
             0.0,                       // time
             0.016,                     // dt
             0.995,                     // decay
@@ -4606,7 +4636,9 @@ impl GpuState {
             0.0,                       // dye_escape_rate_alpha
             0.0,                       // dye_escape_rate_beta
             1.0,                       // dye_deposit_scale (dye -> chem)
-            0.0,                       // reserved
+            0.0,                       // gamma speed equil
+            0.0,                       // gamma speed max lift
+            0.0, 0.0, 0.0,             // reserved
         ];
         let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
 
@@ -4660,12 +4692,12 @@ impl GpuState {
                     },
                     count: None,
                 },
-                // Gamma grid (terrain) as read-only obstacle field
+                // Gamma grid (terrain). Made read-write so fluid can do gamma lift/deposition.
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -5365,6 +5397,8 @@ impl GpuState {
             fluid_ooze_fade_rate: settings.fluid_ooze_fade_rate,
             fluid_ooze_rate_beta: settings.fluid_ooze_rate_beta,
             fluid_ooze_fade_rate_beta: settings.fluid_ooze_fade_rate_beta,
+            fluid_ooze_rate_gamma: settings.fluid_ooze_rate_gamma,
+            fluid_ooze_fade_rate_gamma: settings.fluid_ooze_fade_rate_gamma,
             fluid_ooze_still_rate: settings.fluid_ooze_still_rate,
             fluid_dye_escape_rate: settings.fluid_dye_escape_rate,
             fluid_dye_escape_rate_beta: settings.fluid_dye_escape_rate_beta,
@@ -5425,6 +5459,7 @@ impl GpuState {
             trail_decay: settings.trail_decay,
             trail_opacity: settings.trail_opacity,
             trail_show: settings.trail_show,
+            trail_show_energy: settings.trail_show_energy,
             interior_isotropic: settings.interior_isotropic,
             ignore_stop_codons: settings.ignore_stop_codons,
             require_start_codon: settings.require_start_codon,
@@ -6187,6 +6222,8 @@ impl GpuState {
             fluid_ooze_fade_rate: self.fluid_ooze_fade_rate,
             fluid_ooze_rate_beta: self.fluid_ooze_rate_beta,
             fluid_ooze_fade_rate_beta: self.fluid_ooze_fade_rate_beta,
+            fluid_ooze_rate_gamma: self.fluid_ooze_rate_gamma,
+            fluid_ooze_fade_rate_gamma: self.fluid_ooze_fade_rate_gamma,
             fluid_ooze_still_rate: self.fluid_ooze_still_rate,
             fluid_dye_escape_rate: self.fluid_dye_escape_rate,
             fluid_dye_escape_rate_beta: self.fluid_dye_escape_rate_beta,
@@ -6207,6 +6244,7 @@ impl GpuState {
             trail_decay: self.trail_decay,
             trail_opacity: self.trail_opacity,
             trail_show: self.trail_show,
+            trail_show_energy: self.trail_show_energy,
             interior_isotropic: self.interior_isotropic,
             ignore_stop_codons: self.ignore_stop_codons,
             require_start_codon: self.require_start_codon,
@@ -6878,7 +6916,11 @@ impl GpuState {
             trail_diffusion: self.trail_diffusion,
             trail_decay: self.trail_decay,
             trail_opacity: self.trail_opacity,
-            trail_show: if self.trail_show { 1 } else { 0 },
+            trail_show: if self.trail_show {
+                if self.trail_show_energy { 2 } else { 1 }
+            } else {
+                0
+            },
             interior_isotropic: if self.interior_isotropic { 1 } else { 0 },
             ignore_stop_codons: if self.ignore_stop_codons { 1 } else { 0 },
             require_start_codon: if self.require_start_codon { 1 } else { 0 },
@@ -6941,7 +6983,7 @@ impl GpuState {
 
         // Update fluid params (dt is the user-controlled fluid solver dt)
         {
-            let fluid_params_f32: [f32; 24] = [
+            let fluid_params_f32: [f32; 28] = [
                 self.epoch as f32,         // time
                 self.fluid_dt,             // dt
                 self.fluid_decay,          // decay
@@ -6963,7 +7005,9 @@ impl GpuState {
                 self.fluid_dye_escape_rate,
                 self.fluid_dye_escape_rate_beta,
                 self.dye_precipitation,
-                0.0,
+                self.fluid_ooze_rate_gamma,
+                self.fluid_ooze_fade_rate_gamma,
+                0.0, 0.0, 0.0,
             ];
             let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
             self.queue
@@ -7114,12 +7158,6 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
 
-                // Drain energy from neighbors (vampire mouths) - workgroup_size(256)
-                // Must run BEFORE process_agents so agents see the drained energy
-                cpass.set_pipeline(&self.drain_energy_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
-
                 // Clear fluid force vectors before agents write to it
                 let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
                 cpass.set_pipeline(&self.clear_fluid_force_vectors_pipeline);
@@ -7131,6 +7169,13 @@ impl GpuState {
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
+
+                // Drain energy from neighbors (vampire mouths) - workgroup_size(256)
+                // Runs after process_agents so it can operate on agents_out without requiring
+                // write access to agents_in (which would slow down all compute).
+                cpass.set_pipeline(&self.drain_energy_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
             }
         }
 
@@ -7155,7 +7200,7 @@ impl GpuState {
                     // Inject a deterministic point-force "fumarole" for debugging/visual validation.
                     cpass.set_pipeline(&self.fluid_fumarole_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(1, 1, 1);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
                     cpass.set_pipeline(&self.fluid_generate_forces_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
@@ -7234,7 +7279,7 @@ impl GpuState {
                     // This keeps the point source visible even under strong local flow.
                     cpass.set_pipeline(&self.fluid_fumarole_dye_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(1, 1, 1);
+                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
 
                     // 12. Advect agent trails with velocity field (trail_grid_inject -> trail_grid)
                     cpass.set_pipeline(&self.fluid_advect_trail_pipeline);
@@ -9888,7 +9933,7 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.fluid_ooze_fade_rate,
-                                                                0.0..=100.0,
+                                                                0.0..=500.0,
                                                             )
                                                             .text("Chem Speed Max Lift (Alpha)"),
                                                         );
@@ -9901,9 +9946,25 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.fluid_ooze_fade_rate_beta,
-                                                                0.0..=100.0,
+                                                                0.0..=500.0,
                                                             )
                                                             .text("Chem Speed Max Lift (Beta)"),
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_ooze_rate_gamma,
+                                                                0.0..=100.0,
+                                                            )
+                                                            .text("Chem Speed Equilibrium (Gamma)"),
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.fluid_ooze_fade_rate_gamma,
+                                                                0.0..=500.0,
+                                                            )
+                                                            .text("Chem Speed Max Lift (Gamma)"),
                                                         );
 
                                                         ui.add(
@@ -10533,6 +10594,13 @@ fn main() {
                                                         ui.checkbox(
                                                             &mut state.trail_show,
                                                             "Show Trails Only (overrides alpha/beta/gamma; black background)",
+                                                        );
+                                                        ui.add_enabled(
+                                                            state.trail_show,
+                                                            egui::Checkbox::new(
+                                                                &mut state.trail_show_energy,
+                                                                "Show Energy Trail (instead of trail color)",
+                                                            ),
                                                         );
                                                         if state.trail_show {
                                                             ui.label(

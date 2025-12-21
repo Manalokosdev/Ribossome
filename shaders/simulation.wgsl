@@ -8,7 +8,9 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let agent = agents_in[agent_id];
+    // NOTE: This pass is intended to run after process_agents so that it can
+    // operate on the fully materialized per-agent state in agents_out.
+    let agent = agents_out[agent_id];
 
     // Skip dead agents
     if (agent.alive == 0u || agent.energy <= 0.0) {
@@ -20,33 +22,37 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Check if this agent has any vampire mouth organs (type 33)
-    let body_count = agent.body_count;
-    var has_vampire_mouth = false;
-
-    for (var i = 0u; i < MAX_BODY_PARTS; i++) {
-        if (i >= body_count) { break; }
-        let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
+    // Collect vampire mouth organ indices (type 33) and whether this agent has any disablers (type 26).
+    // This lets us iterate only vampire mouths later, instead of scanning every body part.
+    let body_count = min(agent.body_count, MAX_BODY_PARTS);
+    var vampire_mouth_indices: array<u32, MAX_BODY_PARTS>;
+    var vampire_mouth_count = 0u;
+    var has_disabler = false;
+    for (var i = 0u; i < body_count; i++) {
+        let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
         if (base_type == 33u) {
-            has_vampire_mouth = true;
-            break;
+            vampire_mouth_indices[vampire_mouth_count] = i;
+            vampire_mouth_count += 1u;
+        } else if (base_type == 26u) {
+            has_disabler = true;
         }
     }
-
-    if (!has_vampire_mouth) {
+    if (vampire_mouth_count == 0u) {
         return;
     }
 
     // Collect nearby agents using spatial grid
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
-    let my_grid_x = u32(clamp(agents_in[agent_id].position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-    let my_grid_y = u32(clamp(agents_in[agent_id].position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    let my_grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    let my_grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
 
     var neighbor_count = 0u;
     var neighbor_ids: array<u32, 64>;
 
     for (var dy: i32 = -10; dy <= 10; dy++) {
+        if (neighbor_count >= 64u) { break; }
         for (var dx: i32 = -10; dx <= 10; dx++) {
+            if (neighbor_count >= 64u) { break; }
             if (dx == 0 && dy == 0) { continue; }
 
             let check_x = i32(my_grid_x) + dx;
@@ -61,7 +67,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
 
                 if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                    let neighbor = agents_in[neighbor_id];
+                    let neighbor = agents_out[neighbor_id];
 
                     if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                         if (neighbor_count < 64u) {
@@ -74,42 +80,41 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // No neighbors to drain
-    if (neighbor_count == 0u) {
-        return;
-    }
+    let has_neighbors = neighbor_count != 0u;
 
     // Process each vampire mouth organ (F=4u, G=5u, H=6u)
     var total_energy_gained = 0.0;
 
-    for (var i = 0u; i < MAX_BODY_PARTS; i++) {
-        if (i >= body_count) { break; }
-        let part = agents_in[agent_id].body[i];
-        let base_type = get_base_part_type(part.part_type);
+    for (var mi = 0u; mi < vampire_mouth_count; mi++) {
+        let i = vampire_mouth_indices[mi];
+        let part = agents_out[agent_id].body[i];
+        let mouth_local_pos = part.pos;
 
-        // Check if this is a vampire mouth organ (type 33)
-        if (base_type == 33u) {
+        // World position for this mouth. Keep this computed regardless of enable state so
+        // we can always update the tracking data.
+        let rotated_pos = apply_agent_rotation(mouth_local_pos, agent.rotation);
+        let mouth_world_pos = agent.position + rotated_pos;
+
             // Cooldown timer (stored in _pad.x) should tick regardless of enable state
-            var current_cooldown = agents_in[agent_id].body[i]._pad.x;
+            var current_cooldown = agents_out[agent_id].body[i]._pad.x;
             if (current_cooldown > 0.0) {
                 current_cooldown -= 1.0;
-                agents_in[agent_id].body[i]._pad.x = current_cooldown;
+                agents_out[agent_id].body[i]._pad.x = current_cooldown;
             }
-
-            // Local position (relative to agent center) for this mouth organ
-            let mouth_local_pos = part.pos;
 
             // Disabler gating:
             // Vampire mouths act by default, but are suppressed when "inhibitor/enabler" organs
             // (type 26) are placed nearby on the same agent body.
             var block = 0.0;
-            for (var j = 0u; j < min(body_count, MAX_BODY_PARTS); j++) {
-                let check_type = get_base_part_type(agents_in[agent_id].body[j].part_type);
-                if (check_type == 26u) {  // "Enabler" used as disabler for vampire mouths
-                    let disabler_pos = agents_in[agent_id].body[j].pos;
-                    let d = length(mouth_local_pos - disabler_pos);
-                    if (d < 20.0) {
-                        block += max(0.0, 1.0 - d / 20.0);
+            if (has_disabler) {
+                for (var j = 0u; j < body_count; j++) {
+                    let check_type = get_base_part_type(agents_out[agent_id].body[j].part_type);
+                    if (check_type == 26u) {  // "Enabler" used as disabler for vampire mouths
+                        let disabler_pos = agents_out[agent_id].body[j].pos;
+                        let d = length(mouth_local_pos - disabler_pos);
+                        if (d < 20.0) {
+                            block += max(0.0, 1.0 - d / 20.0);
+                        }
                     }
                 }
             }
@@ -119,18 +124,10 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Only work if not fully suppressed
             if (mouth_activity > 0.0001) {
-
-                // Get mouth world position
-                let rotated_pos = apply_agent_rotation(mouth_local_pos, agents_in[agent_id].rotation);
-                let mouth_world_pos = agents_in[agent_id].position + rotated_pos;
-
-                // Previous mouth world position (packed into part.data).
-                // If uninitialized, treat prev as current to avoid huge bogus deltas.
-                var prev_world_pos = unpack_position_from_f32(part.data, f32(SIM_SIZE));
-                if (part.data == 0.0) {
-                    prev_world_pos = mouth_world_pos;
-                }
-
+                // If we have no neighbor candidates, skip the victim search/drain work.
+                if (!has_neighbors) {
+                    agents_out[agent_id].body[i]._pad.y = 0.0;
+                } else {
                 // Find closest victim within drain range
                 var closest_victim_id = 0xFFFFFFFFu;
                 var closest_dist = 999999.0;
@@ -139,7 +136,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 for (var n = 0u; n < neighbor_count; n++) {
                     let victim_id = neighbor_ids[n];
                     // Only read victim position for distance check (not energy yet)
-                    let victim_pos = agents_in[victim_id].position;
+                    let victim_pos = agents_out[victim_id].position;
 
                     // Distance from mouth to victim center
                     let delta = mouth_world_pos - victim_pos;
@@ -156,7 +153,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Try to claim the victim's spatial grid cell atomically
                     // This prevents multiple DIFFERENT vampires from draining the same victim simultaneously
                     // But allows the same vampire to drain with multiple mouths
-                    let victim_pos = agents_in[closest_victim_id].position;
+                    let victim_pos = agents_out[closest_victim_id].position;
                     let victim_scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
                     let victim_grid_x = u32(clamp(victim_pos.x * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
                     let victim_grid_y = u32(clamp(victim_pos.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
@@ -188,15 +185,15 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Only proceed if we can drain this victim AND cooldown is ready
                     if (can_drain && current_cooldown <= 0.0) {
                         // Vampire drain scales down with disabler suppression AND mouth movement speed
-                        let victim_energy = agents_in[closest_victim_id].energy;
+                        let victim_energy = agents_out[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
                             // Linear speed-based absorption reduction using RELATIVE victim speed.
                             // IMPORTANT: don't use mouth-tip delta here; rotation can make the tip move far
                             // faster than VEL_MAX even when the agent is behaving normally, which would
                             // zero-out vampire drains permanently.
-                            let agent_vel = agents_in[agent_id].velocity;
-                            let victim_vel = agents_in[closest_victim_id].velocity;
+                            let agent_vel = agent.velocity;
+                            let victim_vel = agents_out[closest_victim_id].velocity;
                             let rel_speed = length(agent_vel - victim_vel);
                             let normalized_rel_speed = min(rel_speed / VEL_MAX, 1.0);
                             let speed_multiplier = clamp(1.0 - normalized_rel_speed, 0.0, 1.0);
@@ -206,17 +203,17 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                             // Victim loses 2x the absorbed energy.
                             let energy_damage = absorbed_energy * 2.0;
-                            agents_in[closest_victim_id].energy = max(0.0, victim_energy - energy_damage);
+                            agents_out[closest_victim_id].energy = max(0.0, victim_energy - energy_damage);
 
                             total_energy_gained += absorbed_energy;
 
                             // Store absorbed amount in _pad.y for visualization
-                            agents_in[agent_id].body[i]._pad.y = absorbed_energy;
+                            agents_out[agent_id].body[i]._pad.y = absorbed_energy;
 
                             // Set cooldown timer
-                            agents_in[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
+                            agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
                         } else {
-                            agents_in[agent_id].body[i]._pad.y = 0.0;
+                            agents_out[agent_id].body[i]._pad.y = 0.0;
                         }
 
                     } else {
@@ -224,25 +221,20 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 } else {
                     // Failed to claim - another vampire got here first
-                    agents_in[agent_id].body[i]._pad.y = 0.0;
+                    agents_out[agent_id].body[i]._pad.y = 0.0;
+                }
                 }
             } else {
-                agents_in[agent_id].body[i]._pad.y = 0.0;
+                agents_out[agent_id].body[i]._pad.y = 0.0;
             }
 
             // Store current position for next frame's movement calculation
-            let rotated_pos = apply_agent_rotation(mouth_local_pos, agents_in[agent_id].rotation);
-            let mouth_world_pos = agents_in[agent_id].position + rotated_pos;
-            agents_in[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
-        } else {
-            // Not a vampire mouth
-            agents_in[agent_id].body[i]._pad.y = 0.0;
-        }
+            agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
     }
 
     // Add gained energy to this agent
     if (total_energy_gained > 0.0) {
-        agents_in[agent_id].energy += total_energy_gained;
+        agents_out[agent_id].energy += total_energy_gained;
     }
 }
 
@@ -2219,15 +2211,15 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Apply conservation correction: maintain the current value when strength is zero
     let a_blur = clamp(mix(current_alpha, a_total, alpha_conv_strength), 0.0, 1.0);
     let b_blur = clamp(mix(current_beta, b_total, beta_conv_strength), 0.0, 1.0);
-    let g_blur = clamp(mix(current_gamma, g_total, gamma_strength), 0.0, 1.0);
+    let g_blur = max(mix(current_gamma, g_total, gamma_strength), 0.0);
 
     // Layer the fluid-directed convolution on top of the classic blur+slope result.
     // The a_blur/b_blur/g_blur values already incorporate the mix with current values.
     // Persistence applies as decay to alpha/beta.
     var final_alpha = clamp(mix(alpha_base, a_blur, alpha_conv_strength) * persistence, 0.0, 1.0);
     var final_beta = clamp(mix(beta_base, b_blur, beta_conv_strength) * persistence, 0.0, 1.0);
-    // Gamma shift is terrain transport; keep it bounded but do not apply persistence decay.
-    var final_gamma = clamp(g_blur, 0.0, 1.0);
+    // Gamma shift is terrain transport; do not apply persistence decay.
+    var final_gamma = max(g_blur, 0.0);
 
     // Stochastic rain - randomly add food/poison droplets (saturated drops)
     // Use position and random seed to generate unique random values per cell
@@ -2569,18 +2561,18 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Bicubic (smoothest)
         alpha = clamp(sample_grid_bicubic(world_pos, 0u), 0.0, 1.0);
         beta = clamp(sample_grid_bicubic(world_pos, 1u), 0.0, 1.0);
-        gamma = clamp(sample_grid_bicubic(world_pos, 2u), 0.0, 1.0);
+        gamma = max(sample_grid_bicubic(world_pos, 2u), 0.0);
     } else if (params.grid_interpolation == 1u) {
         // Bilinear (smooth)
         alpha = clamp(sample_grid_bilinear(world_pos, 0u), 0.0, 1.0);
         beta = clamp(sample_grid_bilinear(world_pos, 1u), 0.0, 1.0);
-        gamma = clamp(sample_grid_bilinear(world_pos, 2u), 0.0, 1.0);
+        gamma = max(sample_grid_bilinear(world_pos, 2u), 0.0);
     } else {
         // Nearest neighbor (pixelated)
         let c = chem_grid[grid_index(world_pos)];
         alpha = clamp(c.x, 0.0, 1.0);
         beta = clamp(c.y, 0.0, 1.0);
-        gamma = clamp(read_gamma_height(grid_index(world_pos)), 0.0, 1.0);
+        gamma = max(read_gamma_height(grid_index(world_pos)), 0.0);
     }
 
     // Hide gamma if requested (treat gamma exactly like alpha/beta, no normalization)
@@ -2760,17 +2752,29 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // ====== RGB TRAIL OVERLAY ======
-    // Sample trail grid and blend onto the visual output
-    let trail_color = clamp(trail_grid[grid_index(world_pos)].xyz, vec3<f32>(0.0), vec3<f32>(1.0));
+    // ====== TRAIL OVERLAY ======
+    // trail_grid stores RGB dye trail + energy trail in W (unclamped).
+    let trail_cell = trail_grid[grid_index(world_pos)];
+    let trail_color = clamp(trail_cell.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
+    let trail_energy = max(trail_cell.w, 0.0);
 
-    // Trail-only mode: show just the trail on black background
-    if (params.trail_show != 0u) {
+    // Trail visualization modes:
+    // 0 = normal (add RGB trails onto base)
+    // 1 = trails-only (RGB)
+    // 2 = trails-only (energy)
+    if (params.trail_show == 1u) {
         let trail_only = trail_color * clamp(params.trail_opacity, 0.0, 1.0);
         visual_grid[visual_idx] = vec4<f32>(trail_only, 1.0);
+    } else if (params.trail_show == 2u) {
+        // Energy is stored as an unclamped accumulator; use sqrt to make small values visible.
+        let v = clamp(sqrt(trail_energy) * clamp(params.trail_opacity, 0.0, 2.0), 0.0, 1.0);
+        visual_grid[visual_idx] = vec4<f32>(vec3<f32>(v), 1.0);
     } else {
-        // Normal mode: additive blending with opacity control (controlled by trail_opacity parameter)
-        let blended_color = clamp(base_color + trail_color * clamp(params.trail_opacity, 0.0, 1.0), vec3<f32>(0.0), vec3<f32>(1.0));
+        let blended_color = clamp(
+            base_color + trail_color * clamp(params.trail_opacity, 0.0, 1.0),
+            vec3<f32>(0.0),
+            vec3<f32>(1.0)
+        );
         visual_grid[visual_idx] = vec4<f32>(blended_color, 1.0);
     }
 }
