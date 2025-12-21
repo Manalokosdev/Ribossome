@@ -65,6 +65,16 @@ const PART_OVERRIDE_SLOTS: usize = 128;
 const PART_OVERRIDE_VEC4S: usize = (PART_OVERRIDE_SLOTS + 3) / 4; // 32
 const PART_OVERRIDES_CSV_PATH: &str = "config/part_base_angle_overrides.csv";
 
+// Part (amino + organ) property table: 42 parts, each with 6x vec4<f32> entries.
+// This mirrors the AMINO_DATA layout in shaders/shared.wgsl.
+const PART_PROPS_VEC4S_PER_PART: usize = 6;
+const PART_PROPS_OVERRIDE_VEC4S_USED: usize = PART_TYPE_COUNT * PART_PROPS_VEC4S_PER_PART; // 252
+// NOTE: Padded to keep bytemuck::Pod/Zeroable derives happy for this array length.
+// Only the first PART_PROPS_OVERRIDE_VEC4S_USED entries are used.
+const PART_PROPS_OVERRIDE_VEC4S: usize = 256;
+const PART_FLAGS_OVERRIDE_VEC4S: usize = (PART_TYPE_COUNT + 3) / 4; // 11
+const PART_PROPERTIES_JSON_PATH: &str = "config/part_properties.json";
+
 const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     // 0–19 amino acids
     "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y",
@@ -74,6 +84,186 @@ const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
     "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2",
 ];
+
+fn ui_part_base_angle_overrides(ui: &mut egui::Ui, state: &mut GpuState) {
+    ui.label("Overrides are in radians. NaN = use shader default.");
+    ui.horizontal(|ui| {
+        if ui.button("Load CSV").clicked() {
+            match load_part_base_angle_overrides_csv(Path::new(PART_OVERRIDES_CSV_PATH)) {
+                Ok(ov) => {
+                    state.part_base_angle_overrides = ov;
+                    state.part_base_angle_overrides_dirty = true;
+                }
+                Err(err) => eprintln!("Failed to load {}: {err:?}", PART_OVERRIDES_CSV_PATH),
+            }
+        }
+        if ui.button("Save CSV").clicked() {
+            if let Err(err) = save_part_base_angle_overrides_csv(
+                Path::new(PART_OVERRIDES_CSV_PATH),
+                &state.part_base_angle_overrides,
+            ) {
+                eprintln!("Failed to save {}: {err:?}", PART_OVERRIDES_CSV_PATH);
+            }
+        }
+        if ui.button("Clear").clicked() {
+            state.part_base_angle_overrides = [f32::NAN; PART_OVERRIDE_SLOTS];
+            state.part_base_angle_overrides_dirty = true;
+        }
+    });
+
+    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+        for i in 0..PART_TYPE_COUNT {
+            ui.horizontal(|ui| {
+                ui.label(format!("{:02} {}", i, PART_TYPE_NAMES[i]));
+
+                let mut enabled = !state.part_base_angle_overrides[i].is_nan();
+                if ui.checkbox(&mut enabled, "override").changed() {
+                    state.part_base_angle_overrides[i] = if enabled { 0.0 } else { f32::NAN };
+                    state.part_base_angle_overrides_dirty = true;
+                }
+
+                if enabled {
+                    let mut v = state.part_base_angle_overrides[i];
+                    let changed = ui.add(egui::DragValue::new(&mut v).speed(0.01)).changed();
+                    ui.label(format!("({:.1}°)", v.to_degrees()));
+                    if changed {
+                        state.part_base_angle_overrides[i] = v;
+                        state.part_base_angle_overrides_dirty = true;
+                    }
+                } else {
+                    ui.label("default");
+                }
+            });
+        }
+    });
+}
+
+fn ui_part_properties_editor_popup(ui: &egui::Ui, state: &mut GpuState) {
+    if !state.show_part_properties_editor {
+        return;
+    }
+
+    const VEC4_LABELS: [[&str; 4]; PART_PROPS_VEC4S_PER_PART] = [
+        ["segment_length", "thickness", "base_angle", "mass"],
+        ["alpha_sens", "beta_sens", "thrust_force", "energy_cons"],
+        ["color_r", "color_g", "color_b", "energy_storage"],
+        ["energy_absorb", "beta_absorb", "beta_damage", "parameter1"],
+        ["signal_decay", "alpha_left", "alpha_right", "beta_left"],
+        ["beta_right", "wind_coupling", "unused_5z", "unused_5w"],
+    ];
+
+    egui::Window::new("Part & Organ Properties")
+        .open(&mut state.show_part_properties_editor)
+        .resizable(true)
+        .vscroll(true)
+        .show(ui.ctx(), |ui| {
+            ui.label("Edits apply immediately (no restart). Save to persist.");
+            ui.label(format!("File: {}", PART_PROPERTIES_JSON_PATH));
+
+            ui.horizontal(|ui| {
+                if ui.button("Load JSON").clicked() {
+                    match load_part_properties_json(Path::new(PART_PROPERTIES_JSON_PATH)) {
+                        Ok((props, flags)) => {
+                            // Start from shader defaults, then apply JSON values.
+                            state.part_props_override = state.part_props_defaults;
+                            for i in 0..PART_PROPS_OVERRIDE_VEC4S_USED {
+                                for c in 0..4 {
+                                    let v = props[i][c];
+                                    if !v.is_nan() {
+                                        state.part_props_override[i][c] = v;
+                                    }
+                                }
+                            }
+
+                            // Flags are intentionally ignored in the editor now.
+                            let _ = flags;
+                            state.part_flags_override = [f32::NAN; PART_TYPE_COUNT];
+                            state.part_properties_dirty = true;
+                        }
+                        Err(err) => eprintln!("Failed to load {}: {err:?}", PART_PROPERTIES_JSON_PATH),
+                    }
+                }
+                if ui.button("Save JSON").clicked() {
+                    if let Err(err) = save_part_properties_json(
+                        Path::new(PART_PROPERTIES_JSON_PATH),
+                        &state.part_props_override,
+                        &state.part_props_defaults,
+                    ) {
+                        eprintln!("Failed to save {}: {err:?}", PART_PROPERTIES_JSON_PATH);
+                    }
+                }
+                if ui.button("Reset ALL to shader defaults").clicked() {
+                    state.part_props_override = state.part_props_defaults;
+                    state.part_flags_override = [f32::NAN; PART_TYPE_COUNT];
+                    state.part_properties_dirty = true;
+                }
+            });
+
+            ui.separator();
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for part_idx in 0..PART_TYPE_COUNT {
+                    let name = PART_TYPE_NAMES[part_idx];
+                    let header = format!("{:02} {}", part_idx, name);
+                    ui.collapsing(header, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.button("Reset this part to defaults").clicked() {
+                                for v in 0..PART_PROPS_VEC4S_PER_PART {
+                                    let k = part_idx * PART_PROPS_VEC4S_PER_PART + v;
+                                    state.part_props_override[k] = state.part_props_defaults[k];
+                                }
+                                state.part_properties_dirty = true;
+                            }
+
+                            ui.label("(numeric values only)");
+                        });
+
+                        // Property vec4 blocks
+                        egui::Grid::new(format!("props_grid_{}", part_idx))
+                            .num_columns(5)
+                            .spacing([10.0, 6.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label("block");
+                                ui.label("field");
+                                ui.label("value");
+                                ui.label("default");
+                                ui.label("delta");
+                                ui.end_row();
+
+                                for v in 0..PART_PROPS_VEC4S_PER_PART {
+                                    let k = part_idx * PART_PROPS_VEC4S_PER_PART + v;
+                                    for c in 0..4 {
+                                        let label = VEC4_LABELS[v][c];
+                                        let def = state.part_props_defaults[k][c];
+                                        let mut val = state.part_props_override[k][c];
+                                        if val.is_nan() {
+                                            val = def;
+                                            state.part_props_override[k][c] = val;
+                                            state.part_properties_dirty = true;
+                                        }
+
+                                        ui.label(format!("v{}", v));
+                                        ui.label(label);
+
+                                        let changed = ui.add(egui::DragValue::new(&mut val).speed(0.01)).changed();
+                                        if changed {
+                                            state.part_props_override[k][c] = val;
+                                            state.part_properties_dirty = true;
+                                        }
+
+                                        ui.label(format!("{:.6}", def));
+                                        ui.label(format!("{:+.6}", val - def));
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    });
+                    ui.separator();
+                }
+            });
+        });
+}
 
 fn pack_part_base_angle_overrides_vec4(overrides: &[f32; PART_OVERRIDE_SLOTS]) -> [[f32; 4]; PART_OVERRIDE_VEC4S] {
     let mut out = [[f32::NAN; 4]; PART_OVERRIDE_VEC4S];
@@ -139,6 +329,269 @@ fn save_part_base_angle_overrides_csv(path: &Path, overrides: &[f32; PART_OVERRI
     }
     fs::write(path, out)?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PartPropertiesJson {
+    // Exactly PART_TYPE_COUNT entries.
+    parts: Vec<PartPropertiesPartJson>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PartPropertiesPartJson {
+    index: usize,
+    name: String,
+    // 6 vec4 blocks, component-wise optional. None = use shader default.
+    vec4: [[Option<f32>; 4]; PART_PROPS_VEC4S_PER_PART],
+    // Optional override of AMINO_FLAGS[t] (bitmask). None = use shader default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flags: Option<u32>,
+}
+
+fn pack_part_flags_override_vec4(overrides: &[f32; PART_TYPE_COUNT]) -> [[f32; 4]; PART_FLAGS_OVERRIDE_VEC4S] {
+    let mut out = [[f32::NAN; 4]; PART_FLAGS_OVERRIDE_VEC4S];
+    for i in 0..PART_TYPE_COUNT {
+        out[i / 4][i & 3] = overrides[i];
+    }
+    out
+}
+
+fn load_part_properties_json(
+    path: &Path,
+) -> anyhow::Result<(
+    [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+    [f32; PART_TYPE_COUNT],
+)> {
+    let text = fs::read_to_string(path)?;
+    let parsed: PartPropertiesJson = serde_json::from_str(&text)?;
+
+    let mut props = [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S];
+    let mut flags = [f32::NAN; PART_TYPE_COUNT];
+
+    for part in parsed.parts {
+        if part.index >= PART_TYPE_COUNT {
+            continue;
+        }
+        for v in 0..PART_PROPS_VEC4S_PER_PART {
+            let dst = part.index * PART_PROPS_VEC4S_PER_PART + v;
+            for c in 0..4 {
+                props[dst][c] = part.vec4[v][c].unwrap_or(f32::NAN);
+            }
+        }
+        flags[part.index] = part.flags.map(|f| f as f32).unwrap_or(f32::NAN);
+    }
+
+    Ok((props, flags))
+}
+
+fn save_part_properties_json(
+    path: &Path,
+    props_override: &[[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+    props_defaults: &[[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let mut parts: Vec<PartPropertiesPartJson> = Vec::with_capacity(PART_TYPE_COUNT);
+    for i in 0..PART_TYPE_COUNT {
+        let mut vec4 = [[None; 4]; PART_PROPS_VEC4S_PER_PART];
+        for v in 0..PART_PROPS_VEC4S_PER_PART {
+            let src = i * PART_PROPS_VEC4S_PER_PART + v;
+            for c in 0..4 {
+                // Always emit a complete numeric table: if somehow NaN is present,
+                // fall back to the shader default.
+                let x = props_override[src][c];
+                let def = props_defaults[src][c];
+                vec4[v][c] = Some(if x.is_nan() { def } else { x });
+            }
+        }
+
+        parts.push(PartPropertiesPartJson {
+            index: i,
+            name: PART_TYPE_NAMES[i].to_string(),
+            vec4,
+            flags: None,
+        });
+    }
+
+    let out = PartPropertiesJson { parts };
+    let json = serde_json::to_string_pretty(&out)?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
+fn parse_shared_wgsl_part_defaults(
+    path: &Path,
+) -> anyhow::Result<(
+    [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+    [u32; PART_TYPE_COUNT],
+)> {
+    let text = fs::read_to_string(path)?;
+
+    // --- Parse AMINO_DATA vec4 list ---
+    let amino_start = text
+        .find("var<private> AMINO_DATA")
+        .ok_or_else(|| anyhow::anyhow!("AMINO_DATA not found"))?;
+    let amino_slice = &text[amino_start..];
+    let amino_end = amino_slice
+        .find("var<private> AMINO_FLAGS")
+        .ok_or_else(|| anyhow::anyhow!("AMINO_FLAGS not found (after AMINO_DATA)"))?;
+    let amino_block = &amino_slice[..amino_end];
+
+    let mut vec4s: Vec<[f32; 4]> = Vec::with_capacity(PART_PROPS_OVERRIDE_VEC4S_USED);
+    let mut i = 0usize;
+    let pat = "vec4<f32>(";
+    while let Some(pos) = amino_block[i..].find(pat) {
+        let start = i + pos + pat.len();
+        let rest = &amino_block[start..];
+        let close = rest
+            .find(')')
+            .ok_or_else(|| anyhow::anyhow!("Unclosed vec4<f32>(...) in AMINO_DATA"))?;
+        let inside = &rest[..close];
+        let mut vals = [0.0f32; 4];
+        let parts: Vec<&str> = inside.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if parts.len() != 4 {
+            return Err(anyhow::anyhow!("Expected 4 floats in vec4, got {}: {inside}", parts.len()));
+        }
+        for k in 0..4 {
+            vals[k] = parts[k].parse::<f32>()?;
+        }
+        vec4s.push(vals);
+        i = start + close + 1;
+    }
+
+    if vec4s.len() != PART_PROPS_OVERRIDE_VEC4S_USED {
+        return Err(anyhow::anyhow!(
+            "Expected {} vec4 entries in AMINO_DATA, found {}",
+            PART_PROPS_OVERRIDE_VEC4S_USED,
+            vec4s.len()
+        ));
+    }
+
+    let mut props = [[0.0f32; 4]; PART_PROPS_OVERRIDE_VEC4S];
+    for (idx, v) in vec4s.into_iter().enumerate() {
+        props[idx] = v;
+    }
+
+    // --- Parse AMINO_FLAGS list ---
+    let flags_start = text
+        .find("var<private> AMINO_FLAGS")
+        .ok_or_else(|| anyhow::anyhow!("AMINO_FLAGS not found"))?;
+    let flags_slice = &text[flags_start..];
+    let paren_open = flags_slice
+        .find('(')
+        .ok_or_else(|| anyhow::anyhow!("AMINO_FLAGS '(' not found"))?;
+
+    // Find the matching closing ')' for the array constructor, accounting for nested parentheses
+    // in expressions like (1u<<9), and ignoring // line comments.
+    let mut depth: i32 = 0;
+    let mut in_line_comment = false;
+    let mut content_start: Option<usize> = None;
+    let mut content_end: Option<usize> = None;
+    let bytes = flags_slice.as_bytes();
+    let mut i = paren_open;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_line_comment {
+            if b == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if b == b'(' {
+            depth += 1;
+            if depth == 1 {
+                content_start = Some(i + 1);
+            }
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                content_end = Some(i);
+                break;
+            }
+        }
+        i += 1;
+    }
+    let content_start = content_start.ok_or_else(|| anyhow::anyhow!("AMINO_FLAGS content start not found"))?;
+    let content_end = content_end.ok_or_else(|| anyhow::anyhow!("AMINO_FLAGS matching ')' not found"))?;
+    let flags_inside = &flags_slice[content_start..content_end];
+
+    // Strip // comments before tokenizing.
+    let mut flags_clean = String::new();
+    for line in flags_inside.lines() {
+        let line = match line.split_once("//") {
+            Some((pre, _)) => pre,
+            None => line,
+        };
+        flags_clean.push_str(line);
+        flags_clean.push('\n');
+    }
+
+    fn eval_flag_expr(expr: &str) -> anyhow::Result<u32> {
+        let e = expr.trim();
+        if e.is_empty() {
+            return Ok(0);
+        }
+        let mut acc: u32 = 0;
+        for term in e.split('|') {
+            let t = term.trim().trim_end_matches(',');
+            if t.is_empty() {
+                continue;
+            }
+            if t == "0u" || t == "0" {
+                continue;
+            }
+            if let Some(sh_pos) = t.find("<<") {
+                // Accept forms like (1u<<9) or 1u<<9
+                let left = t[..sh_pos].trim().trim_start_matches('(').trim();
+                let right = t[sh_pos + 2..]
+                    .trim()
+                    .trim_end_matches(')')
+                    .trim_end_matches('u');
+                let base = left.trim_end_matches('u');
+                let base_v: u32 = base.parse()?;
+                let shift: u32 = right.parse()?;
+                acc |= base_v << shift;
+            } else {
+                let lit = t.trim_end_matches('u').trim_end_matches(')');
+                acc |= lit.parse::<u32>()?;
+            }
+        }
+        Ok(acc)
+    }
+
+    let mut flags_list: Vec<u32> = Vec::with_capacity(PART_TYPE_COUNT);
+    for raw in flags_clean.split(',') {
+        let item = raw.trim();
+        if item.is_empty() {
+            continue;
+        }
+        flags_list.push(eval_flag_expr(item)?);
+        if flags_list.len() == PART_TYPE_COUNT {
+            break;
+        }
+    }
+    if flags_list.len() != PART_TYPE_COUNT {
+        return Err(anyhow::anyhow!(
+            "Expected {} AMINO_FLAGS entries, found {}",
+            PART_TYPE_COUNT,
+            flags_list.len()
+        ));
+    }
+    let mut flags = [0u32; PART_TYPE_COUNT];
+    for (idx, v) in flags_list.into_iter().enumerate() {
+        flags[idx] = v;
+    }
+
+    Ok((props, flags))
 }
 
 // Selected-agent CPU readback: use a small ring buffer so we can request ~60Hz updates
@@ -1161,6 +1614,9 @@ struct SimParams {
     beta_slope_bias: f32,
     alpha_multiplier: f32,
     beta_multiplier: f32,
+    // Global scalar for rain/precipitation injection into chem grids.
+    // 0 disables precipitation entirely.
+    dye_precipitation: f32,
     chemical_slope_scale_alpha: f32,
     chemical_slope_scale_beta: f32,
     mutation_rate: f32,
@@ -1288,11 +1744,23 @@ struct EnvironmentInitParams {
     // Part base-angle overrides: packed vec4s with NaN sentinel (NaN = use shader default).
     // 128 slots reserved.
     part_angle_override: [[f32; 4]; PART_OVERRIDE_VEC4S],
+
+    // Part property overrides: 42 parts × 6 vec4 blocks.
+    // NaN sentinel per component means "use shader default".
+    part_props_override: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+
+    // Optional override of AMINO_FLAGS bitmask.
+    // Packed as vec4<f32> lanes with NaN sentinel = "use shader default".
+    part_flags_override: [[f32; 4]; PART_FLAGS_OVERRIDE_VEC4S],
 }
 
 // Keep host layout in sync with the WGSL uniform buffer (std140).
-// Previous EnvironmentInitParams was 128 bytes; we now append a 32x vec4 override table (512 bytes).
-const _: [(); 640] = [(); std::mem::size_of::<EnvironmentInitParams>()];
+// Keep host layout in sync with the WGSL uniform buffer (std140).
+// Previous EnvironmentInitParams was 128 bytes; we appended:
+// - base-angle overrides: 32x vec4 (512 bytes)
+// - part props overrides: 256x vec4 (4096 bytes; padded, only first 252 used)
+// - part flags overrides: 11x vec4 (176 bytes)
+const _: [(); 4912] = [(); std::mem::size_of::<EnvironmentInitParams>()];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AutoDifficultyParam {
@@ -1361,6 +1829,7 @@ fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
 fn default_dye_alpha_color() -> [f32; 3] { [0.0, 1.0, 0.0] }
 fn default_dye_beta_color() -> [f32; 3] { [1.0, 0.0, 0.0] }
+fn default_dye_precipitation() -> f32 { 1.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -1448,6 +1917,8 @@ struct SimulationSettings {
     beta_slope_bias: f32,
     alpha_multiplier: f32,
     beta_multiplier: f32,
+    #[serde(default = "default_dye_precipitation")]
+    dye_precipitation: f32,
     alpha_rain_map_path: Option<PathBuf>,
     beta_rain_map_path: Option<PathBuf>,
     chemical_slope_scale_alpha: f32,
@@ -1564,6 +2035,7 @@ impl Default for SimulationSettings {
             beta_slope_bias: 5.0,
             alpha_multiplier: 0.0001,
             beta_multiplier: 0.0,
+            dye_precipitation: 1.0,
             alpha_rain_map_path: None,
             beta_rain_map_path: None,
             chemical_slope_scale_alpha: 0.1,
@@ -1784,7 +2256,7 @@ impl SimulationSettings {
 
     fn sanitize(&mut self) {
         self.camera_zoom = self.camera_zoom.clamp(0.1, 2000.0);
-        self.spawn_probability = self.spawn_probability.clamp(0.0, 1.0);
+        self.spawn_probability = self.spawn_probability.clamp(0.0, 5.0);
         self.death_probability = self.death_probability.clamp(0.0, 0.1);
         self.mutation_rate = self.mutation_rate.clamp(0.0, 0.1);
         // auto_replenish requires no sanitizing
@@ -1800,6 +2272,7 @@ impl SimulationSettings {
         self.beta_slope_bias = self.beta_slope_bias.clamp(-10.0, 10.0);
         self.alpha_multiplier = self.alpha_multiplier.clamp(0.0, 0.001);
         self.beta_multiplier = self.beta_multiplier.clamp(0.0, 0.001);
+        self.dye_precipitation = self.dye_precipitation.clamp(0.0, 1.0);
         self.chemical_slope_scale_alpha = self.chemical_slope_scale_alpha.clamp(0.0, 1.0);
         self.chemical_slope_scale_beta = self.chemical_slope_scale_beta.clamp(0.0, 1.0);
         self.food_power = self.food_power.clamp(0.0, 10.0);
@@ -1936,6 +2409,19 @@ struct GpuState {
     // Part base-angle overrides (radians). NaN means: use shader default.
     part_base_angle_overrides: [f32; PART_OVERRIDE_SLOTS],
     part_base_angle_overrides_dirty: bool,
+
+    // Part (amino + organ) property overrides, mirroring shaders/shared.wgsl AMINO_DATA layout.
+    // NaN sentinel per component means: use shader default.
+    part_props_override: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+    part_flags_override: [f32; PART_TYPE_COUNT], // NaN sentinel = use shader default; stored as numeric bitmask
+    part_properties_dirty: bool,
+
+    // Parsed shader defaults (for UI to show effective values).
+    part_props_defaults: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+    part_flags_defaults: [u32; PART_TYPE_COUNT],
+
+    // UI
+    show_part_properties_editor: bool,
 
     // Fluid simulation pipelines
     fluid_generate_forces_pipeline: wgpu::ComputePipeline,
@@ -2104,6 +2590,7 @@ struct GpuState {
     beta_slope_bias: f32,
     alpha_multiplier: f32,
     beta_multiplier: f32,
+    dye_precipitation: f32,
     alpha_rain_map_path: Option<PathBuf>,
     beta_rain_map_path: Option<PathBuf>,
     alpha_rain_variation: f32,
@@ -2268,6 +2755,7 @@ impl GpuState {
         self.beta_slope_bias = settings.beta_slope_bias;
         self.alpha_multiplier = settings.alpha_multiplier;
         self.beta_multiplier = settings.beta_multiplier;
+        self.dye_precipitation = settings.dye_precipitation;
         self.alpha_rain_map_path = settings.alpha_rain_map_path;
         self.beta_rain_map_path = settings.beta_rain_map_path;
         self.chemical_slope_scale_alpha = settings.chemical_slope_scale_alpha;
@@ -2416,6 +2904,8 @@ impl GpuState {
             gamma_noise_scale: self.gamma_noise_scale,
             noise_power: self.noise_power,
             part_angle_override: pack_part_base_angle_overrides_vec4(&self.part_base_angle_overrides),
+            part_props_override: self.part_props_override,
+            part_flags_override: pack_part_flags_override_vec4(&self.part_flags_override),
         };
 
         self.environment_init_cpu = params;
@@ -2800,6 +3290,8 @@ impl GpuState {
             gamma_noise_scale: 1.0,
             noise_power: 1.0,
             part_angle_override: pack_part_base_angle_overrides_vec4(&[f32::NAN; PART_OVERRIDE_SLOTS]),
+            part_props_override: [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S],
+            part_flags_override: [[f32::NAN; 4]; PART_FLAGS_OVERRIDE_VEC4S],
         };
 
         let environment_init_params_buffer =
@@ -2860,6 +3352,7 @@ impl GpuState {
             beta_slope_bias: 5.0,
             alpha_multiplier: 0.0001, // Rain probability: 0.01% per cell per frame
             beta_multiplier: 0.0,     // Poison rain disabled
+            dye_precipitation: 1.0,
             chemical_slope_scale_alpha: 0.1,
             chemical_slope_scale_beta: 0.1,
             mutation_rate: 0.005,
@@ -4093,7 +4586,7 @@ impl GpuState {
         // FLUID SIMULATION PIPELINES (buffers already created above, before bind groups)
         // ============================================================================
 
-        // Fluid params buffer (flat f32 array, packed as 5x vec4<f32> in WGSL).
+        // Fluid params buffer (flat f32 array, packed as 6x vec4<f32> in WGSL).
         // Indices must match shaders/fluid.wgsl FP_* constants.
         let fluid_params_f32: [f32; 24] = [
             0.0,                       // time
@@ -4112,7 +4605,8 @@ impl GpuState {
             0.0,                       // beta chem speed max lift
             0.0,                       // dye_escape_rate_alpha
             0.0,                       // dye_escape_rate_beta
-            0.0, 0.0,                  // pad to 24 floats (6 vec4s)
+            1.0,                       // dye_deposit_scale (dye -> chem)
+            0.0,                       // reserved
         ];
         let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
 
@@ -4830,6 +5324,7 @@ impl GpuState {
             beta_slope_bias: settings.beta_slope_bias,
             alpha_multiplier: settings.alpha_multiplier,
             beta_multiplier: settings.beta_multiplier,
+            dye_precipitation: settings.dye_precipitation,
             alpha_rain_variation: settings.alpha_rain_variation,
             beta_rain_variation: settings.beta_rain_variation,
             alpha_rain_phase: settings.alpha_rain_phase,
@@ -4959,6 +5454,12 @@ impl GpuState {
             environment_init_cpu: environment_init,
             part_base_angle_overrides: [f32::NAN; PART_OVERRIDE_SLOTS],
             part_base_angle_overrides_dirty: false,
+            part_props_override: [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S],
+            part_flags_override: [f32::NAN; PART_TYPE_COUNT],
+            part_properties_dirty: false,
+            part_props_defaults: [[0.0; 4]; PART_PROPS_OVERRIDE_VEC4S],
+            part_flags_defaults: [0u32; PART_TYPE_COUNT],
+            show_part_properties_editor: false,
             destroyed: false,
         };
 
@@ -4979,6 +5480,53 @@ impl GpuState {
                 bytemuck::bytes_of(&state.environment_init_cpu),
             );
             state.part_base_angle_overrides_dirty = false;
+        }
+
+        // Parse shader defaults for the part property editor.
+        match parse_shared_wgsl_part_defaults(Path::new("shaders/shared.wgsl")) {
+            Ok((props, flags)) => {
+                state.part_props_defaults = props;
+                state.part_flags_defaults = flags;
+
+                // Prefer a fully-populated numeric table: start overrides from defaults.
+                state.part_props_override = state.part_props_defaults;
+                state.part_flags_override = [f32::NAN; PART_TYPE_COUNT];
+                state.part_properties_dirty = true;
+            }
+            Err(err) => {
+                eprintln!("Warning: failed to parse shaders/shared.wgsl defaults: {err:?}");
+            }
+        }
+
+        // Load part properties (amino + organ) from JSON, if present.
+        if let Ok((props, flags)) = load_part_properties_json(Path::new(PART_PROPERTIES_JSON_PATH)) {
+            // Merge JSON on top of defaults.
+            for i in 0..PART_PROPS_OVERRIDE_VEC4S_USED {
+                for c in 0..4 {
+                    let v = props[i][c];
+                    if !v.is_nan() {
+                        state.part_props_override[i][c] = v;
+                    }
+                }
+            }
+
+            // Flags are intentionally ignored in the editor now.
+            let _ = flags;
+            state.part_flags_override = [f32::NAN; PART_TYPE_COUNT];
+            state.part_properties_dirty = true;
+        }
+
+        // Apply part-properties overrides immediately so simulation/render match from the first frame.
+        if state.part_properties_dirty {
+            state.environment_init_cpu.part_props_override = state.part_props_override;
+            state.environment_init_cpu.part_flags_override =
+                pack_part_flags_override_vec4(&state.part_flags_override);
+            state.queue.write_buffer(
+                &state.environment_init_params_buffer,
+                0,
+                bytemuck::bytes_of(&state.environment_init_cpu),
+            );
+            state.part_properties_dirty = false;
         }
         profiler.mark("GpuState constructed");
 
@@ -5607,6 +6155,7 @@ impl GpuState {
             beta_slope_bias: self.beta_slope_bias,
             alpha_multiplier: self.alpha_multiplier,
             beta_multiplier: self.beta_multiplier,
+            dye_precipitation: self.dye_precipitation,
             alpha_rain_map_path: self.alpha_rain_map_path.clone(),
             beta_rain_map_path: self.beta_rain_map_path.clone(),
             chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
@@ -6075,6 +6624,18 @@ impl GpuState {
             self.part_base_angle_overrides_dirty = false;
         }
 
+        if self.part_properties_dirty {
+            self.environment_init_cpu.part_props_override = self.part_props_override;
+            self.environment_init_cpu.part_flags_override =
+                pack_part_flags_override_vec4(&self.part_flags_override);
+            self.queue.write_buffer(
+                &self.environment_init_params_buffer,
+                0,
+                bytemuck::bytes_of(&self.environment_init_cpu),
+            );
+            self.part_properties_dirty = false;
+        }
+
         // Smooth camera following with continuous integration
         if self.follow_selected_agent {
             // Store previous camera position for motion blur
@@ -6207,7 +6768,10 @@ impl GpuState {
 
         let effective_dt = if should_run_simulation { 0.016 } else { 0.0 };
         let effective_spawn_p = if should_run_simulation {
-            self.difficulty.spawn_prob.apply_to(self.spawn_probability, false)
+            self.difficulty
+                .spawn_prob
+                .apply_to(self.spawn_probability, false)
+                .clamp(0.0, 5.0)
         } else {
             0.0
         };
@@ -6246,6 +6810,7 @@ impl GpuState {
             beta_slope_bias: self.beta_slope_bias,
             alpha_multiplier: current_alpha,
             beta_multiplier: current_beta,
+            dye_precipitation: self.dye_precipitation,
             chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
             chemical_slope_scale_beta: self.chemical_slope_scale_beta,
             mutation_rate: self.mutation_rate,
@@ -6372,7 +6937,7 @@ impl GpuState {
                 self.fluid_ooze_fade_rate_beta,
                 self.fluid_dye_escape_rate,
                 self.fluid_dye_escape_rate_beta,
-                0.0,
+                self.dye_precipitation,
                 0.0,
             ];
             let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
@@ -8780,6 +9345,7 @@ fn main() {
                                                     ("Difficulty", egui::Color32::from_rgb(60, 50, 50)),
                                                     ("Visualization", egui::Color32::from_rgb(55, 55, 55)),
                                                     ("Fluid", egui::Color32::from_rgb(50, 55, 60)),
+                                                    ("Overrides", egui::Color32::from_rgb(55, 55, 55)),
                                                 ];
 
                                                 for (idx, (name, color)) in tab_colors.iter().enumerate() {
@@ -8804,6 +9370,7 @@ fn main() {
                                                 4 => egui::Color32::from_rgb(60, 50, 50),  // Difficulty - red-gray
                                                 5 => egui::Color32::from_rgb(55, 55, 55),  // Visualization - neutral gray
                                                 6 => egui::Color32::from_rgb(50, 55, 60),  // Fluid - blue-gray
+                                                7 => egui::Color32::from_rgb(55, 55, 55),  // Overrides - neutral gray
                                                 _ => egui::Color32::from_rgb(50, 50, 50),
                                             };
 
@@ -8811,7 +9378,36 @@ fn main() {
                                             let remaining_rect = ui.available_rect_before_wrap();
                                             ui.painter().rect_filled(remaining_rect, 0.0, tab_color);
 
+                                            // Popup window (rendered regardless of active tab).
+                                            ui_part_properties_editor_popup(ui, state);
+
                                             match state.ui_tab {
+                                                7 => {
+                                                    // Overrides tab
+                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                                        ui.heading("Overrides");
+
+                                                        ui.separator();
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Edit Part & Organ Properties...").clicked() {
+                                                                state.show_part_properties_editor = true;
+                                                            }
+                                                            if ui.button("Save Part Properties JSON").clicked() {
+                                                                if let Err(err) = save_part_properties_json(
+                                                                    Path::new(PART_PROPERTIES_JSON_PATH),
+                                                                    &state.part_props_override,
+                                                                    &state.part_props_defaults,
+                                                                ) {
+                                                                    eprintln!("Failed to save {}: {err:?}", PART_PROPERTIES_JSON_PATH);
+                                                                }
+                                                            }
+                                                        });
+
+                                                        ui.separator();
+                                                        ui.heading("Part Base-Angle Overrides");
+                                                        ui_part_base_angle_overrides(ui, state);
+                                                    });
+                                                }
                                                 0 => {
                                                     // Simulation tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -9087,7 +9683,7 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.spawn_probability,
-                                                                0.0..=1.0,
+                                                                0.0..=5.0,
                                                             )
                                                             .text("Pairing Probability"),
                                                         );
@@ -9380,6 +9976,11 @@ fn main() {
                                                             egui::Slider::new(&mut state.alpha_multiplier, 0.0..=0.01)
                                                                 .text("Rain Probability"),
                                                         );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.dye_precipitation, 0.0..=1.0)
+                                                                .text("Dye Precipitation"),
+                                                        )
+                                                        .on_hover_text("Scales rain/precipitation injection into the chem grids. 0 disables precipitation entirely.");
                                                         ui.checkbox(&mut state.rain_debug_visual, "≡ƒÄ¿ Show Rain Pattern");
                                                         if state.rain_debug_visual {
                                                             ui.label("≡ƒƒó Green = Alpha (food) | ≡ƒö┤ Red = Beta (poison)");
@@ -10783,58 +11384,7 @@ fn main() {
 
                                             ui.separator();
                                             ui.collapsing("Part Base-Angle Overrides", |ui| {
-                                                ui.label("Overrides are in radians. NaN = use shader default.");
-                                                ui.horizontal(|ui| {
-                                                    if ui.button("Load CSV").clicked() {
-                                                        match load_part_base_angle_overrides_csv(Path::new(PART_OVERRIDES_CSV_PATH)) {
-                                                            Ok(ov) => {
-                                                                state.part_base_angle_overrides = ov;
-                                                                state.part_base_angle_overrides_dirty = true;
-                                                            }
-                                                            Err(err) => eprintln!("Failed to load {}: {err:?}", PART_OVERRIDES_CSV_PATH),
-                                                        }
-                                                    }
-                                                    if ui.button("Save CSV").clicked() {
-                                                        if let Err(err) = save_part_base_angle_overrides_csv(
-                                                            Path::new(PART_OVERRIDES_CSV_PATH),
-                                                            &state.part_base_angle_overrides,
-                                                        ) {
-                                                            eprintln!("Failed to save {}: {err:?}", PART_OVERRIDES_CSV_PATH);
-                                                        }
-                                                    }
-                                                    if ui.button("Clear").clicked() {
-                                                        state.part_base_angle_overrides = [f32::NAN; PART_OVERRIDE_SLOTS];
-                                                        state.part_base_angle_overrides_dirty = true;
-                                                    }
-                                                });
-
-                                                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                                                    for i in 0..PART_TYPE_COUNT {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label(format!("{:02} {}", i, PART_TYPE_NAMES[i]));
-
-                                                            let mut enabled = !state.part_base_angle_overrides[i].is_nan();
-                                                            if ui.checkbox(&mut enabled, "override").changed() {
-                                                                state.part_base_angle_overrides[i] = if enabled { 0.0 } else { f32::NAN };
-                                                                state.part_base_angle_overrides_dirty = true;
-                                                            }
-
-                                                            if enabled {
-                                                                let mut v = state.part_base_angle_overrides[i];
-                                                                let changed = ui
-                                                                    .add(egui::DragValue::new(&mut v).speed(0.01))
-                                                                    .changed();
-                                                                ui.label(format!("({:.1}°)", v.to_degrees()));
-                                                                if changed {
-                                                                    state.part_base_angle_overrides[i] = v;
-                                                                    state.part_base_angle_overrides_dirty = true;
-                                                                }
-                                                            } else {
-                                                                ui.label("default");
-                                                            }
-                                                        });
-                                                    }
-                                                });
+                                                ui_part_base_angle_overrides(ui, state);
                                             });
 
                                             ui.separator();

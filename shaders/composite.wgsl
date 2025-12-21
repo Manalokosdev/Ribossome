@@ -44,6 +44,7 @@ struct SimParams {
     beta_slope_bias: f32,
     alpha_multiplier: f32,
     beta_multiplier: f32,
+    dye_precipitation: f32,
     chemical_slope_scale_alpha: f32,
     chemical_slope_scale_beta: f32,
     mutation_rate: f32,

@@ -1352,6 +1352,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var total_consumed_beta = 0.0;
     var local_alpha = 0.0;
 
+    // If an agent has any vampire mouth (type 33), deactivate normal mouths.
+    var has_vampire_mouth = false;
+    for (var j = 0u; j < min(body_count, MAX_BODY_PARTS); j++) {
+        let bt = get_base_part_type(agents_out[agent_id].body[j].part_type);
+        if (bt == 33u) {
+            has_vampire_mouth = true;
+            break;
+        }
+    }
+
     // Single loop through all body parts
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
@@ -1429,6 +1439,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // - Vampire mouths (type 33) pay 3x the activity cost.
             let base_maintenance = select(props.energy_consumption, props.energy_consumption * 3.0, base_type == 33u);
 
+            // Deactivate normal mouths if any vampire mouth is present.
+            let normal_mouth_deactivated = has_vampire_mouth && (base_type != 33u);
+            if (normal_mouth_deactivated) {
+                organ_extra = base_maintenance;
+            } else {
+
             // 3) Feeding: mouths consume from alpha/beta grids
             // Get enabler amplification for this mouth
             let amplification = amplification_per_part[i];
@@ -1486,6 +1502,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     agent.energy -= consumed_beta * params.poison_power * poison_multiplier;
                     total_consumed_beta += consumed_beta;
                 }
+            }
             }
         } else if (props.is_propeller) {
             // Propellers: base cost (always paid) + activity cost (linear with thrust)

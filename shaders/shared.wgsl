@@ -186,6 +186,7 @@ struct SimParams {
     beta_slope_bias: f32,
     alpha_multiplier: f32,
     beta_multiplier: f32,
+    dye_precipitation: f32,
     chemical_slope_scale_alpha: f32,
     chemical_slope_scale_beta: f32,
     mutation_rate: f32,
@@ -300,6 +301,17 @@ struct EnvironmentInitParams {
     // Packed as vec4<f32> (16-byte stride) with NaN sentinel = "use default".
     // 128 slots reserved for future amino/organ expansion.
     part_angle_override: array<vec4<f32>, 32>,
+
+    // Part property override table.
+    // 42 parts × 6 vec4 blocks (matches AMINO_DATA layout).
+    // Padded to 256 vec4s for stable host-side packing; only first 252 are used.
+    // NaN sentinel per component = "use shader default".
+    part_props_override: array<vec4<f32>, 256>,
+
+    // Optional override of AMINO_FLAGS bitmask.
+    // Packed as vec4<f32> (16-byte stride) with NaN sentinel = "use default".
+    // Stored as numeric f32 (safe for small bitmasks), converted back to u32.
+    part_flags_override: array<vec4<f32>, 11>,
 }
 
 // ============================================================================
@@ -527,10 +539,38 @@ var<private> AMINO_FLAGS: array<u32, AMINO_COUNT> = array<u32, AMINO_COUNT>(
 fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     let t = min(amino_type, AMINO_COUNT - 1u);
     let d = AMINO_DATA[t];
-    let f = AMINO_FLAGS[t];
+    var f = AMINO_FLAGS[t];
+
+    // Optional AMINO_FLAGS override (NaN means: keep default)
+    {
+        let i = t;
+        let v = environment_init.part_flags_override[i / 4u];
+        let lane = i & 3u;
+        var ov = v.x;
+        if (lane == 1u) { ov = v.y; }
+        if (lane == 2u) { ov = v.z; }
+        if (lane == 3u) { ov = v.w; }
+        if (ov == ov) { // NaN check
+            f = u32(ov);
+        }
+    }
+
+    // Apply per-component property overrides (NaN sentinel = use default)
+    let o0 = environment_init.part_props_override[t * 6u + 0u];
+    let o1 = environment_init.part_props_override[t * 6u + 1u];
+    let o2 = environment_init.part_props_override[t * 6u + 2u];
+    let o3 = environment_init.part_props_override[t * 6u + 3u];
+    let o4 = environment_init.part_props_override[t * 6u + 4u];
+    let o5 = environment_init.part_props_override[t * 6u + 5u];
+    let v0 = select(d[0], o0, vec4<bool>(o0.x == o0.x, o0.y == o0.y, o0.z == o0.z, o0.w == o0.w));
+    let v1 = select(d[1], o1, vec4<bool>(o1.x == o1.x, o1.y == o1.y, o1.z == o1.z, o1.w == o1.w));
+    let v2 = select(d[2], o2, vec4<bool>(o2.x == o2.x, o2.y == o2.y, o2.z == o2.z, o2.w == o2.w));
+    let v3 = select(d[3], o3, vec4<bool>(o3.x == o3.x, o3.y == o3.y, o3.z == o3.z, o3.w == o3.w));
+    let v4 = select(d[4], o4, vec4<bool>(o4.x == o4.x, o4.y == o4.y, o4.z == o4.z, o4.w == o4.w));
+    let v5 = select(d[5], o5, vec4<bool>(o5.x == o5.x, o5.y == o5.y, o5.z == o5.z, o5.w == o5.w));
 
     var p: AminoAcidProperties;
-    p.segment_length = d[0].x; p.thickness = d[0].y; p.base_angle = d[0].z; p.mass = d[0].w;
+    p.segment_length = v0.x; p.thickness = v0.y; p.base_angle = v0.z; p.mass = v0.w;
 
     // Optional base_angle override (NaN means: keep default)
     {
@@ -545,13 +585,13 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
             p.base_angle = ov;
         }
     }
-    p.alpha_sensitivity = d[1].x; p.beta_sensitivity = d[1].y; p.thrust_force = d[1].z; p.energy_consumption = d[1].w;
-    p.color = d[2].xyz; p.energy_storage = d[2].w;
-    p.energy_absorption_rate = d[3].x; p.beta_absorption_rate = d[3].y; p.beta_damage = d[3].z; p.parameter1 = d[3].w;
-    p.signal_decay = d[4].x; p.alpha_left_mult = d[4].y; p.alpha_right_mult = d[4].z; p.beta_left_mult = d[4].w;
-    p.beta_right_mult = d[5].x;
+    p.alpha_sensitivity = v1.x; p.beta_sensitivity = v1.y; p.thrust_force = v1.z; p.energy_consumption = v1.w;
+    p.color = v2.xyz; p.energy_storage = v2.w;
+    p.energy_absorption_rate = v3.x; p.beta_absorption_rate = v3.y; p.beta_damage = v3.z; p.parameter1 = v3.w;
+    p.signal_decay = v4.x; p.alpha_left_mult = v4.y; p.alpha_right_mult = v4.z; p.beta_left_mult = v4.w;
+    p.beta_right_mult = v5.x;
     // Stored in AMINO_DATA[t][5].y (spare slot). If left as 0.0, default to 1.0.
-    let raw_wind_coupling = d[5].y;
+    let raw_wind_coupling = v5.y;
     p.fluid_wind_coupling = select(1.0, raw_wind_coupling, raw_wind_coupling != 0.0);
 
     p.is_propeller          = (f & (1u<<0))  != 0u;

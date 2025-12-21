@@ -177,6 +177,7 @@ const CHEM_MAX_STEP_FRAC: f32 = 0.25; // hard clamp per tick to avoid instabilit
 //  19 BETA chem speed max lift
 //  20 dye_escape_rate_alpha (1/sec)
 //  21 dye_escape_rate_beta (1/sec)
+//  22 dye_deposit_scale (0..1) - scales dye -> chem deposition
 // (padded to 6 vec4s / 24 floats)
 const FP_TIME: u32 = 0u;
 const FP_DT: u32 = 1u;
@@ -194,6 +195,7 @@ const FP_CHEM_SPEED_EQUIL_BETA: u32 = 18u;
 const FP_CHEM_SPEED_MAX_LIFT_BETA: u32 = 19u;
 const FP_DYE_ESCAPE_RATE_ALPHA: u32 = 20u;
 const FP_DYE_ESCAPE_RATE_BETA: u32 = 21u;
+const FP_DYE_DEPOSIT_SCALE: u32 = 22u;
 const FP_VEC4_COUNT: u32 = 6u;
 
 @group(0) @binding(3) var<uniform> params: array<vec4<f32>, FP_VEC4_COUNT>;
@@ -649,8 +651,9 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Deposit only up to available headroom in chem to preserve mass.
     let chem_headroom_alpha = max(1.0 - chem.x, 0.0);
     let chem_headroom_beta = max(1.0 - chem.y, 0.0);
-    let deposit_alpha = min(dye_val.y * deposit_frac_alpha, chem_headroom_alpha);
-    let deposit_beta = min(dye_val.x * deposit_frac_beta, chem_headroom_beta);
+    let dye_deposit_scale = clamp(fp_f32(FP_DYE_DEPOSIT_SCALE), 0.0, 1.0);
+    let deposit_alpha = min(dye_val.y * deposit_frac_alpha, chem_headroom_alpha) * dye_deposit_scale;
+    let deposit_beta = min(dye_val.x * deposit_frac_beta, chem_headroom_beta) * dye_deposit_scale;
     chem.x = chem.x + deposit_alpha;
     chem.y = chem.y + deposit_beta;
     dye_val.y = max(dye_val.y - deposit_alpha, 0.0);
