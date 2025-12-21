@@ -9116,17 +9116,6 @@ fn main() {
                                 if should_run_simulation {
                                     state.epoch += 1;
 
-                                    // Auto-snapshot every AUTO_SNAPSHOT_INTERVAL epochs
-                                    if state.epoch > 0 && state.epoch % AUTO_SNAPSHOT_INTERVAL == 0 && state.epoch != state.last_autosave_epoch {
-                                        state.last_autosave_epoch = state.epoch;
-                                        let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
-                                        if let Err(e) = state.save_snapshot_to_file(autosave_path) {
-                                            eprintln!("ΓÜá Auto-snapshot failed at epoch {}: {:?}", state.epoch, e);
-                                        } else {
-                                            println!("Γ£ô Auto-snapshot saved at epoch {}", state.epoch);
-                                        }
-                                    }
-
                                     // Sample population for statistics graph
                                     if state.epoch - state.last_sample_epoch >= state.epoch_sample_interval {
                                         state.population_history.push(state.alive_count);
@@ -11083,6 +11072,24 @@ fn main() {
                             }
 
                             if let Some(gpu_state) = &mut state {
+                                // Auto-snapshot every AUTO_SNAPSHOT_INTERVAL epochs.
+                                // NOTE: this runs after egui has updated state from sliders, so the
+                                // autosave snapshot captures the latest control-panel values.
+                                if !gpu_state.is_paused
+                                    && gpu_state.alive_count > 0
+                                    && gpu_state.epoch > 0
+                                    && gpu_state.epoch % AUTO_SNAPSHOT_INTERVAL == 0
+                                    && gpu_state.epoch != gpu_state.last_autosave_epoch
+                                {
+                                    gpu_state.last_autosave_epoch = gpu_state.epoch;
+                                    let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
+                                    if let Err(e) = gpu_state.save_snapshot_to_file(autosave_path) {
+                                        eprintln!("ΓÜá Auto-snapshot failed at epoch {}: {:?}", gpu_state.epoch, e);
+                                    } else {
+                                        println!("Γ£ô Auto-snapshot saved at epoch {}", gpu_state.epoch);
+                                    }
+                                }
+
                                 if gpu_state.snapshot_save_requested {
                                     gpu_state.snapshot_save_requested = false;
 
