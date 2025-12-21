@@ -239,12 +239,12 @@ fn render_body_part_ctx(
     // Always show in inspector mode, otherwise require zoom > 5
     let is_inspector = ctx.use_inspector_coords.x >= 0.0;
     let show_enabler = amino_props.is_inhibitor && (is_inspector || params.camera_zoom > 5.0);
-    
+
     if (show_enabler) {
         let radius = 20.0;
         let segments = 32u;
         let zoom = params.camera_zoom;
-        
+
         // In inspector, use higher opacity for visibility; in main view, fade in based on zoom
         var alpha: f32;
         if (is_inspector) {
@@ -253,7 +253,7 @@ fn render_body_part_ctx(
             let fade = clamp((zoom - 5.0) / 10.0, 0.0, 1.0);
             alpha = 0.15 * fade;
         }
-        
+
         let color = vec4<f32>(0.2, 0.3, 0.2, alpha);
         var prev = world_pos + vec2<f32>(radius, 0.0);
         for (var s = 1u; s <= segments; s++) {
@@ -300,6 +300,13 @@ fn render_body_part_ctx(
         let jet_seed = agent_id * 1000u + part_index * 17u;
         let particle_count = 1u + u32(round(amplification * 5.0)) + u32(round(zoom_factor * 3.0));
         draw_particle_jet_ctx(world_pos, exhaust_dir, jet_length, jet_seed, particle_count, ctx);
+    }
+
+    // 6b. ORGAN: Displacer (A/B) - blue radial-spikes marker
+    if (amino_props.is_displacer) {
+        let star_radius = max(get_part_visual_size(part.part_type) * 2.5, 7.0);
+        let star_color = vec4<f32>(vec3<f32>(0.0, 0.39, 1.0), 0.9);
+        draw_star_5_ctx(world_pos, star_radius, star_color, ctx);
     }
 
     // 7. ORGAN: Mouth (feeding organ) - asterisk marker
@@ -517,23 +524,23 @@ fn draw_selection_circle(center_pos: vec2<f32>, agent_id: u32, body_count: u32) 
 
     // Convert center to screen space
     let screen_center = world_to_screen(center_pos);
-    
+
     // Draw crosshair with fixed screen-space size (zoom-independent)
     let fixed_radius = 25.0;  // Fixed pixel distance from center
     let arm_length = 30.0;    // Fixed pixel length of each arm
 
     // Draw arms in screen space (pixels)
     // Top arm
-    draw_screen_line(screen_center + vec2<i32>(0, i32(fixed_radius)), 
+    draw_screen_line(screen_center + vec2<i32>(0, i32(fixed_radius)),
                      screen_center + vec2<i32>(0, i32(fixed_radius + arm_length)), color);
     // Right arm
-    draw_screen_line(screen_center + vec2<i32>(i32(fixed_radius), 0), 
+    draw_screen_line(screen_center + vec2<i32>(i32(fixed_radius), 0),
                      screen_center + vec2<i32>(i32(fixed_radius + arm_length), 0), color);
     // Bottom arm
-    draw_screen_line(screen_center + vec2<i32>(0, -i32(fixed_radius)), 
+    draw_screen_line(screen_center + vec2<i32>(0, -i32(fixed_radius)),
                      screen_center + vec2<i32>(0, -i32(fixed_radius + arm_length)), color);
     // Left arm
-    draw_screen_line(screen_center + vec2<i32>(-i32(fixed_radius), 0), 
+    draw_screen_line(screen_center + vec2<i32>(-i32(fixed_radius), 0),
                      screen_center + vec2<i32>(-i32(fixed_radius + arm_length), 0), color);
 }
 
@@ -566,7 +573,7 @@ fn inspector_clip_y(ctx: InspectorContext) -> vec2<i32> {
 // Helper function to draw a line directly in screen-space coordinates (pixels)
 fn draw_screen_line(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
     if (params.draw_enabled == 0u) { return; }
-    
+
     let dx = abs(p1.x - p0.x);
     let dy = abs(p1.y - p0.y);
     var x = p0.x;
@@ -574,7 +581,7 @@ fn draw_screen_line(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
     let sx = select(-1, 1, p0.x < p1.x);
     let sy = select(-1, 1, p0.y < p1.y);
     var err = dx - dy;
-    
+
     // Bresenham's line algorithm
     loop {
         // Draw pixel if within bounds
@@ -584,11 +591,11 @@ fn draw_screen_line(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
                 visual_grid[idx] = color;
             }
         }
-        
+
         if (x == p1.x && y == p1.y) {
             break;
         }
-        
+
         let e2 = 2 * err;
         if (e2 > -dy) {
             err -= dy;
@@ -1178,6 +1185,19 @@ fn draw_asterisk_8_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: In
         let start = center - vec2<f32>(dx, dy);
         let end = center + vec2<f32>(dx, dy);
         draw_thick_line_ctx(start, end, 1.5, color, ctx);
+    }
+}
+
+fn draw_star_5_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: InspectorContext) {
+    // Radial spikes from the center (no intersecting star/pentagram lines).
+    // Kept function name for minimal callsite churn.
+    let num_spikes = 12u;
+    let thickness = max(radius * 0.12, 1.25);
+
+    for (var i = 0u; i < num_spikes; i++) {
+        let ang = f32(i) * 6.28318530718 / f32(num_spikes);
+        let dir = vec2<f32>(cos(ang), sin(ang));
+        draw_thick_line_ctx(center, center + dir * radius, thickness, color, ctx);
     }
 }
 
@@ -1958,8 +1978,8 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                             base_color = base_color * 1.3;
                         }
 
-                        // For organs that need amplification (propeller, mouth, vampire mouth, agent sensors), calculate and apply
-                        let needs_amplification = props.is_propeller || props.is_mouth || base_type == 33u || base_type == 34u || base_type == 35u;
+                        // For organs that need amplification (propeller, displacer, mouth, vampire mouth, agent sensors), calculate and apply
+                        let needs_amplification = props.is_propeller || props.is_displacer || props.is_mouth || base_type == 33u || base_type == 34u || base_type == 35u;
                         if (part_count < body_count && needs_amplification) {
                             let part_pos = selected_agent_buffer[0].body[part_count].pos;
 

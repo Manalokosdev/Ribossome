@@ -411,6 +411,7 @@ struct AminoAcidProperties {
     alpha_sensitivity: f32,
     beta_sensitivity: f32,
     is_propeller: bool,
+    is_displacer: bool,
     thrust_force: f32,
     color: vec3<f32>,
     is_mouth: bool,
@@ -496,12 +497,12 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     array<vec4<f32>,6>( vec4<f32>(10.0, 2.5, 0.3523599, 0.05), vec4<f32>(0.0, 0.1349066, 0.0, 0.00005), vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 0.3, 0.42, 0.42), vec4<f32>(0.1, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
     // 24 ENERGY SENSOR
     array<vec4<f32>,6>( vec4<f32>(10.5, 3.5, 0.4570796, 0.05), vec4<f32>(0.1, -0.15, 0.0, 0.00005), vec4<f32>(0.6, 0.0, 0.8, 0.0), vec4<f32>(0.0, 0.2, -0.66, -0.66), vec4<f32>(0.2, 0.9, 0.1, 0.85), vec4<f32>(0.15, 0.0, 0.0, 0.0) ),
-    // 25 DISPLACER
-    array<vec4<f32>,6>( vec4<f32>(12.0, 8.0, 0.08151, 0.02), vec4<f32>(-0.13, 0.173, 0.0, 0.007), vec4<f32>(0.0, 1.0, 1.0, 0.0), vec4<f32>(0.0, 0.3, 0.36, 0.36), vec4<f32>(0.2, -0.3, 1.3, 1.2), vec4<f32>(-0.2, 0.0, 0.0, 0.0) ),
+    // 25 DISPLACER A
+    array<vec4<f32>,6>( vec4<f32>(12.0, 8.0, 0.08151, 0.02), vec4<f32>(-0.13, 0.173, 2.5, 0.007), vec4<f32>(0.0, 0.39, 1.0, 0.0), vec4<f32>(0.0, 0.3, 0.36, 0.36), vec4<f32>(0.2, -0.3, 1.3, 1.2), vec4<f32>(-0.2, 0.0, 0.0, 0.0) ),
     // 26 ENABLER
     array<vec4<f32>,6>( vec4<f32>(6.0, 6.0, 0.6785398, 0.05), vec4<f32>(0.2, 0.3, 0.0, 0.001), vec4<f32>(1.0, 1.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.24, 0.24), vec4<f32>(0.2, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
-    // 27 unused
-    array<vec4<f32>,6>( vec4<f32>(8.0, 3.0, 0.0, 0.2), vec4<f32>(0.0, 0.0, 0.0, 0.0), vec4<f32>(0.5, 0.5, 0.5, 0.0), vec4<f32>(0.0, 0.0, 0.0, 0.0), vec4<f32>(0.2, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
+    // 27 DISPLACER B
+    array<vec4<f32>,6>( vec4<f32>(12.0, 8.0, 0.08151, 0.02), vec4<f32>(-0.13, 0.173, 2.5, 0.007), vec4<f32>(0.0, 0.39, 1.0, 0.0), vec4<f32>(0.0, 0.3, 0.36, 0.36), vec4<f32>(0.2, -0.3, 1.3, 1.2), vec4<f32>(-0.2, 0.0, 0.0, 0.0) ),
     // 28 STORAGE
     array<vec4<f32>,6>( vec4<f32>(16.0, 22.0, 0.1349066, 1.3), vec4<f32>(0.31, -0.1, 0.0, 0.001), vec4<f32>(1.0, 0.5, 0.0, 100.0), vec4<f32>(0.0, 0.4, -0.84, -0.84), vec4<f32>(0.15, 0.55, 0.45, 0.6), vec4<f32>(0.4, 0.0, 0.0, 0.0) ),
     // 29 POISON RESISTANCE
@@ -534,7 +535,7 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
 
 var<private> AMINO_FLAGS: array<u32, AMINO_COUNT> = array<u32, AMINO_COUNT>(
     0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (1u<<9), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, // 0–19
-    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<8), (1u<<9), 0u, 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3) // 20–41
+    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<8), (1u<<9), (1u<<8), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3) // 20–41
 );
 
 fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
@@ -596,6 +597,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     p.fluid_wind_coupling = select(1.0, raw_wind_coupling, raw_wind_coupling != 0.0);
 
     p.is_propeller          = (f & (1u<<0))  != 0u;
+    p.is_displacer          = (f & (1u<<8))  != 0u;
     p.is_mouth              = (f & (1u<<1))  != 0u;
     p.is_alpha_sensor       = (f & (1u<<2))  != 0u;
     p.is_beta_sensor        = (f & (1u<<3))  != 0u;
@@ -1466,7 +1468,11 @@ fn translate_codon_step(genome: array<u32, GENOME_WORDS>, pos_b: u32, ignore_sto
             }
             else if (amino_type == 9u || amino_type == 12u) {
                 if (modifier < 10u) { organ_base_type = 21u; }
-                else { organ_base_type = 0u; }
+                // Displacer: two variants.
+                // - modifiers 10..14 -> Displacer A (25)
+                // - modifiers 15..19 -> Displacer B (27)
+                else if (modifier < 15u) { organ_base_type = 25u; }
+                else { organ_base_type = 27u; }
             }
             else if (amino_type == 8u || amino_type == 1u) {
                 if (modifier < 4u) { organ_base_type = 20u; }

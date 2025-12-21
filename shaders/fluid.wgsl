@@ -600,19 +600,39 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Sample dye concentration at traced position using bilinear interpolation
     let advected_dye = sample_dye(trace_pos);
 
-    // Extra diffusion: blend advected dye towards a local 4-neighbor blur.
-    // This makes the dye spread out more instead of staying filament-thin.
+    // Extra diffusion: blend advected dye towards a local isotropic blur.
+    // IMPORTANT: A 4-neighbor (axis-only) blur can imprint a subtle "+" pattern
+    // under strong local forcing; include diagonals to reduce grid-direction bias.
     let cx = i32(x);
     let cy = i32(y);
     let l = dye_clamp_coords(cx - 1, cy);
     let r = dye_clamp_coords(cx + 1, cy);
     let u = dye_clamp_coords(cx, cy - 1);
     let d = dye_clamp_coords(cx, cy + 1);
-    let d_l = dye_in[dye_grid_index(l.x, l.y)];
-    let d_r = dye_in[dye_grid_index(r.x, r.y)];
-    let d_u = dye_in[dye_grid_index(u.x, u.y)];
-    let d_d = dye_in[dye_grid_index(d.x, d.y)];
-    let neighbor_blur = (d_l + d_r + d_u + d_d) * 0.25;
+    let lu = dye_clamp_coords(cx - 1, cy - 1);
+    let ru = dye_clamp_coords(cx + 1, cy - 1);
+    let ld = dye_clamp_coords(cx - 1, cy + 1);
+    let rd = dye_clamp_coords(cx + 1, cy + 1);
+
+    let d_c = dye_in[dye_grid_index(x, y)];
+    let d_l = dye_in[dye_grid_index(u32(l.x), u32(l.y))];
+    let d_r = dye_in[dye_grid_index(u32(r.x), u32(r.y))];
+    let d_u = dye_in[dye_grid_index(u32(u.x), u32(u.y))];
+    let d_d = dye_in[dye_grid_index(u32(d.x), u32(d.y))];
+    let d_lu = dye_in[dye_grid_index(u32(lu.x), u32(lu.y))];
+    let d_ru = dye_in[dye_grid_index(u32(ru.x), u32(ru.y))];
+    let d_ld = dye_in[dye_grid_index(u32(ld.x), u32(ld.y))];
+    let d_rd = dye_in[dye_grid_index(u32(rd.x), u32(rd.y))];
+
+    // 3x3 kernel (Gaussian-ish):
+    //   1 2 1
+    //   2 4 2   / 16
+    //   1 2 1
+    let neighbor_blur = (
+        d_c * 4.0 +
+        (d_l + d_r + d_u + d_d) * 2.0 +
+        (d_lu + d_ru + d_ld + d_rd)
+    ) * (1.0 / 16.0);
     let advected_diffused = mix(advected_dye, neighbor_blur, clamp(DYE_DIFFUSE_MIX, 0.0, 1.0));
 
     // Dye ignores obstacles: don't attenuate by permeability.
@@ -625,11 +645,34 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // checkerboarding/odd-even artifacts; using a small 2x2 box filter on |v| makes
     // the lift/deposit thresholding much less likely to imprint the FLUID_GRID_SIZE
     // lattice onto the (higher-res) dye/chem grids.
-    let v00 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
-    let v10 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(0.5, 0.0))), MAX_VEL);
-    let v01 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(0.0, 0.5))), MAX_VEL);
-    let v11 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(0.5, 0.5))), MAX_VEL);
-    let speed_fluid = 0.25 * (length(v00) + length(v10) + length(v01) + length(v11));
+    // Isotropic 3x3 (Gaussian-ish) filter of |v| around the point.
+    // This further suppresses collocated-grid odd/even + axis-aligned modes that can
+    // get amplified by the nonlinear lift/deposit curve.
+    // Kernel:
+    //   1 2 1
+    //   2 4 2   / 16
+    //   1 2 1
+    let o = 0.5;
+    // Sample diagonals at the same radius as axis taps.
+    // If we use (±o, ±o), diagonal taps are farther away by sqrt(2), which can
+    // subtly bias the driver toward cardinal directions on circular motion.
+    let od = o * 0.70710678; // 1/sqrt(2)
+    let v00 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(-od, -od))), MAX_VEL);
+    let v10 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0, -o ))), MAX_VEL);
+    let v20 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( od, -od))), MAX_VEL);
+    let v01 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(-o ,  0.0))), MAX_VEL);
+    let v11 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0,  0.0))), MAX_VEL);
+    let v21 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( o ,  0.0))), MAX_VEL);
+    let v02 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(-od,  od))), MAX_VEL);
+    let v12 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0,  o ))), MAX_VEL);
+    let v22 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( od,  od))), MAX_VEL);
+
+    let avg_vel = (
+        v00 * 1.0 + v10 * 2.0 + v20 * 1.0 +
+        v01 * 2.0 + v11 * 4.0 + v21 * 2.0 +
+        v02 * 1.0 + v12 * 2.0 + v22 * 1.0
+    ) * (1.0 / 16.0);
+    let speed_fluid = length(avg_vel);
     let speed = speed_fluid * fluid_to_dye;
 
     let chem_speed_equil_alpha_in = max(fp_vec4(FP_SPLAT).x, 0.0);
@@ -1019,7 +1062,16 @@ fn solid_normal_from_neighbors(x: u32, y: u32) -> vec2<f32> {
     let s_b = select(0.0, 1.0, (y > 0u) && is_effectively_solid(x, ym));
     let s_t = select(0.0, 1.0, (y + 1u < FLUID_GRID_SIZE) && is_effectively_solid(x, yp));
 
-    let n = vec2<f32>(s_l - s_r, s_b - s_t);
+    // Include diagonal solids to reduce Manhattan (axis-only) bias.
+    let s_bl = select(0.0, 1.0, (x > 0u) && (y > 0u) && is_effectively_solid(xm, ym));
+    let s_tl = select(0.0, 1.0, (x > 0u) && (y + 1u < FLUID_GRID_SIZE) && is_effectively_solid(xm, yp));
+    let s_br = select(0.0, 1.0, (x + 1u < FLUID_GRID_SIZE) && (y > 0u) && is_effectively_solid(xp, ym));
+    let s_tr = select(0.0, 1.0, (x + 1u < FLUID_GRID_SIZE) && (y + 1u < FLUID_GRID_SIZE) && is_effectively_solid(xp, yp));
+
+    let diag = 0.70710678; // 1/sqrt(2)
+    let nx = (s_l - s_r) + diag * ((s_bl + s_tl) - (s_br + s_tr));
+    let ny = (s_b - s_t) + diag * ((s_bl + s_br) - (s_tl + s_tr));
+    let n = vec2<f32>(nx, ny);
     let n_len = length(n);
     return select(vec2<f32>(0.0, 0.0), n / n_len, n_len > 1e-6);
 }
@@ -1200,20 +1252,38 @@ fn advect_trail(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let trace_pos = pos - vel_dye * dt;
     let advected = sample_trail(trace_pos);
 
-    // Optional extra diffusion: blend towards a 4-neighbor blur from trail_in.
+    // Optional extra diffusion: blend towards a small isotropic 3x3 blur from trail_in.
     // Keep subtle; most spreading should come from advection.
     let TRAIL_DIFFUSE_MIX: f32 = 0.005;
     let cx = i32(x);
     let cy = i32(y);
-    let l = dye_clamp_coords(cx - 1, cy);
-    let r = dye_clamp_coords(cx + 1, cy);
-    let u = dye_clamp_coords(cx, cy - 1);
-    let d = dye_clamp_coords(cx, cy + 1);
-    let t_l = trail_in[dye_grid_index(l.x, l.y)];
-    let t_r = trail_in[dye_grid_index(r.x, r.y)];
-    let t_u = trail_in[dye_grid_index(u.x, u.y)];
-    let t_d = trail_in[dye_grid_index(d.x, d.y)];
-    let neighbor_blur = (t_l + t_r + t_u + t_d) * 0.25;
+
+    let c00 = dye_clamp_coords(cx - 1, cy - 1);
+    let c10 = dye_clamp_coords(cx + 0, cy - 1);
+    let c20 = dye_clamp_coords(cx + 1, cy - 1);
+    let c01 = dye_clamp_coords(cx - 1, cy + 0);
+    let c11 = dye_clamp_coords(cx + 0, cy + 0);
+    let c21 = dye_clamp_coords(cx + 1, cy + 0);
+    let c02 = dye_clamp_coords(cx - 1, cy + 1);
+    let c12 = dye_clamp_coords(cx + 0, cy + 1);
+    let c22 = dye_clamp_coords(cx + 1, cy + 1);
+
+    let t00 = trail_in[dye_grid_index(c00.x, c00.y)];
+    let t10 = trail_in[dye_grid_index(c10.x, c10.y)];
+    let t20 = trail_in[dye_grid_index(c20.x, c20.y)];
+    let t01 = trail_in[dye_grid_index(c01.x, c01.y)];
+    let t11 = trail_in[dye_grid_index(c11.x, c11.y)];
+    let t21 = trail_in[dye_grid_index(c21.x, c21.y)];
+    let t02 = trail_in[dye_grid_index(c02.x, c02.y)];
+    let t12 = trail_in[dye_grid_index(c12.x, c12.y)];
+    let t22 = trail_in[dye_grid_index(c22.x, c22.y)];
+
+    // Gaussian-ish kernel (1 2 1 / 2 4 2 / 1 2 1) normalized by 16.
+    let neighbor_blur = (
+        t00 + 2.0 * t10 + t20 +
+        2.0 * t01 + 4.0 * t11 + 2.0 * t21 +
+        t02 + 2.0 * t12 + t22
+    ) * (1.0 / 16.0);
 
     let mixed = mix(advected, neighbor_blur, clamp(TRAIL_DIFFUSE_MIX, 0.0, 1.0));
     trail_out[idx] = mixed;
@@ -1412,34 +1482,90 @@ fn compute_divergence(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let xm = clamp(i32(x) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
-    let xp = clamp(i32(x) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
-    let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
-    let yp = clamp(i32(y) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
+    // Diagonal-informed divergence to reduce axis-aligned grid modes.
+    // We blend axis and diagonal estimates of partial derivatives.
+    let v_c = reflect_if_into_solid(x, y, raw_velocity_cell(x, y));
 
-    let v_l = reflect_if_into_solid(u32(xm), y, raw_velocity_cell(u32(xm), y));
-    let v_r = reflect_if_into_solid(u32(xp), y, raw_velocity_cell(u32(xp), y));
-    let v_b = reflect_if_into_solid(x, u32(ym), raw_velocity_cell(x, u32(ym)));
-    let v_t = reflect_if_into_solid(x, u32(yp), raw_velocity_cell(x, u32(yp)));
+    let v_l = reflect_if_into_solid(x - 1u, y, raw_velocity_cell(x - 1u, y));
+    let v_r = reflect_if_into_solid(x + 1u, y, raw_velocity_cell(x + 1u, y));
+    let v_b = reflect_if_into_solid(x, y - 1u, raw_velocity_cell(x, y - 1u));
+    let v_t = reflect_if_into_solid(x, y + 1u, raw_velocity_cell(x, y + 1u));
 
-    // Central differences; assume dx = 1.
-    let div = 0.5 * ((v_r.x - v_l.x) + (v_t.y - v_b.y));
-    divergence[idx] = div;
+    // Diagonals: if the diagonal is solid, mirror the center (Neumann-ish).
+    var v_bl = v_c;
+    if (!is_effectively_solid(x - 1u, y - 1u)) {
+        v_bl = reflect_if_into_solid(x - 1u, y - 1u, raw_velocity_cell(x - 1u, y - 1u));
+    }
+    var v_br = v_c;
+    if (!is_effectively_solid(x + 1u, y - 1u)) {
+        v_br = reflect_if_into_solid(x + 1u, y - 1u, raw_velocity_cell(x + 1u, y - 1u));
+    }
+    var v_tl = v_c;
+    if (!is_effectively_solid(x - 1u, y + 1u)) {
+        v_tl = reflect_if_into_solid(x - 1u, y + 1u, raw_velocity_cell(x - 1u, y + 1u));
+    }
+    var v_tr = v_c;
+    if (!is_effectively_solid(x + 1u, y + 1u)) {
+        v_tr = reflect_if_into_solid(x + 1u, y + 1u, raw_velocity_cell(x + 1u, y + 1u));
+    }
+
+    let du_dx_axis = 0.5 * (v_r.x - v_l.x);
+    let dv_dy_axis = 0.5 * (v_t.y - v_b.y);
+    let du_dx_diag = 0.25 * ((v_tr.x + v_br.x) - (v_tl.x + v_bl.x));
+    let dv_dy_diag = 0.25 * ((v_tr.y + v_tl.y) - (v_br.y + v_bl.y));
+
+    // Blend factor: 0 => classic axis-only, 1 => diagonal-only.
+    let t = 0.5;
+    let du_dx = mix(du_dx_axis, du_dx_diag, t);
+    let dv_dy = mix(dv_dy_axis, dv_dy_diag, t);
+
+    divergence[idx] = du_dx + dv_dy;
 }
 
 fn curl_at(x: u32, y: u32) -> f32 {
+    // Diagonal-informed curl to reduce axis-aligned artifacts.
     let xm = clamp(i32(x) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let xp = clamp(i32(x) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let yp = clamp(i32(y) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
 
-    let v_l = reflect_if_into_solid(u32(xm), y, raw_velocity_cell(u32(xm), y));
-    let v_r = reflect_if_into_solid(u32(xp), y, raw_velocity_cell(u32(xp), y));
-    let v_b = reflect_if_into_solid(x, u32(ym), raw_velocity_cell(x, u32(ym)));
-    let v_t = reflect_if_into_solid(x, u32(yp), raw_velocity_cell(x, u32(yp)));
+    let xmu = u32(xm);
+    let xpu = u32(xp);
+    let ymu = u32(ym);
+    let ypu = u32(yp);
 
-    let dvy_dx = 0.5 * (v_r.y - v_l.y);
-    let dvx_dy = 0.5 * (v_t.x - v_b.x);
+    let v_c = reflect_if_into_solid(x, y, raw_velocity_cell(x, y));
+    let v_l = reflect_if_into_solid(xmu, y, raw_velocity_cell(xmu, y));
+    let v_r = reflect_if_into_solid(xpu, y, raw_velocity_cell(xpu, y));
+    let v_b = reflect_if_into_solid(x, ymu, raw_velocity_cell(x, ymu));
+    let v_t = reflect_if_into_solid(x, ypu, raw_velocity_cell(x, ypu));
+
+    // Diagonals: Neumann-ish (mirror center) when solid.
+    var v_bl = v_c;
+    if (!is_effectively_solid(xmu, ymu)) {
+        v_bl = reflect_if_into_solid(xmu, ymu, raw_velocity_cell(xmu, ymu));
+    }
+    var v_br = v_c;
+    if (!is_effectively_solid(xpu, ymu)) {
+        v_br = reflect_if_into_solid(xpu, ymu, raw_velocity_cell(xpu, ymu));
+    }
+    var v_tl = v_c;
+    if (!is_effectively_solid(xmu, ypu)) {
+        v_tl = reflect_if_into_solid(xmu, ypu, raw_velocity_cell(xmu, ypu));
+    }
+    var v_tr = v_c;
+    if (!is_effectively_solid(xpu, ypu)) {
+        v_tr = reflect_if_into_solid(xpu, ypu, raw_velocity_cell(xpu, ypu));
+    }
+
+    let dvy_dx_axis = 0.5 * (v_r.y - v_l.y);
+    let dvx_dy_axis = 0.5 * (v_t.x - v_b.x);
+    let dvy_dx_diag = 0.25 * ((v_tr.y + v_br.y) - (v_tl.y + v_bl.y));
+    let dvx_dy_diag = 0.25 * ((v_tr.x + v_tl.x) - (v_br.x + v_bl.x));
+
+    let t = 0.5;
+    let dvy_dx = mix(dvy_dx_axis, dvy_dx_diag, t);
+    let dvx_dy = mix(dvx_dy_axis, dvx_dy_diag, t);
     return dvy_dx - dvx_dy;
 }
 
@@ -1474,7 +1600,17 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let w_b = abs(curl_at(x, y - 1u));
     let w_t = abs(curl_at(x, y + 1u));
 
-    let grad = vec2<f32>(w_r - w_l, w_t - w_b) * 0.5;
+    let w_bl = abs(curl_at(x - 1u, y - 1u));
+    let w_br = abs(curl_at(x + 1u, y - 1u));
+    let w_tl = abs(curl_at(x - 1u, y + 1u));
+    let w_tr = abs(curl_at(x + 1u, y + 1u));
+
+    let grad_axis = vec2<f32>(w_r - w_l, w_t - w_b) * 0.5;
+    let grad_diag = vec2<f32>(
+        ((w_tr + w_br) - (w_tl + w_bl)) * 0.25,
+        ((w_tr + w_tl) - (w_br + w_bl)) * 0.25
+    );
+    let grad = mix(grad_axis, grad_diag, 0.5);
     let mag = max(length(grad), 1e-5);
     let n = grad / mag;
 
@@ -1540,30 +1676,62 @@ fn jacobi_pressure(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // Neumann boundary (solid walls): dp/dn = 0.
     // Implemented by mirroring the edge pressure to the outside.
-    var p_l = pressure_in[idx];
+    // IMPORTANT: Use a 9-point (diagonal-including) Laplacian stencil to reduce
+    // axis-aligned artifacts that can show up as "+" patterns.
+    let p_c = pressure_in[idx];
+
+    var p_l = p_c;
     if (x > 0u && !is_effectively_solid(x - 1u, y)) {
         p_l = pressure_in[grid_index(x - 1u, y)];
     }
-    var p_r = pressure_in[idx];
+    var p_r = p_c;
     if (x + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x + 1u, y)) {
         p_r = pressure_in[grid_index(x + 1u, y)];
     }
-    var p_b = pressure_in[idx];
+    var p_b = p_c;
     if (y > 0u && !is_effectively_solid(x, y - 1u)) {
         p_b = pressure_in[grid_index(x, y - 1u)];
     }
-    var p_t = pressure_in[idx];
+    var p_t = p_c;
     if (y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x, y + 1u)) {
         p_t = pressure_in[grid_index(x, y + 1u)];
     }
 
-    // Jacobi: p = (sum_neighbors - div) / 4, assuming dx = 1.
+    // Diagonals (same Neumann treatment: if neighbor is solid/out-of-bounds, mirror center).
+    var p_bl = p_c;
+    if (x > 0u && y > 0u && !is_effectively_solid(x - 1u, y - 1u)) {
+        p_bl = pressure_in[grid_index(x - 1u, y - 1u)];
+    }
+    var p_br = p_c;
+    if (x + 1u < FLUID_GRID_SIZE && y > 0u && !is_effectively_solid(x + 1u, y - 1u)) {
+        p_br = pressure_in[grid_index(x + 1u, y - 1u)];
+    }
+    var p_tl = p_c;
+    if (x > 0u && y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x - 1u, y + 1u)) {
+        p_tl = pressure_in[grid_index(x - 1u, y + 1u)];
+    }
+    var p_tr = p_c;
+    if (x + 1u < FLUID_GRID_SIZE && y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x + 1u, y + 1u)) {
+        p_tr = pressure_in[grid_index(x + 1u, y + 1u)];
+    }
+
+    // 9-point Laplacian (more isotropic than 5-point):
+    //   ∇²p ≈ (4*axis + diag - 20*p_c) / 6   (with dx = 1)
+    // Solve (Jacobi): p_c = (4*axis + diag - 6*div) / 20
     let div = divergence[idx];
-    if (is_bad_f32(div) || is_bad_f32(p_l) || is_bad_f32(p_r) || is_bad_f32(p_b) || is_bad_f32(p_t)) {
+    if (
+        is_bad_f32(div) ||
+        is_bad_f32(p_c) ||
+        is_bad_f32(p_l) || is_bad_f32(p_r) || is_bad_f32(p_b) || is_bad_f32(p_t) ||
+        is_bad_f32(p_bl) || is_bad_f32(p_br) || is_bad_f32(p_tl) || is_bad_f32(p_tr)
+    ) {
         pressure_out[idx] = 0.0;
         return;
     }
-    pressure_out[idx] = (p_l + p_r + p_b + p_t - div) * 0.25;
+
+    let axis_sum = p_l + p_r + p_b + p_t;
+    let diag_sum = p_bl + p_br + p_tl + p_tr;
+    pressure_out[idx] = (4.0 * axis_sum + diag_sum - 6.0 * div) * (1.0 / 20.0);
 }
 
 // 6. Subtract pressure gradient from velocity to make it divergence-free.
@@ -1583,25 +1751,50 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Use the same Neumann pressure boundary treatment as the Jacobi solve.
-    var p_l = pressure_in[idx];
+    // Use the same Neumann pressure boundary treatment as the Jacobi solve,
+    // but estimate the gradient with a diagonal-informed stencil to reduce axis bias.
+    let p_c = pressure_in[idx];
+    var p_l = p_c;
     if (x > 0u && !is_effectively_solid(x - 1u, y)) {
         p_l = pressure_in[grid_index(x - 1u, y)];
     }
-    var p_r = pressure_in[idx];
+    var p_r = p_c;
     if (x + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x + 1u, y)) {
         p_r = pressure_in[grid_index(x + 1u, y)];
     }
-    var p_b = pressure_in[idx];
+    var p_b = p_c;
     if (y > 0u && !is_effectively_solid(x, y - 1u)) {
         p_b = pressure_in[grid_index(x, y - 1u)];
     }
-    var p_t = pressure_in[idx];
+    var p_t = p_c;
     if (y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x, y + 1u)) {
         p_t = pressure_in[grid_index(x, y + 1u)];
     }
 
-    let grad = vec2<f32>(p_r - p_l, p_t - p_b) * 0.5;
+    var p_bl = p_c;
+    if (x > 0u && y > 0u && !is_effectively_solid(x - 1u, y - 1u)) {
+        p_bl = pressure_in[grid_index(x - 1u, y - 1u)];
+    }
+    var p_br = p_c;
+    if (x + 1u < FLUID_GRID_SIZE && y > 0u && !is_effectively_solid(x + 1u, y - 1u)) {
+        p_br = pressure_in[grid_index(x + 1u, y - 1u)];
+    }
+    var p_tl = p_c;
+    if (x > 0u && y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x - 1u, y + 1u)) {
+        p_tl = pressure_in[grid_index(x - 1u, y + 1u)];
+    }
+    var p_tr = p_c;
+    if (x + 1u < FLUID_GRID_SIZE && y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x + 1u, y + 1u)) {
+        p_tr = pressure_in[grid_index(x + 1u, y + 1u)];
+    }
+
+    let grad_axis = vec2<f32>(p_r - p_l, p_t - p_b) * 0.5;
+    let grad_diag = vec2<f32>(
+        ((p_tr + p_br) - (p_tl + p_bl)) * 0.25,
+        ((p_tr + p_tl) - (p_br + p_bl)) * 0.25
+    );
+    let grad = mix(grad_axis, grad_diag, 0.5);
+
     var v = sanitize_vec2(velocity_in[idx]) - grad;
     v = reflect_if_into_solid(x, y, v);
     velocity_out[idx] = clamp_vec2_len(sanitize_vec2(v), MAX_VEL);
@@ -1666,7 +1859,16 @@ fn diffuse_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let v_b = raw_velocity_cell(x, y - 1u);
     let v_t = raw_velocity_cell(x, y + 1u);
 
-    let lap = (v_l + v_r + v_b + v_t) - 4.0 * v_c;
+    let v_bl = raw_velocity_cell(x - 1u, y - 1u);
+    let v_br = raw_velocity_cell(x + 1u, y - 1u);
+    let v_tl = raw_velocity_cell(x - 1u, y + 1u);
+    let v_tr = raw_velocity_cell(x + 1u, y + 1u);
+
+    // 9-point (diagonal-including) Laplacian for better isotropy:
+    //   ∇²v ≈ (4*axis + diag - 20*v_c) / 6
+    let axis_sum = (v_l + v_r + v_b + v_t);
+    let diag_sum = (v_bl + v_br + v_tl + v_tr);
+    let lap = (4.0 * axis_sum + diag_sum - 20.0 * v_c) * (1.0 / 6.0);
 
     // nu is in "cells^2 / second" with dx=1; lower values reduce blur.
     let nu = max(fp_vec4(FP_SPLAT).w, 0.0);

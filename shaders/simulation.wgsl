@@ -1,6 +1,53 @@
 // Vampire mouths drain energy from nearby living agents
 // ============================================================================
 
+// Helper: add a force into the low-res fluid force grid using bilinear splatting.
+// This reduces axis-aligned artifacts vs. writing into a single nearest cell.
+fn add_fluid_force_splat(pos_world: vec2<f32>, f: vec2<f32>) {
+    if (pos_world.x < 0.0 || pos_world.x >= f32(SIM_SIZE) || pos_world.y < 0.0 || pos_world.y >= f32(SIM_SIZE)) {
+        return;
+    }
+
+    let ws = f32(SIM_SIZE);
+    let grid_f = f32(FLUID_GRID_SIZE);
+
+    // Continuous coords in fluid-cell space.
+    let gx = (pos_world.x / ws) * grid_f;
+    let gy = (pos_world.y / ws) * grid_f;
+
+    // Match the fluid shader convention: cell centers at (x+0.5, y+0.5).
+    let x = gx - 0.5;
+    let y = gy - 0.5;
+
+    let x0 = i32(floor(x));
+    let y0 = i32(floor(y));
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+
+    let fx = fract(x);
+    let fy = fract(y);
+
+    let ix0 = clamp(x0, 0, i32(FLUID_GRID_SIZE) - 1);
+    let iy0 = clamp(y0, 0, i32(FLUID_GRID_SIZE) - 1);
+    let ix1 = clamp(x1, 0, i32(FLUID_GRID_SIZE) - 1);
+    let iy1 = clamp(y1, 0, i32(FLUID_GRID_SIZE) - 1);
+
+    let w00 = (1.0 - fx) * (1.0 - fy);
+    let w10 = fx * (1.0 - fy);
+    let w01 = (1.0 - fx) * fy;
+    let w11 = fx * fy;
+
+    let idx00 = u32(iy0) * FLUID_GRID_SIZE + u32(ix0);
+    let idx10 = u32(iy0) * FLUID_GRID_SIZE + u32(ix1);
+    let idx01 = u32(iy1) * FLUID_GRID_SIZE + u32(ix0);
+    let idx11 = u32(iy1) * FLUID_GRID_SIZE + u32(ix1);
+
+    fluid_forces[idx00] = fluid_forces[idx00] + f * w00;
+    fluid_forces[idx10] = fluid_forces[idx10] + f * w10;
+    fluid_forces[idx01] = fluid_forces[idx01] + f * w01;
+    fluid_forces[idx11] = fluid_forces[idx11] + f * w11;
+}
+
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
@@ -486,7 +533,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Optimized passes: enabler discovery, amplification calculation, signal storage, and propagation
 
     var amplification_per_part: array<f32, MAX_BODY_PARTS>;
-    var propeller_thrust_magnitude: array<f32, MAX_BODY_PARTS>; // Store thrust for cost calculation
+    var propeller_thrust_magnitude: array<f32, MAX_BODY_PARTS>; // Store activity magnitude for cost calculation (propeller or displacer)
     var old_alpha: array<f32, MAX_BODY_PARTS>;
     var old_beta: array<f32, MAX_BODY_PARTS>;
 
@@ -1225,25 +1272,62 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
 
                 // INJECT PROPELLER FORCE DIRECTLY INTO FLUID FORCES BUFFER
-                // Map world position to fluid grid (FLUID_GRID_SIZE x FLUID_GRID_SIZE)
-                // IMPORTANT: do NOT clamp out-of-bounds positions into the edge cells.
-                // That produces "wind coming from outside" when propellers are outside the valid world.
-                if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
-                    let grid_f = f32(FLUID_GRID_SIZE);
-                    let max_idx_f = grid_f - 1.0;
-                    let fluid_grid_x = u32(clamp(world_pos.x / f32(SIM_SIZE) * grid_f, 0.0, max_idx_f));
-                    let fluid_grid_y = u32(clamp(world_pos.y / f32(SIM_SIZE) * grid_f, 0.0, max_idx_f));
-                    let fluid_idx = fluid_grid_y * FLUID_GRID_SIZE + fluid_grid_x;
-
-                    // Write thrust force into the shared vec2 buffer.
-                    // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
-                    let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength, 0.0);
-                    fluid_forces[fluid_idx] = fluid_forces[fluid_idx] + scaled_force;
-                }
+                // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
+                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength, 0.0);
+                add_fluid_force_splat(world_pos, scaled_force);
             }
         }
 
-        // Displacer organ removed (was organ 25)
+
+        // Displacer force: symmetric fluid displacement (net agent thrust ~0)
+        // - Displacer A (base_type 25): aligned with propeller direction (perpendicular to segment axis)
+        // - Displacer B (base_type 27): aligned with segment axis (90° relative)
+        if (amino_props.is_displacer && agent.energy >= amino_props.energy_consumption) {
+            var segment_dir = vec2<f32>(0.0);
+            if (i > 0u) {
+                let prev = agents_out[agent_id].body[i-1u].pos;
+                segment_dir = part.pos - prev;
+            } else if (agents_out[agent_id].body_count > 1u) {
+                let next = agents_out[agent_id].body[1u].pos;
+                segment_dir = next - part.pos;
+            } else {
+                segment_dir = vec2<f32>(1.0, 0.0);
+            }
+            let seg_len = length(segment_dir);
+            let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
+
+            // Choose displacement direction in local space
+            var disp_local = vec2<f32>(-axis_local.y, axis_local.x) * chirality_flip_physics;
+            if (base_type == 27u) {
+                disp_local = axis_local * chirality_flip_physics;
+            }
+
+            let disp_dir_world = normalize(apply_agent_rotation(disp_local, agent.rotation));
+            let dir_len = length(disp_dir_world);
+            if (dir_len > 1e-5) {
+                let dir = disp_dir_world / dir_len;
+
+                if (PROPELLERS_ENABLED) {
+                    let quadratic_amp = amplification * amplification;
+                    let displacer_strength = amino_props.thrust_force * 3.0 * quadratic_amp * 4.0;
+                    // Reuse propeller_thrust_magnitude storage for displacer activity (mutually exclusive).
+                    propeller_thrust_magnitude[i] = displacer_strength;
+
+                    // Offset along the displacement axis so the force pair does not cancel trivially.
+                    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+                    let offset_world = cell_to_world * 2.0;
+                    let p_plus = world_pos + dir * offset_world;
+                    let p_minus = world_pos - dir * offset_world;
+
+                    let f = dir * displacer_strength;
+                    let force_scale = FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength, 0.0);
+
+                    // Inject +f at +offset and -f at -offset -> net force = 0.
+                    add_fluid_force_splat(p_plus, (-f * force_scale));
+                    add_fluid_force_splat(p_minus, (f * force_scale));
+                }
+            }
+        }
 
     }
 
@@ -1504,6 +1588,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Reduce operational (thrust) cost by 1/3.
             let activity_cost = props.energy_consumption * thrust_ratio * 1.0;
             organ_extra = props.energy_consumption + activity_cost; // Base + activity
+        } else if (props.is_displacer) {
+            // Displacers: base cost + activity cost (linear with displacement strength)
+            // Displacer strength is intentionally boosted (currently 4x) for visibility.
+            // Normalize against that boost so the activity cost matches propellers at the same amp.
+            let base_strength = props.thrust_force * 3.0 * 4.0; // Max with amp=1 (including strength boost)
+            let strength_ratio = propeller_thrust_magnitude[i] / base_strength;
+            let activity_cost = props.energy_consumption * strength_ratio * 1.0;
+            organ_extra = props.energy_consumption + activity_cost;
         } else {
             // Other organs use linear amplification scaling
             let amp = amplification_per_part[i];

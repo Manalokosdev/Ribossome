@@ -9,13 +9,13 @@ H(6),-0.35,"α-V6 (r=101, +, Green)","α-M6 (r=17, -, Cyan)","LP-Propeller","LP-
 I(7),0.61,"α-V7 (r=197, +, Green)","α-M7 (r=113, +, Green)","LP-Propeller","LP-Propeller","KC-Enabler","KC-Enabler",,
 K(8),-0.12,"α-V8 (r=124, +, Green)","α-M8 (r=40, -, Cyan)","LP-Propeller","LP-Propeller","KC-Enabler","KC-Enabler",,
 L(9),0.95,"α-V9 (r=231, +, Green)","α-M9 (r=147, +, Green)","LP-Propeller","LP-Propeller","KC-Enabler","KC-Enabler",,
-M(10),-0.48,"β-V10 (r=88, -, Magenta)","β-M10 (r=4, -, Magenta)","LP-Displacer","LP-Displacer",,,,"HQ-PoisonRes"
-N(11),0.24,"β-V11 (r=160, +, Red)","β-M11 (r=76, -, Magenta)","LP-Displacer","LP-Displacer",,,,"HQ-PoisonRes"
-P(12),-0.77,"β-V12 (r=59, -, Magenta)","β-M12 (r=75, -, Magenta)","LP-Displacer","LP-Displacer",,,,"HQ-PoisonRes"
-Q(13),0.53,"β-V13 (r=189, +, Red)","β-M13 (r=105, +, Red)","LP-Displacer","LP-Displacer",,,,"HQ-PoisonRes"
-R(14),-0.29,"β-V14 (r=107, +, Red)","β-M14 (r=23, -, Magenta)","LP-Displacer","LP-Displacer",,,"HQ-ChiralFlip","HQ-ChiralFlip"
-S(15),0.71,"β-V15 (r=207, +, Red)","β-M15 (r=123, +, Red)","LP-Displacer","LP-Displacer",,,"HQ-ChiralFlip","HQ-ChiralFlip"
-T(16),-0.66,"β-V16 (r=70, -, Magenta)","β-M16 (r=14, -, Magenta)","LP-Displacer","LP-Displacer","KC-Clock (α emit, slow reverse)","KC-Clock (β emit, slow reverse)","HQ-ChiralFlip","HQ-ChiralFlip"
-V(17),0.36,"β-V17 (r=172, +, Red)","β-M17 (r=88, -, Magenta)","LP-Displacer","LP-Displacer","KC-Clock (α emit, medium)","KC-Clock (β emit, medium)","HQ-ChiralFlip","HQ-ChiralFlip"
-W(18),-0.84,"ε-V18 (r=52, -, Purple-Inv)","ε-M18 (r=68, -, Purple-Inv)","LP-Displacer","LP-Displacer","KC-Clock (α emit, slower reverse)","KC-Clock (β emit, slower reverse)","HQ-ChiralFlip","HQ-ChiralFlip"
-Y(19),0.08,"ε-V19 (r=144, +, Purple)","ε-M19 (r=60, -, Purple-Inv)","LP-Displacer","LP-Displacer","KC-Clock (α emit, very slow)","KC-Clock (β emit, very slow)","HQ-ChiralFlip","HQ-ChiralFlip"
+M(10),-0.48,"β-V10 (r=88, -, Magenta)","β-M10 (r=4, -, Magenta)","LP-Displacer A","LP-Displacer A",,,,"HQ-PoisonRes"
+N(11),0.24,"β-V11 (r=160, +, Red)","β-M11 (r=76, -, Magenta)","LP-Displacer A","LP-Displacer A",,,,"HQ-PoisonRes"
+P(12),-0.77,"β-V12 (r=59, -, Magenta)","β-M12 (r=75, -, Magenta)","LP-Displacer A","LP-Displacer A",,,,"HQ-PoisonRes"
+Q(13),0.53,"β-V13 (r=189, +, Red)","β-M13 (r=105, +, Red)","LP-Displacer A","LP-Displacer A",,,,"HQ-PoisonRes"
+R(14),-0.29,"β-V14 (r=107, +, Red)","β-M14 (r=23, -, Magenta)","LP-Displacer A","LP-Displacer A",,,"HQ-ChiralFlip","HQ-ChiralFlip"
+S(15),0.71,"β-V15 (r=207, +, Red)","β-M15 (r=123, +, Red)","LP-Displacer B","LP-Displacer B",,,"HQ-ChiralFlip","HQ-ChiralFlip"
+T(16),-0.66,"β-V16 (r=70, -, Magenta)","β-M16 (r=14, -, Magenta)","LP-Displacer B","LP-Displacer B","KC-Clock (α emit, slow reverse)","KC-Clock (β emit, slow reverse)","HQ-ChiralFlip","HQ-ChiralFlip"
+V(17),0.36,"β-V17 (r=172, +, Red)","β-M17 (r=88, -, Magenta)","LP-Displacer B","LP-Displacer B","KC-Clock (α emit, medium)","KC-Clock (β emit, medium)","HQ-ChiralFlip","HQ-ChiralFlip"
+W(18),-0.84,"ε-V18 (r=52, -, Purple-Inv)","ε-M18 (r=68, -, Purple-Inv)","LP-Displacer B","LP-Displacer B","KC-Clock (α emit, slower reverse)","KC-Clock (β emit, slower reverse)","HQ-ChiralFlip","HQ-ChiralFlip"
+Y(19),0.08,"ε-V19 (r=144, +, Purple)","ε-M19 (r=60, -, Purple-Inv)","LP-Displacer B","LP-Displacer B","KC-Clock (α emit, very slow)","KC-Clock (β emit, very slow)","HQ-ChiralFlip","HQ-ChiralFlip"

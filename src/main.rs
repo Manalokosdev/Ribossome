@@ -79,7 +79,7 @@ const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     // 0–19 amino acids
     "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y",
     // 20–41 organs / specials (keep in sync with shaders/shared.wgsl table comments)
-    "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "DISPLACER", "ENABLER", "UNUSED_27",
+    "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "DISPLACER_A", "ENABLER", "DISPLACER_B",
     "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "VAMPIRE_MOUTH", "AGENT_ALPHA_SENSOR",
     "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
     "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2",
@@ -953,9 +953,9 @@ fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
         22 => [0.0, 1.0, 0.0],   // alpha sensor
         23 => [1.0, 0.0, 0.0],   // beta sensor
         24 => [0.6, 0.0, 0.8],   // energy sensor
-        25 => [0.0, 1.0, 1.0],   // legacy displacer (organ 25 removed; may appear in old snapshots)
+        25 => [0.0, 0.39, 1.0],  // displacer A
         26 => [1.0, 1.0, 1.0],   // enabler
-        27 => [0.5, 0.5, 0.5],
+        27 => [0.0, 0.39, 1.0],  // displacer B
         28 => [1.0, 0.5, 0.0],   // storage
         29 => [1.0, 0.4, 0.7],   // poison resistance
         30 => [1.0, 0.0, 1.0],   // chiral flipper
@@ -1007,8 +1007,9 @@ fn part_base_name(base_type: u32) -> &'static str {
         22 => "Alpha Sensor",
         23 => "Beta Sensor",
         24 => "Energy Sensor",
-        25 => "Legacy Displacer",
+        25 => "Displacer A",
         26 => "Enabler",
+        27 => "Displacer B",
         28 => "Storage",
         29 => "Poison Resistance",
         30 => "Chiral Flipper",
@@ -8723,6 +8724,7 @@ fn save_simulation_snapshot(
     snapshot: &SimulationSnapshot,
 ) -> anyhow::Result<()> {
     use std::io::BufWriter;
+    use anyhow::Context;
 
     // 1. Create RGB image from grids
     let mut img_data = vec![0u8; GRID_CELL_COUNT * 3];
@@ -8738,18 +8740,35 @@ fn save_simulation_snapshot(
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&compressed);
 
-    // 3. Write PNG with custom text chunk
-    let file = std::fs::File::create(path)?;
-    let w = BufWriter::new(file);
-    let mut encoder = png::Encoder::new(w, GRID_DIM_U32, GRID_DIM_U32);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
+    // 3. Write PNG with custom text chunk (atomic write via temp + rename)
+    let tmp_path = {
+        let file_name = path
+            .file_name()
+            .context("Snapshot path has no file name")?
+            .to_string_lossy();
+        path.with_file_name(format!("{}.tmp", file_name))
+    };
 
-    // Add metadata as uncompressed text chunk
-    encoder.add_text_chunk("RibossomeSnapshot".to_string(), encoded)?;
+    {
+        let file = std::fs::File::create(&tmp_path)?;
+        let w = BufWriter::new(file);
+        let mut encoder = png::Encoder::new(w, GRID_DIM_U32, GRID_DIM_U32);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
 
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(&img_data)?;
+        // Add metadata as uncompressed text chunk
+        encoder.add_text_chunk("RibossomeSnapshot".to_string(), encoded)?;
+
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&img_data)?;
+        writer.finish()?;
+    }
+
+    // On Windows, rename over an existing file fails, so remove first.
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+    std::fs::rename(&tmp_path, path)?;
 
     println!("Γ£ô Saved snapshot: {} agents, epoch {}", snapshot.agents.len(), snapshot.epoch);
     Ok(())
