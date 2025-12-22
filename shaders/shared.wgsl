@@ -16,8 +16,6 @@ const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 256u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
 const GENOME_WORDS: u32 = GENOME_BYTES / 4u;
-const PACKED_GENOME_WORDS: u32 = GENOME_BYTES / 16u;
-const PACKED_BASES_PER_WORD: u32 = 16u;
 const MIN_GENE_LENGTH: u32 = 6u;
 const PROPELLERS_ENABLED: bool = true;
 // Experimental: disable global agent orientation; body geometry defines facing.
@@ -1313,28 +1311,6 @@ fn genome_read_word(genome: array<u32, GENOME_WORDS>, index: u32) -> u32 {
     }
 }
 
-fn packed_read_word(packed: array<u32, PACKED_GENOME_WORDS>, index: u32) -> u32 {
-    switch (index) {
-        case 0u:  { return packed[0u]; }
-        case 1u:  { return packed[1u]; }
-        case 2u:  { return packed[2u]; }
-        case 3u:  { return packed[3u]; }
-        case 4u:  { return packed[4u]; }
-        case 5u:  { return packed[5u]; }
-        case 6u:  { return packed[6u]; }
-        case 7u:  { return packed[7u]; }
-        case 8u:  { return packed[8u]; }
-        case 9u:  { return packed[9u]; }
-        case 10u: { return packed[10u]; }
-        case 11u: { return packed[11u]; }
-        case 12u: { return packed[12u]; }
-        case 13u: { return packed[13u]; }
-        case 14u: { return packed[14u]; }
-        case 15u: { return packed[15u]; }
-        default: { return packed[15u]; }
-    }
-}
-
 fn genome_get_base_ascii(genome: array<u32, GENOME_WORDS>, index: u32) -> u32 {
     if (index >= GENOME_LENGTH) { return 0u; }
     let w = index / 4u; let o = index % 4u; let word_val = genome_read_word(genome, w); return (word_val >> (o * 8u)) & 0xFFu;
@@ -1346,45 +1322,6 @@ fn genome_get_codon_ascii(genome: array<u32, GENOME_WORDS>, index: u32) -> vec3<
         genome_get_base_ascii(genome, index + 1u),
         genome_get_base_ascii(genome, index + 2u)
     );
-}
-
-fn base_ascii_to_2bit(b: u32) -> u32 {
-    if (b == 65u) { return 0u; }
-    if (b == 85u) { return 1u; }
-    if (b == 71u) { return 2u; }
-    if (b == 67u) { return 3u; }
-    return 0u;
-}
-
-fn base_2bit_to_ascii(v: u32) -> u32 {
-    switch (v & 3u) {
-        case 0u: { return 65u; }
-        case 1u: { return 85u; }
-        case 2u: { return 71u; }
-        default: { return 67u; }
-    }
-}
-
-fn genome_get_base_packed(packed: array<u32, PACKED_GENOME_WORDS>, index: u32) -> u32 {
-    if (index >= GENOME_LENGTH) { return 0u; }
-    let word_index = index / PACKED_BASES_PER_WORD;
-    let bit_index = (index % PACKED_BASES_PER_WORD) * 2u;
-    let word_val = packed_read_word(packed, word_index);
-    let two_bits = (word_val >> bit_index) & 0x3u;
-    return base_2bit_to_ascii(two_bits);
-}
-
-fn genome_pack_into(agent_in: Agent) -> array<u32, PACKED_GENOME_WORDS> {
-    var out: array<u32, PACKED_GENOME_WORDS>;
-    for (var i = 0u; i < GENOME_LENGTH; i++) {
-        let b = genome_get_base_ascii(agent_in.genome, i);
-        let v = base_ascii_to_2bit(b);
-        let wi = i / PACKED_BASES_PER_WORD;
-        let bi = (i % PACKED_BASES_PER_WORD) * 2u;
-        let current_word = out[wi];
-        out[wi] = current_word | (v << bi);
-    }
-    return out;
 }
 
 fn genome_find_start_codon(genome: array<u32, GENOME_WORDS>) -> u32 {

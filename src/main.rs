@@ -603,7 +603,6 @@ const SELECTED_AGENT_READBACK_INTERVAL_MS: u64 = 16; // ~60Hz
 const MAX_BODY_PARTS: usize = 64;
 const GENOME_BYTES: usize = 256; // ASCII bases including padding
 const GENOME_WORDS: usize = GENOME_BYTES / std::mem::size_of::<u32>();
-const PACKED_GENOME_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const MIN_GENE_LENGTH: usize = 6;
 const MAX_SPAWN_REQUESTS: usize = 2000;
 
