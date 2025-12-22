@@ -603,8 +603,12 @@ const SELECTED_AGENT_READBACK_INTERVAL_MS: u64 = 16; // ~60Hz
 const MAX_BODY_PARTS: usize = 64;
 const GENOME_BYTES: usize = 256; // ASCII bases including padding
 const GENOME_WORDS: usize = GENOME_BYTES / std::mem::size_of::<u32>();
+const GENOME_PACKED_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
+const GENOME_BASES_PER_PACKED_WORD: usize = 16;
 const MIN_GENE_LENGTH: usize = 6;
 const MAX_SPAWN_REQUESTS: usize = 2000;
+
+const SNAPSHOT_VERSION: &str = "1.1";
 
 // RGB colors per amino acid, kept in sync with shader get_amino_acid_properties()
 const AMINO_COLORS: [[f32; 3]; 20] = [
@@ -768,6 +772,8 @@ const TS_EGUI_ENC_END: u32 = 57;
 
 const GPU_TS_COUNT: u32 = 58;
 
+const FRAME_PROFILER_READBACK_SLOTS: usize = 2;
+
 struct FrameProfiler {
     enabled: bool,
     gpu_supported: bool,
@@ -777,7 +783,15 @@ struct FrameProfiler {
     timestamp_period_ns: f64,
     query_set: Option<wgpu::QuerySet>,
     query_resolve: Option<wgpu::Buffer>,
-    query_readback: Option<wgpu::Buffer>,
+    query_readback: Vec<wgpu::Buffer>,
+    readback_busy: [bool; FRAME_PROFILER_READBACK_SLOTS],
+    capture_index: u64,
+    last_copied_slot: Option<usize>,
+    pending_map: Option<(
+        usize,
+        std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    )>,
+    wait_for_readback: bool,
     last_cpu_update_ms: f64,
     last_cpu_render_ms: f64,
     last_cpu_egui_ms: f64,
@@ -788,6 +802,12 @@ impl FrameProfiler {
         let enabled = std::env::var("ALSIM_PROFILE")
             .map(|value| value != "0")
             .unwrap_or(false);
+
+        // Default behavior is "blocking" (accurate per-sample printing but can stall the CPU).
+        // Set ALSIM_PROFILE_WAIT=0 to avoid stalling; prints may be skipped until data is ready.
+        let wait_for_readback = std::env::var("ALSIM_PROFILE_WAIT")
+            .map(|value| value != "0")
+            .unwrap_or(true);
 
         let sample_interval = std::env::var("ALSIM_PROFILE_INTERVAL_MS")
             .ok()
@@ -818,15 +838,27 @@ impl FrameProfiler {
                 mapped_at_creation: false,
             });
             let query_readback = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("FrameProfiler QueryReadback"),
+                label: Some("FrameProfiler QueryReadback[0]"),
                 size: bytes,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
 
-            (Some(query_set), Some(query_resolve), Some(query_readback))
+            let mut readbacks = Vec::with_capacity(FRAME_PROFILER_READBACK_SLOTS);
+            readbacks.push(query_readback);
+            for slot in 1..FRAME_PROFILER_READBACK_SLOTS {
+                let label = format!("FrameProfiler QueryReadback[{slot}]");
+                readbacks.push(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&label),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }));
+            }
+
+            (Some(query_set), Some(query_resolve), readbacks)
         } else {
-            (None, None, None)
+            (None, None, Vec::new())
         };
 
         Self {
@@ -839,6 +871,11 @@ impl FrameProfiler {
             query_set,
             query_resolve,
             query_readback,
+            readback_busy: [false; FRAME_PROFILER_READBACK_SLOTS],
+            capture_index: 0,
+            last_copied_slot: None,
+            pending_map: None,
+            wait_for_readback,
             last_cpu_update_ms: 0.0,
             last_cpu_render_ms: 0.0,
             last_cpu_egui_ms: 0.0,
@@ -880,19 +917,35 @@ impl FrameProfiler {
         }
     }
 
-    fn resolve_and_copy(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn resolve_and_copy(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if !self.capture_this_frame {
             return;
         }
-        let (Some(query_set), Some(resolve), Some(readback)) =
-            (&self.query_set, &self.query_resolve, &self.query_readback)
-        else {
+        let (Some(query_set), Some(resolve)) = (&self.query_set, &self.query_resolve) else {
             return;
         };
+        if self.query_readback.is_empty() {
+            return;
+        }
+
+        let slot = (self.capture_index as usize) % FRAME_PROFILER_READBACK_SLOTS;
+        if self.readback_busy[slot] {
+            // If we're in non-blocking mode and readbacks are still busy, skip rather than stall.
+            self.capture_this_frame = false;
+            self.next_sample_time = std::time::Instant::now() + self.sample_interval;
+            return;
+        }
 
         let bytes = (GPU_TS_COUNT as u64) * 8;
+        let readback = &self.query_readback[slot];
         encoder.resolve_query_set(query_set, 0..GPU_TS_COUNT, resolve, 0);
         encoder.copy_buffer_to_buffer(resolve, 0, readback, 0, bytes);
+
+        self.readback_busy[slot] = true;
+        self.last_copied_slot = Some(slot);
+        self.capture_index = self.capture_index.wrapping_add(1);
+        self.capture_this_frame = false;
+        self.next_sample_time = std::time::Instant::now() + self.sample_interval;
     }
 
     fn set_cpu_update_ms(&mut self, ms: f64) {
@@ -908,32 +961,88 @@ impl FrameProfiler {
     }
 
     fn readback_and_print(&mut self, device: &wgpu::Device) {
-        if !self.capture_this_frame {
+        if !self.enabled || !self.gpu_supported {
+            return;
+        }
+        if self.query_readback.is_empty() {
             return;
         }
 
-        let Some(readback) = &self.query_readback else {
-            self.capture_this_frame = false;
-            self.next_sample_time = std::time::Instant::now() + self.sample_interval;
+        // If there is a pending map, try to complete it first.
+        if let Some((pending_slot, rx)) = self.pending_map.take() {
+            if self.wait_for_readback {
+                device.poll(wgpu::Maintain::Wait);
+                let _ = rx.recv();
+            } else {
+                device.poll(wgpu::Maintain::Poll);
+                if rx.try_recv().is_err() {
+                    self.pending_map = Some((pending_slot, rx));
+                    return;
+                }
+            }
+
+            let pending_readback = &self.query_readback[pending_slot];
+            let slice = pending_readback.slice(..);
+            let stamps: Vec<u64> = {
+                let view = slice.get_mapped_range();
+                view.chunks_exact(8)
+                    .take(GPU_TS_COUNT as usize)
+                    .map(|chunk| {
+                        let bytes: [u8; 8] = chunk.try_into().unwrap();
+                        u64::from_le_bytes(bytes)
+                    })
+                    .collect()
+            };
+            pending_readback.unmap();
+            self.readback_busy[pending_slot] = false;
+
+            self.print_stamps(&stamps);
+            return;
+        }
+
+        // Start mapping the most recently copied slot (or any busy slot if we missed it).
+        let slot = if let Some(slot) = self.last_copied_slot {
+            slot
+        } else {
             return;
         };
+        if !self.readback_busy[slot] {
+            return;
+        }
 
+        let readback = &self.query_readback[slot];
         let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::Maintain::Wait);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            let _ = tx.send(res);
+        });
+        self.pending_map = Some((slot, rx));
 
-        let stamps: Vec<u64> = {
-            let view = slice.get_mapped_range();
-            view.chunks_exact(8)
-                .take(GPU_TS_COUNT as usize)
-                .map(|chunk| {
-                    let bytes: [u8; 8] = chunk.try_into().unwrap();
-                    u64::from_le_bytes(bytes)
-                })
-                .collect()
-        };
-        readback.unmap();
+        // In blocking mode, complete it immediately so prints happen on the expected cadence.
+        if self.wait_for_readback {
+            device.poll(wgpu::Maintain::Wait);
+            if let Some((pending_slot, rx)) = self.pending_map.take() {
+                let _ = rx.recv();
+                let pending_readback = &self.query_readback[pending_slot];
+                let slice = pending_readback.slice(..);
+                let stamps: Vec<u64> = {
+                    let view = slice.get_mapped_range();
+                    view.chunks_exact(8)
+                        .take(GPU_TS_COUNT as usize)
+                        .map(|chunk| {
+                            let bytes: [u8; 8] = chunk.try_into().unwrap();
+                            u64::from_le_bytes(bytes)
+                        })
+                        .collect()
+                };
+                pending_readback.unmap();
+                self.readback_busy[pending_slot] = false;
+                self.print_stamps(&stamps);
+            }
+        }
+    }
 
+    fn print_stamps(&self, stamps: &[u64]) {
         let dt_ms = |a: u32, b: u32| -> Option<f64> {
             let a = stamps.get(a as usize).copied().unwrap_or(0);
             let b = stamps.get(b as usize).copied().unwrap_or(0);
@@ -1070,9 +1179,6 @@ impl FrameProfiler {
             gpu_egui.unwrap_or(-1.0),
             gpu_egui_pass.unwrap_or(-1.0),
         );
-
-        self.capture_this_frame = false;
-        self.next_sample_time = std::time::Instant::now() + self.sample_interval;
     }
 }
 
@@ -1313,6 +1419,103 @@ fn genome_get_base_ascii(genome: &[u32; GENOME_WORDS], idx: usize) -> u8 {
     let word = genome[idx / 4];
     let shift = (idx % 4) * 8;
     ((word >> shift) & 0xFF) as u8
+}
+
+#[inline]
+fn genome_base_2bit_to_ascii(v: u32) -> u8 {
+    match v & 3 {
+        0 => b'A',
+        1 => b'U',
+        2 => b'G',
+        _ => b'C',
+    }
+}
+
+#[inline]
+fn genome_base_ascii_to_2bit(b: u8) -> u32 {
+    match b {
+        b'A' => 0,
+        b'U' => 1,
+        b'G' => 2,
+        b'C' => 3,
+        _ => 0,
+    }
+}
+
+#[inline]
+fn genome_packed_get_base_ascii(
+    packed: &[u32; GENOME_PACKED_WORDS],
+    idx: usize,
+    offset: u32,
+    len: u32,
+) -> u8 {
+    if idx >= GENOME_BYTES {
+        return b'X';
+    }
+    let idx_u32 = idx as u32;
+    if idx_u32 < offset || idx_u32 >= offset.saturating_add(len) {
+        return b'X';
+    }
+    let word_index = idx / GENOME_BASES_PER_PACKED_WORD;
+    let bit_index = (idx % GENOME_BASES_PER_PACKED_WORD) * 2;
+    let word_val = packed[word_index];
+    let two_bits = (word_val >> bit_index) & 0x3;
+    genome_base_2bit_to_ascii(two_bits)
+}
+
+fn genome_packed_to_ascii_words(
+    packed: &[u32; GENOME_PACKED_WORDS],
+    offset: u32,
+    len: u32,
+) -> [u32; GENOME_WORDS] {
+    let mut out = [0u32; GENOME_WORDS];
+    for idx in 0..GENOME_BYTES {
+        let b = genome_packed_get_base_ascii(packed, idx, offset, len);
+        let word = idx / 4;
+        let shift = (idx % 4) * 8;
+        out[word] |= (b as u32) << shift;
+    }
+    out
+}
+
+fn genome_pack_ascii_words(
+    genome_ascii: &[u32; GENOME_WORDS],
+) -> (u32, u32, [u32; GENOME_PACKED_WORDS]) {
+    // Interpret the active region as the span [first_non_x, last_non_x] (inclusive).
+    // NOTE: This assumes 'X' is used only for padding (no internal X holes).
+    let mut first = GENOME_BYTES;
+    let mut last = 0usize;
+    for i in 0..GENOME_BYTES {
+        let b = genome_get_base_ascii(genome_ascii, i);
+        if b != b'X' {
+            if first == GENOME_BYTES {
+                first = i;
+            }
+            last = i;
+        }
+    }
+
+    if first == GENOME_BYTES {
+        return (0, 0, [0u32; GENOME_PACKED_WORDS]);
+    }
+
+    let offset = first as u32;
+    let len = (last - first + 1) as u32;
+    let mut packed = [0u32; GENOME_PACKED_WORDS];
+
+    for idx in first..=last {
+        let base = genome_get_base_ascii(genome_ascii, idx);
+        if base == b'X' {
+            continue;
+        }
+        let code = genome_base_ascii_to_2bit(base);
+        let bi = idx as u32;
+        let wi = (bi / GENOME_BASES_PER_PACKED_WORD as u32) as usize;
+        let bit_index = (bi % GENOME_BASES_PER_PACKED_WORD as u32) * 2;
+        packed[wi] |= code << bit_index;
+    }
+
+    (len, offset, packed)
 }
 
 #[inline]
@@ -1872,7 +2075,8 @@ fn string_to_genome(s: &str) -> anyhow::Result<[u32; GENOME_WORDS]> {
 }
 
 fn save_agent_via_dialog(agent: &Agent) -> anyhow::Result<()> {
-    let genome_str = genome_to_string(&agent.genome);
+    let genome_ascii = genome_packed_to_ascii_words(&agent.genome_packed, agent.genome_offset, agent.gene_length);
+    let genome_str = genome_to_string(&genome_ascii);
     let default_name = format!("agent_{}.json", &genome_str[0..8.min(genome_str.len())]);
 
     if let Some(path) = rfd::FileDialog::new()
@@ -1954,10 +2158,10 @@ struct Agent {
     age: u32,                                  // 4 bytes (60-63) - age in frames
     total_mass: f32,                           // 4 bytes (64-67) - computed each frame after morphology
     poison_resistant_count: u32,               // 4 bytes (68-71) - number of poison-resistant organs
-    gene_length: u32,                          // 4 bytes (72-75) - number of non-X bases in genome (valid gene length)
-    genome: [u32; GENOME_WORDS],               // GENOME_BYTES bytes (ASCII bases) - 76 to 331
-    _pad_genome_align: [u32; 5],               // 20 bytes (332-351) - padding to align body to 16-byte boundary
-    body: [BodyPart; MAX_BODY_PARTS],          // starts at byte 352 (16-byte aligned)
+    gene_length: u32,                          // number of active (non-padding) bases
+    genome_offset: u32,                        // left padding so active bases are in [offset, offset+len)
+    genome_packed: [u32; GENOME_PACKED_WORDS], // 2-bit packed genome (A/U/G/C)
+    body: [BodyPart; MAX_BODY_PARTS],
 }
 
 // SAFETY: Agent is repr(C) with explicit padding, matching shader layout exactly
@@ -1973,7 +2177,10 @@ struct SpawnRequest {
     position: [f32; 2],
     energy: f32,
     rotation: f32,
-    genome_override: [u32; GENOME_WORDS],
+    genome_override_len: u32,
+    genome_override_offset: u32,
+    genome_override_packed: [u32; GENOME_PACKED_WORDS],
+    _pad_genome: [u32; 2],
 }
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -2629,9 +2836,11 @@ struct AgentSnapshot {
 
 impl From<&Agent> for AgentSnapshot {
     fn from(agent: &Agent) -> Self {
-        // Extract genome as bytes
+        // Extract genome as bytes (legacy ASCII with X padding)
+        let genome_ascii =
+            genome_packed_to_ascii_words(&agent.genome_packed, agent.genome_offset, agent.gene_length);
         let mut genome_bytes = Vec::with_capacity(GENOME_BYTES);
-        for word in &agent.genome {
+        for word in &genome_ascii {
             genome_bytes.extend_from_slice(&word.to_le_bytes());
         }
 
@@ -2654,6 +2863,9 @@ impl AgentSnapshot {
             }
         }
 
+        let (genome_override_len, genome_override_offset, genome_override_packed) =
+            genome_pack_ascii_words(&genome_override);
+
         SpawnRequest {
             seed: 0,
             genome_seed: 0,
@@ -2662,7 +2874,10 @@ impl AgentSnapshot {
             position: self.position,
             energy: self.energy,
             rotation: self.rotation,
-            genome_override,
+            genome_override_len,
+            genome_override_offset,
+            genome_override_packed,
+            _pad_genome: [0u32; 2],
         }
     }
 }
@@ -2706,7 +2921,7 @@ impl SimulationSnapshot {
         println!("Snapshot created with {} agents (from {} living)", agent_snapshots.len(), agents.len());
 
         Self {
-            version: "1.0".to_string(),
+            version: SNAPSHOT_VERSION.to_string(),
             timestamp,
             epoch,
             settings: Some(settings),
@@ -3509,21 +3724,26 @@ impl GpuState {
         debug_assert_eq!(std::mem::align_of::<BodyPart>(), 16);
         debug_assert_eq!(
             std::mem::size_of::<Agent>(),
-            2400,
+            2192,
             "Agent layout mismatch for MAX_BODY_PARTS={}",
             MAX_BODY_PARTS
         );
         debug_assert_eq!(std::mem::align_of::<Agent>(), 16);
-        // NOTE: SpawnRequest includes a GENOME_WORDS-word genome_override array (GENOME_BYTES bytes)
+        // NOTE: SpawnRequest includes a packed genome override:
+        // - genome_override_len (u32)
+        // - genome_override_offset (u32)
+        // - genome_override_packed ([u32; GENOME_PACKED_WORDS])
         // Layout breakdown (std430 / repr(C, align(16))):
         // seed/genome_seed/flags/_pad_seed = 16 bytes total
         // position ([f32;2]) = 8  -> offset 16..24
         // energy (4) + rotation (4) = 8 -> offset 24..32
-        // genome_override ([u32; GENOME_WORDS]) = GENOME_BYTES -> offset 32..288 total
-        // Total size = 288 bytes; alignment = 16 bytes.
+        // genome_override_len (4) + genome_override_offset (4) -> offset 32..40
+        // genome_override_packed (GENOME_PACKED_WORDS * 4 = 64) -> offset 40..104
+        // _pad_genome ([u32;2] = 8) -> offset 104..112
+        // Total size = 112 bytes; alignment = 16 bytes.
         debug_assert_eq!(
             std::mem::size_of::<SpawnRequest>(),
-            288,
+            112,
             "SpawnRequest size mismatch; update buffer allocations/bindings if this fails"
         );
         debug_assert_eq!(std::mem::align_of::<SpawnRequest>(), 16);
@@ -6185,7 +6405,10 @@ impl GpuState {
                 position: [0.0, 0.0], // Let GPU generate random position using seed
                 energy: 10.0,
                 rotation: 0.0, // Let GPU generate random rotation using seed
-                genome_override: [0u32; GENOME_WORDS],
+                genome_override_len: 0,
+                genome_override_offset: 0,
+                genome_override_packed: [0u32; GENOME_PACKED_WORDS],
+                _pad_genome: [0u32; 2],
             };
 
             self.cpu_spawn_queue.push(request);
@@ -6402,7 +6625,10 @@ impl GpuState {
                     position: [0.0, 0.0], // Let GPU generate random position using seed
                     energy: 10.0,
                     rotation: 0.0, // Let GPU generate random rotation using seed
-                    genome_override: [0u32; GENOME_WORDS],
+                    genome_override_len: 0,
+                    genome_override_offset: 0,
+                    genome_override_packed: [0u32; GENOME_PACKED_WORDS],
+                    _pad_genome: [0u32; 2],
                 };
 
                 self.cpu_spawn_queue.push(request);
@@ -8909,6 +9135,18 @@ impl GpuState {
         // Load snapshot from PNG file
         let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
 
+        // Snapshot compatibility gate.
+        // - Empty version strings are treated as legacy "1.0".
+        // - Current builds write SNAPSHOT_VERSION.
+        match snapshot.version.as_str() {
+            "" | "1.0" | "1.1" => {}
+            other => {
+                anyhow::bail!(
+                    "Unsupported snapshot version '{other}'. This build supports snapshot versions 1.0 and 1.1."
+                );
+            }
+        }
+
         // Apply loaded settings only if they exist in the snapshot (backwards compatibility)
         if let Some(settings) = &snapshot.settings {
             self.apply_settings(settings);
@@ -9007,8 +9245,17 @@ impl GpuState {
 
         let mut new_agent = Agent::zeroed();
 
-        // Mutate genome
-        new_agent.genome = self.mutate_genome(&parent_agent.genome);
+        // Mutate genome (via legacy ASCII representation) then repack.
+        let parent_ascii = genome_packed_to_ascii_words(
+            &parent_agent.genome_packed,
+            parent_agent.genome_offset,
+            parent_agent.gene_length,
+        );
+        let mutated_ascii = self.mutate_genome(&parent_ascii);
+        let (gene_length, genome_offset, genome_packed) = genome_pack_ascii_words(&mutated_ascii);
+        new_agent.gene_length = gene_length;
+        new_agent.genome_offset = genome_offset;
+        new_agent.genome_packed = genome_packed;
 
         // Spawn near parent with random offset
         self.rng_state = self
@@ -10258,6 +10505,12 @@ fn main() {
                                                                 Ok(genome) => {
                                                                     println!("Successfully loaded genome, spawning 100 clones...");
 
+                                                                    let (
+                                                                        genome_override_len,
+                                                                        genome_override_offset,
+                                                                        genome_override_packed,
+                                                                    ) = genome_pack_ascii_words(&genome);
+
                                                                     for _ in 0..100 {
                                                                         state.rng_state = state.rng_state
                                                                             .wrapping_mul(6364136223846793005u64)
@@ -10293,7 +10546,10 @@ fn main() {
                                                                             position: [rx * SIM_SIZE, ry * SIM_SIZE],
                                                                             energy: 10.0,
                                                                             rotation,
-                                                                            genome_override: genome,
+                                                                            genome_override_len,
+                                                                            genome_override_offset,
+                                                                            genome_override_packed,
+                                                                            _pad_genome: [0u32; 2],
                                                                         };
 
                                                                         state.cpu_spawn_queue.push(request);
@@ -10689,6 +10945,12 @@ fn main() {
                                                                             "Successfully loaded genome, spawning 100 clones..."
                                                                         );
 
+                                                                        let (
+                                                                            genome_override_len,
+                                                                            genome_override_offset,
+                                                                            genome_override_packed,
+                                                                        ) = genome_pack_ascii_words(&genome);
+
                                                                         for _ in 0..100 {
                                                                             state.rng_state = state
                                                                                 .rng_state
@@ -10737,7 +10999,10 @@ fn main() {
                                                                                 ],
                                                                                 energy: 10.0,
                                                                                 rotation,
-                                                                                genome_override: genome,
+                                                                                genome_override_len,
+                                                                                genome_override_offset,
+                                                                                genome_override_packed,
+                                                                                _pad_genome: [0u32; 2],
                                                                             };
 
                                                                             state.cpu_spawn_queue.push(request);
@@ -11983,8 +12248,13 @@ fn main() {
                                                     // - Optional stop-codon ignore
                                                     // - Promoters consume 6 bases (promoter+modifier), even if the result is an amino
                                                     // - Translation does not "restart" after a stop
+                                                    let genome_ascii = genome_packed_to_ascii_words(
+                                                        &agent.genome_packed,
+                                                        agent.genome_offset,
+                                                        agent.gene_length,
+                                                    );
                                                     let translation_map = build_translation_map_for_inspector(
-                                                        &agent.genome,
+                                                        &genome_ascii,
                                                         (agent.body_count as usize).min(MAX_BODY_PARTS),
                                                         state.require_start_codon,
                                                         state.ignore_stop_codons,
@@ -11993,7 +12263,7 @@ fn main() {
                                                     for idx in 0..GENOME_BYTES {
                                                         let row = idx / bases_per_line;
                                                         let col = idx % bases_per_line;
-                                                        let base = genome_get_base_ascii(&agent.genome, idx);
+                                                        let base = genome_get_base_ascii(&genome_ascii, idx);
                                                         let mut color = genome_base_color(base);
 
                                                         // Darken untranslated regions
@@ -12025,8 +12295,13 @@ fn main() {
                                                         let bar_w = 280.0;
                                                         let bar_h = 8.0;
 
+                                                        let genome_ascii = genome_packed_to_ascii_words(
+                                                            &agent.genome_packed,
+                                                            agent.genome_offset,
+                                                            agent.gene_length,
+                                                        );
                                                         let nucleotide_spans = compute_body_part_nucleotide_spans_for_inspector(
-                                                            &agent.genome,
+                                                            &genome_ascii,
                                                             body_count,
                                                             state.require_start_codon,
                                                             state.ignore_stop_codons,

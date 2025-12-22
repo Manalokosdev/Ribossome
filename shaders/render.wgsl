@@ -1804,7 +1804,9 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Draw full genome bar (all nucleotides from first non-X triplet) - VERTICAL
     if (in_genome_bar) {
-        let genome = selected_agent_buffer[0].genome;
+        let genome_packed = selected_agent_buffer[0].genome_packed;
+        let genome_offset = selected_agent_buffer[0].genome_offset;
+        let gene_length = selected_agent_buffer[0].gene_length;
         let body_count = selected_agent_buffer[0].body_count;
         let available_height = bars.bars_y_end - bars.bars_y_start;
         let genome_pixel_y = flipped_y - bars.bars_y_start;  // Pixel position in bar (0 to available_height)
@@ -1812,12 +1814,12 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
         let base_index = genome_pixel_y / pixels_per_base;  // Which base are we displaying
 
         // Always start from first non-X triplet (gene start)
-        let gene_start = genome_find_first_coding_triplet(genome);
+        let gene_start = genome_find_first_coding_triplet(genome_packed, genome_offset, gene_length);
 
         // Find translation start to know where active region begins
         var translation_start = 0xFFFFFFFFu;
         if (params.require_start_codon == 1u) {
-            translation_start = genome_find_start_codon(genome);
+            translation_start = genome_find_start_codon(genome_packed, genome_offset, gene_length);
         } else {
             translation_start = gene_start;
         }
@@ -1836,7 +1838,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             for (var i = 0u; i < MAX_BODY_PARTS; i++) {
                 // Use centralized translation function
-                let step = translate_codon_step(genome, pos_b, params.ignore_stop_codons == 1u);
+                let step = translate_codon_step(genome_packed, pos_b, genome_offset, gene_length, params.ignore_stop_codons == 1u);
 
                 if (!step.is_valid) {
                     if (step.is_stop && part_count >= body_count) {
@@ -1855,26 +1857,13 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        // Find first run of 3+ consecutive 'X's to mark end of gene
-        var first_x_position = GENOME_LENGTH;
-        if (gene_start != 0xFFFFFFFFu) {
-            for (var scan_pos = gene_start; scan_pos < GENOME_LENGTH - 2u; scan_pos++) {
-                let ascii0 = genome_get_base_ascii(genome, scan_pos);
-                let ascii1 = genome_get_base_ascii(genome, scan_pos + 1u);
-                let ascii2 = genome_get_base_ascii(genome, scan_pos + 2u);
-                // Found 3 consecutive X's
-                if (ascii0 == 88u && ascii1 == 88u && ascii2 == 88u) {
-                    first_x_position = scan_pos;
-                    break;
-                }
-            }
-        }
+        let gene_end = min(GENOME_LENGTH, genome_offset + gene_length);
 
         if (gene_start != 0xFFFFFFFFu && base_index < GENOME_LENGTH - gene_start) {
             let actual_base_index = gene_start + base_index;
-            // Only draw if before first 'X'
-            if (actual_base_index < first_x_position && actual_base_index < GENOME_LENGTH) {
-                let base_ascii = genome_get_base_ascii(genome, actual_base_index);
+            // Only draw if inside active gene region
+            if (actual_base_index < gene_end && actual_base_index < GENOME_LENGTH) {
+                let base_ascii = genome_get_base_ascii(genome_packed, actual_base_index, genome_offset, gene_length);
 
                 var base_color = vec3<f32>(0.5, 0.5, 0.5);
                 if (base_ascii == 65u) {  // 'A'
@@ -1901,7 +1890,9 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Draw amino acid/organ bar (only translated parts up to body_count) - VERTICAL WITH LABELS
     if (in_amino_bar || in_label_area) {
-        let genome = selected_agent_buffer[0].genome;
+        let genome_packed = selected_agent_buffer[0].genome_packed;
+        let genome_offset = selected_agent_buffer[0].genome_offset;
+        let gene_length = selected_agent_buffer[0].gene_length;
         let body_count = selected_agent_buffer[0].body_count;
         let available_height = bars.bars_y_end - bars.bars_y_start;
         let genome_pixel_y = flipped_y - bars.bars_y_start;  // Pixel position in bar
@@ -1909,12 +1900,12 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
         let base_index_in_bar = genome_pixel_y / pixels_per_base;
 
         // Gene always starts at first non-X triplet
-        let gene_start = genome_find_first_coding_triplet(genome);
+        let gene_start = genome_find_first_coding_triplet(genome_packed, genome_offset, gene_length);
 
         // Translation starts at AUG (if required) or gene start
         var translation_start = 0xFFFFFFFFu;
         if (params.require_start_codon == 1u) {
-            translation_start = genome_find_start_codon(genome);
+            translation_start = genome_find_start_codon(genome_packed, genome_offset, gene_length);
         } else {
             translation_start = gene_start;
         }
@@ -1937,7 +1928,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             for (var i = 0u; i < MAX_BODY_PARTS; i++) {
                 // Use centralized translation function
-                let step = translate_codon_step(genome, pos_b, params.ignore_stop_codons == 1u);
+                let step = translate_codon_step(genome_packed, pos_b, genome_offset, gene_length, params.ignore_stop_codons == 1u);
 
                 // Handle invalid translation or stop
                 if (!step.is_valid) {
@@ -2116,19 +2107,21 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Draw signal bars (alpha and beta signals for each body part) - VERTICAL
     if (in_alpha_bar || in_beta_bar) {
-        let genome = selected_agent_buffer[0].genome;
+        let genome_packed = selected_agent_buffer[0].genome_packed;
+        let genome_offset = selected_agent_buffer[0].genome_offset;
+        let gene_length = selected_agent_buffer[0].gene_length;
         let body_count = selected_agent_buffer[0].body_count;
         let available_height = bars.bars_y_end - bars.bars_y_start;
         let genome_pixel_y = flipped_y - bars.bars_y_start;  // Pixel position in bar
         let pixels_per_base = 2u;  // 2 pixels per base (must match amino bar)
 
         // Gene always starts at first non-X triplet
-        let gene_start = genome_find_first_coding_triplet(genome);
+        let gene_start = genome_find_first_coding_triplet(genome_packed, genome_offset, gene_length);
 
         // Translation starts at AUG (if required) or gene start
         var translation_start = 0xFFFFFFFFu;
         if (params.require_start_codon == 1u) {
-            translation_start = genome_find_start_codon(genome);
+            translation_start = genome_find_start_codon(genome_packed, genome_offset, gene_length);
         } else {
             translation_start = gene_start;
         }
@@ -2151,7 +2144,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             for (var i = 0u; i < MAX_BODY_PARTS; i++) {
                 // Use centralized translation function
-                let step = translate_codon_step(genome, pos_b, params.ignore_stop_codons == 1u);
+                let step = translate_codon_step(genome_packed, pos_b, genome_offset, gene_length, params.ignore_stop_codons == 1u);
 
                 if (!step.is_valid) {
                     break;

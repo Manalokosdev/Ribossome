@@ -15,7 +15,11 @@ const SIM_SIZE: u32 = 30720u;          // Simulation world size (doubled)
 const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 256u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
-const GENOME_WORDS: u32 = GENOME_BYTES / 4u;
+// ASCII genome representation (legacy / temporary scratch): 4 bases per u32.
+const GENOME_ASCII_WORDS: u32 = GENOME_BYTES / 4u;
+// Packed genome representation: 2 bits per base (A/U/G/C), 16 bases per u32.
+const GENOME_PACKED_WORDS: u32 = GENOME_BYTES / 16u;
+const GENOME_BASES_PER_PACKED_WORD: u32 = 16u;
 const MIN_GENE_LENGTH: u32 = 6u;
 const PROPELLERS_ENABLED: bool = true;
 // Experimental: disable global agent orientation; body geometry defines facing.
@@ -142,9 +146,12 @@ struct Agent {
     age: u32,                 // age in frames since spawn
     total_mass: f32,          // total mass computed after morphology
     poison_resistant_count: u32, // number of poison-resistant organs (type 29)
-    gene_length: u32,        // number of non-X bases in genome (valid gene length)
-    genome: array<u32, GENOME_WORDS>,   // GENOME_BYTES bytes genome (ASCII RNA bases)
-    _pad_genome_align: array<u32, 5>, // padding to align body array to 16-byte boundary
+    // Genome is stored as 2-bit packed bases in a fixed GENOME_BYTES-capacity space.
+    // gene_length: number of active (non-padding) bases.
+    // genome_offset: left padding (so active bases live in [offset, offset+len)).
+    gene_length: u32,
+    genome_offset: u32,
+    genome_packed: array<u32, GENOME_PACKED_WORDS>,
     body: array<BodyPart, MAX_BODY_PARTS>, // body parts array
 }
 
@@ -156,7 +163,10 @@ struct SpawnRequest {
     position: vec2<f32>,
     energy: f32,
     rotation: f32,
-    genome_override: array<u32, GENOME_WORDS>,
+    genome_override_len: u32,
+    genome_override_offset: u32,
+    genome_override_packed: array<u32, GENOME_PACKED_WORDS>,
+    _pad_genome: array<u32, 2>,
 }
 
 struct SimParams {
@@ -1241,7 +1251,7 @@ fn codon_to_amino_index(b0: u32, b1: u32, b2: u32) -> u32 {
 }
 
 // Genome helpers and translation
-fn genome_read_word(genome: array<u32, GENOME_WORDS>, index: u32) -> u32 {
+fn genome_ascii_read_word(genome: array<u32, GENOME_ASCII_WORDS>, index: u32) -> u32 {
     switch (index) {
         case 0u:  { return genome[0u]; }
         case 1u:  { return genome[1u]; }
@@ -1311,43 +1321,87 @@ fn genome_read_word(genome: array<u32, GENOME_WORDS>, index: u32) -> u32 {
     }
 }
 
-fn genome_get_base_ascii(genome: array<u32, GENOME_WORDS>, index: u32) -> u32 {
-    if (index >= GENOME_LENGTH) { return 0u; }
-    let w = index / 4u; let o = index % 4u; let word_val = genome_read_word(genome, w); return (word_val >> (o * 8u)) & 0xFFu;
+fn genome_packed_read_word(packed: array<u32, GENOME_PACKED_WORDS>, index: u32) -> u32 {
+    switch (index) {
+        case 0u:  { return packed[0u]; }
+        case 1u:  { return packed[1u]; }
+        case 2u:  { return packed[2u]; }
+        case 3u:  { return packed[3u]; }
+        case 4u:  { return packed[4u]; }
+        case 5u:  { return packed[5u]; }
+        case 6u:  { return packed[6u]; }
+        case 7u:  { return packed[7u]; }
+        case 8u:  { return packed[8u]; }
+        case 9u:  { return packed[9u]; }
+        case 10u: { return packed[10u]; }
+        case 11u: { return packed[11u]; }
+        case 12u: { return packed[12u]; }
+        case 13u: { return packed[13u]; }
+        case 14u: { return packed[14u]; }
+        case 15u: { return packed[15u]; }
+        default: { return packed[15u]; }
+    }
 }
 
-fn genome_get_codon_ascii(genome: array<u32, GENOME_WORDS>, index: u32) -> vec3<u32> {
+fn genome_base_2bit_to_ascii(v: u32) -> u32 {
+    switch (v & 3u) {
+        case 0u: { return 65u; } // A
+        case 1u: { return 85u; } // U
+        case 2u: { return 71u; } // G
+        default: { return 67u; } // C
+    }
+}
+
+fn genome_base_ascii_to_2bit(b: u32) -> u32 {
+    if (b == 65u) { return 0u; } // A
+    if (b == 85u) { return 1u; } // U
+    if (b == 71u) { return 2u; } // G
+    if (b == 67u) { return 3u; } // C
+    return 0u;
+}
+
+fn genome_get_base_ascii(packed: array<u32, GENOME_PACKED_WORDS>, index: u32, offset: u32, len: u32) -> u32 {
+    if (index >= GENOME_LENGTH) { return 88u; }
+    if (index < offset || index >= offset + len) { return 88u; } // 'X' padding
+    let word_index = index / GENOME_BASES_PER_PACKED_WORD;
+    let bit_index = (index % GENOME_BASES_PER_PACKED_WORD) * 2u;
+    let word_val = genome_packed_read_word(packed, word_index);
+    let two_bits = (word_val >> bit_index) & 0x3u;
+    return genome_base_2bit_to_ascii(two_bits);
+}
+
+fn genome_get_codon_ascii(packed: array<u32, GENOME_PACKED_WORDS>, index: u32, offset: u32, len: u32) -> vec3<u32> {
     return vec3<u32>(
-        genome_get_base_ascii(genome, index),
-        genome_get_base_ascii(genome, index + 1u),
-        genome_get_base_ascii(genome, index + 2u)
+        genome_get_base_ascii(packed, index, offset, len),
+        genome_get_base_ascii(packed, index + 1u, offset, len),
+        genome_get_base_ascii(packed, index + 2u, offset, len)
     );
 }
 
-fn genome_find_start_codon(genome: array<u32, GENOME_WORDS>) -> u32 {
+fn genome_find_start_codon(packed: array<u32, GENOME_PACKED_WORDS>, offset: u32, len: u32) -> u32 {
     for (var i = 0u; i < GENOME_LENGTH - 2u; i++) {
-        let b0 = genome_get_base_ascii(genome, i);
-        let b1 = genome_get_base_ascii(genome, i + 1u);
-        let b2 = genome_get_base_ascii(genome, i + 2u);
+        let b0 = genome_get_base_ascii(packed, i, offset, len);
+        let b1 = genome_get_base_ascii(packed, i + 1u, offset, len);
+        let b2 = genome_get_base_ascii(packed, i + 2u, offset, len);
         if (b0 == 65u && b1 == 85u && b2 == 71u) { return i; }
     }
     return 0xFFFFFFFFu;
 }
 
-fn genome_find_first_coding_triplet(genome: array<u32, GENOME_WORDS>) -> u32 {
+fn genome_find_first_coding_triplet(packed: array<u32, GENOME_PACKED_WORDS>, offset: u32, len: u32) -> u32 {
     var i = 0u;
     loop {
         if (i + 2u >= GENOME_LENGTH) { break; }
-        let codon = genome_get_codon_ascii(genome, i);
+        let codon = genome_get_codon_ascii(packed, i, offset, len);
         if (codon.x == 88u || codon.y == 88u || codon.z == 88u) { i = i + 1u; continue; }
         return i;
     }
     return 0xFFFFFFFFu;
 }
 
-fn genome_is_stop_codon_at(genome: array<u32, GENOME_WORDS>, index: u32) -> bool {
+fn genome_is_stop_codon_at(packed: array<u32, GENOME_PACKED_WORDS>, index: u32, offset: u32, len: u32) -> bool {
     if (index + 2u >= GENOME_LENGTH) { return true; }
-    let c = genome_get_codon_ascii(genome, index);
+    let c = genome_get_codon_ascii(packed, index, offset, len);
     if (c.x == 88u || c.y == 88u || c.z == 88u) { return true; }
     return (c.x == 85u && c.y == 65u && (c.z == 65u || c.z == 71u)) || (c.x == 85u && c.y == 71u && c.z == 65u);
 }
@@ -1359,22 +1413,22 @@ struct TranslationStep {
     is_valid: bool,
 }
 
-fn translate_codon_step(genome: array<u32, GENOME_WORDS>, pos_b: u32, ignore_stop_codons: bool) -> TranslationStep {
+fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, offset: u32, len: u32, ignore_stop_codons: bool) -> TranslationStep {
     var result: TranslationStep;
     result.part_type = 0u; result.bases_consumed = 3u; result.is_stop = false; result.is_valid = false;
 
     if (pos_b + 2u >= GENOME_LENGTH) { return result; }
 
-    let is_stop_or_x = genome_is_stop_codon_at(genome, pos_b);
+    let is_stop_or_x = genome_is_stop_codon_at(packed, pos_b, offset, len);
     if (is_stop_or_x) {
-        let c = genome_get_codon_ascii(genome, pos_b);
+        let c = genome_get_codon_ascii(packed, pos_b, offset, len);
         let has_x = (c.x == 88u || c.y == 88u || c.z == 88u);
         result.is_stop = !has_x;
         result.is_valid = ignore_stop_codons && !has_x;
         return result;
     }
 
-    let codon = genome_get_codon_ascii(genome, pos_b);
+    let codon = genome_get_codon_ascii(packed, pos_b, offset, len);
     let amino_type = codon_to_amino_index(codon.x, codon.y, codon.z);
 
     let is_promoter = (amino_type == 9u || amino_type == 12u ||
@@ -1386,20 +1440,20 @@ fn translate_codon_step(genome: array<u32, GENOME_WORDS>, pos_b: u32, ignore_sto
     var bases_consumed = 3u;
 
     if (is_promoter && pos_b + 5u < GENOME_LENGTH) {
-        let b3 = genome_get_base_ascii(genome, pos_b + 3u);
-        let b4 = genome_get_base_ascii(genome, pos_b + 4u);
-        let b5 = genome_get_base_ascii(genome, pos_b + 5u);
+        let b3 = genome_get_base_ascii(packed, pos_b + 3u, offset, len);
+        let b4 = genome_get_base_ascii(packed, pos_b + 4u, offset, len);
+        let b5 = genome_get_base_ascii(packed, pos_b + 5u, offset, len);
         let second_codon_has_x = (b3 == 88u || b4 == 88u || b5 == 88u);
 
         if (!second_codon_has_x) {
             // If the modifier codon is a stop codon, do not allow it to synthesize an organ.
             // - Normal mode: consume only the promoter (3 bases) so the stop codon terminates on the next step.
             // - Debug mode (ignore_stop_codons): skip over the stop codon (consume 6 bases) but still emit the promoter amino.
-            if (genome_is_stop_codon_at(genome, pos_b + 3u)) {
+            if (genome_is_stop_codon_at(packed, pos_b + 3u, offset, len)) {
                 final_part_type = amino_type;
                 bases_consumed = select(3u, 6u, ignore_stop_codons);
             } else {
-            let codon2 = genome_get_codon_ascii(genome, pos_b + 3u);
+            let codon2 = genome_get_codon_ascii(packed, pos_b + 3u, offset, len);
             let modifier = codon_to_amino_index(codon2.x, codon2.y, codon2.z);
             var organ_base_type = 0u;
 
@@ -1463,7 +1517,7 @@ fn translate_codon_step(genome: array<u32, GENOME_WORDS>, pos_b: u32, ignore_sto
     return result;
 }
 
-fn genome_revcomp_word(parent: array<u32, GENOME_WORDS>, wi: u32) -> u32 {
+fn genome_revcomp_ascii_word(parent_packed: array<u32, GENOME_PACKED_WORDS>, parent_offset: u32, parent_len: u32, wi: u32) -> u32 {
     let dst0 = wi * 4u + 0u;
     let dst1 = wi * 4u + 1u;
     let dst2 = wi * 4u + 2u;
@@ -1472,9 +1526,9 @@ fn genome_revcomp_word(parent: array<u32, GENOME_WORDS>, wi: u32) -> u32 {
     let src1 = (GENOME_LENGTH - 1u) - dst1;
     let src2 = (GENOME_LENGTH - 1u) - dst2;
     let src3 = (GENOME_LENGTH - 1u) - dst3;
-    let b0 = rna_complement(genome_get_base_ascii(parent, src0));
-    let b1 = rna_complement(genome_get_base_ascii(parent, src1));
-    let b2 = rna_complement(genome_get_base_ascii(parent, src2));
-    let b3 = rna_complement(genome_get_base_ascii(parent, src3));
+    let b0 = rna_complement(genome_get_base_ascii(parent_packed, src0, parent_offset, parent_len));
+    let b1 = rna_complement(genome_get_base_ascii(parent_packed, src1, parent_offset, parent_len));
+    let b2 = rna_complement(genome_get_base_ascii(parent_packed, src2, parent_offset, parent_len));
+    let b3 = rna_complement(genome_get_base_ascii(parent_packed, src3, parent_offset, parent_len));
     return (b0 & 0xFFu) | ((b1 & 0xFFu) << 8u) | ((b2 & 0xFFu) << 16u) | ((b3 & 0xFFu) << 24u);
 }
