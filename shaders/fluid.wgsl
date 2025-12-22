@@ -601,33 +601,18 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // checkerboarding/odd-even artifacts; using a small 2x2 box filter on |v| makes
     // the lift/deposit thresholding much less likely to imprint the FLUID_GRID_SIZE
     // lattice onto the (higher-res) dye/chem grids.
-    // Isotropic 3x3 (Gaussian-ish) filter of |v| around the point.
-    // This further suppresses collocated-grid odd/even + axis-aligned modes that can
-    // get amplified by the nonlinear lift/deposit curve.
-    // Kernel:
-    //   1 2 1
-    //   2 4 2   / 16
-    //   1 2 1
+    // Low-pass filter of velocity for the speed-driven chem<->dye transfer.
+    // Keep this cheap: 5-tap cross filter (center + axis taps).
+    // This still damps collocated-grid odd/even artifacts without the cost of a full 3x3.
     let o = 0.5;
-    // Sample diagonals at the same radius as axis taps.
-    // If we use (±o, ±o), diagonal taps are farther away by sqrt(2), which can
-    // subtly bias the driver toward cardinal directions on circular motion.
-    let od = o * 0.70710678; // 1/sqrt(2)
-    let v00 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(-od, -od))), MAX_VEL);
-    let v10 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0, -o ))), MAX_VEL);
-    let v20 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( od, -od))), MAX_VEL);
-    let v01 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(-o ,  0.0))), MAX_VEL);
-    let v11 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0,  0.0))), MAX_VEL);
-    let v21 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( o ,  0.0))), MAX_VEL);
-    let v02 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(-od,  od))), MAX_VEL);
-    let v12 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0,  o ))), MAX_VEL);
-    let v22 = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( od,  od))), MAX_VEL);
+    let v_c = vel_fluid;
+    let v_l = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(-o,  0.0))), MAX_VEL);
+    let v_r = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( o,  0.0))), MAX_VEL);
+    let v_u = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0, -o))), MAX_VEL);
+    let v_d = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0,  o))), MAX_VEL);
 
-    let avg_vel = (
-        v00 * 1.0 + v10 * 2.0 + v20 * 1.0 +
-        v01 * 2.0 + v11 * 4.0 + v21 * 2.0 +
-        v02 * 1.0 + v12 * 2.0 + v22 * 1.0
-    ) * (1.0 / 16.0);
+    // Weights: center=4, axis=2 each (sum=12)
+    let avg_vel = (v_c * 4.0 + (v_l + v_r + v_u + v_d) * 2.0) * (1.0 / 12.0);
     let speed_fluid = length(avg_vel);
     let speed = speed_fluid * FLUID_TO_DYE_SCALE;
 
@@ -1483,7 +1468,9 @@ fn compute_divergence(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 
 fn curl_at(x: u32, y: u32) -> f32 {
-    // Diagonal-informed curl to reduce axis-aligned artifacts.
+    // Axis-only curl.
+    // NOTE: This is intentionally cheaper than the diagonal-informed version.
+    // Vorticity confinement is an artistic/detail term; we bias toward speed.
     let xm = clamp(i32(x) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let xp = clamp(i32(x) + 1, 0, i32(FLUID_GRID_SIZE) - 1);
     let ym = clamp(i32(y) - 1, 0, i32(FLUID_GRID_SIZE) - 1);
@@ -1500,32 +1487,8 @@ fn curl_at(x: u32, y: u32) -> f32 {
     let v_b = reflect_if_into_solid(x, ymu, raw_velocity_cell(x, ymu));
     let v_t = reflect_if_into_solid(x, ypu, raw_velocity_cell(x, ypu));
 
-    // Diagonals: Neumann-ish (mirror center) when solid.
-    var v_bl = v_c;
-    if (!is_effectively_solid(xmu, ymu)) {
-        v_bl = reflect_if_into_solid(xmu, ymu, raw_velocity_cell(xmu, ymu));
-    }
-    var v_br = v_c;
-    if (!is_effectively_solid(xpu, ymu)) {
-        v_br = reflect_if_into_solid(xpu, ymu, raw_velocity_cell(xpu, ymu));
-    }
-    var v_tl = v_c;
-    if (!is_effectively_solid(xmu, ypu)) {
-        v_tl = reflect_if_into_solid(xmu, ypu, raw_velocity_cell(xmu, ypu));
-    }
-    var v_tr = v_c;
-    if (!is_effectively_solid(xpu, ypu)) {
-        v_tr = reflect_if_into_solid(xpu, ypu, raw_velocity_cell(xpu, ypu));
-    }
-
-    let dvy_dx_axis = 0.5 * (v_r.y - v_l.y);
-    let dvx_dy_axis = 0.5 * (v_t.x - v_b.x);
-    let dvy_dx_diag = 0.25 * ((v_tr.y + v_br.y) - (v_tl.y + v_bl.y));
-    let dvx_dy_diag = 0.25 * ((v_tr.x + v_tl.x) - (v_br.x + v_bl.x));
-
-    let t = 0.5;
-    let dvy_dx = mix(dvy_dx_axis, dvy_dx_diag, t);
-    let dvx_dy = mix(dvx_dy_axis, dvx_dy_diag, t);
+    let dvy_dx = 0.5 * (v_r.y - v_l.y);
+    let dvx_dy = 0.5 * (v_t.x - v_b.x);
     return dvy_dx - dvx_dy;
 }
 
@@ -1560,17 +1523,7 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let w_b = abs(curl_at(x, y - 1u));
     let w_t = abs(curl_at(x, y + 1u));
 
-    let w_bl = abs(curl_at(x - 1u, y - 1u));
-    let w_br = abs(curl_at(x + 1u, y - 1u));
-    let w_tl = abs(curl_at(x - 1u, y + 1u));
-    let w_tr = abs(curl_at(x + 1u, y + 1u));
-
-    let grad_axis = vec2<f32>(w_r - w_l, w_t - w_b) * 0.5;
-    let grad_diag = vec2<f32>(
-        ((w_tr + w_br) - (w_tl + w_bl)) * 0.25,
-        ((w_tr + w_tl) - (w_br + w_bl)) * 0.25
-    );
-    let grad = mix(grad_axis, grad_diag, 0.5);
+    let grad = vec2<f32>(w_r - w_l, w_t - w_b) * 0.5;
     let mag = max(length(grad), 1e-5);
     let n = grad / mag;
 
