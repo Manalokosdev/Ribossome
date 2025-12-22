@@ -654,17 +654,26 @@ fn sample_fluid_velocity_bilinear(pos_world: vec2<f32>) -> vec2<f32> {
     let grid_f = f32(FLUID_GRID_SIZE);
 
     // Map world position to fluid-grid continuous coordinates.
-    // Clamp slightly inside the domain so floor/fract stay well-defined at the max edge.
-    let gx = clamp((pos_world.x / ws) * grid_f, 0.0, grid_f - 1e-4);
-    let gy = clamp((pos_world.y / ws) * grid_f, 0.0, grid_f - 1e-4);
+    // IMPORTANT: Match the fluid solver convention: cell centers are at (x+0.5, y+0.5).
+    // If we sample without this half-cell shift, we introduce a consistent (0.5, 0.5) offset,
+    // which can show up as a global diagonal drift.
+    let gx_center = (pos_world.x / ws) * grid_f;
+    let gy_center = (pos_world.y / ws) * grid_f;
 
-    let x0 = i32(floor(gx));
-    let y0 = i32(floor(gy));
+    // Clamp slightly inside the domain so floor/fract stay well-defined at the max edge.
+    let gx = clamp(gx_center, 0.5, grid_f - 0.5);
+    let gy = clamp(gy_center, 0.5, grid_f - 0.5);
+
+    let x = gx - 0.5;
+    let y = gy - 0.5;
+
+    let x0 = i32(floor(x));
+    let y0 = i32(floor(y));
     let x1 = min(x0 + 1, i32(FLUID_GRID_SIZE) - 1);
     let y1 = min(y0 + 1, i32(FLUID_GRID_SIZE) - 1);
 
-    let tx = fract(gx);
-    let ty = fract(gy);
+    let tx = fract(x);
+    let ty = fract(y);
 
     let idx00 = u32(y0) * FLUID_GRID_SIZE + u32(x0);
     let idx10 = u32(y0) * FLUID_GRID_SIZE + u32(x1);

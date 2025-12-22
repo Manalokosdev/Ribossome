@@ -2150,12 +2150,93 @@ impl Default for SimulationSettings {
 // SNAPSHOT SAVE/LOAD STRUCTURES
 // ============================================================================
 
+fn scrub_json_nulls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Drop null keys to allow #[serde(default)] to fill values.
+            let null_keys: Vec<String> = map
+                .iter()
+                .filter_map(|(k, v)| v.is_null().then(|| k.clone()))
+                .collect();
+            for k in null_keys {
+                map.remove(&k);
+            }
+
+            for v in map.values_mut() {
+                scrub_json_nulls(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            // Preserve array length: replace null elements with 0.0 (common for legacy float arrays).
+            for v in arr.iter_mut() {
+                if v.is_null() {
+                    *v = serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap());
+                } else {
+                    scrub_json_nulls(v);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn de_f32_null_default<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or(0.0))
+}
+
+fn de_f32_null_default_one<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or(1.0))
+}
+
+fn de_u32_null_default<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u32>::deserialize(deserializer)?.unwrap_or(0))
+}
+
+fn de_vec2_f32_null_default<'de, D>(deserializer: D) -> Result<[f32; 2], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<[Option<f32>; 2]>::deserialize(deserializer)?;
+    Ok(match opt {
+        Some([x, y]) => [x.unwrap_or(0.0), y.unwrap_or(0.0)],
+        None => [0.0, 0.0],
+    })
+}
+
+fn de_settings_option_lossy<'de, D>(deserializer: D) -> Result<Option<SimulationSettings>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(mut v) = value else {
+        return Ok(None);
+    };
+    scrub_json_nulls(&mut v);
+
+    // If settings are malformed, treat them as absent (use current defaults).
+    Ok(serde_json::from_value::<SimulationSettings>(v).ok())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentSnapshot {
+    #[serde(default, deserialize_with = "de_vec2_f32_null_default")]
     position: [f32; 2],
+    #[serde(default, deserialize_with = "de_f32_null_default")]
     rotation: f32,
+    #[serde(default, deserialize_with = "de_f32_null_default_one")]
     energy: f32,
+    #[serde(default, deserialize_with = "de_u32_null_default")]
     generation: u32,
+    #[serde(default)]
     genome: Vec<u8>, // Store as bytes for compression
 }
 
@@ -2201,11 +2282,15 @@ impl AgentSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SimulationSnapshot {
-    version: String,
-    timestamp: String,
-    epoch: u64,
     #[serde(default)]
+    version: String,
+    #[serde(default)]
+    timestamp: String,
+    #[serde(default)]
+    epoch: u64,
+    #[serde(default, deserialize_with = "de_settings_option_lossy")]
     settings: Option<SimulationSettings>,
+    #[serde(default)]
     agents: Vec<AgentSnapshot>,
 }
 
@@ -2386,6 +2471,7 @@ struct GpuState {
     gamma_grid: wgpu::Buffer,
     trail_grid: wgpu::Buffer,
     trail_grid_inject: wgpu::Buffer,
+    trail_debug_readback: wgpu::Buffer,
     visual_grid_buffer: wgpu::Buffer,
     agent_grid_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
@@ -2459,8 +2545,6 @@ struct GpuState {
     fluid_jacobi_pressure_pipeline: wgpu::ComputePipeline,
     fluid_subtract_gradient_pipeline: wgpu::ComputePipeline,
     fluid_copy_pipeline: wgpu::ComputePipeline,
-    fluid_copy_velocity_to_forces_pipeline: wgpu::ComputePipeline,
-    fluid_copy_dye_to_forces_pipeline: wgpu::ComputePipeline,
     fluid_clear_forces_pipeline: wgpu::ComputePipeline,
     fluid_clear_force_vectors_pipeline: wgpu::ComputePipeline,
     fluid_fumarole_dye_pipeline: wgpu::ComputePipeline,
@@ -2486,7 +2570,6 @@ struct GpuState {
     // Pipelines
     process_pipeline: wgpu::ComputePipeline,
     clear_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
-    randomize_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_commit_pipeline: wgpu::ComputePipeline,
     diffuse_trails_pipeline: wgpu::ComputePipeline,
@@ -2559,6 +2642,7 @@ struct GpuState {
 
     // Inspector refresh throttling (update at ~25fps to save GPU time)
     inspector_frame_counter: u32,
+    trail_energy_debug_next_epoch: u64,
     epochs_per_second: f32,
 
     // Population statistics tracking
@@ -3293,6 +3377,13 @@ impl GpuState {
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let trail_debug_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Trail Grid Debug Readback"),
+            size: trail_buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         profiler.mark("Alpha/Beta/Gamma/Trail buffers");
@@ -4639,7 +4730,7 @@ impl GpuState {
             1.0,                       // dye_deposit_scale (dye -> chem)
             0.0,                       // gamma speed equil
             0.0,                       // gamma speed max lift
-            0.0, 0.0, 0.0,             // reserved
+            100.0, 0.0, 0.0,           // reserved (slope_steer_rate, _, _)
         ];
         let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
 
@@ -5002,24 +5093,6 @@ impl GpuState {
             cache: None,
         });
 
-        let fluid_copy_velocity_to_forces_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Fluid Copy Velocity To Forces"),
-            layout: Some(&fluid_pipeline_layout),
-            module: &fluid_shader,
-            entry_point: "copy_velocity_to_forces",
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let fluid_copy_dye_to_forces_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Fluid Copy Dye To Forces"),
-            layout: Some(&fluid_pipeline_layout),
-            module: &fluid_shader,
-            entry_point: "copy_dye_to_forces",
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
         let fluid_clear_forces_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Fluid Clear Forces"),
             layout: Some(&fluid_pipeline_layout),
@@ -5053,15 +5126,6 @@ impl GpuState {
             layout: Some(&fluid_pipeline_layout),
             module: &fluid_shader,
             entry_point: "clear_fluid_force_vectors",
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let randomize_fluid_force_vectors_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Randomize Fluid Force Vectors"),
-            layout: Some(&fluid_pipeline_layout),
-            module: &fluid_shader,
-            entry_point: "randomize_forces",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -5225,6 +5289,7 @@ impl GpuState {
             gamma_grid,
             trail_grid,
             trail_grid_inject,
+            trail_debug_readback,
             visual_grid_buffer,
             agent_grid_buffer,
             params_buffer,
@@ -5254,7 +5319,6 @@ impl GpuState {
             sampler,
             process_pipeline,
             clear_fluid_force_vectors_pipeline,
-            randomize_fluid_force_vectors_pipeline,
             diffuse_pipeline,
             diffuse_commit_pipeline,
             diffuse_trails_pipeline,
@@ -5316,6 +5380,7 @@ impl GpuState {
             last_epoch_update: std::time::Instant::now(),
             last_epoch_count: 0,
             inspector_frame_counter: 0,
+            trail_energy_debug_next_epoch: 0,
             epochs_per_second: 0.0,
             population_history: Vec::new(),
             alpha_rain_history: VecDeque::new(),
@@ -5430,8 +5495,6 @@ impl GpuState {
             fluid_jacobi_pressure_pipeline,
             fluid_subtract_gradient_pipeline,
             fluid_copy_pipeline,
-            fluid_copy_velocity_to_forces_pipeline,
-            fluid_copy_dye_to_forces_pipeline,
             fluid_clear_forces_pipeline,
             fluid_clear_force_vectors_pipeline,
             fluid_fumarole_pipeline,
@@ -7008,7 +7071,7 @@ impl GpuState {
                 self.dye_precipitation,
                 self.fluid_ooze_rate_gamma,
                 self.fluid_ooze_fade_rate_gamma,
-                0.0, 0.0, 0.0,
+                self.fluid_slope_force_scale, 0.0, 0.0,
             ];
             let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
             self.queue
@@ -7402,11 +7465,96 @@ impl GpuState {
             );
         }
 
+        // Debug: when viewing energy trails, occasionally read back trail_grid.w stats.
+        // This confirms whether the energy channel is actually accumulating (vs. visualization issues).
+        let mut did_trail_energy_readback = false;
+        if self.trail_show && self.trail_show_energy && self.epoch >= self.trail_energy_debug_next_epoch {
+            let trail_buffer_size = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 4]>()) as u64;
+            encoder.copy_buffer_to_buffer(
+                &self.trail_grid,
+                0,
+                &self.trail_debug_readback,
+                0,
+                trail_buffer_size,
+            );
+            did_trail_energy_readback = true;
+            // Throttle to avoid stalling the GPU too often.
+            self.trail_energy_debug_next_epoch = self.epoch.saturating_add(2000);
+        }
+
         self.process_completed_alive_readbacks();
         let slot = self.ensure_alive_slot_ready();
         let alive_buffer = self.copy_state_to_staging(&mut encoder, slot);
 
         self.queue.submit(Some(encoder.finish()));
+
+        if did_trail_energy_readback {
+            let slice = self.trail_debug_readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |result| {
+                result.unwrap();
+            });
+            self.device.poll(wgpu::Maintain::Wait);
+            {
+                let view = slice.get_mapped_range();
+                let floats: &[f32] = bytemuck::cast_slice(&view);
+                let mut max_w: f32 = 0.0;
+                let mut sum_w: f64 = 0.0;
+                let mut nonzero: u32 = 0;
+                let mut nonfinite: u32 = 0;
+                let mut nonfinite_x: u32 = 0;
+                let mut nonfinite_y: u32 = 0;
+                let mut nonfinite_z: u32 = 0;
+                let cell_count = (floats.len() / 4).max(1);
+
+                for i in (3..floats.len()).step_by(4) {
+                    let w = floats[i];
+                    if !w.is_finite() {
+                        nonfinite += 1;
+                        continue;
+                    }
+                    if w > max_w {
+                        max_w = w;
+                    }
+                    if w > 0.0 {
+                        nonzero += 1;
+                    }
+                    sum_w += w as f64;
+                }
+
+                for i in (0..floats.len()).step_by(4) {
+                    let x = floats[i + 0];
+                    let y = floats[i + 1];
+                    let z = floats[i + 2];
+                    if !x.is_finite() {
+                        nonfinite_x += 1;
+                    }
+                    if !y.is_finite() {
+                        nonfinite_y += 1;
+                    }
+                    if !z.is_finite() {
+                        nonfinite_z += 1;
+                    }
+                }
+
+                let mean_w = (sum_w / cell_count as f64) as f32;
+                println!(
+                    "Trail energy stats: max_w={:.3e} mean_w={:.3e} nonzero_cells={} nonfinite_w={} nonfinite_xyz=({}, {}, {})",
+                    max_w, mean_w, nonzero, nonfinite, nonfinite_x, nonfinite_y, nonfinite_z
+                );
+
+                if floats.len() >= 16 {
+                    let s0 = [floats[0], floats[1], floats[2], floats[3]];
+                    let s1 = [floats[4], floats[5], floats[6], floats[7]];
+                    let b0 = [s0[0].to_bits(), s0[1].to_bits(), s0[2].to_bits(), s0[3].to_bits()];
+                    let b1 = [s1[0].to_bits(), s1[1].to_bits(), s1[2].to_bits(), s1[3].to_bits()];
+                    println!(
+                        "Trail sample[0]={:?} bits={:08x?}  sample[1]={:?} bits={:08x?}",
+                        s0, b0, s1, b1
+                    );
+                }
+            }
+            self.trail_debug_readback.unmap();
+        }
 
         // Debug: check if spawn actually increased the count (readback may not be ready yet)
         if cpu_spawn_count > 0 && !self.is_paused {
@@ -7922,6 +8070,25 @@ impl GpuState {
         // Clear alive counter
         // Clear [spawn, debug, alive] counters
         self.queue.write_buffer(&self.spawn_debug_counters, 0, bytemuck::cast_slice(&[0u32, 0u32, 0u32]));
+
+        // Trails are not stored in the snapshot PNG. If we don't clear them here,
+        // the GPU buffers can contain uninitialized data (often NaNs), which then
+        // permanently poisons the energy trail channel.
+        {
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Clear trail buffers (snapshot load)"),
+            });
+            encoder.clear_buffer(&self.trail_grid, 0, None);
+            encoder.clear_buffer(&self.trail_grid_inject, 0, None);
+            self.queue.submit(Some(encoder.finish()));
+        }
+
+        // Extra safety: some backends/drivers can still leave stale data visible until the
+        // first frame submits more work. Force a deterministic zero-fill via CPU upload.
+        let trail_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 4]>()) as usize;
+        let zeros = vec![0u8; trail_bytes];
+        self.queue.write_buffer(&self.trail_grid, 0, &zeros);
+        self.queue.write_buffer(&self.trail_grid_inject, 0, &zeros);
 
         // Zero out all agent buffers
         let zero_agents = vec![Agent::zeroed(); self.agent_buffer_capacity];
@@ -8810,7 +8977,9 @@ fn load_simulation_snapshot(
             use base64::Engine;
             let compressed = base64::engine::general_purpose::STANDARD.decode(&chunk.text)?;
             let json = zstd::decode_all(&compressed[..])?;
-            let snapshot: SimulationSnapshot = serde_json::from_slice(&json)?;
+            let mut value: serde_json::Value = serde_json::from_slice(&json)?;
+            scrub_json_nulls(&mut value);
+            let snapshot: SimulationSnapshot = serde_json::from_value(value)?;
 
             println!("Γ£ô Loaded snapshot: {} agents, epoch {}, saved {}",
                 snapshot.agents.len(), snapshot.epoch, snapshot.timestamp);
@@ -10606,7 +10775,7 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.trail_opacity,
-                                                                0.0..=2.0,
+                                                                0.0..=200.0,
                                                             )
                                                             .text("Trail Opacity"),
                                                         );

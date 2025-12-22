@@ -48,6 +48,20 @@ fn add_fluid_force_splat(pos_world: vec2<f32>, f: vec2<f32>) {
     fluid_forces[idx11] = fluid_forces[idx11] + f * w11;
 }
 
+fn is_bad_f32(x: f32) -> bool {
+    // WGSL portability: detect NaN via (x != x). Detect Inf/overflow via a large threshold.
+    return (x != x) || (abs(x) > 1e20);
+}
+
+fn sanitize_f32(x: f32) -> f32 {
+    return select(x, 0.0, is_bad_f32(x));
+}
+
+// Experiment toggle:
+// If false, propellers do NOT apply thrust/torque directly to agent movement,
+// and instead only influence motion indirectly through the fluid.
+const PROPELLERS_APPLY_DIRECT_FORCE: bool = true;
+
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
@@ -1267,9 +1281,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let propeller_strength = amino_props.thrust_force * 3 * quadratic_amp;
                 propeller_thrust_magnitude[i] = propeller_strength; // Store for cost calculation
                 let thrust_force = thrust_dir_world * propeller_strength;
-                force += thrust_force;
-                // Torque from lever arm r_com cross thrust (scaled down to reduce perpetual spinning)
-                torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
+                if (PROPELLERS_APPLY_DIRECT_FORCE) {
+                    force += thrust_force;
+                    // Torque from lever arm r_com cross thrust (scaled down to reduce perpetual spinning)
+                    torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
+                }
 
                 // INJECT PROPELLER FORCE DIRECTLY INTO FLUID FORCES BUFFER
                 // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
@@ -1306,6 +1322,105 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let dir_len = length(disp_dir_world);
             if (dir_len > 1e-5) {
                 let dir = disp_dir_world / dir_len;
+
+                // Displacer "chem sweep": move a fixed fraction of local chem (alpha/beta)
+                // along the bipolar axis, similar to prop wash displacement.
+                // Total moved fraction = 25% split across +dir and -dir.
+                if (max(params.prop_wash_strength, 0.0) > 0.0) {
+                    let clamped_pos = clamp_position(world_pos);
+                    let grid_scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+                    var gx = i32(clamped_pos.x / grid_scale);
+                    var gy = i32(clamped_pos.y / grid_scale);
+                    gx = clamp(gx, 0, i32(GRID_SIZE) - 1);
+                    gy = clamp(gy, 0, i32(GRID_SIZE) - 1);
+
+                    let center_idx = u32(gy) * GRID_SIZE + u32(gx);
+                    var center = chem_grid[center_idx];
+                    var center_gamma = max(read_gamma_height(center_idx), 0.0);
+
+                    let base_seed = hash(agent_id * 747796405u + i * 2891336453u + params.random_seed * 196613u);
+                    let dist_plus = 1 + (hash(base_seed ^ 0xA3C59ACBu) % 3u);  // 1..3
+                    let dist_minus = 1 + (hash(base_seed ^ 0x1B56C4E9u) % 3u); // 1..3
+
+                    let transfer_frac_each = 0.125; // 12.5% each direction => 25% total
+                    var moved_any_gamma = false;
+
+                    // +dir transfer
+                    {
+                        let target_world = clamped_pos + dir * (f32(dist_plus) * grid_scale);
+                        let target_gx = clamp(i32(round(target_world.x / grid_scale)), 0, i32(GRID_SIZE) - 1);
+                        let target_gy = clamp(i32(round(target_world.y / grid_scale)), 0, i32(GRID_SIZE) - 1);
+                        let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
+
+                        if (target_idx != center_idx) {
+                            var dst = chem_grid[target_idx];
+                            var dst_gamma = max(read_gamma_height(target_idx), 0.0);
+
+                            let a_move = min(center.x * transfer_frac_each, max(0.0, 1.0 - dst.x));
+                            let b_move = min(center.y * transfer_frac_each, max(0.0, 1.0 - dst.y));
+                            let g_move = center_gamma * transfer_frac_each;
+
+                            if (a_move > 0.0) {
+                                center.x = clamp(center.x - a_move, 0.0, 1.0);
+                                dst.x = clamp(dst.x + a_move, 0.0, 1.0);
+                            }
+                            if (b_move > 0.0) {
+                                center.y = clamp(center.y - b_move, 0.0, 1.0);
+                                dst.y = clamp(dst.y + b_move, 0.0, 1.0);
+                            }
+
+                            if (g_move > 0.0) {
+                                center_gamma = max(center_gamma - g_move, 0.0);
+                                dst_gamma = dst_gamma + g_move;
+                                write_gamma_height(target_idx, dst_gamma);
+                                moved_any_gamma = true;
+                            }
+
+                            chem_grid[target_idx] = dst;
+                        }
+                    }
+
+                    // -dir transfer
+                    {
+                        let target_world = clamped_pos - dir * (f32(dist_minus) * grid_scale);
+                        let target_gx = clamp(i32(round(target_world.x / grid_scale)), 0, i32(GRID_SIZE) - 1);
+                        let target_gy = clamp(i32(round(target_world.y / grid_scale)), 0, i32(GRID_SIZE) - 1);
+                        let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
+
+                        if (target_idx != center_idx) {
+                            var dst = chem_grid[target_idx];
+                            var dst_gamma = max(read_gamma_height(target_idx), 0.0);
+
+                            let a_move = min(center.x * transfer_frac_each, max(0.0, 1.0 - dst.x));
+                            let b_move = min(center.y * transfer_frac_each, max(0.0, 1.0 - dst.y));
+                            let g_move = center_gamma * transfer_frac_each;
+
+                            if (a_move > 0.0) {
+                                center.x = clamp(center.x - a_move, 0.0, 1.0);
+                                dst.x = clamp(dst.x + a_move, 0.0, 1.0);
+                            }
+                            if (b_move > 0.0) {
+                                center.y = clamp(center.y - b_move, 0.0, 1.0);
+                                dst.y = clamp(dst.y + b_move, 0.0, 1.0);
+                            }
+
+                            if (g_move > 0.0) {
+                                center_gamma = max(center_gamma - g_move, 0.0);
+                                dst_gamma = dst_gamma + g_move;
+                                write_gamma_height(target_idx, dst_gamma);
+                                moved_any_gamma = true;
+                            }
+
+                            chem_grid[target_idx] = dst;
+                        }
+                    }
+
+                    chem_grid[center_idx] = center;
+
+                    if (moved_any_gamma) {
+                        write_gamma_height(center_idx, center_gamma);
+                    }
+                }
 
                 if (PROPELLERS_ENABLED) {
                     let quadratic_amp = amplification * amplification;
@@ -1484,9 +1599,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let blended = mix(current_trail, agent_color, trail_deposit_strength);
 
         // Deposit energy trail (unclamped) - scale by agent energy
-        let current_energy_trail = trail_grid_inject[idx].w;
-        let energy_deposit = agent.energy * trail_deposit_strength * 0.1; // 10% of energy deposited
-        let blended_energy = current_energy_trail + energy_deposit;
+        let current_energy_trail = sanitize_f32(trail_grid_inject[idx].w);
+        let agent_energy = max(sanitize_f32(agent.energy), 0.0);
+        // Typical agent energy ~20; scale down contribution so trails don't saturate.
+        let energy_deposit = agent_energy * trail_deposit_strength * (0.1 / 20.0); // 20x weaker than before
+        let blended_energy = sanitize_f32(current_energy_trail + energy_deposit);
 
         trail_grid_inject[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), blended_energy);
 
@@ -2438,7 +2555,11 @@ fn diffuse_trails(@builtin(global_invocation_id) gid: vec3<u32>) {
     // - apply optional mild diffusion
     // - apply decay
     // Agents then deposit into trail_grid_inject during process_agents.
-    let current = trail_grid[idx];
+    let current_raw = trail_grid[idx];
+    let current = vec4<f32>(
+        clamp(current_raw.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
+        sanitize_f32(current_raw.w)
+    );
     let strength = clamp(params.trail_diffusion, 0.0, 1.0);
     let decay = clamp(params.trail_decay, 0.0, 1.0);
 
@@ -2449,15 +2570,19 @@ fn diffuse_trails(@builtin(global_invocation_id) gid: vec3<u32>) {
     let y_u = u32(clamp(yi - 1, 0, i32(GRID_SIZE) - 1));
     let y_d = u32(clamp(yi + 1, 0, i32(GRID_SIZE) - 1));
 
-    let l = trail_grid[y * GRID_SIZE + x_l];
-    let r = trail_grid[y * GRID_SIZE + x_r];
-    let u = trail_grid[y_u * GRID_SIZE + x];
-    let d = trail_grid[y_d * GRID_SIZE + x];
+    let l_raw = trail_grid[y * GRID_SIZE + x_l];
+    let r_raw = trail_grid[y * GRID_SIZE + x_r];
+    let u_raw = trail_grid[y_u * GRID_SIZE + x];
+    let d_raw = trail_grid[y_d * GRID_SIZE + x];
+    let l = vec4<f32>(clamp(l_raw.xyz, vec3<f32>(0.0), vec3<f32>(1.0)), sanitize_f32(l_raw.w));
+    let r = vec4<f32>(clamp(r_raw.xyz, vec3<f32>(0.0), vec3<f32>(1.0)), sanitize_f32(r_raw.w));
+    let u = vec4<f32>(clamp(u_raw.xyz, vec3<f32>(0.0), vec3<f32>(1.0)), sanitize_f32(u_raw.w));
+    let d = vec4<f32>(clamp(d_raw.xyz, vec3<f32>(0.0), vec3<f32>(1.0)), sanitize_f32(d_raw.w));
     let neighbor_blur = (l + r + u + d) * 0.25;
 
     let mixed = mix(current, neighbor_blur, strength);
     let faded_rgb = clamp(mixed.xyz * decay, vec3<f32>(0.0), vec3<f32>(1.0));
-    let faded_energy = mixed.w * decay;
+    let faded_energy = sanitize_f32(mixed.w) * decay;
     trail_grid_inject[idx] = vec4<f32>(faded_rgb, faded_energy);
 }
 
@@ -2858,9 +2983,23 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         let trail_only = trail_color * clamp(params.trail_opacity, 0.0, 1.0);
         visual_grid[visual_idx] = vec4<f32>(trail_only, 1.0);
     } else if (params.trail_show == 2u) {
-        // Energy is stored as an unclamped accumulator; use sqrt to make small values visible.
-        let v = clamp(sqrt(trail_energy) * clamp(params.trail_opacity, 0.0, 2.0), 0.0, 1.0);
-        visual_grid[visual_idx] = vec4<f32>(vec3<f32>(v), 1.0);
+        // Energy is stored as an unclamped accumulator.
+        // Do NOT clamp the opacity gain here (only clamp output via tone mapping).
+        let w_raw = trail_cell.w;
+        // WGSL portability: avoid isNan/isInf (not available on all validator versions).
+        let w_is_nan = w_raw != w_raw;
+        let w_is_inf = abs(w_raw) > 1.0e30;
+        if (w_is_nan || w_is_inf) {
+            // Bright magenta = bad/invalid energy values.
+            visual_grid[visual_idx] = vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        } else {
+            let exposure = max(params.trail_opacity, 0.0);
+            let e = max(w_raw, 0.0);
+            let x = sqrt(e) * exposure;
+            // Exposure mapping: makes tiny values visible without hard clamping.
+            let v = 1.0 - exp(-x);
+            visual_grid[visual_idx] = vec4<f32>(vec3<f32>(v), 1.0);
+        }
     } else {
         let blended_color = clamp(
             base_color + trail_color * clamp(params.trail_opacity, 0.0, 1.0),

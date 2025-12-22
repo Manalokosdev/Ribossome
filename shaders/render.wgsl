@@ -75,7 +75,10 @@ fn render_body_part_ctx(
         let base_color = mix(amino_props.color, agent_color, params.agent_color_blend);
 
         let seed = base_type * 12345u + 67890u;
-        let segment_length = length(world_pos - segment_start_world);
+        let seg_vec = world_pos - segment_start_world;
+        let segment_length = length(seg_vec);
+        let axis = select(seg_vec / segment_length, vec2<f32>(1.0, 0.0), segment_length < 1e-5);
+        let perp = vec2<f32>(-axis.y, axis.x);
         let organ_width = segment_length * 0.15;
         let line_width = organ_width;
 
@@ -89,7 +92,9 @@ fn render_body_part_ctx(
             let offset_seed = seed + i * 9876u;
             let offset_angle = f32(offset_seed % 628u) / 100.0;
             let offset_dist = f32((offset_seed / 628u) % 100u) / 100.0 * organ_width * 3.5;
-            let offset = vec2<f32>(cos(offset_angle) * offset_dist, sin(offset_angle) * offset_dist);
+            // IMPORTANT: generate the offset in the segment's local basis so it rotates with the amino.
+            let offset_dir = axis * cos(offset_angle) + perp * sin(offset_angle);
+            let offset = offset_dir * offset_dist;
             let curr_pos = base_pos + offset;
 
             let dark_color = vec4<f32>(base_color * 0.5, 1.0);
@@ -106,7 +111,10 @@ fn render_body_part_ctx(
         let base_color = mix(amino_props.color, agent_color, params.agent_color_blend);
 
         let seed = base_type * 12345u + 67890u;
-        let segment_length = length(world_pos - segment_start_world);
+        let seg_vec = world_pos - segment_start_world;
+        let segment_length = length(seg_vec);
+        let axis = select(seg_vec / segment_length, vec2<f32>(1.0, 0.0), segment_length < 1e-5);
+        let perp = vec2<f32>(-axis.y, axis.x);
         let organ_width = segment_length * 0.15;
         let line_width = get_part_visual_size(part.part_type) * 0.5;
 
@@ -120,7 +128,9 @@ fn render_body_part_ctx(
             let offset_seed = seed + i * 9876u;
             let offset_angle = f32(offset_seed % 628u) / 100.0;
             let offset_dist = f32((offset_seed / 628u) % 100u) / 100.0 * organ_width * 3.5;
-            let offset = vec2<f32>(cos(offset_angle) * offset_dist, sin(offset_angle) * offset_dist);
+            // IMPORTANT: generate the offset in the segment's local basis so it rotates with the organ.
+            let offset_dir = axis * cos(offset_angle) + perp * sin(offset_angle);
+            let offset = offset_dir * offset_dist;
             let curr_pos = base_pos + offset;
 
             let dark_color = vec4<f32>(base_color * 0.5, 1.0);

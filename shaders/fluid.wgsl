@@ -189,6 +189,7 @@ const CHEM_EQUIL_PLATEAU_FRAC: f32 = 0.15;
 //  22 dye_deposit_scale (0..1) - scales dye -> chem deposition
 //  23 GAMMA speed equil
 //  24 GAMMA speed max lift
+//  25 slope_steer_rate (1/sec)
 // (padded to 7 vec4s / 28 floats)
 const FP_TIME: u32 = 0u;
 const FP_DT: u32 = 1u;
@@ -209,7 +210,12 @@ const FP_DYE_ESCAPE_RATE_BETA: u32 = 21u;
 const FP_DYE_DEPOSIT_SCALE: u32 = 22u;
 const FP_CHEM_SPEED_EQUIL_GAMMA: u32 = 23u;
 const FP_CHEM_SPEED_MAX_LIFT_GAMMA: u32 = 24u;
+const FP_SLOPE_STEER_RATE: u32 = 25u;
 const FP_VEC4_COUNT: u32 = 7u;
+
+// Precomputed grid-scale conversions.
+const DYE_TO_FLUID_SCALE: f32 = f32(FLUID_GRID_SIZE) / f32(GAMMA_GRID_DIM);
+const FLUID_TO_DYE_SCALE: f32 = 1.0 / DYE_TO_FLUID_SCALE;
 
 @group(0) @binding(3) var<uniform> params: array<vec4<f32>, FP_VEC4_COUNT>;
 
@@ -252,34 +258,6 @@ fn rotate2(v: vec2<f32>, a: f32) -> vec2<f32> {
 // ============================================================================
 // VELOCITY EXPORT (for visualization in main sim composite)
 // ============================================================================
-
-@compute @workgroup_size(16, 16)
-fn copy_velocity_to_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
-        return;
-    }
-
-    let idx = grid_index(x, y);
-    fluid_forces[idx] = velocity_in[idx];
-}
-
-// Copy dye concentration to forces buffer for visualization (dye in x, zero in y)
-@compute @workgroup_size(16, 16)
-fn copy_dye_to_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
-        return;
-    }
-
-    let idx = grid_index(x, y);
-    // Dye buffers are GAMMA_GRID_DIM^2, so map the current fluid cell to an env cell.
-    let env_idx = gamma_idx_for_fluid_cell(x, y);
-    // Store dye (beta, alpha) directly for downstream visualization/debug.
-    fluid_forces[idx] = dye_in[env_idx].xy;
-}
 
 @compute @workgroup_size(16, 16)
 fn clear_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -431,7 +409,7 @@ fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let size_f = f32(FLUID_GRID_SIZE);
-    let fluid_to_dye = f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let fluid_to_dye = FLUID_TO_DYE_SCALE;
     let time_bucket = u32(fp_f32(FP_TIME)) / 16u;
 
     let xi = i32(x);
@@ -529,26 +507,6 @@ fn inject_test_force(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // Fill the forces buffer with deterministic pseudo-random vectors.
 // Used to verify the "forces -> velocity" path independent of agent propellers.
-@compute @workgroup_size(16, 16)
-fn randomize_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
-        return;
-    }
-
-    let idx = grid_index(x, y);
-
-    // Deterministic per-frame seed from time (ms-ish).
-    let t = u32(fp_f32(FP_TIME) * 1000.0);
-    let r1 = rand01(idx ^ t ^ 0xA511E9B3u);
-    let r2 = rand01(idx ^ t ^ 0x63D83595u);
-    let v = vec2<f32>(r1 * 2.0 - 1.0, r2 * 2.0 - 1.0);
-
-    let strength = 1.0;
-    fluid_forces[idx] = v * strength;
-}
-
 // Deprecated: legacy chem->dye injection pass.
 // We keep this kernel to preserve pipeline structure, but it no longer transfers
 // mass between chem and dye. All chem↔dye exchange is handled by advect_dye using
@@ -583,16 +541,14 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
     // Convert dye-grid position into fluid-grid coordinates for velocity sampling.
-    let dye_to_fluid = f32(FLUID_GRID_SIZE) / f32(GAMMA_GRID_DIM);
-    let fluid_to_dye = 1.0 / dye_to_fluid;
-    let fluid_pos = pos * dye_to_fluid;
+    let fluid_pos = pos * DYE_TO_FLUID_SCALE;
 
     // Read current velocity
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let vel_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
 
     // Convert velocity to dye-grid units before tracing.
-    let vel_dye = vel_fluid * fluid_to_dye;
+    let vel_dye = vel_fluid * FLUID_TO_DYE_SCALE;
 
     // Backward trace - follow the flow backwards to find where dye came from
     let trace_pos = pos - vel_dye * dt;
@@ -673,7 +629,7 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
         v02 * 1.0 + v12 * 2.0 + v22 * 1.0
     ) * (1.0 / 16.0);
     let speed_fluid = length(avg_vel);
-    let speed = speed_fluid * fluid_to_dye;
+    let speed = speed_fluid * FLUID_TO_DYE_SCALE;
 
     let chem_speed_equil_alpha_in = max(fp_vec4(FP_SPLAT).x, 0.0);
     let chem_speed_max_lift_alpha_in = max(fp_vec4(FP_SPLAT).y, 0.0);
@@ -983,8 +939,13 @@ fn gamma_slope_steer_velocity(x: u32, y: u32, v_in: vec2<f32>, dt: f32) -> vec2<
 
     let align = clamp(dot(v_dir, s_dir), -1.0, 1.0);
     // More steering when misaligned, none when aligned.
-    // Clamp to [0,1] so this acts like a rotation/lerp rather than an acceleration.
-    let t = clamp((1.0 - align) * fp_f32(FP_FLUID_SLOPE_FORCE_SCALE) * dt, 0.0, 1.0);
+    // dt-independent blend:
+    // t = 1 - exp(-rate * misalign * dt)
+    // For small dt this matches the old linear form (~rate*misalign*dt), but behaves
+    // consistently across dt.
+    let rate = max(fp_f32(FP_SLOPE_STEER_RATE), 0.0);
+    let misalign = clamp(1.0 - align, 0.0, 2.0);
+    let t = clamp(1.0 - exp(-rate * misalign * dt), 0.0, 1.0);
 
     // Lerp directions then renormalize.
     let dir_raw = v_dir + (s_dir - v_dir) * t;
@@ -1240,13 +1201,11 @@ fn advect_trail(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
     // Convert trail-grid position into fluid-grid coordinates for velocity sampling.
-    let dye_to_fluid = f32(FLUID_GRID_SIZE) / f32(GAMMA_GRID_DIM);
-    let fluid_to_dye = 1.0 / dye_to_fluid;
-    let fluid_pos = pos * dye_to_fluid;
+    let fluid_pos = pos * DYE_TO_FLUID_SCALE;
 
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let vel_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
-    let vel_dye = vel_fluid * fluid_to_dye;
+    let vel_dye = vel_fluid * FLUID_TO_DYE_SCALE;
 
     // Semi-Lagrangian backtrace
     let trace_pos = pos - vel_dye * dt;
@@ -1286,7 +1245,8 @@ fn advect_trail(@builtin(global_invocation_id) global_id: vec3<u32>) {
     ) * (1.0 / 16.0);
 
     let mixed = mix(advected, neighbor_blur, clamp(TRAIL_DIFFUSE_MIX, 0.0, 1.0));
-    trail_out[idx] = mixed;
+    let mixed_w = select(mixed.w, 0.0, is_bad_f32(mixed.w));
+    trail_out[idx] = vec4<f32>(mixed.xyz, mixed_w);
 }
 
 fn splat_falloff(dist: f32, radius: f32) -> f32 {
