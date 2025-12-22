@@ -1718,8 +1718,38 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Consume alpha and beta based on per-amino absorption rates
             // and local availability, scaled by speed (slower = more absorption)
-            let available_alpha = chem_grid[idx].x;
-            let available_beta = chem_grid[idx].y;
+            // Bilinear availability sampling at the mouth position.
+            // NOTE: This is paired with bilinear (4-cell) absorption writes below.
+            let clamped_pos = clamp_position(world_pos);
+            let grid_scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+            let gx = (clamped_pos.x / grid_scale) - 0.5;
+            let gy = (clamped_pos.y / grid_scale) - 0.5;
+
+            let x0 = i32(floor(gx));
+            let y0 = i32(floor(gy));
+            let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
+            let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
+
+            let fx = fract(gx);
+            let fy = fract(gy);
+
+            let w00 = (1.0 - fx) * (1.0 - fy);
+            let w10 = fx * (1.0 - fy);
+            let w01 = (1.0 - fx) * fy;
+            let w11 = fx * fy;
+
+            let idx00 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
+            let idx10 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
+            let idx01 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
+            let idx11 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
+
+            let c00 = chem_grid[idx00];
+            let c10 = chem_grid[idx10];
+            let c01 = chem_grid[idx01];
+            let c11 = chem_grid[idx11];
+
+            let available_alpha = w00 * c00.x + w10 * c10.x + w01 * c01.x + w11 * c11.x;
+            let available_beta  = w00 * c00.y + w10 * c10.y + w01 * c01.y + w11 * c11.y;
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed effects and amplification to the rates themselves
@@ -1751,8 +1781,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // Apply alpha consumption - energy gain uses base food_power (speed already in consumption)
                 if (consumed_alpha > 0.0) {
-                    let prev = chem_grid[idx];
-                    chem_grid[idx] = vec2<f32>(clamp(available_alpha - consumed_alpha, 0.0, available_alpha), prev.y);
+                    // Distribute absorption bilinearly into the 4 neighbor cells.
+                    // NOTE: This is intentionally non-atomic and can be racy under contention.
+                    let da00 = consumed_alpha * w00;
+                    let da10 = consumed_alpha * w10;
+                    let da01 = consumed_alpha * w01;
+                    let da11 = consumed_alpha * w11;
+
+                    if (da00 > 0.0) { let prev = chem_grid[idx00]; chem_grid[idx00] = vec2<f32>(clamp(prev.x - da00, 0.0, prev.x), prev.y); }
+                    if (da10 > 0.0) { let prev = chem_grid[idx10]; chem_grid[idx10] = vec2<f32>(clamp(prev.x - da10, 0.0, prev.x), prev.y); }
+                    if (da01 > 0.0) { let prev = chem_grid[idx01]; chem_grid[idx01] = vec2<f32>(clamp(prev.x - da01, 0.0, prev.x), prev.y); }
+                    if (da11 > 0.0) { let prev = chem_grid[idx11]; chem_grid[idx11] = vec2<f32>(clamp(prev.x - da11, 0.0, prev.x), prev.y); }
 
                     agent_energy_cur += consumed_alpha * params.food_power;
                     total_consumed_alpha += consumed_alpha;
@@ -1760,8 +1799,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // Apply beta consumption - damage uses poison_power, reduced by poison protection
                 if (consumed_beta > 0.0) {
-                    let prev = chem_grid[idx];
-                    chem_grid[idx] = vec2<f32>(prev.x, clamp(available_beta - consumed_beta, 0.0, available_beta));
+                    // Distribute absorption bilinearly into the 4 neighbor cells.
+                    // NOTE: This is intentionally non-atomic and can be racy under contention.
+                    let db00 = consumed_beta * w00;
+                    let db10 = consumed_beta * w10;
+                    let db01 = consumed_beta * w01;
+                    let db11 = consumed_beta * w11;
+
+                    if (db00 > 0.0) { let prev = chem_grid[idx00]; chem_grid[idx00] = vec2<f32>(prev.x, clamp(prev.y - db00, 0.0, prev.y)); }
+                    if (db10 > 0.0) { let prev = chem_grid[idx10]; chem_grid[idx10] = vec2<f32>(prev.x, clamp(prev.y - db10, 0.0, prev.y)); }
+                    if (db01 > 0.0) { let prev = chem_grid[idx01]; chem_grid[idx01] = vec2<f32>(prev.x, clamp(prev.y - db01, 0.0, prev.y)); }
+                    if (db11 > 0.0) { let prev = chem_grid[idx11]; chem_grid[idx11] = vec2<f32>(prev.x, clamp(prev.y - db11, 0.0, prev.y)); }
+
                     agent_energy_cur -= consumed_beta * params.poison_power * poison_multiplier;
                     total_consumed_beta += consumed_beta;
                 }

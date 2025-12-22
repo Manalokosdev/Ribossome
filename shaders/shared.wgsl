@@ -828,6 +828,64 @@ fn sample_grid_bilinear(pos: vec2<f32>, grid_type: u32) -> f32 {
     return mix(v0, v1, fy);
 }
 
+// Approximate the local gradient of the combined env signal (fluid dye + chem) at `center`.
+// Returns gradient in "signal units per env-cell".
+// Uses 9 samples (3x3) and weights diagonal neighbors as being sqrt(2) farther away,
+// which makes the response more isotropic.
+fn sample_env_gradient_sobel(center: vec2<f32>, grid_type: u32) -> vec2<f32> {
+    let clamped = clamp_position(center);
+    let scale = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
+
+    // Match grid_index(): integer cell coords by truncation.
+    let cx = clamp(i32(clamped.x / scale), 0, i32(ENV_GRID_SIZE) - 1);
+    let cy = clamp(i32(clamped.y / scale), 0, i32(ENV_GRID_SIZE) - 1);
+
+    // Precompute neighbor coordinates (edge-safe) to avoid per-sample clamps.
+    let x0 = max(cx - 1, 0);
+    let x1 = cx;
+    let x2 = min(cx + 1, i32(ENV_GRID_SIZE) - 1);
+    let y0 = max(cy - 1, 0);
+    let y1 = cy;
+    let y2 = min(cy + 1, i32(ENV_GRID_SIZE) - 1);
+
+    let row0 = u32(y0) * ENV_GRID_SIZE;
+    let row1 = u32(y1) * ENV_GRID_SIZE;
+    let row2 = u32(y2) * ENV_GRID_SIZE;
+
+    let idx00 = row0 + u32(x0);
+    let idx10 = row0 + u32(x1);
+    let idx20 = row0 + u32(x2);
+    let idx01 = row1 + u32(x0);
+    let idx11 = row1 + u32(x1);
+    let idx21 = row1 + u32(x2);
+    let idx02 = row2 + u32(x0);
+    let idx12 = row2 + u32(x1);
+    let idx22 = row2 + u32(x2);
+
+    // Fetch combined env value (fluid dye + chem) for alpha/beta without branching.
+    // grid_type 0 => alpha: d.y + c.x
+    // grid_type 1 => beta : d.x + c.y
+    let use_alpha = (grid_type == 0u);
+    // No per-sample clamp here: let the downstream sensor nonlinearity clamp/saturate.
+    // This reduces ALU and keeps the gradient faithful to the raw combined field.
+    let v00 = select(fluid_dye[idx00].x + chem_grid[idx00].y, fluid_dye[idx00].y + chem_grid[idx00].x, use_alpha);
+    let v10 = select(fluid_dye[idx10].x + chem_grid[idx10].y, fluid_dye[idx10].y + chem_grid[idx10].x, use_alpha);
+    let v20 = select(fluid_dye[idx20].x + chem_grid[idx20].y, fluid_dye[idx20].y + chem_grid[idx20].x, use_alpha);
+    let v01 = select(fluid_dye[idx01].x + chem_grid[idx01].y, fluid_dye[idx01].y + chem_grid[idx01].x, use_alpha);
+    let v21 = select(fluid_dye[idx21].x + chem_grid[idx21].y, fluid_dye[idx21].y + chem_grid[idx21].x, use_alpha);
+    let v02 = select(fluid_dye[idx02].x + chem_grid[idx02].y, fluid_dye[idx02].y + chem_grid[idx02].x, use_alpha);
+    let v12 = select(fluid_dye[idx12].x + chem_grid[idx12].y, fluid_dye[idx12].y + chem_grid[idx12].x, use_alpha);
+    let v22 = select(fluid_dye[idx22].x + chem_grid[idx22].y, fluid_dye[idx22].y + chem_grid[idx22].x, use_alpha);
+
+    // Distance-aware (isotropic) weighting:
+    // - axis neighbors are 1 cell away
+    // - diagonal neighbors are sqrt(2) cells away => weight 1/2
+    // Denominator is constant: 2*1 + 4*0.5 = 4.
+    let gx = 0.25 * (v21 - v01) + 0.125 * ((v20 + v22) - (v00 + v02));
+    let gy = 0.25 * (v12 - v10) + 0.125 * ((v02 + v22) - (v00 + v20));
+    return vec2<f32>(gx, gy);
+}
+
 fn cubic_hermite(t: f32) -> vec4<f32> {
     let t2 = t * t;
     let t3 = t2 * t;
@@ -945,34 +1003,20 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
     let chir = select(1.0, -1.0, chirality_flip < 0.0);
     let dir = select(vec2<f32>(1.0, 0.0), normalize(sensor_perpendicular), length(sensor_perpendicular) > 1e-5) * chir;
 
-    let pos_left = center + dir * cell;
-    let pos_right = center - dir * cell;
-
-    var v_left = 0.0;
-    var v_right = 0.0;
-    if (is_in_bounds(pos_left)) {
-        let idx = grid_index(pos_left);
-        let d = fluid_dye[idx];
-        let c = chem_grid[idx];
-        if (grid_type == 0u) { v_left = clamp(d.y + c.x, 0.0, 1.0); }
-        else if (grid_type == 1u) { v_left = clamp(d.x + c.y, 0.0, 1.0); }
-    }
-    if (is_in_bounds(pos_right)) {
-        let idx = grid_index(pos_right);
-        let d = fluid_dye[idx];
-        let c = chem_grid[idx];
-        if (grid_type == 0u) { v_right = clamp(d.y + c.x, 0.0, 1.0); }
-        else if (grid_type == 1u) { v_right = clamp(d.x + c.y, 0.0, 1.0); }
-    }
+    // 3x3 neighborhood gradient (9 samples) for a more exact local directional signal.
+    // Convert gradient to the same scale as the old (right - left) single-cell scheme:
+    // old diff ~= v(+cell) - v(-cell) ~= 2 * (dv/ds per cell).
+    let grad = sample_env_gradient_sobel(center, grid_type);
+    let diff = 2.0 * dot(grad, dir);
 
     if (debug_mode) {
+        let pos_left = center + dir * cell;
+        let pos_right = center - dir * cell;
         // Left sample = red, right sample = blue.
         draw_filled_circle(pos_left, 4.0, vec4<f32>(1.0, 0.0, 0.0, 0.7));
         draw_filled_circle(pos_right, 4.0, vec4<f32>(0.0, 0.0, 1.0, 0.7));
     }
 
-    // Left/right with polarity-controlled sign.
-    let diff = v_right - v_left;
     return diff * gain * sign_mult;
 }
 
