@@ -2476,75 +2476,20 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let beta_base = clamp(beta_iso - beta_flux * kernel_scale, 0.0, 1.0);
 
     // NOTE: sample_grid_bilinear expects world-space in [0, SIM_SIZE).
+    // Fluid-directed convolution has been removed; keep classic blur+slope behavior.
+    // We still compute a single local fluid speed sample for the rain logic below.
     let pos_cell = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
     let cell_to_world = f32(SIM_SIZE) / f32(GRID_SIZE);
     let pos_world = pos_cell * cell_to_world;
-    let env_to_fluid = f32(FLUID_GRID_SIZE) / f32(GRID_SIZE);
 
-    // Use fluid forces as a direction field (converted to env-cell units).
-    // Keep it bounded so it behaves like a convolution offset, not advection.
-    // Bilinear sampling reduces banding from the low-res fluid grid.
     let raw_v = sample_fluid_velocity_bilinear(pos_world);
     let raw_vlen = length(raw_v);
-    // Smooth deadzone to avoid a hard cutoff line (banding) when speeds are near the threshold.
-    // Below ~0.005 the field contributes nothing; by ~0.02 it contributes fully.
-    let deadzone_t = smoothstep(0.005, 0.02, raw_vlen);
-    let v = (raw_v / env_to_fluid) * deadzone_t;
-    let vlen = length(v);
-    let dir = select(vec2<f32>(0.0, 0.0), v / vlen, vlen > 1e-6);
 
-    // Map magnitude to a small sub-cell offset (in env-cell units).
-    // This keeps the effect local and prevents whole-field translation.
-    // NOTE: The simulation tick is dt-free; scaling by params.dt makes this effect vanish
-    // when dt is 0/unused, so we treat this as a per-tick offset.
-    let max_offset = 1.25;
-    let base_offset = clamp(vlen * 0.002, 0.0, max_offset);
-
-    // One-sided 3-tap kernel (UPWIND).
-    // To smear *along* the vector field, each cell must pull content from upstream
-    // (i.e., sample in the -direction). This avoids symmetric smearing and prevents
-    // backward blur against the plume direction.
-    let o_a = dir * (base_offset * alpha_conv_strength);
-    let o_b = dir * (base_offset * beta_conv_strength);
-    // Gamma terrain is typically much smoother than alpha/beta, so the same sub-cell offsets
-    // can be visually imperceptible. Use a slightly larger offset scale while keeping the same
-    // 0..1 strength semantics.
-    let gamma_offset_scale = 6.0;
-    let o_g = dir * (base_offset * gamma_strength * gamma_offset_scale);
-
-    // Taps at {0, -1, -2} (upstream) relative to the flow direction.
-    // Weights sum to 1 and bias to the current cell to keep it stable.
-    let w0 = 0.60;
-    let w1 = 0.30;
-    let w2 = 0.10;
-
-    let a_0 = sample_grid_bilinear(pos_world, 0u);
-    let a_m1 = sample_grid_bilinear(pos_world - o_a * cell_to_world, 0u);
-    let a_m2 = sample_grid_bilinear(pos_world - (o_a * 2.0) * cell_to_world, 0u);
-    let b_0 = sample_grid_bilinear(pos_world, 1u);
-    let b_m1 = sample_grid_bilinear(pos_world - o_b * cell_to_world, 1u);
-    let b_m2 = sample_grid_bilinear(pos_world - (o_b * 2.0) * cell_to_world, 1u);
-    let g_0 = sample_grid_bilinear(pos_world, 2u);
-    let g_m1 = sample_grid_bilinear(pos_world - o_g * cell_to_world, 2u);
-    let g_m2 = sample_grid_bilinear(pos_world - (o_g * 2.0) * cell_to_world, 2u);
-
-    // Normalize weights to conserve total quantity (sum of all values should remain constant)
-    let a_total = a_0 * w0 + a_m1 * w1 + a_m2 * w2;
-    let b_total = b_0 * w0 + b_m1 * w1 + b_m2 * w2;
-    let g_total = g_0 * w0 + g_m1 * w1 + g_m2 * w2;
-
-    // Apply conservation correction: maintain the current value when strength is zero
-    let a_blur = clamp(mix(current_alpha, a_total, alpha_conv_strength), 0.0, 1.0);
-    let b_blur = clamp(mix(current_beta, b_total, beta_conv_strength), 0.0, 1.0);
-    let g_blur = max(mix(current_gamma, g_total, gamma_strength), 0.0);
-
-    // Layer the fluid-directed convolution on top of the classic blur+slope result.
-    // The a_blur/b_blur/g_blur values already incorporate the mix with current values.
     // Persistence applies as decay to alpha/beta.
-    var final_alpha = clamp(mix(alpha_base, a_blur, alpha_conv_strength) * persistence, 0.0, 1.0);
-    var final_beta = clamp(mix(beta_base, b_blur, beta_conv_strength) * persistence, 0.0, 1.0);
-    // Gamma shift is terrain transport; do not apply persistence decay.
-    var final_gamma = max(g_blur, 0.0);
+    var final_alpha = clamp(alpha_base * persistence, 0.0, 1.0);
+    var final_beta = clamp(beta_base * persistence, 0.0, 1.0);
+    // Gamma: no fluid-directed shift.
+    var final_gamma = max(current_gamma, 0.0);
 
     // Stochastic rain - randomly add food/poison droplets (saturated drops)
     // Use position and random seed to generate unique random values per cell

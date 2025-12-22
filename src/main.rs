@@ -774,6 +774,121 @@ const GPU_TS_COUNT: u32 = 58;
 
 const FRAME_PROFILER_READBACK_SLOTS: usize = 2;
 
+#[derive(Default)]
+struct BenchSeries {
+    values: Vec<f64>,
+}
+
+impl BenchSeries {
+    fn push_opt(&mut self, v: Option<f64>) {
+        if let Some(v) = v {
+            if v.is_finite() {
+                self.values.push(v);
+            }
+        }
+    }
+
+    fn summary(&mut self) -> Option<(usize, f64, f64, f64, f64, f64)> {
+        if self.values.is_empty() {
+            return None;
+        }
+        self.values.sort_by(|a, b| a.total_cmp(b));
+        let n = self.values.len();
+        let min = self.values[0];
+        let max = self.values[n - 1];
+        let mean = self.values.iter().sum::<f64>() / (n as f64);
+
+        let q = |p: f64| -> f64 {
+            let p = p.clamp(0.0, 1.0);
+            let idx = ((n - 1) as f64 * p).round() as usize;
+            self.values[idx.clamp(0, n - 1)]
+        };
+        let p50 = q(0.50);
+        let p95 = q(0.95);
+
+        Some((n, min, p50, p95, mean, max))
+    }
+}
+
+struct BenchCollector {
+    warmup_remaining: usize,
+    samples_remaining: usize,
+    printed: bool,
+
+    sim_total_ms: BenchSeries,
+    sim_diffuse_ms: BenchSeries,
+    sim_process_ms: BenchSeries,
+    sim_drain_ms: BenchSeries,
+    cpu_update_ms: BenchSeries,
+}
+
+impl BenchCollector {
+    fn new(warmup: usize, samples: usize) -> Self {
+        Self {
+            warmup_remaining: warmup,
+            samples_remaining: samples.max(1),
+            printed: false,
+            sim_total_ms: BenchSeries::default(),
+            sim_diffuse_ms: BenchSeries::default(),
+            sim_process_ms: BenchSeries::default(),
+            sim_drain_ms: BenchSeries::default(),
+            cpu_update_ms: BenchSeries::default(),
+        }
+    }
+
+    fn on_sample(
+        &mut self,
+        sim_total_ms: Option<f64>,
+        sim_diffuse_ms: Option<f64>,
+        sim_process_ms: Option<f64>,
+        sim_drain_ms: Option<f64>,
+        cpu_update_ms: f64,
+    ) -> bool {
+        if self.warmup_remaining > 0 {
+            self.warmup_remaining -= 1;
+            return false;
+        }
+
+        self.sim_total_ms.push_opt(sim_total_ms);
+        self.sim_diffuse_ms.push_opt(sim_diffuse_ms);
+        self.sim_process_ms.push_opt(sim_process_ms);
+        self.sim_drain_ms.push_opt(sim_drain_ms);
+        self.cpu_update_ms.push_opt(Some(cpu_update_ms));
+
+        self.samples_remaining = self.samples_remaining.saturating_sub(1);
+        self.samples_remaining == 0
+    }
+
+    fn print_summary_once(&mut self) {
+        if self.printed {
+            return;
+        }
+        self.printed = true;
+
+        println!("\n[bench] Completed benchmark samples.");
+        println!("[bench] All times are milliseconds; p50/p95 computed over captured samples.");
+
+        let mut print_series = |name: &str, s: &mut BenchSeries| {
+            if let Some((n, min, p50, p95, mean, max)) = s.summary() {
+                println!(
+                    "[bench] {:<12} n={:<4} min={:>7.3} p50={:>7.3} p95={:>7.3} mean={:>7.3} max={:>7.3}",
+                    name, n, min, p50, p95, mean, max
+                );
+            } else {
+                println!("[bench] {:<12} (no samples)", name);
+            }
+        };
+
+        print_series("sim", &mut self.sim_total_ms);
+        print_series("diffuse", &mut self.sim_diffuse_ms);
+        print_series("process", &mut self.sim_process_ms);
+        print_series("drain", &mut self.sim_drain_ms);
+        print_series("cpuUpdate", &mut self.cpu_update_ms);
+
+        println!("[bench] Exiting.");
+    }
+}
+
 struct FrameProfiler {
     enabled: bool,
     gpu_supported: bool,
@@ -796,25 +911,60 @@ struct FrameProfiler {
     last_cpu_render_ms: f64,
     last_cpu_egui_ms: f64,
     last_inspector_requested: bool,
+
+    bench: Option<BenchCollector>,
+    bench_verbose: bool,
+    bench_exit_requested: bool,
 }
 
 impl FrameProfiler {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let enabled = std::env::var("ALSIM_PROFILE")
+        let bench_enabled = std::env::var("ALSIM_BENCH")
             .map(|value| value != "0")
             .unwrap_or(false);
 
+        let mut enabled = std::env::var("ALSIM_PROFILE")
+            .map(|value| value != "0")
+            .unwrap_or(false);
+        if bench_enabled {
+            enabled = true;
+        }
+
         // Default behavior is "blocking" (accurate per-sample printing but can stall the CPU).
         // Set ALSIM_PROFILE_WAIT=0 to avoid stalling; prints may be skipped until data is ready.
-        let wait_for_readback = std::env::var("ALSIM_PROFILE_WAIT")
-            .map(|value| value != "0")
-            .unwrap_or(true);
+        // In bench mode we default to blocking unless explicitly overridden.
+        let wait_for_readback = match std::env::var("ALSIM_PROFILE_WAIT") {
+            Ok(value) => value != "0",
+            Err(_) => bench_enabled,
+        };
 
-        let sample_interval = std::env::var("ALSIM_PROFILE_INTERVAL_MS")
+        let mut sample_interval = std::env::var("ALSIM_PROFILE_INTERVAL_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .map(std::time::Duration::from_millis)
             .unwrap_or_else(|| std::time::Duration::from_millis(1000));
+        if bench_enabled {
+            // Capture every frame; benchmark mode prints a summary at the end.
+            sample_interval = std::time::Duration::from_millis(0);
+        }
+
+        let bench_verbose = std::env::var("ALSIM_BENCH_VERBOSE")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+
+        let bench = if bench_enabled {
+            let warmup = std::env::var("ALSIM_BENCH_WARMUP")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(50);
+            let samples = std::env::var("ALSIM_BENCH_SAMPLES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(300);
+            Some(BenchCollector::new(warmup, samples))
+        } else {
+            None
+        };
 
         // We use CommandEncoder::write_timestamp, which requires TIMESTAMP_QUERY_INSIDE_ENCODERS.
         let gpu_supported = device.features().contains(
@@ -881,7 +1031,15 @@ impl FrameProfiler {
             last_cpu_render_ms: 0.0,
             last_cpu_egui_ms: 0.0,
             last_inspector_requested: false,
+
+            bench,
+            bench_verbose,
+            bench_exit_requested: false,
         }
+    }
+
+    fn bench_exit_requested(&self) -> bool {
+        self.bench_exit_requested
     }
 
     fn set_inspector_requested(&mut self, requested: bool) {
@@ -1048,7 +1206,7 @@ impl FrameProfiler {
         }
     }
 
-    fn print_stamps(&self, stamps: &[u64]) {
+    fn print_stamps(&mut self, stamps: &[u64]) {
         let dt_ms = |a: u32, b: u32| -> Option<f64> {
             let a = stamps.get(a as usize).copied().unwrap_or(0);
             let b = stamps.get(b as usize).copied().unwrap_or(0);
@@ -1112,6 +1270,24 @@ impl FrameProfiler {
 
         let gpu_egui = dt_ms(TS_EGUI_ENC_START, TS_EGUI_ENC_END);
         let gpu_egui_pass = dt_ms(TS_EGUI_PASS_START, TS_EGUI_PASS_END);
+
+        if let Some(bench) = &mut self.bench {
+            let done = bench.on_sample(
+                gpu_sim,
+                gpu_sim_diffuse,
+                gpu_sim_process,
+                gpu_sim_drain,
+                self.last_cpu_update_ms,
+            );
+            if done {
+                bench.print_summary_once();
+                self.bench_exit_requested = true;
+            }
+
+            if !self.bench_verbose {
+                return;
+            }
+        }
 
         println!(
             "[perf] gpu(ms): update={:>7.2} sim={:>7.2} fluid={:>7.2} post={:>7.2} composite={:>7.2} copy={:>7.2} render={:>7.2} egui={:>7.2} | cpu(ms): update={:>7.2} render={:>7.2} egui={:>7.2}",
@@ -2971,8 +3147,9 @@ impl SimulationSettings {
         self.slope_interval = self.slope_interval.clamp(1, 64);
         self.alpha_blur = self.alpha_blur.clamp(0.0, 1.0);
         self.beta_blur = self.beta_blur.clamp(0.0, 1.0);
-        self.alpha_fluid_convolution = self.alpha_fluid_convolution.clamp(0.0, 1.0);
-        self.beta_fluid_convolution = self.beta_fluid_convolution.clamp(0.0, 1.0);
+        // Fluid convolution has been removed; keep fields for backward-compat/uniform layout but force them off.
+        self.alpha_fluid_convolution = 0.0;
+        self.beta_fluid_convolution = 0.0;
         self.gamma_blur = self.gamma_blur.clamp(0.0, 1.0);
         self.gamma_shift = self.gamma_shift.clamp(0.0, 1.0);
         self.alpha_slope_bias = self.alpha_slope_bias.clamp(-10.0, 10.0);
@@ -3244,6 +3421,8 @@ struct GpuState {
     limit_fps_25: bool,
     last_frame_time: std::time::Instant,
     last_present_time: std::time::Instant,
+    last_egui_update_time: std::time::Instant,
+    cached_egui_primitives: Vec<egui::ClippedPrimitive>,
 
     frame_profiler: FrameProfiler,
 
@@ -3422,6 +3601,7 @@ struct GpuState {
 }
 
 const FULL_SPEED_PRESENT_INTERVAL_MICROS: u64 = 16_667; // ~60 Hz
+const EGUI_UPDATE_INTERVAL_MICROS: u64 = 33_333; // ~30 Hz
 
 impl GpuState {
     fn write_rain_map_texture(&self) {
@@ -6106,6 +6286,9 @@ impl GpuState {
             last_frame_time: std::time::Instant::now(),
             // Allow immediate first present.
             last_present_time: std::time::Instant::now() - std::time::Duration::from_secs(1),
+            // Allow immediate first egui update.
+            last_egui_update_time: std::time::Instant::now() - std::time::Duration::from_secs(1),
+            cached_egui_primitives: Vec::new(),
             frame_profiler,
             render_interval: settings.render_interval,
             current_mode: if settings.limit_fps {
@@ -6602,14 +6785,22 @@ impl GpuState {
 
     // Replenish population - spawns random agents when population is low
     fn replenish_population(&mut self) {
-        // Only replenish if population drops below 100 agents AND there was a population before
-        // (prevents spawning on startup with 0 agents)
-        if self.alive_count >= 100 || self.alive_count == 0 {
+        // Avoid stacking replenish batches while spawns are already queued.
+        if self.pending_spawn_upload || !self.cpu_spawn_queue.is_empty() {
             return;
         }
 
-        // Spawn 100 completely random agents
-        let spawn_count = 100;
+        // Only replenish if population drops below 100 agents.
+        if self.alive_count >= 100 {
+            return;
+        }
+
+        // If the world is empty, seed a larger initial batch so the sim can start.
+        let spawn_count = if self.alive_count == 0 { 2000 } else { 100 };
+
+        if self.alive_count == 0 {
+            println!("Auto-replenish: population is 0, seeding {} agents", spawn_count);
+        }
 
         // Always spawn completely random agents (no cloning)
         {
@@ -7574,16 +7765,17 @@ impl GpuState {
             adjust_param!(self.difficulty.beta_rain, true); // Harder = Increase
         }
 
-        // Advance RNG & auto-replenish only when not paused AND there are living agents
+        // Advance RNG only when not paused AND there are living agents.
+        // Auto-replenish is handled separately so the world can recover from 0 agents.
         let has_living_agents = self.alive_count > 0;
         if !self.is_paused && has_living_agents {
             self.rng_state ^= self.rng_state << 13;
             self.rng_state ^= self.rng_state >> 7;
             self.rng_state ^= self.rng_state << 17;
+        }
 
-            if self.auto_replenish {
-                self.replenish_population();
-            }
+        if !self.is_paused && self.auto_replenish {
+            self.replenish_population();
         }
 
         let mut gamma_vis_min = self.gamma_vis_min;
@@ -8035,11 +8227,11 @@ impl GpuState {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
 
-                // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(64)
+                // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(256)
                 // Agents will write propeller forces to fluid_force_vectors buffer with 100x boost
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
@@ -8463,6 +8655,10 @@ impl GpuState {
         if !should_draw {
             self.frame_profiler
                 .readback_and_print(&self.device);
+
+            if self.frame_profiler.bench_exit_requested() {
+                std::process::exit(0);
+            }
         }
 
         if did_trail_energy_readback {
@@ -8569,7 +8765,7 @@ impl GpuState {
 
     fn render(
         &mut self,
-        clipped_primitives: Vec<egui::ClippedPrimitive>,
+        clipped_primitives: &[egui::ClippedPrimitive],
         textures_delta: egui::TexturesDelta,
         screen_descriptor: ScreenDescriptor,
     ) -> Result<(), wgpu::SurfaceError> {
@@ -8694,6 +8890,10 @@ impl GpuState {
             self.frame_profiler.set_cpu_render_ms(cpu_render_ms);
             self.frame_profiler.set_cpu_egui_ms(0.0);
             self.frame_profiler.readback_and_print(&self.device);
+
+            if self.frame_profiler.bench_exit_requested() {
+                std::process::exit(0);
+            }
             return Ok(());
         }
 
@@ -8732,7 +8932,7 @@ impl GpuState {
             &self.device,
             &self.queue,
             &mut encoder,
-            &clipped_primitives,
+            clipped_primitives,
             &screen_descriptor,
         );
 
@@ -8760,7 +8960,7 @@ impl GpuState {
             let rpass_static: &mut wgpu::RenderPass<'static> =
                 unsafe { std::mem::transmute(&mut rpass) };
             self.egui_renderer
-                .render(rpass_static, &clipped_primitives, &screen_descriptor);
+                .render(rpass_static, clipped_primitives, &screen_descriptor);
 
             self.frame_profiler
                 .write_ts_render_pass(&mut rpass, TS_EGUI_PASS_END);
@@ -8780,6 +8980,14 @@ impl GpuState {
         let cpu_egui_ms = cpu_egui_start.elapsed().as_secs_f64() * 1000.0;
         self.frame_profiler.set_cpu_egui_ms(cpu_egui_ms);
         self.frame_profiler.readback_and_print(&self.device);
+
+        if self.frame_profiler.bench_exit_requested() {
+            std::process::exit(0);
+        }
+
+        if self.frame_profiler.bench_exit_requested() {
+            std::process::exit(0);
+        }
 
         Ok(())
     }
@@ -9618,6 +9826,10 @@ impl GpuState {
         self.last_autosave_epoch = 0;
         self.last_epoch_count = 0;
         self.last_epoch_update = std::time::Instant::now();
+
+        // Reset egui caching (force a rebuild on the next present)
+        self.last_egui_update_time = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        self.cached_egui_primitives.clear();
 
         // Reset camera
         self.camera_zoom = 1.0;
@@ -10470,11 +10682,24 @@ fn main() {
                                 let frame_dt = (now - state.last_frame_time).as_secs_f32().clamp(0.001, 0.1);
                                 state.last_frame_time = now;
 
-                                // In Full Speed mode, avoid presenting hundreds of frames/sec.
-                                // We still run simulation updates as fast as possible, but only present ~60Hz.
-                                let do_present = if state.current_mode == 1 {
+                                let fast_draw_tick = state.render_interval != 0
+                                    && (state.epoch % state.render_interval as u64 == 0);
+
+                                // Avoid presenting hundreds of frames/sec in modes that can run uncapped.
+                                // Full Speed: cap presents to ~60Hz.
+                                // Fast Draw: cap presents to ~60Hz when UI is visible; otherwise only present on draw ticks.
+                                let do_present = if state.is_paused {
+                                    true
+                                } else if state.current_mode == 1 {
                                     state.last_present_time.elapsed()
                                         >= std::time::Duration::from_micros(FULL_SPEED_PRESENT_INTERVAL_MICROS)
+                                } else if state.current_mode == 2 {
+                                    if state.ui_visible {
+                                        state.last_present_time.elapsed()
+                                            >= std::time::Duration::from_micros(FULL_SPEED_PRESENT_INTERVAL_MICROS)
+                                    } else {
+                                        fast_draw_tick
+                                    }
                                 } else {
                                     true
                                 };
@@ -10485,7 +10710,7 @@ fn main() {
                                     true
                                 } else if state.current_mode == 2 {
                                     // Fast Draw mode: draw every N steps
-                                    state.frame_count % state.render_interval == 0
+                                    fast_draw_tick
                                 } else if state.current_mode == 1 {
                                     // Full Speed: only update visualization when we're going to present.
                                     do_present
@@ -10542,20 +10767,20 @@ fn main() {
                                 }
 
                                 if do_present {
+                                    let screen_descriptor = ScreenDescriptor {
+                                        size_in_pixels: [
+                                            state.surface_config.width,
+                                            state.surface_config.height,
+                                        ],
+                                        pixels_per_point: window.scale_factor() as f32,
+                                    };
+
                                     // If the UI is hidden, skip egui entirely (saves CPU at high FPS).
                                     // The UI can be re-enabled via spacebar; next present will rebuild egui.
                                     if !state.ui_visible {
-                                        let screen_descriptor = ScreenDescriptor {
-                                            size_in_pixels: [
-                                                state.surface_config.width,
-                                                state.surface_config.height,
-                                            ],
-                                            pixels_per_point: window.scale_factor() as f32,
-                                        };
-
                                         state.last_present_time = now;
                                         match state.render(
-                                            Vec::new(),
+                                            &[],
                                             egui::TexturesDelta::default(),
                                             screen_descriptor,
                                         ) {
@@ -10566,8 +10791,14 @@ fn main() {
                                             Err(e) => eprintln!("{:?}", e),
                                         }
                                     } else {
-                                        // Build egui UI
+                                        // Drain input every present, but only rebuild egui at ~30Hz (or immediately on interaction).
                                         let raw_input = egui_state.take_egui_input(&window);
+                                        let input_active = !raw_input.events.is_empty();
+                                        let do_egui_update = input_active
+                                            || state.last_egui_update_time.elapsed()
+                                                >= std::time::Duration::from_micros(EGUI_UPDATE_INTERVAL_MICROS);
+
+                                        if do_egui_update {
                                         let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
                                         // Left side panel for simulation controls (only show if ui_visible)
                                         if state.ui_visible {
@@ -11257,25 +11488,6 @@ fn main() {
                                                         );
                                                         ui.label("(controls 3×3 blur strength per update)");
 
-                                                        ui.separator();
-                                                        ui.heading("Fluid Convolution");
-                                                        ui.label("(directional smear along the fluid vector field)");
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.alpha_fluid_convolution,
-                                                                0.0..=1.0,
-                                                            )
-                                                            .text("Alpha Convolution Amount")
-                                                            .custom_formatter(|n, _| format!("{:.3}", n)),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.beta_fluid_convolution,
-                                                                0.0..=1.0,
-                                                            )
-                                                            .text("Beta Convolution Amount")
-                                                            .custom_formatter(|n, _| format!("{:.3}", n)),
-                                                        );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.gamma_shift, 0.0..=1.0)
                                                                 .text("Gamma Shift Strength"),
@@ -12502,29 +12714,45 @@ fn main() {
                                         egui_state.handle_platform_output(&window, full_output.platform_output);
                                         state.persist_settings_if_changed();
 
-                                        // Tessellate and prepare render data
-                                        let clipped_primitives = egui_state.egui_ctx()
+                                        // Tessellate and cache render data
+                                        state.cached_egui_primitives = egui_state
+                                            .egui_ctx()
                                             .tessellate(full_output.shapes, full_output.pixels_per_point);
-                                        let screen_descriptor = ScreenDescriptor {
-                                            size_in_pixels: [
-                                                state.surface_config.width,
-                                                state.surface_config.height,
-                                            ],
-                                            pixels_per_point: window.scale_factor() as f32,
-                                        };
+                                        state.last_egui_update_time = now;
 
-                                        // Render with egui
+                                        // Render with egui (fresh)
                                         state.last_present_time = now;
-                                        match state.render(
-                                            clipped_primitives,
+                                        let cached = std::mem::take(&mut state.cached_egui_primitives);
+                                        let render_result = state.render(
+                                            &cached,
                                             full_output.textures_delta,
                                             screen_descriptor,
-                                        ) {
+                                        );
+                                        state.cached_egui_primitives = cached;
+                                        match render_result {
                                             Ok(_) => {}
                                             Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
                                             Err(wgpu::SurfaceError::Outdated) => {}
                                             Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
                                             Err(e) => eprintln!("{:?}", e),
+                                        }
+                                        } else {
+                                            // Render with cached egui (no rebuild / no texture updates)
+                                            state.last_present_time = now;
+                                            let cached = std::mem::take(&mut state.cached_egui_primitives);
+                                            let render_result = state.render(
+                                                &cached,
+                                                egui::TexturesDelta::default(),
+                                                screen_descriptor,
+                                            );
+                                            state.cached_egui_primitives = cached;
+                                            match render_result {
+                                                Ok(_) => {}
+                                                Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
+                                                Err(wgpu::SurfaceError::Outdated) => {}
+                                                Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
+                                                Err(e) => eprintln!("{:?}", e),
+                                            }
                                         }
                                     }
                                 }
@@ -12634,10 +12862,23 @@ fn main() {
                                 let frame_dt = (now - state.last_frame_time).as_secs_f32().clamp(0.001, 0.1);
                                 state.last_frame_time = now;
 
+                                let fast_draw_tick = state.render_interval != 0
+                                    && (state.epoch % state.render_interval as u64 == 0);
+
                                 // In Full Speed mode, avoid presenting hundreds of frames/sec.
-                                let do_present = if state.current_mode == 1 {
+                                // In Fast Draw mode, avoid presenting every sim step.
+                                let do_present = if state.is_paused {
+                                    true
+                                } else if state.current_mode == 1 {
                                     state.last_present_time.elapsed()
                                         >= std::time::Duration::from_micros(FULL_SPEED_PRESENT_INTERVAL_MICROS)
+                                } else if state.current_mode == 2 {
+                                    if state.ui_visible {
+                                        state.last_present_time.elapsed()
+                                            >= std::time::Duration::from_micros(FULL_SPEED_PRESENT_INTERVAL_MICROS)
+                                    } else {
+                                        fast_draw_tick
+                                    }
                                 } else {
                                     true
                                 };
@@ -12648,8 +12889,34 @@ fn main() {
                                     return;
                                 }
 
-                                // Build egui UI
+                                let screen_descriptor = ScreenDescriptor {
+                                    size_in_pixels: [
+                                        state.surface_config.width,
+                                        state.surface_config.height,
+                                    ],
+                                    pixels_per_point: window.scale_factor() as f32,
+                                };
+
+                                if !state.ui_visible {
+                                    state.last_present_time = now;
+                                    match state.render(&[], egui::TexturesDelta::default(), screen_descriptor) {
+                                        Ok(_) => {}
+                                        Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
+                                        Err(wgpu::SurfaceError::Outdated) => {}
+                                        Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
+                                        Err(e) => eprintln!("{:?}", e),
+                                    }
+                                    return;
+                                }
+
+                                // Drain input every present, but only rebuild egui at ~30Hz (or immediately on interaction).
                                 let raw_input = egui_state.take_egui_input(&window);
+                                let input_active = !raw_input.events.is_empty();
+                                let do_egui_update = input_active
+                                    || state.last_egui_update_time.elapsed()
+                                        >= std::time::Duration::from_micros(EGUI_UPDATE_INTERVAL_MICROS);
+
+                                if do_egui_update {
                                 let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
                                     egui::Window::new("Simulation Controls")
                                         .default_pos([10.0, 10.0])
@@ -12890,29 +13157,45 @@ fn main() {
                                 egui_state.handle_platform_output(&window, full_output.platform_output);
                                 state.persist_settings_if_changed();
 
-                                // Tessellate and prepare render data
-                                let clipped_primitives = egui_state.egui_ctx()
+                                // Tessellate and cache render data
+                                state.cached_egui_primitives = egui_state
+                                    .egui_ctx()
                                     .tessellate(full_output.shapes, full_output.pixels_per_point);
-                                let screen_descriptor = ScreenDescriptor {
-                                    size_in_pixels: [
-                                        state.surface_config.width,
-                                        state.surface_config.height,
-                                    ],
-                                    pixels_per_point: window.scale_factor() as f32,
-                                };
+                                state.last_egui_update_time = now;
 
-                                // Render with egui
+                                // Render with egui (fresh)
                                 state.last_present_time = now;
-                                match state.render(
-                                    clipped_primitives,
+                                let cached = std::mem::take(&mut state.cached_egui_primitives);
+                                let render_result = state.render(
+                                    &cached,
                                     full_output.textures_delta,
                                     screen_descriptor,
-                                ) {
+                                );
+                                state.cached_egui_primitives = cached;
+                                match render_result {
                                     Ok(_) => {}
                                     Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
                                     Err(wgpu::SurfaceError::Outdated) => {}
                                     Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
                                     Err(e) => eprintln!("{:?}", e),
+                                }
+                                } else {
+                                    // Render with cached egui (no rebuild / no texture updates)
+                                    state.last_present_time = now;
+                                    let cached = std::mem::take(&mut state.cached_egui_primitives);
+                                    let render_result = state.render(
+                                        &cached,
+                                        egui::TexturesDelta::default(),
+                                        screen_descriptor,
+                                    );
+                                    state.cached_egui_primitives = cached;
+                                    match render_result {
+                                        Ok(_) => {}
+                                        Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
+                                        Err(wgpu::SurfaceError::Outdated) => {}
+                                        Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
+                                        Err(e) => eprintln!("{:?}", e),
+                                    }
                                 }
                             }
 
