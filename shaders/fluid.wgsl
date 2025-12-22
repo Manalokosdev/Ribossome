@@ -1556,6 +1556,11 @@ fn vorticity_confinement(@builtin(global_invocation_id) global_id: vec3<u32>) {
     velocity_out[idx] = clamp_vec2_len(v, MAX_VEL);
 }
 
+// Jacobi pressure solver workgroup tile cache (16x16 threads + 1-cell halo).
+// Note: workgroup variables must be declared at module scope in WGSL.
+var<workgroup> jacobi_p_tile: array<f32, 324u>; // 18 * 18
+var<workgroup> jacobi_s_tile: array<u32, 324u>; // 18 * 18 (0 = fluid, 1 = solid)
+
 // 4. Clear pressure (for init / each frame)
 @compute @workgroup_size(16, 16)
 fn clear_pressure(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -1572,79 +1577,216 @@ fn clear_pressure(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 // 5. Jacobi iteration for pressure solve (Poisson): ∇²p = div
 @compute @workgroup_size(16, 16)
-fn jacobi_pressure(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn jacobi_pressure(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+) {
     let x = global_id.x;
     let y = global_id.y;
 
-    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+    // Workgroup-tiled Jacobi to reduce global reads and repeated obstacle queries.
+    // This keeps the same math (9-point stencil + Neumann mirroring) but is much cheaper.
+    let in_bounds = (x < FLUID_GRID_SIZE) && (y < FLUID_GRID_SIZE);
+    let idx = select(0u, grid_index(x, y), in_bounds);
+
+    let lid = vec2<u32>(local_id.xy);
+    let lx = lid.x + 1u;
+    let ly = lid.y + 1u;
+    let stride = 18u;
+    let tile_idx = ly * stride + lx;
+
+    // Center cell
+    if (in_bounds) {
+        jacobi_p_tile[tile_idx] = pressure_in[idx];
+        jacobi_s_tile[tile_idx] = select(0u, 1u, is_effectively_solid(x, y));
+    } else {
+        jacobi_p_tile[tile_idx] = 0.0;
+        jacobi_s_tile[tile_idx] = 1u;
+    }
+
+    // Halo loads (out-of-bounds treated as solid)
+    if (lid.x == 0u) {
+        let gx = i32(x) - 1;
+        let gy = i32(y);
+        let ok = (gx >= 0) && (gy >= 0) && (gx < i32(FLUID_GRID_SIZE)) && (gy < i32(FLUID_GRID_SIZE));
+        let hx = u32(max(gx, 0));
+        let hy = u32(max(gy, 0));
+        let hidx = (ly) * stride + 0u;
+        if (ok) {
+            let gxu = hx;
+            let gyu = hy;
+            let gi = grid_index(gxu, gyu);
+            jacobi_p_tile[hidx] = pressure_in[gi];
+            jacobi_s_tile[hidx] = select(0u, 1u, is_effectively_solid(gxu, gyu));
+        } else {
+            jacobi_p_tile[hidx] = 0.0;
+            jacobi_s_tile[hidx] = 1u;
+        }
+    }
+    if (lid.x == 15u) {
+        let gx = i32(x) + 1;
+        let gy = i32(y);
+        let ok = (gx >= 0) && (gy >= 0) && (gx < i32(FLUID_GRID_SIZE)) && (gy < i32(FLUID_GRID_SIZE));
+        let hx = u32(min(gx, i32(FLUID_GRID_SIZE) - 1));
+        let hy = u32(max(gy, 0));
+        let hidx = (ly) * stride + 17u;
+        if (ok) {
+            let gxu = hx;
+            let gyu = hy;
+            let gi = grid_index(gxu, gyu);
+            jacobi_p_tile[hidx] = pressure_in[gi];
+            jacobi_s_tile[hidx] = select(0u, 1u, is_effectively_solid(gxu, gyu));
+        } else {
+            jacobi_p_tile[hidx] = 0.0;
+            jacobi_s_tile[hidx] = 1u;
+        }
+    }
+    if (lid.y == 0u) {
+        let gx = i32(x);
+        let gy = i32(y) - 1;
+        let ok = (gx >= 0) && (gy >= 0) && (gx < i32(FLUID_GRID_SIZE)) && (gy < i32(FLUID_GRID_SIZE));
+        let hx = u32(max(gx, 0));
+        let hy = u32(max(gy, 0));
+        let hidx = 0u * stride + lx;
+        if (ok) {
+            let gxu = hx;
+            let gyu = hy;
+            let gi = grid_index(gxu, gyu);
+            jacobi_p_tile[hidx] = pressure_in[gi];
+            jacobi_s_tile[hidx] = select(0u, 1u, is_effectively_solid(gxu, gyu));
+        } else {
+            jacobi_p_tile[hidx] = 0.0;
+            jacobi_s_tile[hidx] = 1u;
+        }
+    }
+    if (lid.y == 15u) {
+        let gx = i32(x);
+        let gy = i32(y) + 1;
+        let ok = (gx >= 0) && (gy >= 0) && (gx < i32(FLUID_GRID_SIZE)) && (gy < i32(FLUID_GRID_SIZE));
+        let hx = u32(max(gx, 0));
+        let hy = u32(min(gy, i32(FLUID_GRID_SIZE) - 1));
+        let hidx = 17u * stride + lx;
+        if (ok) {
+            let gxu = hx;
+            let gyu = hy;
+            let gi = grid_index(gxu, gyu);
+            jacobi_p_tile[hidx] = pressure_in[gi];
+            jacobi_s_tile[hidx] = select(0u, 1u, is_effectively_solid(gxu, gyu));
+        } else {
+            jacobi_p_tile[hidx] = 0.0;
+            jacobi_s_tile[hidx] = 1u;
+        }
+    }
+    if (lid.x == 0u && lid.y == 0u) {
+        let gx = i32(x) - 1;
+        let gy = i32(y) - 1;
+        let ok = (gx >= 0) && (gy >= 0) && (gx < i32(FLUID_GRID_SIZE)) && (gy < i32(FLUID_GRID_SIZE));
+        let hidx = 0u;
+        if (ok) {
+            let gxu = u32(gx);
+            let gyu = u32(gy);
+            let gi = grid_index(gxu, gyu);
+            jacobi_p_tile[hidx] = pressure_in[gi];
+            jacobi_s_tile[hidx] = select(0u, 1u, is_effectively_solid(gxu, gyu));
+        } else {
+            jacobi_p_tile[hidx] = 0.0;
+            jacobi_s_tile[hidx] = 1u;
+        }
+    }
+    if (lid.x == 15u && lid.y == 0u) {
+        let gx = i32(x) + 1;
+        let gy = i32(y) - 1;
+        let ok = (gx >= 0) && (gy >= 0) && (gx < i32(FLUID_GRID_SIZE)) && (gy < i32(FLUID_GRID_SIZE));
+        let hidx = 17u;
+        if (ok) {
+            let gxu = u32(gx);
+            let gyu = u32(gy);
+            let gi = grid_index(gxu, gyu);
+            jacobi_p_tile[hidx] = pressure_in[gi];
+            jacobi_s_tile[hidx] = select(0u, 1u, is_effectively_solid(gxu, gyu));
+        } else {
+            jacobi_p_tile[hidx] = 0.0;
+            jacobi_s_tile[hidx] = 1u;
+        }
+    }
+    if (lid.x == 0u && lid.y == 15u) {
+        let gx = i32(x) - 1;
+        let gy = i32(y) + 1;
+        let ok = (gx >= 0) && (gy >= 0) && (gx < i32(FLUID_GRID_SIZE)) && (gy < i32(FLUID_GRID_SIZE));
+        let hidx = 17u * stride;
+        if (ok) {
+            let gxu = u32(gx);
+            let gyu = u32(gy);
+            let gi = grid_index(gxu, gyu);
+            jacobi_p_tile[hidx] = pressure_in[gi];
+            jacobi_s_tile[hidx] = select(0u, 1u, is_effectively_solid(gxu, gyu));
+        } else {
+            jacobi_p_tile[hidx] = 0.0;
+            jacobi_s_tile[hidx] = 1u;
+        }
+    }
+    if (lid.x == 15u && lid.y == 15u) {
+        let gx = i32(x) + 1;
+        let gy = i32(y) + 1;
+        let ok = (gx >= 0) && (gy >= 0) && (gx < i32(FLUID_GRID_SIZE)) && (gy < i32(FLUID_GRID_SIZE));
+        let hidx = 17u * stride + 17u;
+        if (ok) {
+            let gxu = u32(gx);
+            let gyu = u32(gy);
+            let gi = grid_index(gxu, gyu);
+            jacobi_p_tile[hidx] = pressure_in[gi];
+            jacobi_s_tile[hidx] = select(0u, 1u, is_effectively_solid(gxu, gyu));
+        } else {
+            jacobi_p_tile[hidx] = 0.0;
+            jacobi_s_tile[hidx] = 1u;
+        }
+    }
+
+    workgroupBarrier();
+
+    if (!in_bounds) {
         return;
     }
 
-    let idx = grid_index(x, y);
-
-    if (is_effectively_solid(x, y)) {
+    if (jacobi_s_tile[tile_idx] != 0u) {
         pressure_out[idx] = 0.0;
         return;
     }
 
-    // Neumann boundary (solid walls): dp/dn = 0.
-    // Implemented by mirroring the edge pressure to the outside.
-    // IMPORTANT: Use a 9-point (diagonal-including) Laplacian stencil to reduce
-    // axis-aligned artifacts that can show up as "+" patterns.
-    let p_c = pressure_in[idx];
+    // Neumann boundary (solid walls): dp/dn = 0 via mirroring p_c.
+    let p_c = jacobi_p_tile[tile_idx];
 
-    var p_l = p_c;
-    if (x > 0u && !is_effectively_solid(x - 1u, y)) {
-        p_l = pressure_in[grid_index(x - 1u, y)];
-    }
-    var p_r = p_c;
-    if (x + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x + 1u, y)) {
-        p_r = pressure_in[grid_index(x + 1u, y)];
-    }
-    var p_b = p_c;
-    if (y > 0u && !is_effectively_solid(x, y - 1u)) {
-        p_b = pressure_in[grid_index(x, y - 1u)];
-    }
-    var p_t = p_c;
-    if (y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x, y + 1u)) {
-        p_t = pressure_in[grid_index(x, y + 1u)];
-    }
+    let l_idx = tile_idx - 1u;
+    let r_idx = tile_idx + 1u;
+    let b_idx = tile_idx - stride;
+    let t_idx = tile_idx + stride;
+    let bl_idx = b_idx - 1u;
+    let br_idx = b_idx + 1u;
+    let tl_idx = t_idx - 1u;
+    let tr_idx = t_idx + 1u;
 
-    // Diagonals (same Neumann treatment: if neighbor is solid/out-of-bounds, mirror center).
-    var p_bl = p_c;
-    if (x > 0u && y > 0u && !is_effectively_solid(x - 1u, y - 1u)) {
-        p_bl = pressure_in[grid_index(x - 1u, y - 1u)];
-    }
-    var p_br = p_c;
-    if (x + 1u < FLUID_GRID_SIZE && y > 0u && !is_effectively_solid(x + 1u, y - 1u)) {
-        p_br = pressure_in[grid_index(x + 1u, y - 1u)];
-    }
-    var p_tl = p_c;
-    if (x > 0u && y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x - 1u, y + 1u)) {
-        p_tl = pressure_in[grid_index(x - 1u, y + 1u)];
-    }
-    var p_tr = p_c;
-    if (x + 1u < FLUID_GRID_SIZE && y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x + 1u, y + 1u)) {
-        p_tr = pressure_in[grid_index(x + 1u, y + 1u)];
+    let p_l = select(jacobi_p_tile[l_idx], p_c, jacobi_s_tile[l_idx] != 0u);
+    let p_r = select(jacobi_p_tile[r_idx], p_c, jacobi_s_tile[r_idx] != 0u);
+    let p_b = select(jacobi_p_tile[b_idx], p_c, jacobi_s_tile[b_idx] != 0u);
+    let p_t = select(jacobi_p_tile[t_idx], p_c, jacobi_s_tile[t_idx] != 0u);
+    let p_bl = select(jacobi_p_tile[bl_idx], p_c, jacobi_s_tile[bl_idx] != 0u);
+    let p_br = select(jacobi_p_tile[br_idx], p_c, jacobi_s_tile[br_idx] != 0u);
+    let p_tl = select(jacobi_p_tile[tl_idx], p_c, jacobi_s_tile[tl_idx] != 0u);
+    let p_tr = select(jacobi_p_tile[tr_idx], p_c, jacobi_s_tile[tr_idx] != 0u);
+
+    let div = divergence[idx];
+    if (is_bad_f32(div) || is_bad_f32(p_c)) {
+        pressure_out[idx] = 0.0;
+        return;
     }
 
     // 9-point Laplacian (more isotropic than 5-point):
     //   ∇²p ≈ (4*axis + diag - 20*p_c) / 6   (with dx = 1)
     // Solve (Jacobi): p_c = (4*axis + diag - 6*div) / 20
-    let div = divergence[idx];
-    if (
-        is_bad_f32(div) ||
-        is_bad_f32(p_c) ||
-        is_bad_f32(p_l) || is_bad_f32(p_r) || is_bad_f32(p_b) || is_bad_f32(p_t) ||
-        is_bad_f32(p_bl) || is_bad_f32(p_br) || is_bad_f32(p_tl) || is_bad_f32(p_tr)
-    ) {
-        pressure_out[idx] = 0.0;
-        return;
-    }
-
     let axis_sum = p_l + p_r + p_b + p_t;
     let diag_sum = p_bl + p_br + p_tl + p_tr;
-    pressure_out[idx] = (4.0 * axis_sum + diag_sum - 6.0 * div) * (1.0 / 20.0);
+    let p_new = (4.0 * axis_sum + diag_sum - 6.0 * div) * (1.0 / 20.0);
+    pressure_out[idx] = select(p_new, 0.0, is_bad_f32(p_new));
 }
 
 // 6. Subtract pressure gradient from velocity to make it divergence-free.

@@ -1189,12 +1189,20 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Now calculate forces using the updated morphology (using pre-collected neighbors)
     var chirality_flip_physics = 1.0; // Track cumulative chirality for propeller direction
+    // Accumulate rotational inertia and detect vampire mouths in this same pass
+    // to avoid extra full body scans.
+    var moment_of_inertia = 0.0;
+    var has_vampire_mouth = false;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
 
         // Get amino acid properties
         let base_type = get_base_part_type(part.part_type);
         let amino_props = get_amino_acid_properties(base_type);
+
+        if (base_type == 33u) {
+            has_vampire_mouth = true;
+        }
 
         // Check if this part is Leucine (index 9) and flip chirality
         if (base_type == 9u) {
@@ -1211,11 +1219,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Use midpoint for physics calculations
         let offset_from_com = segment_midpoint - center_of_mass;
+
+        // Moment of inertia (rotation-invariant; can be computed in local space)
+        let part_mass = max(amino_props.mass, 0.01);
+        moment_of_inertia += part_mass * dot(offset_from_com, offset_from_com);
         let r_com = apply_agent_rotation(offset_from_com, agent_rot);
         let rotated_midpoint = apply_agent_rotation(segment_midpoint, agent_rot);
         let world_pos = agent_pos + rotated_midpoint;
 
-        let part_mass = max(amino_props.mass, 0.01);
         let part_weight = part_mass / total_mass;
 
         // Slope force per amino acid
@@ -1558,27 +1569,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Apply torque - overdamped angular motion (no angular inertia)
     // In viscous fluids, angular velocity is directly proportional to torque
-    // Calculate moment of inertia just for scaling the rotational drag
-    // Use segment midpoints for proper rotational inertia calculation
-    var moment_of_inertia = 0.0;
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        let part = agents_out[agent_id].body[i];
-        let base_type = get_base_part_type(part.part_type);
-        let props = get_amino_acid_properties(base_type);
-        let mass = max(props.mass, 0.01);
-
-        // Calculate segment midpoint
-        var segment_start_chain = vec2<f32>(0.0);
-        if (i > 0u) {
-            segment_start_chain = agents_out[agent_id].body[i - 1u].pos;
-        }
-        let segment_midpoint_chain = (segment_start_chain + part.pos) * 0.5;
-        let segment_midpoint = morphology_origin + segment_midpoint_chain;
-
-        let offset = segment_midpoint - center_of_mass;
-        let r_squared = dot(offset, offset);
-        moment_of_inertia += mass * r_squared;
-    }
     moment_of_inertia = max(moment_of_inertia, 0.01);
 
     // Overdamped rotation: angular_velocity = torque / rotational_drag
@@ -1626,14 +1616,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var local_alpha = 0.0;
 
     // If an agent has any vampire mouth (type 33), deactivate normal mouths.
-    var has_vampire_mouth = false;
-    for (var j = 0u; j < min(body_count, MAX_BODY_PARTS); j++) {
-        let bt = get_base_part_type(agents_out[agent_id].body[j].part_type);
-        if (bt == 33u) {
-            has_vampire_mouth = true;
-            break;
-        }
-    }
+    // (Computed earlier during the physics pass.)
 
     // Single loop through all body parts
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
