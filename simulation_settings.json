@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.6021682,
+  "camera_zoom": 0.81790686,
   "spawn_probability": 0.5,
   "death_probability": 0.00005,
   "mutation_rate": 0.005,
@@ -28,7 +28,7 @@
   "amino_maintenance_cost": 0.0,
   "pairing_cost": 0.0,
   "prop_wash_strength": 0.05,
-  "repulsion_strength": 6.0,
+  "repulsion_strength": 45.0,
   "agent_repulsion_strength": 0.001,
   "limit_fps": false,
   "limit_fps_25": false,

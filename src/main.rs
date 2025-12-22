@@ -3263,6 +3263,7 @@ struct GpuState {
 
     // Population statistics tracking
     population_history: Vec<u32>, // Stores population at sample points
+    population_plot_points: Vec<[f64; 2]>,
     alpha_rain_history: VecDeque<f32>,
     beta_rain_history: VecDeque<f32>,
     epoch_sample_interval: u64,   // Sample every N epochs (1000)
@@ -6119,6 +6120,7 @@ impl GpuState {
             trail_energy_debug_next_epoch: 0,
             epochs_per_second: 0.0,
             population_history: Vec::new(),
+            population_plot_points: Vec::new(),
             alpha_rain_history: VecDeque::new(),
             beta_rain_history: VecDeque::new(),
             epoch_sample_interval: 1000,
@@ -8573,6 +8575,10 @@ impl GpuState {
     ) -> Result<(), wgpu::SurfaceError> {
         let cpu_render_start = std::time::Instant::now();
 
+        let skip_egui = clipped_primitives.is_empty()
+            && textures_delta.set.is_empty()
+            && textures_delta.free.is_empty();
+
         // Update FPS counter
         self.frame_count += 1;
         let now = std::time::Instant::now();
@@ -8665,6 +8671,31 @@ impl GpuState {
 
         self.frame_profiler
             .write_ts_encoder(&mut encoder, TS_RENDER_ENC_END);
+
+        if skip_egui {
+            // Keep egui markers stable when egui is skipped.
+            self.frame_profiler
+                .write_ts_encoder(&mut encoder, TS_EGUI_ENC_START);
+            self.frame_profiler
+                .write_ts_encoder(&mut encoder, TS_EGUI_PASS_START);
+            self.frame_profiler
+                .write_ts_encoder(&mut encoder, TS_EGUI_PASS_END);
+            self.frame_profiler
+                .write_ts_encoder(&mut encoder, TS_EGUI_ENC_END);
+
+            // Resolve/copy timestamps at the end of the frame work.
+            self.frame_profiler.resolve_and_copy(&mut encoder);
+
+            // Submit simulation rendering and present.
+            self.queue.submit(Some(encoder.finish()));
+            output.present();
+
+            let cpu_render_ms = cpu_render_start.elapsed().as_secs_f64() * 1000.0;
+            self.frame_profiler.set_cpu_render_ms(cpu_render_ms);
+            self.frame_profiler.set_cpu_egui_ms(0.0);
+            self.frame_profiler.readback_and_print(&self.device);
+            return Ok(());
+        }
 
         // Submit simulation rendering
         self.queue.submit(Some(encoder.finish()));
@@ -9602,6 +9633,7 @@ impl GpuState {
 
         // Reset statistics
         self.population_history.clear();
+        self.population_plot_points.clear();
         self.alpha_rain_history.clear();
         self.beta_rain_history.clear();
 
@@ -10477,6 +10509,20 @@ fn main() {
                                         if state.population_history.len() > state.max_history_points {
                                             state.population_history.remove(0);
                                         }
+
+                                        // Update cached plot points only when data changes (avoids per-frame allocs).
+                                        // Downsample to cap egui_plot CPU cost at high FPS.
+                                        const MAX_PLOT_POINTS: usize = 1024;
+                                        let len = state.population_history.len();
+                                        let stride = ((len + MAX_PLOT_POINTS - 1) / MAX_PLOT_POINTS).max(1);
+                                        state.population_plot_points = state
+                                            .population_history
+                                            .iter()
+                                            .enumerate()
+                                            .step_by(stride)
+                                            .map(|(i, &pop)| [i as f64, pop as f64])
+                                            .collect();
+
                                         state.last_sample_epoch = state.epoch;
                                     }
 
@@ -10496,12 +10542,36 @@ fn main() {
                                 }
 
                                 if do_present {
-                                    // Build egui UI
-                                    let raw_input = egui_state.take_egui_input(&window);
-                                    let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
-                                    // Left side panel for simulation controls (only show if ui_visible)
-                                    if state.ui_visible {
-                                    egui::SidePanel::left("simulation_controls")
+                                    // If the UI is hidden, skip egui entirely (saves CPU at high FPS).
+                                    // The UI can be re-enabled via spacebar; next present will rebuild egui.
+                                    if !state.ui_visible {
+                                        let screen_descriptor = ScreenDescriptor {
+                                            size_in_pixels: [
+                                                state.surface_config.width,
+                                                state.surface_config.height,
+                                            ],
+                                            pixels_per_point: window.scale_factor() as f32,
+                                        };
+
+                                        state.last_present_time = now;
+                                        match state.render(
+                                            Vec::new(),
+                                            egui::TexturesDelta::default(),
+                                            screen_descriptor,
+                                        ) {
+                                            Ok(_) => {}
+                                            Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
+                                            Err(wgpu::SurfaceError::Outdated) => {}
+                                            Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
+                                            Err(e) => eprintln!("{:?}", e),
+                                        }
+                                    } else {
+                                        // Build egui UI
+                                        let raw_input = egui_state.take_egui_input(&window);
+                                        let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
+                                        // Left side panel for simulation controls (only show if ui_visible)
+                                        if state.ui_visible {
+                                        egui::SidePanel::left("simulation_controls")
                                         .default_width(350.0)
                                         .resizable(true)
                                         .frame(egui::Frame::none()
@@ -10659,17 +10729,10 @@ fn main() {
                                                     state.epoch_sample_interval
                                                 ));
 
-                                                if !state.population_history.is_empty() {
-                                                    use egui_plot::{Line, Plot, PlotPoints};
+                                                if !state.population_plot_points.is_empty() {
+                                                    use egui_plot::{Line, Plot};
 
-                                                    let points: PlotPoints = state
-                                                        .population_history
-                                                        .iter()
-                                                        .enumerate()
-                                                        .map(|(i, &pop)| [i as f64, pop as f64])
-                                                        .collect();
-
-                                                    let line = Line::new(points)
+                                                    let line = Line::new(state.population_plot_points.clone())
                                                         .color(egui::Color32::from_rgb(100, 200, 100))
                                                         .name("Population");
 
@@ -10683,6 +10746,8 @@ fn main() {
                                                         .show(ui, |plot_ui| {
                                                             plot_ui.line(line);
                                                         });
+                                                } else {
+                                                    ui.label("No data yet (waiting for first sample)");
                                                 }
                                             });
 
@@ -10844,17 +10909,10 @@ fn main() {
                                                                 state.epoch_sample_interval
                                                             ));
 
-                                                            if !state.population_history.is_empty() {
-                                                                use egui_plot::{Line, Plot, PlotPoints};
+                                                            if !state.population_plot_points.is_empty() {
+                                                                            use egui_plot::{Line, Plot};
 
-                                                                let points: PlotPoints = state
-                                                                    .population_history
-                                                                    .iter()
-                                                                    .enumerate()
-                                                                    .map(|(i, &pop)| [i as f64, pop as f64])
-                                                                    .collect();
-
-                                                                let line = Line::new(points)
+                                                                            let line = Line::new(state.population_plot_points.clone())
                                                                     .color(egui::Color32::from_rgb(100, 200, 100))
                                                                     .name("Population");
 
@@ -12436,37 +12494,38 @@ fn main() {
                                                 }
                                             });
 
-                                    }); // Close the dark grey frame
-                                    }
-                                });
+                                        }); // Close the dark grey frame
+                                        }
+                                    });
 
-                                    // Handle platform output
-                                    egui_state.handle_platform_output(&window, full_output.platform_output);
-                                    state.persist_settings_if_changed();
+                                        // Handle platform output
+                                        egui_state.handle_platform_output(&window, full_output.platform_output);
+                                        state.persist_settings_if_changed();
 
-                                    // Tessellate and prepare render data
-                                    let clipped_primitives = egui_state.egui_ctx()
-                                        .tessellate(full_output.shapes, full_output.pixels_per_point);
-                                    let screen_descriptor = ScreenDescriptor {
-                                        size_in_pixels: [
-                                            state.surface_config.width,
-                                            state.surface_config.height,
-                                        ],
-                                        pixels_per_point: window.scale_factor() as f32,
-                                    };
+                                        // Tessellate and prepare render data
+                                        let clipped_primitives = egui_state.egui_ctx()
+                                            .tessellate(full_output.shapes, full_output.pixels_per_point);
+                                        let screen_descriptor = ScreenDescriptor {
+                                            size_in_pixels: [
+                                                state.surface_config.width,
+                                                state.surface_config.height,
+                                            ],
+                                            pixels_per_point: window.scale_factor() as f32,
+                                        };
 
-                                    // Render with egui
-                                    state.last_present_time = now;
-                                    match state.render(
-                                        clipped_primitives,
-                                        full_output.textures_delta,
-                                        screen_descriptor,
-                                    ) {
-                                        Ok(_) => {}
-                                        Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
-                                        Err(wgpu::SurfaceError::Outdated) => {}
-                                        Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
-                                        Err(e) => eprintln!("{:?}", e),
+                                        // Render with egui
+                                        state.last_present_time = now;
+                                        match state.render(
+                                            clipped_primitives,
+                                            full_output.textures_delta,
+                                            screen_descriptor,
+                                        ) {
+                                            Ok(_) => {}
+                                            Err(wgpu::SurfaceError::Lost) => state.resize(window.inner_size()),
+                                            Err(wgpu::SurfaceError::Outdated) => {}
+                                            Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
+                                            Err(e) => eprintln!("{:?}", e),
+                                        }
                                     }
                                 }
                             }
