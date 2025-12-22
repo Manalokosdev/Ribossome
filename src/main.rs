@@ -795,6 +795,7 @@ struct FrameProfiler {
     last_cpu_update_ms: f64,
     last_cpu_render_ms: f64,
     last_cpu_egui_ms: f64,
+    last_inspector_requested: bool,
 }
 
 impl FrameProfiler {
@@ -879,7 +880,12 @@ impl FrameProfiler {
             last_cpu_update_ms: 0.0,
             last_cpu_render_ms: 0.0,
             last_cpu_egui_ms: 0.0,
+            last_inspector_requested: false,
         }
+    }
+
+    fn set_inspector_requested(&mut self, requested: bool) {
+        self.last_inspector_requested = requested;
     }
 
     fn begin_frame(&mut self) {
@@ -1159,7 +1165,7 @@ impl FrameProfiler {
         );
 
         println!(
-            "[perf] post-kernels(ms): compact={:>6.2} cpuSpawn={:>6.2} merge={:>6.2} initDead={:>6.2} finalize={:>6.2} pausedProc={:>6.2} rndAgents={:>6.2} inspClr={:>6.2} inspDraw={:>6.2}",
+            "[perf] post-kernels(ms): compact={:>6.2} cpuSpawn={:>6.2} merge={:>6.2} initDead={:>6.2} finalize={:>6.2} pausedProc={:>6.2} renderAgents={:>6.2} inspClr={:>6.2} inspDraw={:>6.2} inspOn={}",
             gpu_post_compact.unwrap_or(-1.0),
             gpu_post_cpu_spawn.unwrap_or(-1.0),
             gpu_post_merge.unwrap_or(-1.0),
@@ -1169,6 +1175,7 @@ impl FrameProfiler {
             gpu_post_render_agents.unwrap_or(-1.0),
             gpu_post_inspector_clear.unwrap_or(-1.0),
             gpu_post_inspector_draw.unwrap_or(-1.0),
+            if self.last_inspector_requested { 1 } else { 0 },
         );
 
         println!(
@@ -7476,6 +7483,12 @@ impl GpuState {
 
     pub fn update(&mut self, should_draw: bool, frame_dt: f32) {
         let cpu_update_start = std::time::Instant::now();
+
+        // Make perf logs self-describing: inspector preview only runs on draw frames
+        // and only when an agent is selected.
+        self.frame_profiler
+            .set_inspector_requested(should_draw && self.selected_agent_index.is_some());
+
         self.frame_profiler.begin_frame();
 
         // Push base-angle overrides into the existing EnvironmentInitParams uniform.
@@ -8336,7 +8349,12 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.draw_inspector_agent_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(1, 1, 1);
+                // Tiled preview draw: shader uses workgroup_size(1,1) and clips each tile.
+                // Keep these constants in sync with shaders/render.wgsl.
+                let tile_size: u32 = 32;
+                let tiles_x = (300 + tile_size - 1) / tile_size;
+                let tiles_y = (300 + tile_size - 1) / tile_size;
+                cpass.dispatch_workgroups(tiles_x, tiles_y, 1);
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_INSPECTOR_DRAW);

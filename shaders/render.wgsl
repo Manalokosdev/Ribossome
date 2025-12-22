@@ -27,7 +27,7 @@ fn render_body_part(
     amplification: f32,
     in_debug_mode: bool
 ) {
-    render_body_part_ctx(part, part_index, agent_id, agent_position, agent_rotation, agent_energy, agent_color, body_count, morphology_origin, amplification, in_debug_mode, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+    render_body_part_ctx(part, part_index, agent_id, agent_position, agent_rotation, agent_energy, agent_color, body_count, morphology_origin, amplification, in_debug_mode, InspectorContext(vec2<f32>(-1.0), vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
 }
 
 fn render_body_part_ctx(
@@ -564,6 +564,8 @@ struct InspectorContext {
     // In inspector mode, this encodes a Y-clip range: [x, y) in screen pixels.
     // Default vec2(0.0, window_height) means "full height".
     use_inspector_coords: vec2<f32>,
+    // Optional X-clip range in buffer pixels: [x, y). If invalid, defaults to full inspector width.
+    clip_x: vec2<f32>,
     center: vec2<f32>,                // center of preview window
     scale: f32,                       // scale factor for inspector
     offset: vec2<f32>,                // offset to actual buffer position
@@ -578,6 +580,27 @@ fn inspector_clip_y(ctx: InspectorContext) -> vec2<i32> {
         y1 = i32(ctx.use_inspector_coords.y);
     }
     return vec2<i32>(y0, y1);
+}
+
+fn inspector_clip_x(ctx: InspectorContext) -> vec2<i32> {
+    // Default to full inspector width when caller doesn't provide a valid range.
+    var x0: i32 = i32(ctx.offset.x);
+    var x1: i32 = i32(ctx.offset.x) + i32(INSPECTOR_WIDTH);
+    if (ctx.clip_x.y > ctx.clip_x.x) {
+        x0 = i32(ctx.clip_x.x);
+        x1 = i32(ctx.clip_x.y);
+    }
+    return vec2<i32>(x0, x1);
+}
+
+// Clip rectangle in *screen* coordinates (before offset is added).
+// Returns (x0, x1, y0, y1) where x1/y1 are exclusive.
+fn inspector_clip_screen(ctx: InspectorContext) -> vec4<i32> {
+    let bx = inspector_clip_x(ctx);
+    let by = inspector_clip_y(ctx);
+    let offx = i32(ctx.offset.x);
+    let offy = i32(ctx.offset.y);
+    return vec4<i32>(bx.x - offx, bx.y - offx, by.x - offy, by.y - offy);
 }
 
 // Helper function to draw a line directly in screen-space coordinates (pixels)
@@ -620,7 +643,7 @@ fn draw_screen_line(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
 
 // Helper function to draw a thick line in screen space
 fn draw_thick_line(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32>) {
-    draw_thick_line_ctx(p0, p1, thickness, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+    draw_thick_line_ctx(p0, p1, thickness, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
 }
 
 fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4<f32>, ctx: InspectorContext) {
@@ -660,10 +683,22 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
 
     // Calculate bounding box for the capsule
     let half_thick = f32(screen_thickness);
-    let min_x = min(screen_p0.x, screen_p1.x) - screen_thickness;
-    let max_x = max(screen_p0.x, screen_p1.x) + screen_thickness;
-    let min_y = min(screen_p0.y, screen_p1.y) - screen_thickness;
-    let max_y = max(screen_p0.y, screen_p1.y) + screen_thickness;
+    var min_x = min(screen_p0.x, screen_p1.x) - screen_thickness;
+    var max_x = max(screen_p0.x, screen_p1.x) + screen_thickness;
+    var min_y = min(screen_p0.y, screen_p1.y) - screen_thickness;
+    var max_y = max(screen_p0.y, screen_p1.y) + screen_thickness;
+
+    // Clamp raster loops to the caller-provided clip rectangle in inspector mode.
+    if (ctx.use_inspector_coords.x >= 0.0) {
+        let clip = inspector_clip_screen(ctx);
+        min_x = max(min_x, clip.x);
+        max_x = min(max_x, clip.y - 1);
+        min_y = max(min_y, clip.z);
+        max_y = min(max_y, clip.w - 1);
+        if (min_x > max_x || min_y > max_y) {
+            return;
+        }
+    }
 
     // Iterate only over bounding box (much smaller than full screen)
     for (var py = min_y; py <= max_y; py++) {
@@ -744,8 +779,9 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
                     // Inspector mode: offset to actual buffer position and check inspector bounds
                     let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
                     let y_clip = inspector_clip_y(ctx);
+                    let x_clip = inspector_clip_x(ctx);
                     // Allow drawing anywhere in the inspector area (300px wide, full height)
-                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                    if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
                         buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                         idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                         in_bounds = true;
@@ -803,7 +839,8 @@ fn draw_thin_line_ctx(p0: vec2<f32>, p1: vec2<f32>, color: vec4<f32>, ctx: Inspe
         if (ctx.use_inspector_coords.x >= 0.0) {
             let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
             let y_clip = inspector_clip_y(ctx);
-            if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+            let x_clip = inspector_clip_x(ctx);
+            if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
                 buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                 idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                 in_bounds = true;
@@ -879,10 +916,22 @@ fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32,
     let half_thick = f32(screen_thickness);
 
     // Calculate bounding box
-    let bbox_min_x = min(screen_p0.x, screen_p1.x) - screen_thickness;
-    let bbox_min_y = min(screen_p0.y, screen_p1.y) - screen_thickness;
-    let bbox_max_x = max(screen_p0.x, screen_p1.x) + screen_thickness;
-    let bbox_max_y = max(screen_p0.y, screen_p1.y) + screen_thickness;
+    var bbox_min_x = min(screen_p0.x, screen_p1.x) - screen_thickness;
+    var bbox_min_y = min(screen_p0.y, screen_p1.y) - screen_thickness;
+    var bbox_max_x = max(screen_p0.x, screen_p1.x) + screen_thickness;
+    var bbox_max_y = max(screen_p0.y, screen_p1.y) + screen_thickness;
+
+    // Clamp raster loops to the caller-provided clip rectangle in inspector mode.
+    if (ctx.use_inspector_coords.x >= 0.0) {
+        let clip = inspector_clip_screen(ctx);
+        bbox_min_x = max(bbox_min_x, clip.x);
+        bbox_max_x = min(bbox_max_x, clip.y - 1);
+        bbox_min_y = max(bbox_min_y, clip.z);
+        bbox_max_y = min(bbox_max_y, clip.w - 1);
+        if (bbox_min_x > bbox_max_x || bbox_min_y > bbox_max_y) {
+            return;
+        }
+    }
 
     for (var py = bbox_min_y; py <= bbox_max_y; py++) {
         for (var px = bbox_min_x; px <= bbox_max_x; px++) {
@@ -951,7 +1000,8 @@ fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32,
                 if (ctx.use_inspector_coords.x >= 0.0) {
                     let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
                     let y_clip = inspector_clip_y(ctx);
-                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                    let x_clip = inspector_clip_x(ctx);
+                    if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
                         buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                         idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                         in_bounds = true;
@@ -1000,7 +1050,8 @@ fn draw_filled_circle_optimized(center: vec2<i32>, radius: f32, color: vec4<f32>
                     // Inspector mode
                     let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
                     let y_clip = inspector_clip_y(ctx);
-                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                    let x_clip = inspector_clip_x(ctx);
+                    if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
                         buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                         idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                         in_bounds = true;
@@ -1061,7 +1112,7 @@ fn draw_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
 
 // Helper: draw a filled circle in screen space
 fn draw_filled_circle(center: vec2<f32>, radius: f32, color: vec4<f32>) {
-    draw_filled_circle_ctx(center, radius, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+    draw_filled_circle_ctx(center, radius, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
 }
 
 fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: InspectorContext) {
@@ -1081,8 +1132,32 @@ fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx:
 
     let radius_i = i32(ceil(screen_radius));
 
-    for (var dy = -radius_i; dy <= radius_i; dy++) {
-        for (var dx = -radius_i; dx <= radius_i; dx++) {
+    // Clamp the raster loops to the caller-provided clip rectangle in inspector mode.
+    // This is critical for tiling the inspector preview render.
+    var clip_screen: vec4<i32> = vec4<i32>(-2147483648, 2147483647, -2147483648, 2147483647);
+    if (ctx.use_inspector_coords.x >= 0.0) {
+        clip_screen = inspector_clip_screen(ctx);
+    }
+
+    // If we're fully clipped out, early exit.
+    if (ctx.use_inspector_coords.x >= 0.0) {
+        let min_x = screen_center.x - radius_i;
+        let max_x = screen_center.x + radius_i;
+        let min_y = screen_center.y - radius_i;
+        let max_y = screen_center.y + radius_i;
+        if (max_x < clip_screen.x || min_x >= clip_screen.y || max_y < clip_screen.z || min_y >= clip_screen.w) {
+            return;
+        }
+    }
+
+    // Clamp loop extents when in inspector mode (tile rendering).
+    let dy0 = select(-radius_i, max(-radius_i, clip_screen.z - screen_center.y), ctx.use_inspector_coords.x >= 0.0);
+    let dy1 = select(radius_i,  min(radius_i,  clip_screen.w - 1 - screen_center.y), ctx.use_inspector_coords.x >= 0.0);
+
+    for (var dy = dy0; dy <= dy1; dy++) {
+        let dx0 = select(-radius_i, max(-radius_i, clip_screen.x - screen_center.x), ctx.use_inspector_coords.x >= 0.0);
+        let dx1 = select(radius_i,  min(radius_i,  clip_screen.y - 1 - screen_center.x), ctx.use_inspector_coords.x >= 0.0);
+        for (var dx = dx0; dx <= dx1; dx++) {
             let offset = vec2<f32>(f32(dx), f32(dy));
             let dist2 = dot(offset, offset);
             if (dist2 <= screen_radius * screen_radius) {
@@ -1119,7 +1194,8 @@ fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx:
                     // Inspector mode
                     let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
                     let y_clip = inspector_clip_y(ctx);
-                    if (buffer_pos.x >= i32(ctx.offset.x) && buffer_pos.x < i32(ctx.offset.x) + i32(INSPECTOR_WIDTH) &&
+                    let x_clip = inspector_clip_x(ctx);
+                    if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
                         buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
                         idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
                         in_bounds = true;
@@ -1213,7 +1289,7 @@ fn draw_star_5_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: Inspec
 
 // Helper: draw an asterisk (*) with 4 crossing lines (vertical, horizontal, 2 diagonals)
 fn draw_asterisk(center: vec2<f32>, radius: f32, color: vec4<f32>) {
-    draw_asterisk_ctx(center, radius, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+    draw_asterisk_ctx(center, radius, color, InspectorContext(vec2<f32>(-1.0), vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
 }
 
 fn draw_asterisk_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: InspectorContext) {
@@ -1243,7 +1319,7 @@ fn draw_asterisk_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx: Insp
 
 // Helper: draw a cloud-like shape (fuzzy circle with some random bumps)
 fn draw_cloud(center: vec2<f32>, radius: f32, color: vec4<f32>, seed: u32) {
-    draw_cloud_ctx(center, radius, color, seed, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+    draw_cloud_ctx(center, radius, color, seed, InspectorContext(vec2<f32>(-1.0), vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
 }
 
 fn draw_cloud_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, seed: u32, ctx: InspectorContext) {
@@ -1344,7 +1420,7 @@ fn draw_cloud_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, seed: u32, c
 
 // Helper: draw a particle jet (motion-blurred particles in a cone)
 fn draw_particle_jet(origin: vec2<f32>, direction: vec2<f32>, length: f32, seed: u32, particle_count: u32) {
-    draw_particle_jet_ctx(origin, direction, length, seed, particle_count, InspectorContext(vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
+    draw_particle_jet_ctx(origin, direction, length, seed, particle_count, InspectorContext(vec2<f32>(-1.0), vec2<f32>(-1.0), vec2<f32>(0.0), 1.0, vec2<f32>(0.0)));
 }
 
 fn draw_particle_jet_ctx(origin: vec2<f32>, direction: vec2<f32>, length: f32, seed: u32, particle_count: u32, ctx: InspectorContext) {
@@ -2313,15 +2389,15 @@ fn clear_inspector_preview(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // Draw inspector agent (called after render_inspector, draws agent closeup in preview)
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(1, 1)
 fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (params.draw_enabled == 0u) { return; }
     if (params.selected_agent_index == 0xFFFFFFFFu) { return; }
 
-    // This shader doesn't need to do pixel-level work anymore
-    // Just call render_body_part_ctx for each part with inspector context
-    // Only run once (use thread 0,0)
-    if (gid.x != 0u || gid.y != 0u) { return; }
+    // Tiled inspector preview rendering: each invocation renders a clipped tile of the preview.
+    // This parallelizes the expensive raster loops inside draw primitives.
+    let tile_size = 32u;
+    let preview_total = 300u;
 
     let body_count = min(selected_agent_buffer[0].body_count, MAX_BODY_PARTS);
     if (body_count == 0u) { return; }
@@ -2335,6 +2411,20 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let window_height = u32(safe_height);
     _ = window_height;
     let preview_y_start = 10u;  // 10px from top
+
+    // Compute this tile's clip rectangle in *screen* coordinates.
+    let tile_x0 = gid.x * tile_size;
+    let tile_y0 = gid.y * tile_size;
+    if (tile_x0 >= preview_total || tile_y0 >= preview_total) { return; }
+    let tile_x1 = min(tile_x0 + tile_size, preview_total);
+    let tile_y1 = min(tile_y0 + tile_size, preview_total);
+
+    // Intersect tile with the actual preview box we draw into.
+    let draw_x0 = max(tile_x0, preview_x_start);
+    let draw_y0 = max(tile_y0, preview_y_start);
+    let draw_x1 = min(tile_x1, preview_x_start + preview_size);
+    let draw_y1 = min(tile_y1, preview_y_start + preview_size);
+    if (draw_x0 >= draw_x1 || draw_y0 >= draw_y1) { return; }
 
     // Calculate auto-scale to fit agent
     var max_extent = 0.0;
@@ -2358,12 +2448,20 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let buffer_offset_x = f32(buffer_offset_u);
 
     // Create inspector context.
-    // Y-clip to preview box range. Buffer Y is flipped (bottom-origin), so we need to
-    // map preview Y range [0..300) to buffer rows [window_height-300..window_height).
+    // Clip to this tile (in buffer pixel coordinates).
+    // Buffer Y is flipped (bottom-origin), so we map preview Y range [0..300) to
+    // buffer rows [window_height-300..window_height).
     let preview_buffer_y_start = f32(window_height - 300u);
     let preview_buffer_y_end = f32(window_height);
+    _ = preview_buffer_y_end;
+
+    let clip_x0 = f32(buffer_offset_u + draw_x0);
+    let clip_x1 = f32(buffer_offset_u + draw_x1);
+    let clip_y0 = preview_buffer_y_start + f32(draw_y0);
+    let clip_y1 = preview_buffer_y_start + f32(draw_y1);
     let ctx = InspectorContext(
-        vec2<f32>(preview_buffer_y_start, preview_buffer_y_end),  // y-clip buffer range
+        vec2<f32>(clip_y0, clip_y1),  // y-clip buffer range (tile)
+        vec2<f32>(clip_x0, clip_x1),  // x-clip buffer range (tile)
         vec2<f32>(preview_center_x, preview_center_y),  // center of preview
         scale_factor,  // scale
         vec2<f32>(buffer_offset_x, preview_buffer_y_start)  // offset to actual buffer position
