@@ -69,6 +69,10 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
+    // Spatial grid uses an epoch stamp so we don't have to clear it every frame.
+    // Store stamp = (epoch + 1) so a zero-initialized buffer is always treated as empty.
+    let current_stamp = params.epoch + 1u;
+
     // NOTE: This pass is intended to run after process_agents so that it can
     // operate on the fully materialized per-agent state in agents_out.
     let agent = agents_out[agent_id];
@@ -102,46 +106,12 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Collect nearby agents using spatial grid
+    // Vampire reach and corresponding grid search radius.
+    // NOTE: cap to 10 (previous behavior) to avoid pathological loop sizes.
+    let max_drain_distance = 50.0; // Fixed 50 unit radius
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
-    let my_grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-    let my_grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-
-    var neighbor_count = 0u;
-    var neighbor_ids: array<u32, 64>;
-
-    for (var dy: i32 = -10; dy <= 10; dy++) {
-        if (neighbor_count >= 64u) { break; }
-        for (var dx: i32 = -10; dx <= 10; dx++) {
-            if (neighbor_count >= 64u) { break; }
-            if (dx == 0 && dy == 0) { continue; }
-
-            let check_x = i32(my_grid_x) + dx;
-            let check_y = i32(my_grid_y) + dy;
-
-            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) &&
-                check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-
-                let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                let raw_neighbor_id = atomicLoad(&agent_spatial_grid[check_idx]);
-                // Unmask high bit to get actual agent ID
-                let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-
-                if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                    let neighbor = agents_out[neighbor_id];
-
-                    if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                        if (neighbor_count < 64u) {
-                            neighbor_ids[neighbor_count] = neighbor_id;
-                            neighbor_count++;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let has_neighbors = neighbor_count != 0u;
+    let cell_size = f32(SIM_SIZE) / f32(SPATIAL_GRID_SIZE);
+    let grid_radius = clamp(i32(ceil(max_drain_distance / cell_size)), 1, 10);
 
     // Process each vampire mouth organ (F=4u, G=5u, H=6u)
     var total_energy_gained = 0.0;
@@ -185,28 +155,147 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Only work if not fully suppressed
             if (mouth_activity > 0.0001) {
-                // If we have no neighbor candidates, skip the victim search/drain work.
-                if (!has_neighbors) {
-                    agents_out[agent_id].body[i]._pad.y = 0.0;
-                } else {
-                // Find closest victim within drain range
+                // Mouth-centered spiral search over spatial grid.
+                // We break early on the first in-range victim to save compute.
                 var closest_victim_id = 0xFFFFFFFFu;
-                var closest_dist = 999999.0;
-                let max_drain_distance = 50.0; // Fixed 50 unit radius
 
-                for (var n = 0u; n < neighbor_count; n++) {
-                    let victim_id = neighbor_ids[n];
-                    // Only read victim position for distance check (not energy yet)
-                    let victim_pos = agents_out[victim_id].position;
+                let mouth_grid_x = u32(clamp(mouth_world_pos.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+                let mouth_grid_y = u32(clamp(mouth_world_pos.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
 
-                    // Distance from mouth to victim center
-                    let delta = mouth_world_pos - victim_pos;
-                    let dist = length(delta);
-
-                    if (dist < max_drain_distance && dist < closest_dist) {
-                        closest_dist = dist;
-                        closest_victim_id = victim_id;
+                var found_victim = false;
+                for (var radius: i32 = 0; radius <= grid_radius; radius++) {
+                    if (found_victim) {
+                        break;
                     }
+                    if (radius == 0) {
+                        // Single center cell
+                        let check_x = i32(mouth_grid_x);
+                        let check_y = i32(mouth_grid_y);
+                        let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                        let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                        if (stamp == current_stamp) {
+                            let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                            let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                            if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                let neighbor = agents_out[neighbor_id];
+                                if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                    let dist = length(mouth_world_pos - neighbor.position);
+                                    if (dist < max_drain_distance) {
+                                        closest_victim_id = neighbor_id;
+                                        found_victim = true;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Top and bottom edges
+                        for (var dx: i32 = -radius; dx <= radius; dx++) {
+                            if (found_victim) {
+                                break;
+                            }
+                            // Top
+                            var check_x = i32(mouth_grid_x) + dx;
+                            var check_y = i32(mouth_grid_y) - radius;
+                            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                                if (stamp == current_stamp) {
+                                    let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                                    let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                                    if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                        let neighbor = agents_out[neighbor_id];
+                                        if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                            let dist = length(mouth_world_pos - neighbor.position);
+                                            if (dist < max_drain_distance) {
+                                                closest_victim_id = neighbor_id;
+                                                found_victim = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Bottom
+                            if (!found_victim) {
+                                check_x = i32(mouth_grid_x) + dx;
+                                check_y = i32(mouth_grid_y) + radius;
+                                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                                    if (stamp == current_stamp) {
+                                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                            let neighbor = agents_out[neighbor_id];
+                                            if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                                let dist = length(mouth_world_pos - neighbor.position);
+                                                if (dist < max_drain_distance) {
+                                                    closest_victim_id = neighbor_id;
+                                                    found_victim = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Left and right edges (excluding corners already covered)
+                        for (var dy: i32 = -radius + 1; dy <= radius - 1; dy++) {
+                            if (found_victim) {
+                                break;
+                            }
+                            // Left
+                            var check_x = i32(mouth_grid_x) - radius;
+                            var check_y = i32(mouth_grid_y) + dy;
+                            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                                if (stamp == current_stamp) {
+                                    let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                                    let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                                    if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                        let neighbor = agents_out[neighbor_id];
+                                        if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                            let dist = length(mouth_world_pos - neighbor.position);
+                                            if (dist < max_drain_distance) {
+                                                closest_victim_id = neighbor_id;
+                                                found_victim = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Right
+                            if (!found_victim) {
+                                check_x = i32(mouth_grid_x) + radius;
+                                check_y = i32(mouth_grid_y) + dy;
+                                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                                    if (stamp == current_stamp) {
+                                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                            let neighbor = agents_out[neighbor_id];
+                                            if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                                let dist = length(mouth_world_pos - neighbor.position);
+                                                if (dist < max_drain_distance) {
+                                                    closest_victim_id = neighbor_id;
+                                                    found_victim = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!found_victim) {
+                    agents_out[agent_id].body[i]._pad.y = 0.0;
                 }
 
                 // Drain from closest victim only
@@ -218,29 +307,27 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let victim_scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
                     let victim_grid_x = u32(clamp(victim_pos.x * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
                     let victim_grid_y = u32(clamp(victim_pos.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-                    let victim_grid_idx = victim_grid_y * SPATIAL_GRID_SIZE + victim_grid_x;
+                    let victim_cell = victim_grid_y * SPATIAL_GRID_SIZE + victim_grid_x;
 
                     // Atomic claim: mark victim with high bit to indicate it's being drained this frame.
                     // The high bit preserves the victim ID for physics (unmask with & 0x7FFFFFFF).
                     // IMPORTANT: this claim must be exclusive across vampires to avoid
                     // cross-invocation RMW races on victim energy.
-                    let current_cell = atomicLoad(&agent_spatial_grid[victim_grid_idx]);
+                    let victim_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(victim_cell)]);
                     var can_drain = false;
+                    if (victim_stamp == current_stamp) {
+                        let current_cell = atomicLoad(&agent_spatial_grid[spatial_id_index(victim_cell)]);
 
-                    // Check if cell contains the victim (with or without high bit)
-                    let cell_agent_id = current_cell & 0x7FFFFFFFu;
-                    let is_claimed = (current_cell & 0x80000000u) != 0u;
+                        // Check if cell contains the victim (with or without high bit)
+                        let cell_agent_id = current_cell & 0x7FFFFFFFu;
+                        let is_claimed = (current_cell & 0x80000000u) != 0u;
 
-                    if (cell_agent_id == closest_victim_id && !is_claimed) {
-                        // Victim is unclaimed - try to mark with high bit
-                        let claimed_victim_id = closest_victim_id | 0x80000000u;
-                        let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[victim_grid_idx], closest_victim_id, claimed_victim_id);
-                        can_drain = claim_result.exchanged;
-                    } else if (cell_agent_id == closest_victim_id && is_claimed) {
-                        // Victim is already claimed this frame; do not drain.
-                        // Allowing drains here reintroduces multi-vampire races and lets vampires
-                        // over-collect energy due to last-writer-wins on victim energy.
-                        can_drain = false;
+                        if (cell_agent_id == closest_victim_id && !is_claimed) {
+                            // Victim is unclaimed - try to mark with high bit
+                            let claimed_victim_id = closest_victim_id | 0x80000000u;
+                            let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[spatial_id_index(victim_cell)], closest_victim_id, claimed_victim_id);
+                            can_drain = claim_result.exchanged;
+                        }
                     }
 
                     // Only proceed if we can drain this victim AND cooldown is ready
@@ -276,14 +363,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         } else {
                             agents_out[agent_id].body[i]._pad.y = 0.0;
                         }
-
                     } else {
-                        // Keep cell claimed (cleared next frame) - this prevents other vampires from attacking same victim
+                        agents_out[agent_id].body[i]._pad.y = 0.0;
                     }
                 } else {
-                    // Failed to claim - another vampire got here first
                     agents_out[agent_id].body[i]._pad.y = 0.0;
-                }
                 }
             } else {
                 agents_out[agent_id].body[i]._pad.y = 0.0;
@@ -307,6 +391,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (agent_id >= params.agent_count) {
         return;
     }
+
+    // Spatial grid uses an epoch stamp so we don't have to clear it every frame.
+    let current_stamp = params.epoch + 1u;
 
     // IMPORTANT: Avoid copying the full Agent payload into a local variable.
     // In practice this can pull in the entire body array and become a bandwidth hotspot.
@@ -539,7 +626,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             mass_sum += m;
 
             // Check organ type once for both data field and _pad handling
-            let is_organ = (base_type >= 20u);
             let is_vampire_mouth = (base_type == 33u);
 
             // Preserve organ internal state across frames by default.
@@ -554,19 +640,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
             } else {
                 agents_out[agent_id].body[i].data = 0.0;
-            }
-
-            // Persist smoothed angle in _pad.x for regular amino acids only
-            // Organs (condensers, clocks) use _pad for their own state storage
-            // EXCEPTION: Vampire mouths (type 33) need _pad.y preserved for visualization
-            if (!is_organ) {
-                let keep_pad_y = agents_in[agent_id].body[i]._pad.y;
-                agents_out[agent_id].body[i]._pad = vec2<f32>(smoothed_signal, keep_pad_y);
-            } else if (is_vampire_mouth) {
-                // Vampire mouths: preserve both cooldown (_pad.x) and drain amount (_pad.y)
-                let cooldown = agents_in[agent_id].body[i]._pad.x;
-                let drain_amount = agents_in[agent_id].body[i]._pad.y;
-                agents_out[agent_id].body[i]._pad = vec2<f32>(cooldown, drain_amount);
             }
         }
 
@@ -666,8 +739,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) &&
                 check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
 
-                let check_idx = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                let raw_neighbor_id = atomicLoad(&agent_spatial_grid[check_idx]);
+                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                if (stamp != current_stamp) {
+                    continue;
+                }
+                let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
                 // Unmask high bit to get actual agent ID (vampire claim bit)
                 let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
 
@@ -3001,11 +3078,18 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ====== SPATIAL GRID DEBUG VISUALIZATION ======
     // Show which grid cells contain agents (when debug mode is enabled)
     if (params.debug_mode != 0u) {
+        let current_stamp = params.epoch + 1u;
         let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
         let grid_x = u32(clamp(world_x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
         let grid_y = u32(clamp(world_y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-        let grid_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
-        let raw_agent_id = atomicLoad(&agent_spatial_grid[grid_idx]);
+        let grid_cell = grid_y * SPATIAL_GRID_SIZE + grid_x;
+
+        // Skip stale cells from prior epochs.
+        let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(grid_cell)]);
+        if (stamp != current_stamp) {
+            return;
+        }
+        let raw_agent_id = atomicLoad(&agent_spatial_grid[spatial_id_index(grid_cell)]);
         // Unmask high bit to get actual agent ID (vampire claim bit)
         let agent_id = raw_agent_id & 0x7FFFFFFFu;
         let is_claimed = (raw_agent_id & 0x80000000u) != 0u;
@@ -3525,8 +3609,9 @@ fn clear_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let idx = y * SPATIAL_GRID_SIZE + x;
-    atomicStore(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY);
+    let cell = y * SPATIAL_GRID_SIZE + x;
+    atomicStore(&agent_spatial_grid[spatial_id_index(cell)], SPATIAL_GRID_EMPTY);
+    atomicStore(&agent_spatial_grid[spatial_epoch_index(cell)], 0u);
 }
 
 // Populate the agent spatial grid with agent indices
@@ -3549,15 +3634,26 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
     let grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
     let grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-    let primary_idx = grid_y * SPATIAL_GRID_SIZE + grid_x;
+    let primary_cell = grid_y * SPATIAL_GRID_SIZE + grid_x;
 
-    // Try to claim the primary cell atomically
-    let primary_result = atomicCompareExchangeWeak(&agent_spatial_grid[primary_idx], SPATIAL_GRID_EMPTY, agent_id);
+    // Stamp is epoch+1 so 0 remains the "never written" value.
+    let current_stamp = params.epoch + 1u;
 
-    if (!primary_result.exchanged) {
+    // Try to claim the primary cell via epoch stamp.
+    let primary_old_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(primary_cell)]);
+    var found = false;
+    if (primary_old_stamp != current_stamp) {
+        let primary_claim = atomicCompareExchangeWeak(&agent_spatial_grid[spatial_epoch_index(primary_cell)], primary_old_stamp, current_stamp);
+        if (primary_claim.exchanged) {
+            atomicStore(&agent_spatial_grid[spatial_id_index(primary_cell)], agent_id);
+            found = true;
+        }
+    }
+
+    if (!found) {
         // Primary cell is occupied - search for nearest empty cell in a spiral pattern
         // This ensures all agents are findable even in crowded areas
-        var found = false;
+        // found is already declared above.
 
         // Search in expanding square rings up to radius 5 (covers 11x11 area = 121 cells)
         for (var radius = 1u; radius <= 5u && !found; radius++) {
@@ -3568,10 +3664,14 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let check_y_top = i32(grid_y) - i32(radius);
                 if (check_x_top >= 0 && check_x_top < i32(SPATIAL_GRID_SIZE) &&
                     check_y_top >= 0 && check_y_top < i32(SPATIAL_GRID_SIZE)) {
-                    let idx = u32(check_y_top) * SPATIAL_GRID_SIZE + u32(check_x_top);
-                    let result = atomicCompareExchangeWeak(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY, agent_id);
-                    if (result.exchanged) {
-                        found = true;
+                    let cell = u32(check_y_top) * SPATIAL_GRID_SIZE + u32(check_x_top);
+                    let old_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(cell)]);
+                    if (old_stamp != current_stamp) {
+                        let claim = atomicCompareExchangeWeak(&agent_spatial_grid[spatial_epoch_index(cell)], old_stamp, current_stamp);
+                        if (claim.exchanged) {
+                            atomicStore(&agent_spatial_grid[spatial_id_index(cell)], agent_id);
+                            found = true;
+                        }
                     }
                 }
 
@@ -3581,10 +3681,14 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let check_y_bot = i32(grid_y) + i32(radius);
                     if (check_x_bot >= 0 && check_x_bot < i32(SPATIAL_GRID_SIZE) &&
                         check_y_bot >= 0 && check_y_bot < i32(SPATIAL_GRID_SIZE)) {
-                        let idx = u32(check_y_bot) * SPATIAL_GRID_SIZE + u32(check_x_bot);
-                        let result = atomicCompareExchangeWeak(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY, agent_id);
-                        if (result.exchanged) {
-                            found = true;
+                        let cell = u32(check_y_bot) * SPATIAL_GRID_SIZE + u32(check_x_bot);
+                        let old_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(cell)]);
+                        if (old_stamp != current_stamp) {
+                            let claim = atomicCompareExchangeWeak(&agent_spatial_grid[spatial_epoch_index(cell)], old_stamp, current_stamp);
+                            if (claim.exchanged) {
+                                atomicStore(&agent_spatial_grid[spatial_id_index(cell)], agent_id);
+                                found = true;
+                            }
                         }
                     }
                 }
@@ -3597,10 +3701,14 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let check_y_left = i32(grid_y) + dy;
                 if (check_x_left >= 0 && check_x_left < i32(SPATIAL_GRID_SIZE) &&
                     check_y_left >= 0 && check_y_left < i32(SPATIAL_GRID_SIZE)) {
-                    let idx = u32(check_y_left) * SPATIAL_GRID_SIZE + u32(check_x_left);
-                    let result = atomicCompareExchangeWeak(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY, agent_id);
-                    if (result.exchanged) {
-                        found = true;
+                    let cell = u32(check_y_left) * SPATIAL_GRID_SIZE + u32(check_x_left);
+                    let old_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(cell)]);
+                    if (old_stamp != current_stamp) {
+                        let claim = atomicCompareExchangeWeak(&agent_spatial_grid[spatial_epoch_index(cell)], old_stamp, current_stamp);
+                        if (claim.exchanged) {
+                            atomicStore(&agent_spatial_grid[spatial_id_index(cell)], agent_id);
+                            found = true;
+                        }
                     }
                 }
 
@@ -3610,10 +3718,14 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let check_y_right = i32(grid_y) + dy;
                     if (check_x_right >= 0 && check_x_right < i32(SPATIAL_GRID_SIZE) &&
                         check_y_right >= 0 && check_y_right < i32(SPATIAL_GRID_SIZE)) {
-                        let idx = u32(check_y_right) * SPATIAL_GRID_SIZE + u32(check_x_right);
-                        let result = atomicCompareExchangeWeak(&agent_spatial_grid[idx], SPATIAL_GRID_EMPTY, agent_id);
-                        if (result.exchanged) {
-                            found = true;
+                        let cell = u32(check_y_right) * SPATIAL_GRID_SIZE + u32(check_x_right);
+                        let old_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(cell)]);
+                        if (old_stamp != current_stamp) {
+                            let claim = atomicCompareExchangeWeak(&agent_spatial_grid[spatial_epoch_index(cell)], old_stamp, current_stamp);
+                            if (claim.exchanged) {
+                                atomicStore(&agent_spatial_grid[spatial_id_index(cell)], agent_id);
+                                found = true;
+                            }
                         }
                     }
                 }

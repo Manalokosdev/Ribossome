@@ -398,6 +398,20 @@ var<storage, read_write> fluid_forces: array<vec2<f32>>; // Fluid forces buffer 
 @group(0) @binding(17)
 var<storage, read_write> agent_spatial_grid: array<atomic<u32>>; // Agent index per grid cell (atomic for vampire victim claiming)
 
+// Spatial grid layout (stored in agent_spatial_grid):
+// Each cell uses 2x u32 entries:
+//   [cell*2 + 0] = agent id (with optional vampire-claim high bit)
+//   [cell*2 + 1] = epoch stamp (params.epoch + 1 for "valid this frame")
+const SPATIAL_GRID_STRIDE: u32 = 2u;
+
+fn spatial_id_index(cell: u32) -> u32 {
+    return cell * SPATIAL_GRID_STRIDE + 0u;
+}
+
+fn spatial_epoch_index(cell: u32) -> u32 {
+    return cell * SPATIAL_GRID_STRIDE + 1u;
+}
+
 // Spatial grid special markers
 const SPATIAL_GRID_EMPTY: u32 = 0xFFFFFFFFu;     // No agent in this cell
 const SPATIAL_GRID_CLAIMED: u32 = 0xFFFFFFFEu;   // Cell claimed by vampire (victim being drained)

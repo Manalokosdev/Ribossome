@@ -4145,8 +4145,9 @@ impl GpuState {
         );
         profiler.mark("Rain map buffer");
 
-        // Agent spatial grid for neighbor detection (u32 per cell at SPATIAL_GRID_DIM resolution)
-        let agent_spatial_grid_size = (SPATIAL_GRID_CELL_COUNT * std::mem::size_of::<u32>()) as u64;
+        // Agent spatial grid for neighbor detection.
+        // Layout: 2x u32 per cell: [id, epoch_stamp].
+        let agent_spatial_grid_size = (SPATIAL_GRID_CELL_COUNT * 2 * std::mem::size_of::<u32>()) as u64;
         let agent_spatial_grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Agent Spatial Grid"),
             size: agent_spatial_grid_size,
@@ -4154,6 +4155,16 @@ impl GpuState {
             mapped_at_creation: false,
         });
         profiler.mark("Agent spatial grid buffer");
+
+        // IMPORTANT: wgpu buffers are not guaranteed to be zero-initialized.
+        // Clear the combined spatial buffer so no cell accidentally matches current_stamp.
+        {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Init Spatial Grid Clear Encoder"),
+            });
+            encoder.clear_buffer(&agent_spatial_grid_buffer, 0, None);
+            queue.submit(Some(encoder.finish()));
+        }
 
         // Gamma grid packs height + 2 slope components per cell (3 floats)
         let gamma_buffer_size = (grid_size * 3 * std::mem::size_of::<f32>()) as u64;
@@ -8201,11 +8212,9 @@ impl GpuState {
 
             // Run simulation compute passes, but skip everything when paused or no living agents
             if should_run_simulation {
-                // Clear agent spatial grid for neighbor detection - workgroup_size(16,16)
-                let spatial_grid_workgroups = (SPATIAL_GRID_DIM as u32 + 15) / 16;
-                cpass.set_pipeline(&self.clear_agent_spatial_grid_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(spatial_grid_workgroups, spatial_grid_workgroups, 1);
+                // Spatial grid clear disabled: we use an epoch-stamped spatial grid.
+                // populate_agent_spatial_grid writes the epoch stamp for touched cells;
+                // all readers ignore cells whose stamp != current epoch.
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
@@ -9479,6 +9488,17 @@ impl GpuState {
         // Update epoch from snapshot
         self.epoch = snapshot.epoch;
 
+        // Clear spatial grid so we don't treat stale cells as valid for the new epoch.
+        {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Load Snapshot Spatial Grid Clear Encoder"),
+                });
+            encoder.clear_buffer(&self.agent_spatial_grid_buffer, 0, None);
+            self.queue.submit(Some(encoder.finish()));
+        }
+
         // Immediately save to autosave to ensure continuity (after agents are spawned)
         let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
         if let Err(e) = self.save_snapshot_to_file(autosave_path) {
@@ -9874,6 +9894,9 @@ impl GpuState {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Reset Encoder"),
         });
+
+        // Clear spatial grid (prevents stale spatial cells after epoch resets).
+        encoder.clear_buffer(&self.agent_spatial_grid_buffer, 0, None);
 
         // Clear [spawn, debug, alive] counters
         encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
