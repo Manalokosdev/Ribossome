@@ -365,7 +365,8 @@ var<storage, read> fluid_velocity: array<vec2<f32>>; // Fluid velocity field (ve
 var<storage, read_write> new_agents: array<Agent>;  // Buffer for spawned agents
 
 @group(0) @binding(10)
-var<storage, read_write> spawn_debug_counters: array<atomic<u32>, 3>;  // [0]=spawn_counter, [1]=debug_counter, [2]=alive_counter
+// [0]=spawn_counter, [1]=debug_counter, [2]=alive_counter.
+var<storage, read_write> spawn_debug_counters: array<atomic<u32>, 3>;
 
 @group(0) @binding(11)
 var<storage, read> spawn_requests: array<SpawnRequest>;

@@ -689,6 +689,394 @@ impl StartupProfiler {
     }
 }
 
+fn select_required_features(adapter_features: wgpu::Features) -> wgpu::Features {
+    let desired = wgpu::Features::TIMESTAMP_QUERY
+        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
+        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    adapter_features & desired
+}
+
+// Timestamp indices. We sample infrequently (default 1Hz) so we can afford a lot of markers.
+// Keep these contiguous; the readback decoding assumes 0..GPU_TS_COUNT.
+const TS_UPDATE_START: u32 = 0;
+
+// --- "Compute Pass" breakdown (diffuse/trails/slope/clears/spatial/process/drain)
+const TS_SIM_PASS_START: u32 = 1;
+const TS_SIM_AFTER_DIFFUSE: u32 = 2;
+const TS_SIM_AFTER_DIFFUSE_COMMIT: u32 = 3;
+const TS_SIM_AFTER_TRAILS_PREP: u32 = 4;
+const TS_SIM_AFTER_SLOPE: u32 = 5;
+const TS_SIM_AFTER_CLEAR_VISUAL: u32 = 6;
+const TS_SIM_AFTER_MOTION_BLUR: u32 = 7;
+const TS_SIM_AFTER_CLEAR_AGENT_GRID: u32 = 8;
+const TS_SIM_AFTER_CLEAR_SPATIAL: u32 = 9;
+const TS_SIM_AFTER_POPULATE_SPATIAL: u32 = 10;
+const TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS: u32 = 11;
+const TS_SIM_AFTER_PROCESS_AGENTS: u32 = 12;
+const TS_SIM_AFTER_DRAIN_ENERGY: u32 = 13;
+const TS_UPDATE_AFTER_SIM: u32 = 14;
+
+// --- "Fluid Compute Pass" breakdown
+const TS_FLUID_PASS_START: u32 = 15;
+const TS_FLUID_AFTER_FUMAROLE_FORCE: u32 = 16;
+const TS_FLUID_AFTER_GENERATE_FORCES: u32 = 17;
+const TS_FLUID_AFTER_ADD_FORCES: u32 = 18;
+const TS_FLUID_AFTER_CLEAR_FORCES: u32 = 19;
+const TS_FLUID_AFTER_DIFFUSE_VELOCITY: u32 = 20;
+const TS_FLUID_AFTER_ADVECT_VELOCITY: u32 = 21;
+const TS_FLUID_AFTER_VORTICITY: u32 = 22;
+const TS_FLUID_AFTER_DIVERGENCE: u32 = 23;
+const TS_FLUID_AFTER_CLEAR_PRESSURE: u32 = 24;
+const TS_FLUID_AFTER_JACOBI: u32 = 25;
+const TS_FLUID_AFTER_SUBTRACT_GRADIENT: u32 = 26;
+const TS_FLUID_AFTER_BOUNDARIES: u32 = 27;
+const TS_FLUID_AFTER_INJECT_DYE: u32 = 28;
+const TS_FLUID_AFTER_ADVECT_DYE: u32 = 29;
+const TS_FLUID_AFTER_FUMAROLE_DYE: u32 = 30;
+const TS_FLUID_AFTER_ADVECT_TRAIL: u32 = 31;
+const TS_UPDATE_AFTER_FLUID: u32 = 32;
+
+// --- "Post-Fluid Compute Pass" breakdown
+const TS_POST_PASS_START: u32 = 33;
+const TS_POST_AFTER_COMPACT: u32 = 34;
+const TS_POST_AFTER_CPU_SPAWN: u32 = 35;
+const TS_POST_AFTER_MERGE: u32 = 36;
+const TS_POST_AFTER_INIT_DEAD: u32 = 37;
+const TS_POST_AFTER_FINALIZE_MERGE: u32 = 38;
+const TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY: u32 = 39;
+const TS_POST_AFTER_RENDER_AGENTS: u32 = 40;
+const TS_POST_AFTER_INSPECTOR_CLEAR: u32 = 41;
+const TS_POST_AFTER_INSPECTOR_DRAW: u32 = 42;
+const TS_UPDATE_AFTER_POST: u32 = 43;
+
+// --- Composite pass + copy
+const TS_COMPOSITE_PASS_START: u32 = 44;
+const TS_UPDATE_AFTER_COMPOSITE: u32 = 45;
+const TS_UPDATE_AFTER_COPY: u32 = 46;
+const TS_UPDATE_END: u32 = 47;
+
+// --- Render (main + overlay) + egui
+const TS_RENDER_ENC_START: u32 = 48;
+const TS_RENDER_MAIN_START: u32 = 49;
+const TS_RENDER_MAIN_END: u32 = 50;
+const TS_RENDER_OVERLAY_START: u32 = 51;
+const TS_RENDER_OVERLAY_END: u32 = 52;
+const TS_RENDER_ENC_END: u32 = 53;
+const TS_EGUI_ENC_START: u32 = 54;
+const TS_EGUI_PASS_START: u32 = 55;
+const TS_EGUI_PASS_END: u32 = 56;
+const TS_EGUI_ENC_END: u32 = 57;
+
+const GPU_TS_COUNT: u32 = 58;
+
+struct FrameProfiler {
+    enabled: bool,
+    gpu_supported: bool,
+    capture_this_frame: bool,
+    sample_interval: std::time::Duration,
+    next_sample_time: std::time::Instant,
+    timestamp_period_ns: f64,
+    query_set: Option<wgpu::QuerySet>,
+    query_resolve: Option<wgpu::Buffer>,
+    query_readback: Option<wgpu::Buffer>,
+    last_cpu_update_ms: f64,
+    last_cpu_render_ms: f64,
+    last_cpu_egui_ms: f64,
+}
+
+impl FrameProfiler {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let enabled = std::env::var("ALSIM_PROFILE")
+            .map(|value| value != "0")
+            .unwrap_or(false);
+
+        let sample_interval = std::env::var("ALSIM_PROFILE_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+            .unwrap_or_else(|| std::time::Duration::from_millis(1000));
+
+        // We use CommandEncoder::write_timestamp, which requires TIMESTAMP_QUERY_INSIDE_ENCODERS.
+        let gpu_supported = device.features().contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        );
+
+        let timestamp_period_ns = queue.get_timestamp_period() as f64;
+        let now = std::time::Instant::now();
+
+        let (query_set, query_resolve, query_readback) = if enabled && gpu_supported {
+            let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("FrameProfiler QuerySet"),
+                ty: wgpu::QueryType::Timestamp,
+                count: GPU_TS_COUNT,
+            });
+
+            let bytes = (GPU_TS_COUNT as u64) * 8;
+            let query_resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("FrameProfiler QueryResolve"),
+                size: bytes,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let query_readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("FrameProfiler QueryReadback"),
+                size: bytes,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+
+            (Some(query_set), Some(query_resolve), Some(query_readback))
+        } else {
+            (None, None, None)
+        };
+
+        Self {
+            enabled,
+            gpu_supported,
+            capture_this_frame: false,
+            sample_interval,
+            next_sample_time: now + sample_interval,
+            timestamp_period_ns,
+            query_set,
+            query_resolve,
+            query_readback,
+            last_cpu_update_ms: 0.0,
+            last_cpu_render_ms: 0.0,
+            last_cpu_egui_ms: 0.0,
+        }
+    }
+
+    fn begin_frame(&mut self) {
+        if !self.enabled || !self.gpu_supported {
+            self.capture_this_frame = false;
+            return;
+        }
+        self.capture_this_frame = std::time::Instant::now() >= self.next_sample_time;
+    }
+
+    fn write_ts_encoder(&self, encoder: &mut wgpu::CommandEncoder, index: u32) {
+        if !self.capture_this_frame {
+            return;
+        }
+        if let Some(query_set) = &self.query_set {
+            encoder.write_timestamp(query_set, index);
+        }
+    }
+
+    fn write_ts_compute_pass(&self, pass: &mut wgpu::ComputePass<'_>, index: u32) {
+        if !self.capture_this_frame {
+            return;
+        }
+        if let Some(query_set) = &self.query_set {
+            pass.write_timestamp(query_set, index);
+        }
+    }
+
+    fn write_ts_render_pass(&self, pass: &mut wgpu::RenderPass<'_>, index: u32) {
+        if !self.capture_this_frame {
+            return;
+        }
+        if let Some(query_set) = &self.query_set {
+            pass.write_timestamp(query_set, index);
+        }
+    }
+
+    fn resolve_and_copy(&self, encoder: &mut wgpu::CommandEncoder) {
+        if !self.capture_this_frame {
+            return;
+        }
+        let (Some(query_set), Some(resolve), Some(readback)) =
+            (&self.query_set, &self.query_resolve, &self.query_readback)
+        else {
+            return;
+        };
+
+        let bytes = (GPU_TS_COUNT as u64) * 8;
+        encoder.resolve_query_set(query_set, 0..GPU_TS_COUNT, resolve, 0);
+        encoder.copy_buffer_to_buffer(resolve, 0, readback, 0, bytes);
+    }
+
+    fn set_cpu_update_ms(&mut self, ms: f64) {
+        self.last_cpu_update_ms = ms;
+    }
+
+    fn set_cpu_render_ms(&mut self, ms: f64) {
+        self.last_cpu_render_ms = ms;
+    }
+
+    fn set_cpu_egui_ms(&mut self, ms: f64) {
+        self.last_cpu_egui_ms = ms;
+    }
+
+    fn readback_and_print(&mut self, device: &wgpu::Device) {
+        if !self.capture_this_frame {
+            return;
+        }
+
+        let Some(readback) = &self.query_readback else {
+            self.capture_this_frame = false;
+            self.next_sample_time = std::time::Instant::now() + self.sample_interval;
+            return;
+        };
+
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+
+        let stamps: Vec<u64> = {
+            let view = slice.get_mapped_range();
+            view.chunks_exact(8)
+                .take(GPU_TS_COUNT as usize)
+                .map(|chunk| {
+                    let bytes: [u8; 8] = chunk.try_into().unwrap();
+                    u64::from_le_bytes(bytes)
+                })
+                .collect()
+        };
+        readback.unmap();
+
+        let dt_ms = |a: u32, b: u32| -> Option<f64> {
+            let a = stamps.get(a as usize).copied().unwrap_or(0);
+            let b = stamps.get(b as usize).copied().unwrap_or(0);
+            if b <= a {
+                return None;
+            }
+            Some(((b - a) as f64 * self.timestamp_period_ns) / 1_000_000.0)
+        };
+
+        let gpu_update_total = dt_ms(TS_UPDATE_START, TS_UPDATE_END);
+
+        let gpu_sim = dt_ms(TS_SIM_PASS_START, TS_UPDATE_AFTER_SIM);
+        let gpu_sim_diffuse = dt_ms(TS_SIM_PASS_START, TS_SIM_AFTER_DIFFUSE);
+        let gpu_sim_diffuse_commit = dt_ms(TS_SIM_AFTER_DIFFUSE, TS_SIM_AFTER_DIFFUSE_COMMIT);
+        let gpu_sim_trails = dt_ms(TS_SIM_AFTER_DIFFUSE_COMMIT, TS_SIM_AFTER_TRAILS_PREP);
+        let gpu_sim_slope = dt_ms(TS_SIM_AFTER_TRAILS_PREP, TS_SIM_AFTER_SLOPE);
+        let gpu_sim_clear_visual = dt_ms(TS_SIM_AFTER_SLOPE, TS_SIM_AFTER_CLEAR_VISUAL);
+        let gpu_sim_motion_blur = dt_ms(TS_SIM_AFTER_CLEAR_VISUAL, TS_SIM_AFTER_MOTION_BLUR);
+        let gpu_sim_clear_agent_grid = dt_ms(TS_SIM_AFTER_MOTION_BLUR, TS_SIM_AFTER_CLEAR_AGENT_GRID);
+        let gpu_sim_clear_spatial = dt_ms(TS_SIM_AFTER_CLEAR_AGENT_GRID, TS_SIM_AFTER_CLEAR_SPATIAL);
+        let gpu_sim_populate_spatial = dt_ms(TS_SIM_AFTER_CLEAR_SPATIAL, TS_SIM_AFTER_POPULATE_SPATIAL);
+        let gpu_sim_clear_force_vectors = dt_ms(TS_SIM_AFTER_POPULATE_SPATIAL, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
+        let gpu_sim_process = dt_ms(TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS, TS_SIM_AFTER_PROCESS_AGENTS);
+        let gpu_sim_drain = dt_ms(TS_SIM_AFTER_PROCESS_AGENTS, TS_SIM_AFTER_DRAIN_ENERGY);
+
+        let gpu_fluid = dt_ms(TS_FLUID_PASS_START, TS_UPDATE_AFTER_FLUID);
+        let gpu_fluid_fumarole_force = dt_ms(TS_FLUID_PASS_START, TS_FLUID_AFTER_FUMAROLE_FORCE);
+        let gpu_fluid_generate = dt_ms(TS_FLUID_AFTER_FUMAROLE_FORCE, TS_FLUID_AFTER_GENERATE_FORCES);
+        let gpu_fluid_add = dt_ms(TS_FLUID_AFTER_GENERATE_FORCES, TS_FLUID_AFTER_ADD_FORCES);
+        let gpu_fluid_clear = dt_ms(TS_FLUID_AFTER_ADD_FORCES, TS_FLUID_AFTER_CLEAR_FORCES);
+        let gpu_fluid_diffuse = dt_ms(TS_FLUID_AFTER_CLEAR_FORCES, TS_FLUID_AFTER_DIFFUSE_VELOCITY);
+        let gpu_fluid_advect = dt_ms(TS_FLUID_AFTER_DIFFUSE_VELOCITY, TS_FLUID_AFTER_ADVECT_VELOCITY);
+        let gpu_fluid_vorticity = dt_ms(TS_FLUID_AFTER_ADVECT_VELOCITY, TS_FLUID_AFTER_VORTICITY);
+        let gpu_fluid_div = dt_ms(TS_FLUID_AFTER_VORTICITY, TS_FLUID_AFTER_DIVERGENCE);
+        let gpu_fluid_clear_pressure = dt_ms(TS_FLUID_AFTER_DIVERGENCE, TS_FLUID_AFTER_CLEAR_PRESSURE);
+        let gpu_fluid_jacobi = dt_ms(TS_FLUID_AFTER_CLEAR_PRESSURE, TS_FLUID_AFTER_JACOBI);
+        let gpu_fluid_grad = dt_ms(TS_FLUID_AFTER_JACOBI, TS_FLUID_AFTER_SUBTRACT_GRADIENT);
+        let gpu_fluid_bounds = dt_ms(TS_FLUID_AFTER_SUBTRACT_GRADIENT, TS_FLUID_AFTER_BOUNDARIES);
+        let gpu_fluid_inject_dye = dt_ms(TS_FLUID_AFTER_BOUNDARIES, TS_FLUID_AFTER_INJECT_DYE);
+        let gpu_fluid_advect_dye = dt_ms(TS_FLUID_AFTER_INJECT_DYE, TS_FLUID_AFTER_ADVECT_DYE);
+        let gpu_fluid_fumarole_dye = dt_ms(TS_FLUID_AFTER_ADVECT_DYE, TS_FLUID_AFTER_FUMAROLE_DYE);
+        let gpu_fluid_advect_trail = dt_ms(TS_FLUID_AFTER_FUMAROLE_DYE, TS_FLUID_AFTER_ADVECT_TRAIL);
+
+        let gpu_post = dt_ms(TS_POST_PASS_START, TS_UPDATE_AFTER_POST);
+        let gpu_post_compact = dt_ms(TS_POST_PASS_START, TS_POST_AFTER_COMPACT);
+        let gpu_post_cpu_spawn = dt_ms(TS_POST_AFTER_COMPACT, TS_POST_AFTER_CPU_SPAWN);
+        let gpu_post_merge = dt_ms(TS_POST_AFTER_CPU_SPAWN, TS_POST_AFTER_MERGE);
+        let gpu_post_init_dead = dt_ms(TS_POST_AFTER_MERGE, TS_POST_AFTER_INIT_DEAD);
+        let gpu_post_finalize = dt_ms(TS_POST_AFTER_INIT_DEAD, TS_POST_AFTER_FINALIZE_MERGE);
+        let gpu_post_paused_process = dt_ms(TS_POST_AFTER_FINALIZE_MERGE, TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY);
+        let gpu_post_render_agents = dt_ms(TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY, TS_POST_AFTER_RENDER_AGENTS);
+        let gpu_post_inspector_clear = dt_ms(TS_POST_AFTER_RENDER_AGENTS, TS_POST_AFTER_INSPECTOR_CLEAR);
+        let gpu_post_inspector_draw = dt_ms(TS_POST_AFTER_INSPECTOR_CLEAR, TS_POST_AFTER_INSPECTOR_DRAW);
+
+        let gpu_comp = dt_ms(TS_COMPOSITE_PASS_START, TS_UPDATE_AFTER_COMPOSITE);
+        let gpu_copy = dt_ms(TS_UPDATE_AFTER_COMPOSITE, TS_UPDATE_AFTER_COPY);
+
+        let gpu_render = dt_ms(TS_RENDER_ENC_START, TS_RENDER_ENC_END);
+        let gpu_render_main = dt_ms(TS_RENDER_MAIN_START, TS_RENDER_MAIN_END);
+        let gpu_render_overlay = dt_ms(TS_RENDER_OVERLAY_START, TS_RENDER_OVERLAY_END);
+
+        let gpu_egui = dt_ms(TS_EGUI_ENC_START, TS_EGUI_ENC_END);
+        let gpu_egui_pass = dt_ms(TS_EGUI_PASS_START, TS_EGUI_PASS_END);
+
+        println!(
+            "[perf] gpu(ms): update={:>7.2} sim={:>7.2} fluid={:>7.2} post={:>7.2} composite={:>7.2} copy={:>7.2} render={:>7.2} egui={:>7.2} | cpu(ms): update={:>7.2} render={:>7.2} egui={:>7.2}",
+            gpu_update_total.unwrap_or(-1.0),
+            gpu_sim.unwrap_or(-1.0),
+            gpu_fluid.unwrap_or(-1.0),
+            gpu_post.unwrap_or(-1.0),
+            gpu_comp.unwrap_or(-1.0),
+            gpu_copy.unwrap_or(-1.0),
+            gpu_render.unwrap_or(-1.0),
+            gpu_egui.unwrap_or(-1.0),
+            self.last_cpu_update_ms,
+            self.last_cpu_render_ms,
+            self.last_cpu_egui_ms,
+        );
+
+        println!(
+            "[perf] sim-kernels(ms): diffuse={:>6.2} commit={:>6.2} trails={:>6.2} slope={:>6.2} clearVis={:>6.2} blur={:>6.2} clrGrid={:>6.2} clrSpat={:>6.2} popSpat={:>6.2} clrForce={:>6.2} process={:>6.2} drain={:>6.2}",
+            gpu_sim_diffuse.unwrap_or(-1.0),
+            gpu_sim_diffuse_commit.unwrap_or(-1.0),
+            gpu_sim_trails.unwrap_or(-1.0),
+            gpu_sim_slope.unwrap_or(-1.0),
+            gpu_sim_clear_visual.unwrap_or(-1.0),
+            gpu_sim_motion_blur.unwrap_or(-1.0),
+            gpu_sim_clear_agent_grid.unwrap_or(-1.0),
+            gpu_sim_clear_spatial.unwrap_or(-1.0),
+            gpu_sim_populate_spatial.unwrap_or(-1.0),
+            gpu_sim_clear_force_vectors.unwrap_or(-1.0),
+            gpu_sim_process.unwrap_or(-1.0),
+            gpu_sim_drain.unwrap_or(-1.0),
+        );
+
+        println!(
+            "[perf] fluid-kernels(ms): fumaF={:>6.2} genF={:>6.2} addF={:>6.2} clrF={:>6.2} diffV={:>6.2} advV={:>6.2} vort={:>6.2} div={:>6.2} clrP={:>6.2} jacobi={:>6.2} grad={:>6.2} bound={:>6.2} injD={:>6.2} advD={:>6.2} fumaD={:>6.2} advT={:>6.2}",
+            gpu_fluid_fumarole_force.unwrap_or(-1.0),
+            gpu_fluid_generate.unwrap_or(-1.0),
+            gpu_fluid_add.unwrap_or(-1.0),
+            gpu_fluid_clear.unwrap_or(-1.0),
+            gpu_fluid_diffuse.unwrap_or(-1.0),
+            gpu_fluid_advect.unwrap_or(-1.0),
+            gpu_fluid_vorticity.unwrap_or(-1.0),
+            gpu_fluid_div.unwrap_or(-1.0),
+            gpu_fluid_clear_pressure.unwrap_or(-1.0),
+            gpu_fluid_jacobi.unwrap_or(-1.0),
+            gpu_fluid_grad.unwrap_or(-1.0),
+            gpu_fluid_bounds.unwrap_or(-1.0),
+            gpu_fluid_inject_dye.unwrap_or(-1.0),
+            gpu_fluid_advect_dye.unwrap_or(-1.0),
+            gpu_fluid_fumarole_dye.unwrap_or(-1.0),
+            gpu_fluid_advect_trail.unwrap_or(-1.0),
+        );
+
+        println!(
+            "[perf] post-kernels(ms): compact={:>6.2} cpuSpawn={:>6.2} merge={:>6.2} initDead={:>6.2} finalize={:>6.2} pausedProc={:>6.2} rndAgents={:>6.2} inspClr={:>6.2} inspDraw={:>6.2}",
+            gpu_post_compact.unwrap_or(-1.0),
+            gpu_post_cpu_spawn.unwrap_or(-1.0),
+            gpu_post_merge.unwrap_or(-1.0),
+            gpu_post_init_dead.unwrap_or(-1.0),
+            gpu_post_finalize.unwrap_or(-1.0),
+            gpu_post_paused_process.unwrap_or(-1.0),
+            gpu_post_render_agents.unwrap_or(-1.0),
+            gpu_post_inspector_clear.unwrap_or(-1.0),
+            gpu_post_inspector_draw.unwrap_or(-1.0),
+        );
+
+        println!(
+            "[perf] render(ms): enc={:>6.2} main={:>6.2} overlay={:>6.2} | egui(ms): enc={:>6.2} pass={:>6.2}",
+            gpu_render.unwrap_or(-1.0),
+            gpu_render_main.unwrap_or(-1.0),
+            gpu_render_overlay.unwrap_or(-1.0),
+            gpu_egui.unwrap_or(-1.0),
+            gpu_egui_pass.unwrap_or(-1.0),
+        );
+
+        self.capture_this_frame = false;
+        self.next_sample_time = std::time::Instant::now() + self.sample_interval;
+    }
+}
+
 const AMINO_FLAGS: [AminoVisualFlags; 20] = [
     AminoVisualFlags {
         is_mouth: false,
@@ -2483,6 +2871,10 @@ struct GpuState {
     environment_init_cpu: EnvironmentInitParams,
     environment_init_params_buffer: wgpu::Buffer,
     spawn_debug_counters: wgpu::Buffer, // [spawn_counter, debug_counter, alive_counter]
+    init_dead_dispatch_args: wgpu::Buffer, // Indirect dispatch args buffer for init-dead (x,y,z)
+    init_dead_params_buffer: wgpu::Buffer, // 16-byte uniform: [max_agents, 0, 0, 0]
+    init_dead_writer_bind_group_layout: wgpu::BindGroupLayout,
+    init_dead_writer_bind_group: wgpu::BindGroup,
     alive_readbacks: [Arc<wgpu::Buffer>; 2],
     alive_readback_pending: [Arc<Mutex<Option<Result<u32, ()>>>>; 2],
     alive_readback_inflight: [bool; 2],
@@ -2585,6 +2977,7 @@ struct GpuState {
     compact_pipeline: wgpu::ComputePipeline, // Remove dead agents
     finalize_merge_pipeline: wgpu::ComputePipeline, // Reset spawn counter
     cpu_spawn_pipeline: wgpu::ComputePipeline, // Materialize CPU spawn requests on GPU
+    write_init_dead_dispatch_args_pipeline: wgpu::ComputePipeline,
     initialize_dead_pipeline: wgpu::ComputePipeline, // Sanitize unused agent slots
     environment_init_pipeline: wgpu::ComputePipeline, // Fill alpha/beta/gamma/trails on GPU
     generate_map_pipeline: wgpu::ComputePipeline, // Generate specific map (flat/noise)
@@ -2630,6 +3023,8 @@ struct GpuState {
     limit_fps_25: bool,
     last_frame_time: std::time::Instant,
     last_present_time: std::time::Instant,
+
+    frame_profiler: FrameProfiler,
 
     // Simulation speed control
     render_interval: u32, // Draw every N steps in fast mode
@@ -3079,11 +3474,12 @@ impl GpuState {
             .await
             .unwrap();
 
+        let required_features = select_required_features(adapter.features());
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("GPU Device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: wgpu::Limits {
                         max_storage_buffers_per_shader_stage: 16,
                         ..wgpu::Limits::default()
@@ -3156,6 +3552,8 @@ impl GpuState {
         // Create egui renderer before device gets moved
         let egui_renderer = egui_wgpu::Renderer::new(&device, surface_format, None, 1, false);
         profiler.mark("egui renderer");
+
+        let frame_profiler = FrameProfiler::new(&device, &queue);
 
         // Initialize agents with minimal data - GPU will generate genome and build body
         let max_agents = 50_000usize; // Increased with 2x world size (4x area): 3.4 KB/agent => ~170 MB per agent buffer
@@ -3570,14 +3968,36 @@ impl GpuState {
 
         let spawn_debug_counters = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spawn/Debug Counters"),
-            size: 12, // 3 x u32
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            size: 12, // 3 x u32 ([0]=spawn, [1]=debug, [2]=alive)
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
+        // [0]=spawn, [1]=debug, [2]=alive.
         queue.write_buffer(&spawn_debug_counters, 0, bytemuck::cast_slice(&[0u32, 0u32, 0u32]));
+
+        // Indirect dispatch args for init-dead: [x, y, z]. Written by a tiny compute kernel.
+        let init_dead_dispatch_args = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("InitDead Dispatch Args"),
+            size: 12,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Default to a no-op dispatch (0 groups).
+        queue.write_buffer(&init_dead_dispatch_args, 0, bytemuck::cast_slice(&[0u32, 1u32, 1u32]));
+
+        // 16-byte uniform for the init-dead-dispatch writer shader: [max_agents, 0, 0, 0].
+        let init_dead_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("InitDead Params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &init_dead_params_buffer,
+            0,
+            bytemuck::cast_slice(&[max_agents as u32, 0u32, 0u32, 0u32]),
+        );
 
         let alive_readbacks = [
             Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -3742,6 +4162,13 @@ impl GpuState {
             source: wgpu::ShaderSource::Wgsl(composite_shader_source.into()),
         });
         profiler.mark("Composite shader compiled");
+
+        // Minimal shader: writes indirect dispatch args for init-dead.
+        let init_dead_dispatch_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("InitDead Dispatch Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/init_dead_dispatch.wgsl").into()),
+        });
+        profiler.mark("initDead dispatch shader compiled");
 
         // ============================================================================
         // FLUID SIMULATION BUFFERS (created early so they can be used in bind groups)
@@ -4074,6 +4501,64 @@ impl GpuState {
             });
         profiler.mark("Compute bind layout");
 
+        // Bind group for the minimal init-dead indirect args writer kernel.
+        let init_dead_writer_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("InitDead Writer Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let init_dead_writer_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("InitDead Writer Bind Group"),
+            layout: &init_dead_writer_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: spawn_debug_counters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: init_dead_dispatch_args.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: init_dead_params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        profiler.mark("initDead writer bind group");
+
         // Create compute bind groups (ping-pong)
         let compute_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Compute Bind Group A"),
@@ -4264,6 +4749,14 @@ impl GpuState {
             });
         profiler.mark("Compute pipeline layout");
 
+        let init_dead_writer_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("InitDead Writer Pipeline Layout"),
+                bind_group_layouts: &[&init_dead_writer_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        profiler.mark("initDead writer pipeline layout");
+
         let process_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Process Agents Pipeline"),
             layout: Some(&compute_pipeline_layout),
@@ -4433,6 +4926,17 @@ impl GpuState {
             cache: None,
         });
         profiler.mark("cpu spawn pipeline");
+
+        let write_init_dead_dispatch_args_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Write InitDead Dispatch Args Pipeline"),
+                layout: Some(&init_dead_writer_pipeline_layout),
+                module: &init_dead_dispatch_shader,
+                entry_point: "write_init_dead_dispatch_args",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("write initDead dispatch args pipeline");
 
         let initialize_dead_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -5295,6 +5799,10 @@ impl GpuState {
             params_buffer,
             environment_init_params_buffer,
             spawn_debug_counters,
+            init_dead_dispatch_args,
+            init_dead_params_buffer,
+            init_dead_writer_bind_group_layout,
+            init_dead_writer_bind_group,
             alive_readbacks,
             alive_readback_pending,
             alive_readback_inflight: [false; 2],
@@ -5334,6 +5842,7 @@ impl GpuState {
             compact_pipeline,
             finalize_merge_pipeline,
             cpu_spawn_pipeline,
+            write_init_dead_dispatch_args_pipeline,
             initialize_dead_pipeline,
             environment_init_pipeline,
             generate_map_pipeline,
@@ -5370,6 +5879,7 @@ impl GpuState {
             last_frame_time: std::time::Instant::now(),
             // Allow immediate first present.
             last_present_time: std::time::Instant::now() - std::time::Duration::from_secs(1),
+            frame_profiler,
             render_interval: settings.render_interval,
             current_mode: if settings.limit_fps {
                 if settings.limit_fps_25 { 3 } else { 0 }
@@ -6432,6 +6942,8 @@ impl GpuState {
         self.params_buffer.destroy();
         self.environment_init_params_buffer.destroy();
         self.spawn_debug_counters.destroy();
+        self.init_dead_dispatch_args.destroy();
+        self.init_dead_params_buffer.destroy();
         for buffer in &self.alive_readbacks {
             buffer.destroy();
         }
@@ -6738,6 +7250,9 @@ impl GpuState {
     }
 
     pub fn update(&mut self, should_draw: bool, frame_dt: f32) {
+        let cpu_update_start = std::time::Instant::now();
+        self.frame_profiler.begin_frame();
+
         // Push base-angle overrides into the existing EnvironmentInitParams uniform.
         // This avoids an extra binding while still allowing runtime edits.
         if self.part_base_angle_overrides_dirty {
@@ -7136,6 +7651,8 @@ impl GpuState {
                 label: Some("Update Encoder"),
             });
 
+        self.frame_profiler.write_ts_encoder(&mut encoder, TS_UPDATE_START);
+
         // Clear counters (spawn_counter is reset in-shader at end of previous frame)
         if should_run_simulation {
             encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
@@ -7157,6 +7674,9 @@ impl GpuState {
                 timestamp_writes: None,
             });
 
+            self.frame_profiler
+                .write_ts_compute_pass(&mut cpass, TS_SIM_PASS_START);
+
             if run_diffusion {
                 cpass.set_pipeline(&self.diffuse_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
@@ -7164,10 +7684,24 @@ impl GpuState {
                 let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
 
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
+
                 // Commit staged alpha/beta back into the environment grids.
                 cpass.set_pipeline(&self.diffuse_commit_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
+            }
+
+            if !run_diffusion {
+                // Keep timestamp progression stable even when skipping.
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
             }
 
             // Prepare trails every simulation frame (copy/decay + optional blur into trail_grid_inject).
@@ -7180,6 +7714,9 @@ impl GpuState {
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
             }
 
+            self.frame_profiler
+                .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_TRAILS_PREP);
+
             if run_slope {
                 cpass.set_pipeline(&self.gamma_slope_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
@@ -7187,6 +7724,9 @@ impl GpuState {
                 let groups_y = (GRID_DIM_U32 + SLOPE_WG_SIZE_Y - 1) / SLOPE_WG_SIZE_Y;
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
             }
+
+            self.frame_profiler
+                .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_SLOPE);
 
             // Clear visual grid only when drawing this step
             if should_draw {
@@ -7198,15 +7738,33 @@ impl GpuState {
                     (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
 
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
+
                 // Apply motion blur if following an agent
                 cpass.set_pipeline(&self.motion_blur_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
 
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
+
                 // Clear agent grid for agent rendering
                 cpass.set_pipeline(&self.clear_agent_grid_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
+            }
+
+            if !should_draw {
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
             }
 
             // Run simulation compute passes, but skip everything when paused or no living agents
@@ -7217,10 +7775,16 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(spatial_grid_workgroups, spatial_grid_workgroups, 1);
 
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
+
                 // Populate agent spatial grid with agent positions - workgroup_size(256)
                 cpass.set_pipeline(&self.populate_agent_spatial_grid_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_POPULATE_SPATIAL);
 
                 // Clear fluid force vectors before agents write to it
                 let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
@@ -7228,11 +7792,17 @@ impl GpuState {
                 cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
                 cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
+
                 // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(64)
                 // Agents will write propeller forces to fluid_force_vectors buffer with 100x boost
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
 
                 // Drain energy from neighbors (vampire mouths) - workgroup_size(256)
                 // Runs after process_agents so it can operate on agents_out without requiring
@@ -7240,8 +7810,28 @@ impl GpuState {
                 cpass.set_pipeline(&self.drain_energy_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
+            }
+
+            if !should_run_simulation {
+                // Keep timestamp progression stable when paused.
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_POPULATE_SPATIAL);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
             }
         }
+
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_SIM);
 
         // End the first compute pass to ensure agent writes to fluid_force_vectors are visible
         // Start a new compute pass for fluid simulation
@@ -7250,6 +7840,9 @@ impl GpuState {
                 label: Some("Fluid Compute Pass"),
                 timestamp_writes: None,
             });
+
+            self.frame_profiler
+                .write_ts_compute_pass(&mut cpass, TS_FLUID_PASS_START);
 
             if should_run_simulation {
                 // Run fluid solver - forces already written by agents to force_vectors
@@ -7266,9 +7859,15 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_FUMAROLE_FORCE);
+
                     cpass.set_pipeline(&self.fluid_generate_forces_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_GENERATE_FORCES);
 
                     // 1. Add forces to velocity (A -> B)
                     // Forces already written directly by agents with 100x boost + test force
@@ -7276,30 +7875,48 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_ADD_FORCES);
+
                     // Clear forces after applying them (so agents start fresh next frame)
                     cpass.set_pipeline(&self.fluid_clear_forces_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_CLEAR_FORCES);
 
                     // 2. Diffuse velocity (B -> A)
                     cpass.set_pipeline(&self.fluid_diffuse_velocity_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_DIFFUSE_VELOCITY);
+
                     // 3. Advect velocity (A -> B)
                     cpass.set_pipeline(&self.fluid_advect_velocity_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_ADVECT_VELOCITY);
 
                     // 4. Vorticity confinement (B -> A)
                     cpass.set_pipeline(&self.fluid_vorticity_confinement_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_VORTICITY);
+
                     // 5. Compute divergence (reads velocity_a)
                     cpass.set_pipeline(&self.fluid_divergence_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_DIVERGENCE);
 
                     // 6. Clear pressure buffers
                     cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
@@ -7310,6 +7927,9 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_CLEAR_PRESSURE);
+
                     // 7. Jacobi iterations for pressure
                     let jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
                     for i in 0..jacobi_iters {
@@ -7319,25 +7939,40 @@ impl GpuState {
                         cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
                     }
 
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_JACOBI);
+
                     // 8. Subtract pressure gradient (A->B)
                     cpass.set_pipeline(&self.fluid_subtract_gradient_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_SUBTRACT_GRADIENT);
 
                     // 9. Enforce boundaries (B->A, final result in velocity_a)
                     cpass.set_pipeline(&self.fluid_enforce_boundaries_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
 
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_BOUNDARIES);
+
                     // 10. Inject dye at propeller locations (A->B)
                     cpass.set_pipeline(&self.fluid_inject_dye_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
 
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_INJECT_DYE);
+
                     // 11. Advect dye with velocity field (B->A, final result in dye_a)
                     cpass.set_pipeline(&self.fluid_advect_dye_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_ADVECT_DYE);
 
                     // 11b. Inject fumarole alpha dye into the final dye buffer (dye_a).
                     // This keeps the point source visible even under strong local flow.
@@ -7345,25 +7980,41 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
 
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_FUMAROLE_DYE);
+
                     // 12. Advect agent trails with velocity field (trail_grid_inject -> trail_grid)
                     cpass.set_pipeline(&self.fluid_advect_trail_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_ADVECT_TRAIL);
                 }
             }
 
             // End fluid compute pass, start new pass for remaining simulation work
             drop(cpass);
+
+            self.frame_profiler
+                .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_FLUID);
+
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Post-Fluid Compute Pass"),
                 timestamp_writes: None,
             });
+
+            self.frame_profiler
+                .write_ts_compute_pass(&mut cpass, TS_POST_PASS_START);
 
             if should_run_simulation {
                 // Compact alive agents - workgroup_size(64)
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_swap, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_COMPACT);
 
                 // Process CPU spawn requests - workgroup_size(64)
                 if cpu_spawn_count > 0 {
@@ -7372,20 +8023,22 @@ impl GpuState {
                     cpass.dispatch_workgroups((cpu_spawn_count + 63) / 64, 1, 1);
                 }
 
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_CPU_SPAWN);
+
                 // Merge spawned agents - workgroup_size(64), max 2000 spawns
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_swap, &[]);
                 cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
 
-                // Sanitize unused agent slots - workgroup_size(256)
-                let init_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
-                cpass.set_pipeline(&self.initialize_dead_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups(init_groups, 1, 1);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_MERGE);
 
-                // Reset spawn counter - workgroup_size(1)
-                cpass.set_pipeline(&self.finalize_merge_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
+                // Compute indirect dispatch args for init-dead (based on alive_total).
+                // NOTE: Must be in a separate compute pass from the indirect dispatch because
+                // the args buffer is STORAGE here and then INDIRECT for dispatch.
+                cpass.set_pipeline(&self.write_init_dead_dispatch_args_pipeline);
+                cpass.set_bind_group(0, &self.init_dead_writer_bind_group, &[]);
                 cpass.dispatch_workgroups(1, 1, 1);
             } else if should_draw && self.agent_count > 0 {
                 // When paused or no living agents: run process pipeline for rendering only (dt=0, probabilities=0)
@@ -7394,6 +8047,44 @@ impl GpuState {
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                self.frame_profiler.write_ts_compute_pass(
+                    &mut cpass,
+                    TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
+                );
+            }
+
+            if should_run_simulation {
+                self.frame_profiler.write_ts_compute_pass(
+                    &mut cpass,
+                    TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
+                );
+            }
+
+            // End post-fluid pass 1. Start pass 2 so init-dead args buffer can be used as INDIRECT.
+            drop(cpass);
+
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Post-Fluid Compute Pass 2"),
+                timestamp_writes: None,
+            });
+
+            if should_run_simulation {
+                // Sanitize unused agent slots - workgroup_size(256), dispatched only for dead tail.
+                cpass.set_pipeline(&self.initialize_dead_pipeline);
+                cpass.set_bind_group(0, bg_swap, &[]);
+                cpass.dispatch_workgroups_indirect(&self.init_dead_dispatch_args, 0);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_INIT_DEAD);
+
+                // Reset spawn counter - workgroup_size(1)
+                cpass.set_pipeline(&self.finalize_merge_pipeline);
+                cpass.set_bind_group(0, bg_swap, &[]);
+                cpass.dispatch_workgroups(1, 1, 1);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_FINALIZE_MERGE);
             }
 
             // Render all agents to agent_grid when drawing
@@ -7402,6 +8093,9 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
             }
+
+            self.frame_profiler
+                .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_RENDER_AGENTS);
 
             // Draw the selected agent into the inspector preview box (top of inspector).
             // Clear the inspector area first to ensure a clean background.
@@ -7412,11 +8106,27 @@ impl GpuState {
                 let preview_groups_y = (300 + 15) / 16;
                 cpass.dispatch_workgroups(preview_groups_x, preview_groups_y, 1);
 
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_INSPECTOR_CLEAR);
+
                 cpass.set_pipeline(&self.draw_inspector_agent_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(1, 1, 1);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_INSPECTOR_DRAW);
+            }
+
+            if !(should_draw && self.selected_agent_index.is_some()) {
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_INSPECTOR_CLEAR);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_INSPECTOR_DRAW);
             }
         }
+
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_POST);
 
         // End compute pass to ensure agent_grid writes are visible before composite reads
         // Start new compute pass for compositing
@@ -7425,6 +8135,9 @@ impl GpuState {
                 label: Some("Composite Compute Pass"),
                 timestamp_writes: None,
             });
+
+            self.frame_profiler
+                .write_ts_compute_pass(&mut cpass, TS_COMPOSITE_PASS_START);
 
             // Composite agent_grid onto visual_grid when drawing
             if should_draw {
@@ -7437,6 +8150,9 @@ impl GpuState {
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
             }
         }
+
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_COMPOSITE);
 
         // Copy visual grid buffer to texture only when drawing this step
         if should_draw {
@@ -7463,6 +8179,9 @@ impl GpuState {
                     depth_or_array_layers: 1,
                 },
             );
+
+            self.frame_profiler
+                .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_COPY);
         }
 
         // Debug: when viewing energy trails, occasionally read back trail_grid.w stats.
@@ -7486,7 +8205,20 @@ impl GpuState {
         let slot = self.ensure_alive_slot_ready();
         let alive_buffer = self.copy_state_to_staging(&mut encoder, slot);
 
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_UPDATE_END);
+
+        if !should_draw {
+            // If we aren't going to render/egui this frame, resolve in the update encoder.
+            self.frame_profiler.resolve_and_copy(&mut encoder);
+        }
+
         self.queue.submit(Some(encoder.finish()));
+
+        if !should_draw {
+            self.frame_profiler
+                .readback_and_print(&self.device);
+        }
 
         if did_trail_energy_readback {
             let slice = self.trail_debug_readback.slice(..);
@@ -7585,6 +8317,9 @@ impl GpuState {
         // Keep ping-pong orientation stable: after process (in->out),
         // compaction wrote results back to the original input buffer.
         // Therefore, we do NOT toggle ping-pong here.
+
+        let cpu_update_ms = cpu_update_start.elapsed().as_secs_f64() * 1000.0;
+        self.frame_profiler.set_cpu_update_ms(cpu_update_ms);
     }
 
     fn render(
@@ -7593,6 +8328,8 @@ impl GpuState {
         textures_delta: egui::TexturesDelta,
         screen_descriptor: ScreenDescriptor,
     ) -> Result<(), wgpu::SurfaceError> {
+        let cpu_render_start = std::time::Instant::now();
+
         // Update FPS counter
         self.frame_count += 1;
         let now = std::time::Instant::now();
@@ -7616,6 +8353,9 @@ impl GpuState {
                 label: Some("Render Encoder"),
             });
 
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_RENDER_ENC_START);
+
         // Render simulation
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -7633,9 +8373,15 @@ impl GpuState {
                 occlusion_query_set: None,
             });
 
+            self.frame_profiler
+                .write_ts_render_pass(&mut rpass, TS_RENDER_MAIN_START);
+
             rpass.set_pipeline(&self.render_pipeline);
             rpass.set_bind_group(0, &self.render_bind_group, &[]);
             rpass.draw(0..6, 0..1);
+
+            self.frame_profiler
+                .write_ts_render_pass(&mut rpass, TS_RENDER_MAIN_END);
         }
 
         // Render inspector overlay (fragment shader) on top of the main pass
@@ -7655,13 +8401,33 @@ impl GpuState {
                 occlusion_query_set: None,
             });
 
+            self.frame_profiler
+                .write_ts_render_pass(&mut rpass, TS_RENDER_OVERLAY_START);
+
             rpass.set_pipeline(&self.inspector_overlay_pipeline);
             rpass.set_bind_group(0, &self.inspector_overlay_bind_group, &[]);
             rpass.draw(0..6, 0..1);
+
+            self.frame_profiler
+                .write_ts_render_pass(&mut rpass, TS_RENDER_OVERLAY_END);
         }
+
+        if self.sim_params_cpu.selected_agent_index == 0xFFFFFFFFu32 {
+            // Keep markers stable when overlay pass is skipped.
+            self.frame_profiler
+                .write_ts_encoder(&mut encoder, TS_RENDER_OVERLAY_START);
+            self.frame_profiler
+                .write_ts_encoder(&mut encoder, TS_RENDER_OVERLAY_END);
+        }
+
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_RENDER_ENC_END);
 
         // Submit simulation rendering
         self.queue.submit(Some(encoder.finish()));
+
+        let cpu_render_ms = cpu_render_start.elapsed().as_secs_f64() * 1000.0;
+        self.frame_profiler.set_cpu_render_ms(cpu_render_ms);
 
         // --- Main simulation and rendering path (if not paused) ---
 
@@ -7676,6 +8442,11 @@ impl GpuState {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("egui Encoder"),
             });
+
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_EGUI_ENC_START);
+
+        let cpu_egui_start = std::time::Instant::now();
 
         // Update buffers
         for (id, image_delta) in &textures_delta.set {
@@ -7707,13 +8478,23 @@ impl GpuState {
                 occlusion_query_set: None,
             });
 
+            self.frame_profiler
+                .write_ts_render_pass(&mut rpass, TS_EGUI_PASS_START);
+
             // SAFETY: The render pass lives long enough for this call.
             // The lifetime requirement is overly restrictive in egui-wgpu 0.29.
             let rpass_static: &mut wgpu::RenderPass<'static> =
                 unsafe { std::mem::transmute(&mut rpass) };
             self.egui_renderer
                 .render(rpass_static, &clipped_primitives, &screen_descriptor);
+
+            self.frame_profiler
+                .write_ts_render_pass(&mut rpass, TS_EGUI_PASS_END);
         }
+
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_EGUI_ENC_END);
+        self.frame_profiler.resolve_and_copy(&mut encoder);
 
         for id in &textures_delta.free {
             self.egui_renderer.free_texture(id);
@@ -7721,6 +8502,10 @@ impl GpuState {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        let cpu_egui_ms = cpu_egui_start.elapsed().as_secs_f64() * 1000.0;
+        self.frame_profiler.set_cpu_egui_ms(cpu_egui_ms);
+        self.frame_profiler.readback_and_print(&self.device);
 
         Ok(())
     }
@@ -7731,6 +8516,8 @@ impl GpuState {
         textures_delta: egui::TexturesDelta,
         screen_descriptor: ScreenDescriptor,
     ) -> Result<(), wgpu::SurfaceError> {
+        let cpu_egui_start = std::time::Instant::now();
+
         // Update FPS counter
         self.frame_count += 1;
         let now = std::time::Instant::now();
@@ -7767,6 +8554,9 @@ impl GpuState {
                 label: Some("egui Encoder"),
             });
 
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_EGUI_ENC_START);
+
         self.egui_renderer.update_buffers(
             &self.device,
             &self.queue,
@@ -7791,12 +8581,22 @@ impl GpuState {
                 occlusion_query_set: None,
             });
 
+            self.frame_profiler
+                .write_ts_render_pass(&mut rpass, TS_EGUI_PASS_START);
+
             // SAFETY: The render pass lives long enough for this call.
             let rpass_static: &mut wgpu::RenderPass<'static> =
                 unsafe { std::mem::transmute(&mut rpass) };
             self.egui_renderer
                 .render(rpass_static, &clipped_primitives, &screen_descriptor);
+
+            self.frame_profiler
+                .write_ts_render_pass(&mut rpass, TS_EGUI_PASS_END);
         }
+
+        self.frame_profiler
+            .write_ts_encoder(&mut encoder, TS_EGUI_ENC_END);
+        self.frame_profiler.resolve_and_copy(&mut encoder);
 
         for id in &textures_delta.free {
             self.egui_renderer.free_texture(id);
@@ -7804,6 +8604,11 @@ impl GpuState {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        let cpu_egui_ms = cpu_egui_start.elapsed().as_secs_f64() * 1000.0;
+        self.frame_profiler.set_cpu_render_ms(0.0);
+        self.frame_profiler.set_cpu_egui_ms(cpu_egui_ms);
+        self.frame_profiler.readback_and_print(&self.device);
 
         Ok(())
     }
@@ -8285,6 +9090,13 @@ impl GpuState {
         self.agents_buffer_b = agents_buffer_b;
         self.agent_buffer_capacity = new_capacity;
 
+        // Keep the init-dead indirect-dispatch writer's max_agents in sync.
+        self.queue.write_buffer(
+            &self.init_dead_params_buffer,
+            0,
+            bytemuck::cast_slice(&[new_capacity as u32, 0u32, 0u32, 0u32]),
+        );
+
         // Shrink agents_cpu back to actual count
         self.agents_cpu.truncate(self.agent_count as usize);
 
@@ -8460,6 +9272,25 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
+                },
+            ],
+        });
+
+        self.init_dead_writer_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("InitDead Writer Bind Group"),
+            layout: &self.init_dead_writer_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.spawn_debug_counters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.init_dead_dispatch_args.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.init_dead_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -9024,10 +9855,11 @@ fn main() {
     }))
     .unwrap();
 
+    let required_features = select_required_features(adapter.features());
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("GPU Device"),
-            required_features: wgpu::Features::empty(),
+            required_features,
             required_limits: wgpu::Limits {
                 max_storage_buffers_per_shader_stage: 16,
                 ..wgpu::Limits::default()

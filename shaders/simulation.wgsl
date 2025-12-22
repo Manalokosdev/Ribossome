@@ -3266,23 +3266,25 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(256)
 fn initialize_dead_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
-    if (idx >= params.max_agents) {
-        return;
-    }
-
     let alive_total = atomicLoad(&spawn_debug_counters[2]);
-    if (idx < alive_total) {
+    let max_agents = params.max_agents;
+    if (alive_total >= max_agents) {
         return;
     }
 
-    var agent = agents_out[idx];
-    agent.alive = 0u;
-    agent.body_count = 0u;
-    agent.energy = 0.0;
-    agent.velocity = vec2<f32>(0.0);
-    agent.pairing_counter = 0u;
-    agents_out[idx] = agent;
+    // This kernel is dispatched only for the dead tail; gid.x is relative to `alive_total`.
+    let idx = alive_total + gid.x;
+    if (idx >= max_agents) {
+        return;
+    }
+
+    // IMPORTANT: Avoid copying the full Agent struct (genome + body arrays).
+    // We only need to ensure a few fields are reset for dead slots.
+    agents_out[idx].alive = 0u;
+    agents_out[idx].body_count = 0u;
+    agents_out[idx].energy = 0.0;
+    agents_out[idx].velocity = vec2<f32>(0.0);
+    agents_out[idx].pairing_counter = 0u;
 }
 
 // Compact living agents from input to output, producing a packed array at the front
