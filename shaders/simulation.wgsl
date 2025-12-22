@@ -312,11 +312,41 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Skip dead agents
     if (agent.alive == 0u) {
-        agents_out[agent_id] = agent;
+        // Avoid copying the full Agent payload for dead entries.
+        agents_out[agent_id].alive = 0u;
+        agents_out[agent_id].body_count = 0u;
+        agents_out[agent_id].energy = 0.0;
+        agents_out[agent_id].velocity = vec2<f32>(0.0);
+        agents_out[agent_id].pairing_counter = 0u;
+        agents_out[agent_id].is_selected = 0u;
         return;
     }
-    // Copy intact agent to output; we'll only modify specific fields below
-    agents_out[agent_id] = agent;
+
+    // Initialize output scalars explicitly (avoid full Agent megacopy).
+    agents_out[agent_id].position = agent.position;
+    agents_out[agent_id].velocity = agent.velocity;
+    agents_out[agent_id].rotation = agent.rotation;
+    agents_out[agent_id].energy = agent.energy;
+    agents_out[agent_id].energy_capacity = agent.energy_capacity;
+    agents_out[agent_id].torque_debug = agent.torque_debug;
+    agents_out[agent_id].morphology_origin = agent.morphology_origin;
+    agents_out[agent_id].alive = agent.alive;
+    agents_out[agent_id].body_count = agent.body_count;
+    agents_out[agent_id].pairing_counter = agent.pairing_counter;
+    agents_out[agent_id].is_selected = agent.is_selected;
+    agents_out[agent_id].generation = agent.generation;
+    agents_out[agent_id].age = agent.age;
+    agents_out[agent_id].total_mass = agent.total_mass;
+    agents_out[agent_id].poison_resistant_count = agent.poison_resistant_count;
+    agents_out[agent_id].gene_length = agent.gene_length;
+
+    // Keep genome synchronized across ping-pong buffers.
+    // NOTE: This is required for correctness because next frame's agents_in is this frame's
+    // agents_out. If we don't write genome every frame, the buffer we write into will retain
+    // stale/garbage genome data for existing agents.
+    for (var w = 0u; w < GENOME_WORDS; w++) {
+        agents_out[agent_id].genome[w] = agent.genome[w];
+    }
 
     // ====== MORPHOLOGY BUILD ======
     // Genome scan only happens on first frame (body_count == 0)
@@ -394,6 +424,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         var chirality_flip = 1.0;
         var sum_angle_mass = 0.0;
         var total_mass_angle = 0.0;
+        var com_sum = vec2<f32>(0.0);
+        var mass_sum = 0.0;
         var total_capacity = 0.0;
         // Reset to 0 before accumulation
         total_mass_morphology = 0.0;
@@ -402,8 +434,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Loop through existing body parts and rebuild positions
         for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
-            // Read cached part_type (set during first build or from previous frame)
-            let final_part_type = agents_out[agent_id].body[i].part_type;
+            // Read cached part_type and persist it to output (ping-pong safety).
+            // IMPORTANT: on the first build we just wrote part_type into agents_out above,
+            // so we must read from agents_out here (agents_in is still empty).
+            let final_part_type = select(
+                agents_in[agent_id].body[i].part_type,
+                agents_out[agent_id].body[i].part_type,
+                first_build
+            );
+            agents_out[agent_id].body[i].part_type = final_part_type;
             let base_type = get_base_part_type(final_part_type);
 
             // Check for chiral flipper
@@ -419,9 +458,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let props = get_amino_acid_properties(base_type);
             total_capacity += props.energy_storage;
 
-            // Read previous frame's signals
-            let alpha = agents_out[agent_id].body[i].alpha_signal;
-            let beta = agents_out[agent_id].body[i].beta_signal;
+            // Read previous frame's signals from input (agents_out is not pre-copied).
+            let alpha = agents_in[agent_id].body[i].alpha_signal;
+            let beta = agents_in[agent_id].body[i].beta_signal;
 
             // Modulate angle based on signals
             let alpha_effect = alpha * props.alpha_sensitivity * SIGNAL_GAIN * ANGLE_GAIN_ALPHA;
@@ -448,9 +487,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             current_pos.y += sin(current_angle) * props.segment_length;
             agents_out[agent_id].body[i].pos = current_pos;
 
+            // Accumulate center-of-mass in the same loop to avoid a second pass.
+            com_sum += current_pos * m;
+            mass_sum += m;
+
             // Check organ type once for both data field and _pad handling
             let is_organ = (base_type >= 20u);
             let is_vampire_mouth = (base_type == 33u);
+
+            // Preserve organ internal state across frames by default.
+            // Non-organs and vampire mouths may overwrite _pad below.
+            agents_out[agent_id].body[i]._pad = agents_in[agent_id].body[i]._pad;
 
             // Data field: for vampire mouths (type 33), store packed world position for movement tracking
             if (is_vampire_mouth) {
@@ -466,7 +513,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Organs (condensers, clocks) use _pad for their own state storage
             // EXCEPTION: Vampire mouths (type 33) need _pad.y preserved for visualization
             if (!is_organ) {
-                let keep_pad_y = agents_out[agent_id].body[i]._pad.y;
+                let keep_pad_y = agents_in[agent_id].body[i]._pad.y;
                 agents_out[agent_id].body[i]._pad = vec2<f32>(smoothed_signal, keep_pad_y);
             } else if (is_vampire_mouth) {
                 // Vampire mouths: preserve both cooldown (_pad.x) and drain amount (_pad.y)
@@ -486,24 +533,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         agents_out[agent_id].poison_resistant_count = poison_resistant_count;
 
         // Center of mass recentering
-        var com = vec2<f32>(0.0);
         let rec_n = body_count_val;
         if (rec_n > 0u) {
-            var mass_sum = 0.0;
-            for (var i = 0u; i < min(rec_n, MAX_BODY_PARTS); i++) {
-                let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
-                let props = get_amino_acid_properties(base_type);
-                let m = max(props.mass, 0.01);
-                com += agents_out[agent_id].body[i].pos * m;
-                mass_sum += m;
-            }
-            com = com / max(mass_sum, 0.0001);
-
-            // Morphology origin after centering
-            var origin_local = -com;
-            for (var i = 0u; i < min(rec_n, MAX_BODY_PARTS); i++) {
-                agents_out[agent_id].body[i].pos -= com;
-            }
+            let com = com_sum / max(mass_sum, 0.0001);
 
             // Calculate mass-weighted average angle
             let avg_angle = sum_angle_mass / max(total_mass_angle, 0.0001);
@@ -518,15 +550,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let s_inv = sin(-avg_angle);
 
             for (var i = 0u; i < min(rec_n, MAX_BODY_PARTS); i++) {
-                let p = agents_out[agent_id].body[i].pos;
+                let p0 = agents_out[agent_id].body[i].pos - com;
                 agents_out[agent_id].body[i].pos = vec2<f32>(
-                    p.x * c_inv - p.y * s_inv,
-                    p.x * s_inv + p.y * c_inv
+                    p0.x * c_inv - p0.y * s_inv,
+                    p0.x * s_inv + p0.y * c_inv
                 );
             }
 
             // Rotate morphology origin
-            let o = origin_local;
+            let o = -com;
             agents_out[agent_id].morphology_origin = vec2<f32>(
                 o.x * c_inv - o.y * s_inv,
                 o.x * s_inv + o.y * c_inv
@@ -561,8 +593,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let props = get_amino_acid_properties(base_type);
 
         // Store old signals for propagation
-        old_alpha[i] = part_i.alpha_signal;
-        old_beta[i] = part_i.beta_signal;
+        old_alpha[i] = agents_in[agent_id].body[i].alpha_signal;
+        old_beta[i] = agents_in[agent_id].body[i].beta_signal;
 
         // Collect enabler positions
         if (props.is_inhibitor) { // enabler role
@@ -1812,7 +1844,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         agent.alive = 0u;
-        agents_out[agent_id] = agent;
+        // Avoid copying the full Agent payload on death.
+        agents_out[agent_id].alive = 0u;
+        agents_out[agent_id].body_count = 0u;
+        agents_out[agent_id].energy = 0.0;
+        agents_out[agent_id].velocity = vec2<f32>(0.0);
+        agents_out[agent_id].pairing_counter = 0u;
+        agents_out[agent_id].is_selected = 0u;
         return;
     }
     // Note: alive counting is handled in the compaction/merge passes
@@ -1826,20 +1864,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ====== RNA PAIRING REPRODUCTION (probabilistic counter) ======
     // Pairing counter probabilistically increments; reproduce when it reaches gene_length
 
-    // First, calculate the gene length (number of non-X bases) for this agent
-    var gene_length = 0u;
-    var first_non_x: u32 = GENOME_LENGTH;
-    var last_non_x: u32 = 0xFFFFFFFFu;
-    for (var bi = 0u; bi < GENOME_LENGTH; bi++) {
-        let b = genome_get_base_ascii(agents_out[agent_id].genome, bi);
-        if (b != 88u) {
-            if (first_non_x == GENOME_LENGTH) { first_non_x = bi; }
-            last_non_x = bi;
-            gene_length += 1u;
+    // Cached gene_length (count of non-'X' bytes). Fall back to a one-time scan
+    // for older snapshots that might not have this field populated.
+    var gene_length = agent.gene_length;
+    if (gene_length == 0u) {
+        for (var bi = 0u; bi < GENOME_LENGTH; bi++) {
+            let b = genome_get_base_ascii(agent.genome, bi);
+            if (b != 88u) {
+                gene_length += 1u;
+            }
         }
     }
 
-    var pairing_counter = agents_out[agent_id].pairing_counter;
+    var pairing_counter = agent.pairing_counter;
     var energy_invested = 0.0; // Track energy spent on pairing for offspring
 
     if (gene_length > 0u && pairing_counter < gene_length) {
@@ -1917,7 +1954,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 offspring.pairing_counter = 0u;
                 offspring.is_selected = 0u;
                 // Lineage and lifecycle
-                offspring.generation = agents_out[agent_id].generation + 1u;
+                offspring.generation = agent.generation + 1u;
                 offspring.age = 0u;
                 offspring.total_mass = 0.0; // Will be computed after morphology build
                 offspring.poison_resistant_count = 0u; // Will be computed after morphology build
@@ -1926,12 +1963,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (params.asexual_reproduction == 1u) {
                     // Asexual reproduction: direct genome copy (mutations applied later)
                     for (var w = 0u; w < GENOME_WORDS; w++) {
-                        offspring.genome[w] = agents_out[agent_id].genome[w];
+                        offspring.genome[w] = agent.genome[w];
                     }
                 } else {
                     // Sexual reproduction: reverse complementary of parent
                     for (var w = 0u; w < GENOME_WORDS; w++) {
-                        let rev_word = genome_revcomp_word(agents_out[agent_id].genome, w);
+                        let rev_word = genome_revcomp_word(agent.genome, w);
                         offspring.genome[w] = rev_word;
                     }
                 }
@@ -2111,6 +2148,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
 
+                // Compute and cache gene_length once for the offspring.
+                if (active_end != 0xFFFFFFFFu) {
+                    offspring.gene_length = active_end - active_start + 1u;
+                } else {
+                    offspring.gene_length = 0u;
+                }
+
                 // New rule: offspring always receives 50% of parent's current energy.
                 // Pairing costs are NOT passed to the offspring.
                 let inherited_energy = agent.energy * 0.5;
@@ -2156,6 +2200,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agents_out[agent_id].rotation = agent.rotation;
     agents_out[agent_id].energy = agent.energy;
     agents_out[agent_id].alive = agent.alive;
+    agents_out[agent_id].gene_length = gene_length;
     // Increment age for living agents
     if (agents_out[agent_id].alive == 1u) {
         agents_out[agent_id].age = agents_out[agent_id].age + 1u;
@@ -3227,12 +3272,23 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
             let override_word = genome_read_word(request.genome_override, w);
             agent.genome[w] = override_word;
         }
+
+        // Count non-'X' bases once at spawn time.
+        var gene_length = 0u;
+        for (var bi = 0u; bi < GENOME_LENGTH; bi++) {
+            let b = genome_get_base_ascii(agent.genome, bi);
+            if (b != 88u) {
+                gene_length += 1u;
+            }
+        }
+        agent.gene_length = gene_length;
     } else {
     // Create centered variable-length genome with 'X' padding on both sides
     // Length in [MIN_GENE_LENGTH, GENOME_LENGTH]
         genome_seed = hash(genome_seed ^ base_seed);
     let gene_span = GENOME_LENGTH - MIN_GENE_LENGTH;
     let gene_len = MIN_GENE_LENGTH + (hash(genome_seed) % (gene_span + 1u));
+        agent.gene_length = gene_len;
         var bytes: array<u32, GENOME_LENGTH>;
         for (var i = 0u; i < GENOME_LENGTH; i++) { bytes[i] = 88u; } // 'X'
         let left_pad = (GENOME_LENGTH - gene_len) / 2u;
