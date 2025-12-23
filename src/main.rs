@@ -46,6 +46,7 @@ const CLEAR_WG_SIZE_Y: u32 = 16;
 const SLOPE_WG_SIZE_X: u32 = 16;
 const SLOPE_WG_SIZE_Y: u32 = 16;
 const TERRAIN_FORCE_SCALE: f32 = 250.0;
+#[allow(dead_code)]
 const GAMMA_CORRECTION_EXPONENT: f32 = 2.2;
 const SETTINGS_FILE_NAME: &str = "simulation_settings.json";
 const AUTO_SNAPSHOT_FILE_NAME: &str = "autosave_snapshot.png";
@@ -605,6 +606,7 @@ const GENOME_BYTES: usize = 256; // ASCII bases including padding
 const GENOME_WORDS: usize = GENOME_BYTES / std::mem::size_of::<u32>();
 const GENOME_PACKED_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const GENOME_BASES_PER_PACKED_WORD: usize = 16;
+#[allow(dead_code)]
 const MIN_GENE_LENGTH: usize = 6;
 const MAX_SPAWN_REQUESTS: usize = 2000;
 
@@ -635,6 +637,7 @@ const AMINO_COLORS: [[f32; 3]; 20] = [
 ];
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct AminoVisualFlags {
     is_mouth: bool,
     is_alpha_sensor: bool,
@@ -646,6 +649,7 @@ struct AminoVisualFlags {
     is_displacer: bool,
 }
 
+#[allow(dead_code)]
 const DEFAULT_AMINO_FLAGS: AminoVisualFlags = AminoVisualFlags {
     is_mouth: false,
     is_alpha_sensor: false,
@@ -868,7 +872,7 @@ impl BenchCollector {
         println!("\n[bench] Completed benchmark samples.");
         println!("[bench] All times are milliseconds; p50/p95 computed over captured samples.");
 
-        let mut print_series = |name: &str, s: &mut BenchSeries| {
+        let print_series = |name: &str, s: &mut BenchSeries| {
             if let Some((n, min, p50, p95, mean, max)) = s.summary() {
                 println!(
                     "[bench] {:<12} n={:<4} min={:>7.3} p50={:>7.3} p95={:>7.3} mean={:>7.3} max={:>7.3}",
@@ -1365,6 +1369,7 @@ impl FrameProfiler {
     }
 }
 
+#[allow(dead_code)]
 const AMINO_FLAGS: [AminoVisualFlags; 20] = [
     AminoVisualFlags {
         is_mouth: false,
@@ -1585,6 +1590,7 @@ fn rgb_to_color32(rgb: [f32; 3]) -> egui::Color32 {
 }
 
 #[inline]
+#[allow(dead_code)]
 fn rgb_to_color32_with_alpha(rgb: [f32; 3], alpha: f32) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(
         rgb_component(rgb[0]),
@@ -2120,6 +2126,7 @@ fn compute_body_part_nucleotide_spans_for_inspector(
     spans
 }
 
+#[allow(dead_code)]
 fn paint_cloud(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: egui::Color32, seed: u64) {
     // Draw multiple overlapping circles to create a fluffy cloud appearance - matching GPU shader
     // GPU draws 8 puffs + 1 central circle
@@ -2147,6 +2154,7 @@ fn paint_cloud(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: 
     painter.circle_filled(center, radius * 0.7, color);
 }
 
+#[allow(dead_code)]
 fn paint_asterisk(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: egui::Color32) {
     // Draw 4 lines: vertical, horizontal, and two diagonals - matching GPU shader exactly
     // GPU uses fixed thickness of 1.0 world units, we'll use 1.0 screen pixels for consistency
@@ -2318,6 +2326,7 @@ impl BodyPart {
     }
 
     /// Extract organ parameter from encoded part_type (0-255)
+    #[allow(dead_code)]
     fn organ_param(&self) -> u32 {
         (self.part_type >> 8) & 0xFF
     }
@@ -3240,6 +3249,7 @@ impl SimulationSettings {
 // GPU STATE
 // ============================================================================
 
+#[allow(dead_code)]
 struct GpuState {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -3603,6 +3613,7 @@ struct GpuState {
 const FULL_SPEED_PRESENT_INTERVAL_MICROS: u64 = 16_667; // ~60 Hz
 const EGUI_UPDATE_INTERVAL_MICROS: u64 = 33_333; // ~30 Hz
 
+#[allow(dead_code)]
 impl GpuState {
     fn write_rain_map_texture(&self) {
         // Expand interleaved alpha/beta into RGBA32F (alpha->R, beta->G).
@@ -3853,7 +3864,7 @@ impl GpuState {
     }
 
     async fn new(window: Arc<Window>) -> Self {
-        let size = window.inner_size();
+        let _size = window.inner_size();
 
         // Create instance and adapter
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -4000,6 +4011,7 @@ impl GpuState {
         let grid_size = GRID_CELL_COUNT;
 
         // Proper Perlin noise implementation (kept for potential later use)
+        #[allow(dead_code)]
         fn perlin_noise(x: f32, y: f32) -> f32 {
             // Permutation table for Perlin noise
             const PERM: [u8; 256] = [
@@ -4054,6 +4066,7 @@ impl GpuState {
         }
 
         // Octaved Perlin noise for more natural patterns with contrast control
+        #[allow(dead_code)]
         fn fractal_noise(x: f32, y: f32, octaves: u32, scale: f32, contrast: f32) -> f32 {
             let mut value = 0.0;
             let mut amplitude = 1.0;
@@ -12152,7 +12165,7 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(&mut state.agent_color_blend, 0.0..=1.0)
                                                                 .text("Color Blend")
-                                                                .clamp_to_range(true)
+                                                                .clamping(egui::SliderClamping::Always)
                                                         ).on_hover_text("0.0 = amino acid colors only, 1.0 = agent color only");
 
                                                         ui.separator();
@@ -12160,7 +12173,7 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(&mut state.agent_trail_decay, 0.0..=1.0)
                                                                 .text("Trail Decay")
-                                                                .clamp_to_range(true)
+                                                                .clamping(egui::SliderClamping::Always)
                                                         ).on_hover_text("0.0 = persistent trail, 1.0 = instant clear (no trail)");
 
                                                         ui.separator();
@@ -12276,12 +12289,12 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_dt, 0.001..=0.05)
                                                                 .text("dt")
-                                                                .clamp_to_range(true),
+                                                                .clamping(egui::SliderClamping::Always),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_decay, 0.5..=1.0)
                                                                 .text("Decay")
-                                                                .clamp_to_range(true),
+                                                                .clamping(egui::SliderClamping::Always),
                                                         );
 
                                                         ui.separator();
@@ -12289,7 +12302,7 @@ fn main() {
                                                             ui.label("Pressure Jacobi Iters");
                                                             ui.add(
                                                                 egui::DragValue::new(&mut state.fluid_jacobi_iters)
-                                                                    .clamp_range(1..=128)
+                                                                    .range(1..=128)
                                                                     .speed(1.0),
                                                             );
                                                         });
@@ -12299,12 +12312,12 @@ fn main() {
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_vorticity, 0.0..=50.0)
                                                                 .text("Vorticity")
-                                                                .clamp_to_range(true),
+                                                                .clamping(egui::SliderClamping::Always),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_viscosity, 0.0..=5.0)
                                                                 .text("Viscosity")
-                                                                .clamp_to_range(true),
+                                                                .clamping(egui::SliderClamping::Always),
                                                         );
 
                                                         ui.separator();
@@ -12315,7 +12328,7 @@ fn main() {
                                                                 0.0..=5.0,
                                                             )
                                                             .text("Propeller Fluid Displacement")
-                                                            .clamp_to_range(true),
+                                                            .clamping(egui::SliderClamping::Always),
                                                         )
                                                         .on_hover_text(
                                                             "Global multiplier for how strongly propellers inject/drag the fluid field (higher = stronger wash).",
@@ -12329,7 +12342,7 @@ fn main() {
                                                                 0.0..=2.0,
                                                             )
                                                             .text("Fluid Push Strength")
-                                                            .clamp_to_range(true),
+                                                            .clamping(egui::SliderClamping::Always),
                                                         )
                                                         .on_hover_text(
                                                             "Global multiplier for how strongly the fluid vector field pushes agents (in addition to per-amino coupling).",
@@ -12343,7 +12356,7 @@ fn main() {
                                                                 0.0..=500.0,
                                                             )
                                                             .text("Slope Flow Force")
-                                                            .clamp_to_range(true),
+                                                            .clamping(egui::SliderClamping::Always),
                                                         )
                                                         .on_hover_text(
                                                             "How strongly terrain slope drives fluid downhill (0 = no slope flow, 100 = default, higher = stronger downhill flow).",
@@ -12354,7 +12367,7 @@ fn main() {
                                                                 0.0..=1000.0,
                                                             )
                                                             .text("Obstacle Blocking")
-                                                            .clamp_to_range(true),
+                                                            .clamping(egui::SliderClamping::Always),
                                                         )
                                                         .on_hover_text(
                                                             "How strongly steep terrain blocks fluid flow (0 = no blocking, 200 = default, higher = steeper slopes act more like solid walls).",
@@ -12425,45 +12438,45 @@ fn main() {
                                                             ui.add(
                                                                 egui::Slider::new(&mut fum.x_frac, 0.0..=1.0)
                                                                     .text("X (frac)")
-                                                                    .clamp_to_range(true),
+                                                                    .clamping(egui::SliderClamping::Always),
                                                             );
                                                             ui.add(
                                                                 egui::Slider::new(&mut fum.y_frac, 0.0..=1.0)
                                                                     .text("Y (frac)")
-                                                                    .clamp_to_range(true),
+                                                                    .clamping(egui::SliderClamping::Always),
                                                             );
                                                             ui.add(
                                                                 egui::Slider::new(&mut fum.dir_degrees, 0.0..=360.0)
                                                                     .text("Direction (deg)")
-                                                                    .clamp_to_range(true),
+                                                                    .clamping(egui::SliderClamping::Always),
                                                             );
                                                             ui.add(
                                                                 egui::Slider::new(&mut fum.strength, 0.0..=50_000.0)
                                                                     .text("Strength")
                                                                     .logarithmic(true)
-                                                                    .clamp_to_range(true),
+                                                                    .clamping(egui::SliderClamping::Always),
                                                             );
                                                             ui.add(
                                                                 egui::Slider::new(&mut fum.spread, 0.0..=FLUID_GRID_SIZE as f32)
                                                                     .text("Spread (cells)")
-                                                                    .clamp_to_range(true),
+                                                                    .clamping(egui::SliderClamping::Always),
                                                             );
                                                             ui.add(
                                                                 egui::Slider::new(&mut fum.alpha_dye_rate, 0.0..=1000.0)
                                                                     .text("Alpha Dye Rate")
                                                                     .logarithmic(true)
-                                                                    .clamp_to_range(true),
+                                                                    .clamping(egui::SliderClamping::Always),
                                                             );
                                                             ui.add(
                                                                 egui::Slider::new(&mut fum.beta_dye_rate, 0.0..=1000.0)
                                                                     .text("Beta Dye Rate")
                                                                     .logarithmic(true)
-                                                                    .clamp_to_range(true),
+                                                                    .clamping(egui::SliderClamping::Always),
                                                             );
                                                             ui.add(
                                                                 egui::Slider::new(&mut fum.variation, 0.0..=1.0)
                                                                     .text("Variation")
-                                                                    .clamp_to_range(true),
+                                                                    .clamping(egui::SliderClamping::Always),
                                                             );
                                                         }
                                                     });
