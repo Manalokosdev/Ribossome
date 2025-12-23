@@ -80,7 +80,7 @@ This document is a quick map of what each major file/folder is for, and which it
   - Large concatenated/dumped shader files used for comparison/debugging.
   - Not used by runtime code; treated as generated artifacts and ignored by git.
 
-- `new_functions.txt`, `old_functions.txt`
+- `archive/notes/new_functions.txt`, `archive/notes/old_functions.txt`
   - Temporary notes during refactors.
 
 ## Scripts
