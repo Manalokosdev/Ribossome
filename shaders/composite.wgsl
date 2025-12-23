@@ -12,7 +12,7 @@
 // ============================================================================
 
 // Standalone bindings for composite shader (not part of shared.wgsl)
-const SIM_SIZE: u32 = 30720u;
+const SIM_SIZE: u32 = 61440u;
 // Visualization-only gain for fluid dye overlay. This does not affect simulation/sensing,
 // only how strongly the dye is displayed when params.fluid_show is enabled.
 // Keep this modest; the overlay also applies a tone-map to avoid blowout.
