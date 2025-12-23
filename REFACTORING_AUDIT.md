@@ -36,4 +36,4 @@ The refactoring was successful. The only functional loss was the zigzag renderin
 
 ## Files Created for Reference
 - shader_before_split.wgsl (backup of pre-refactor version)
-- combined_shaders.wgsl (concatenation of modular files for comparison)
+- combined_shaders.wgsl (generated concatenation of modular files for comparison; not committed)

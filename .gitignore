@@ -17,3 +17,11 @@ Thumbs.db
 
 # Old git history backup
 .git-old/
+
+# Local backup bundles (created during experimentation / revert workflows)
+/archive/revert_backup_*/
+
+# Shader runtime dumps / scratch outputs
+shader_dump_runtime.wgsl
+combined_shaders.wgsl
+shader_source_dump.wgsl

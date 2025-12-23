@@ -122,7 +122,7 @@ During shader modularization, several organ-specific rendering features were los
 
 - `shaders/render.wgsl` - All rendering fixes applied here
 - `shader_before_split.wgsl` - Reference backup created for comparison
-- `combined_shaders.wgsl` - Concatenated modular shaders for diff analysis
+- `combined_shaders.wgsl` - Generated concatenated modular shaders for diff analysis (not committed)
 
 ## Methodology
 
