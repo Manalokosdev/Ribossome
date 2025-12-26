@@ -388,6 +388,14 @@ fn render_body_part_ctx(
         }
     }
 
+    // Mutation Protection organ (type 43): brown filled circle - reduces mutation rate by 30%
+    if (base_type == 43u) {
+        let size = max(get_part_visual_size(part.part_type) * 2.0, 9.0);
+        let brown = vec3<f32>(0.6, 0.4, 0.2); // Brown color
+        let blended = mix(brown, agent_color, params.agent_color_blend * 0.3);
+        draw_filled_circle_ctx(world_pos, size, vec4<f32>(blended, 0.95), ctx);
+    }
+
     // 9. ORGAN: Alpha/Beta Sensors - visual marker scaled by sensing radius
     if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor) {
         // Extract organ parameters to calculate actual sensor radius

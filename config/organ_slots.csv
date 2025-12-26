@@ -1,21 +1,21 @@
 Modifier,Param1,V (Valine),M (Methionine),L (Leucine),P (Proline),K (Lysine),C (Cysteine),H (Histidine),Q (Glutamine)
-A(0),-0.23,"α-V0 (r=113, +, Green)","α-M0 (r=29, -, Cyan)","LP-Propeller","LP-Propeller","KC-Mouth","KC-Mouth","HQ-Storage","HQ-Storage"
-C(1),0.67,"α-V1 (r=203, +, Green)","α-M1 (r=119, +, Green)","LP-Propeller","LP-Propeller","KC-Mouth","KC-Mouth","HQ-Storage","HQ-Storage"
-D(2),-0.91,"α-V2 (r=45, -, Cyan)","α-M2 (r=61, -, Cyan)","LP-Propeller","LP-Propeller","KC-Mouth","KC-Mouth","HQ-Storage","HQ-Storage"
-E(3),-0.58,"α-V3 (r=78, -, Cyan)","α-M3 (r=6, -, Cyan)","LP-Propeller","LP-Propeller","KC-Mouth","KC-Mouth","HQ-Storage","HQ-Storage"
-F(4),0.17,"α-V4 (r=153, +, Green)","α-M4 (r=69, -, Cyan)","LP-Propeller","LP-Propeller","KC-Mouth","KC-Mouth","HQ-Storage","HQ-Storage"
-G(5),0.88,"α-V5 (r=224, +, Green)","α-M5 (r=140, +, Green)","LP-Propeller","LP-Propeller","KC-Mouth","KC-Mouth","HQ-Storage","HQ-Storage"
-H(6),-0.35,"α-V6 (r=101, +, Green)","α-M6 (r=17, -, Cyan)","LP-Propeller","LP-Propeller","KC-Mouth","KC-Mouth","HQ-Storage","HQ-Storage"
-I(7),0.61,"α-V7 (r=197, +, Green)","α-M7 (r=113, +, Green)","LP-Propeller","LP-Propeller","KC-Enabler","KC-Enabler",,
-K(8),-0.12,"α-V8 (r=124, +, Green)","α-M8 (r=40, -, Cyan)","LP-Propeller","LP-Propeller","KC-Enabler","KC-Enabler",,
-L(9),0.95,"α-V9 (r=231, +, Green)","α-M9 (r=147, +, Green)","LP-Propeller","LP-Propeller","KC-Enabler","KC-Enabler",,
-M(10),-0.48,"β-V10 (r=88, -, Magenta)","β-M10 (r=4, -, Magenta)","LP-Displacer A","LP-Displacer A",,,,"HQ-PoisonRes"
-N(11),0.24,"β-V11 (r=160, +, Red)","β-M11 (r=76, -, Magenta)","LP-Displacer A","LP-Displacer A",,,,"HQ-PoisonRes"
-P(12),-0.77,"β-V12 (r=59, -, Magenta)","β-M12 (r=75, -, Magenta)","LP-Displacer A","LP-Displacer A",,,,"HQ-PoisonRes"
-Q(13),0.53,"β-V13 (r=189, +, Red)","β-M13 (r=105, +, Red)","LP-Displacer A","LP-Displacer A",,,,"HQ-PoisonRes"
-R(14),-0.29,"β-V14 (r=107, +, Red)","β-M14 (r=23, -, Magenta)","LP-Displacer A","LP-Displacer A",,,"HQ-ChiralFlip","HQ-ChiralFlip"
-S(15),0.71,"β-V15 (r=207, +, Red)","β-M15 (r=123, +, Red)","LP-Displacer B","LP-Displacer B",,,"HQ-ChiralFlip","HQ-ChiralFlip"
-T(16),-0.66,"β-V16 (r=70, -, Magenta)","β-M16 (r=14, -, Magenta)","LP-Displacer B","LP-Displacer B","KC-Clock (α emit, slow reverse)","KC-Clock (β emit, slow reverse)","HQ-ChiralFlip","HQ-ChiralFlip"
-V(17),0.36,"β-V17 (r=172, +, Red)","β-M17 (r=88, -, Magenta)","LP-Displacer B","LP-Displacer B","KC-Clock (α emit, medium)","KC-Clock (β emit, medium)","HQ-ChiralFlip","HQ-ChiralFlip"
-W(18),-0.84,"ε-V18 (r=52, -, Purple-Inv)","ε-M18 (r=68, -, Purple-Inv)","LP-Displacer B","LP-Displacer B","KC-Clock (α emit, slower reverse)","KC-Clock (β emit, slower reverse)","HQ-ChiralFlip","HQ-ChiralFlip"
-Y(19),0.08,"ε-V19 (r=144, +, Purple)","ε-M19 (r=60, -, Purple-Inv)","LP-Displacer B","LP-Displacer B","KC-Clock (α emit, very slow)","KC-Clock (β emit, very slow)","HQ-ChiralFlip","HQ-ChiralFlip"
+A(0),-0.23,VM-Alpha Sensor (22),VM-Alpha Sensor (22),LP-Propeller (21),LP-Propeller (21),KC-Mouth (20),KC-Mouth (20),HQ-Mutation Protection (43),HQ-Mutation Protection (43)
+C(1),0.67,VM-Alpha Sensor (22),VM-Alpha Sensor (22),LP-Propeller (21),LP-Propeller (21),KC-Mouth (20),KC-Mouth (20),HQ-Storage (28),HQ-Storage (28)
+D(2),-0.91,VM-Alpha Sensor (22),VM-Alpha Sensor (22),LP-Propeller (21),LP-Propeller (21),KC-Mouth (20),KC-Mouth (20),HQ-Storage (28),HQ-Storage (28)
+E(3),-0.58,VM-Alpha Sensor (22),VM-Alpha Sensor (22),LP-Propeller (21),LP-Propeller (21),KC-Mouth (20),KC-Mouth (20),HQ-Storage (28),HQ-Storage (28)
+F(4),0.17,VM-Alpha Sensor (22),VM-Alpha Sensor (22),LP-Propeller (21),LP-Propeller (21),KC-Vampire Mouth (33),KC-Vampire Mouth (33),HQ-Storage (28),HQ-Storage (28)
+G(5),0.88,VM-Alpha Sensor (22),VM-Alpha Sensor (22),LP-Propeller (21),LP-Propeller (21),KC-Vampire Mouth (33),KC-Vampire Mouth (33),HQ-Storage (28),HQ-Storage (28)
+H(6),-0.35,VM-Alpha Sensor (22),VM-Alpha Sensor (22),LP-Propeller (21),LP-Propeller (21),KC-Vampire Mouth (33),KC-Vampire Mouth (33),HQ-Storage (28),HQ-Storage (28)
+I(7),0.61,VM-Alpha Mag Sensor (38),VM-Alpha Mag Sensor (38),LP-Propeller (21),LP-Propeller (21),KC-Enabler (26),KC-Enabler (26),HQ-Pairing Sensor (α/36 β/37),HQ-Pairing Sensor (α/36 β/37)
+K(8),-0.12,VM-Alpha Mag Sensor (39),VM-Alpha Mag Sensor (39),LP-Propeller (21),LP-Propeller (21),KC-Enabler (26),KC-Enabler (26),HQ-Pairing Sensor (α/36 β/37),HQ-Pairing Sensor (α/36 β/37)
+L(9),0.95,VM-Agent Alpha Sensor (34),VM-Agent Alpha Sensor (34),LP-Propeller (21),LP-Propeller (21),KC-Enabler (26),KC-Enabler (26),HQ-Trail Energy (α/37 β/37),HQ-Trail Energy (α/37 β/37)
+M(10),-0.48,VM-Beta Sensor (23),VM-Beta Sensor (23),LP-Displacer A (25),LP-Displacer A (25),KC-Slope Sensor (α/32 β/32),KC-Slope Sensor (α/32 β/32),HQ-Trail Energy (α/37 β/37),HQ-Poison Resist (29)
+N(11),0.24,VM-Beta Sensor (23),VM-Beta Sensor (23),LP-Displacer A (25),LP-Displacer A (25),KC-Slope Sensor (α/32 β/32),KC-Slope Sensor (α/32 β/32),HQ-Trail Energy (α/37 β/37),HQ-Poison Resist (29)
+P(12),-0.77,VM-Beta Sensor (23),VM-Beta Sensor (23),LP-Displacer A (25),LP-Displacer A (25),KC-Slope Sensor (α/32 β/32),KC-Slope Sensor (α/32 β/32),HQ-Trail Energy (α/37 β/37),HQ-Poison Resist (29)
+Q(13),0.53,VM-Beta Sensor (23),VM-Beta Sensor (23),LP-Displacer A (25),LP-Displacer A (25),KC-Slope Sensor (α/32 β/32),KC-Slope Sensor (α/32 β/32),HQ-Trail Energy (α/37 β/37),HQ-Poison Resist (29)
+R(14),-0.29,VM-Beta Sensor (23),VM-Beta Sensor (23),LP-Displacer A (25),LP-Displacer A (25),KC-Clock (α/31 β/31),KC-Clock (α/31 β/31),HQ-Chiral Flipper (30),HQ-Chiral Flipper (30)
+S(15),0.71,VM-Beta Sensor (23),VM-Beta Sensor (23),LP-Displacer B (27),LP-Displacer B (27),KC-Clock (α/31 β/31),KC-Clock (α/31 β/31),HQ-Chiral Flipper (30),HQ-Chiral Flipper (30)
+T(16),-0.66,VM-Beta Mag Sensor (40),VM-Beta Mag Sensor (40),LP-Displacer B (27),LP-Displacer B (27),KC-Sine Gen (α/31 β/31),KC-Sine Gen (α/31 β/31),HQ-Chiral Flipper (30),HQ-Chiral Flipper (30)
+V(17),0.36,VM-Beta Mag Sensor (41),VM-Beta Mag Sensor (41),LP-Displacer B (27),LP-Displacer B (27),KC-Sine Gen (α/31 β/31),KC-Sine Gen (α/31 β/31),HQ-Chiral Flipper (30),HQ-Chiral Flipper (30)
+W(18),-0.84,VM-Beta Sensor (23),VM-Beta Sensor (23),LP-Anchor (α/42 β/42),LP-Anchor (α/42 β/42),KC-Sine Gen (α/31 β/31),KC-Sine Gen (α/31 β/31),HQ-Chiral Flipper (30),HQ-Chiral Flipper (30)
+Y(19),0.08,VM-Agent Beta Sensor (35),VM-Agent Beta Sensor (35),LP-Anchor (α/42 β/42),LP-Anchor (α/42 β/42),KC-Sine Gen (α/31 β/31),KC-Sine Gen (α/31 β/31),HQ-Chiral Flipper (30),HQ-Chiral Flipper (30)

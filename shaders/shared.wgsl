@@ -463,6 +463,7 @@ struct AminoAcidProperties {
     is_inhibitor: bool,
     is_condenser: bool,
     is_clock: bool,
+    is_mutation_protection: bool,
     parameter1: f32,
     fluid_wind_coupling: f32,
 }
@@ -471,7 +472,7 @@ struct AminoAcidProperties {
 // AMINO ACID & ORGAN PROPERTY LOOKUP TABLE (0–19 amino, 20–42 organs)
 // ============================================================================
 
-const AMINO_COUNT: u32 = 43u;
+const AMINO_COUNT: u32 = 44u;
 
 var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<vec4<f32>, 6>, AMINO_COUNT>(
     // 0  A - Alanine
@@ -561,12 +562,14 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     // 41 BETA MAGNITUDE SENSOR (variant)
     array<vec4<f32>,6>( vec4<f32>(10.5, 2.8, 0.4, 0.05), vec4<f32>(0.0, 0.12, 0.0, 0.00005), vec4<f32>(1.0, 0.3, 0.4, 0.0), vec4<f32>(0.0, 0.3, 0.40, 0.40), vec4<f32>(0.997, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
     // 42 ANCHOR
-    array<vec4<f32>,6>( vec4<f32>(10.0, 4.0, 0.0, 0.05), vec4<f32>(0.0, 0.0, 0.0, 0.00005), vec4<f32>(0.6, 0.0, 0.8, 0.0), vec4<f32>(0.0, 0.0, 0.0, 0.0), vec4<f32>(0.997, 0.5, 0.5, 0.5), vec4<f32>(0.0, 0.0, 0.0, 0.0) )
+    array<vec4<f32>,6>( vec4<f32>(10.0, 4.0, 0.0, 0.05), vec4<f32>(0.0, 0.0, 0.0, 0.00005), vec4<f32>(0.6, 0.0, 0.8, 0.0), vec4<f32>(0.0, 0.0, 0.0, 0.0), vec4<f32>(0.997, 0.5, 0.5, 0.5), vec4<f32>(0.0, 0.0, 0.0, 0.0) ),
+    // 43 MUTATION PROTECTION
+    array<vec4<f32>,6>( vec4<f32>(9.0, 4.0, -0.07, 0.02), vec4<f32>(0.2, -0.61, 0.0, 0.001), vec4<f32>(0.6, 0.4, 0.2, 0.0), vec4<f32>(0.0, 0.3, -0.35, -0.35), vec4<f32>(0.997, 1.2, -0.2, -0.3), vec4<f32>(1.3, 0.0, 0.0, 0.0) )
 );
 
 var<private> AMINO_FLAGS: array<u32, AMINO_COUNT> = array<u32, AMINO_COUNT>(
     0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (1u<<9), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, // 0–19
-    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<8), (1u<<9), (1u<<8), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u // 20–42
+    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<8), (1u<<9), (1u<<8), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u, (1u<<12) // 20–43
 );
 
 fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
@@ -642,6 +645,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     p.is_inhibitor          = (f & (1u<<9))  != 0u; // enabler
     p.is_condenser          = (f & (1u<<10)) != 0u;
     p.is_trail_energy_sensor = (f & (1u<<11)) != 0u;
+    p.is_mutation_protection = (f & (1u<<12)) != 0u;
 
     return p;
 }
@@ -1567,7 +1571,8 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
                 else { organ_base_type = 31u; }
             }
             else if (amino_type == 6u || amino_type == 13u) {
-                if (modifier < 7u) { organ_base_type = 28u; }
+                if (modifier == 0u) { organ_base_type = 43u; }
+                else if (modifier < 7u) { organ_base_type = 28u; }
                 else if (modifier < 9u) { organ_base_type = 36u; }
                 else if (modifier == 9u) { organ_base_type = 37u; }
                 else if (modifier < 14u) { organ_base_type = 29u; }
