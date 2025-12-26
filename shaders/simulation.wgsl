@@ -3515,7 +3515,7 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(64)
 fn merge_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let spawn_id = gid.x;
-    let spawn_count = atomicLoad(&spawn_debug_counters[0]);
+    let spawn_count = min(atomicLoad(&spawn_debug_counters[0]), 2000u);
 
     if (spawn_id >= spawn_count) {
         return;
@@ -3702,6 +3702,7 @@ fn compact_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(1)
 fn reset_spawn_counter(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicStore(&spawn_debug_counters[0], 0u);
+    atomicStore(&spawn_debug_counters[2], 0u);
 }
 
 // ============================================================================
