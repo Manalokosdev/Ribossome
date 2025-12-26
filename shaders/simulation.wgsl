@@ -2255,8 +2255,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Random rotation
                 offspring.rotation = hash_f32(offspring_hash) * 6.28318530718;
 
-                // Spawn at parent position
-                offspring.position = clamp_position(agent_pos);
+                // Spawn near parent with minimal jitter (1-3 units) to prevent perfect overlap
+                {
+                    let jitter_angle = hash_f32(offspring_hash ^ 0xBADC0FFEu) * 6.28318530718;
+                    let jitter_dist = 1.0 + hash_f32(offspring_hash ^ 0x1B56C4E9u) * 2.0;
+                    let jitter = vec2<f32>(cos(jitter_angle), sin(jitter_angle)) * jitter_dist;
+                    offspring.position = clamp_position(agent_pos + jitter);
+                }
                 offspring.velocity = vec2<f32>(0.0);
 
                 // Initialize offspring energy; final value assigned after viability check
@@ -2539,9 +2544,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
 
                 new_agents[spawn_index] = offspring;
-                pairing_counter = 0u;
             }
         }
+        // Reset pairing cycle after reproduction
+        pairing_counter = 0u;
     }
     agents_out[agent_id].pairing_counter = pairing_counter;
 
