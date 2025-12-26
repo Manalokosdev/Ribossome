@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.49768844,
+  "camera_zoom": 0.9154921,
   "spawn_probability": 0.3,
   "death_probability": 0.001,
   "mutation_rate": 0.003,
@@ -69,7 +69,7 @@
   "slope_lighting_strength": 5.0,
   "trail_diffusion": 0.3,
   "trail_decay": 0.999,
-  "trail_opacity": 0.0,
+  "trail_opacity": 200.0,
   "trail_show": false,
   "trail_show_energy": false,
   "interior_isotropic": false,
@@ -158,9 +158,9 @@
     0.0
   ],
   "gamma_color": [
-    0.03529412,
-    0.03529412,
-    0.03529412
+    0.047058824,
+    0.047058824,
+    0.047058824
   ],
   "dye_alpha_color": [
     0.24313726,

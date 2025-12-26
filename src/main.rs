@@ -4699,7 +4699,8 @@ impl GpuState {
         // Spawn/death buffers
         let new_agents_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("New Agents Buffer"),
-            size: (std::mem::size_of::<Agent>() * MAX_SPAWN_REQUESTS) as u64,
+            // Same size as the agent buffers so shaders can write spawns by `agent_id`.
+            size: (std::mem::size_of::<Agent>() * max_agents) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -7922,7 +7923,7 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 63) / 64, 1, 1);
 
                 let init_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
                 cpass.set_pipeline(&self.initialize_dead_pipeline);
@@ -8383,10 +8384,21 @@ impl GpuState {
         }
 
         // Handle CPU spawns - only when not paused (consistent with autospawn)
+        // IMPORTANT: process_spawn_requests_only() already runs the spawn/merge pipeline.
+        // If we leave cpu_spawn_count > 0 afterwards, the normal post-fluid pass would run
+        // process_cpu_spawns again and effectively double-spawn the same batch.
         if !self.is_paused && cpu_spawn_count > 0 {
-            // Use the reliable paused spawn path for all manual spawns
             println!("Using reliable spawn path for {} requests", cpu_spawn_count);
             self.process_spawn_requests_only(cpu_spawn_count, true);
+
+            cpu_spawn_count = 0;
+            let mut params = self.sim_params_cpu;
+            params.max_agents = self.agent_buffer_capacity as u32;
+            params.agent_count = self.agent_count;
+            params.cpu_spawn_count = 0;
+            self.sim_params_cpu = params;
+            self.queue
+                .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         }
 
         let diffusion_interval = self.diffusion_interval.max(1);
@@ -8830,7 +8842,7 @@ impl GpuState {
                 // Merge spawned agents - workgroup_size(64), max 2000 spawns
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 63) / 64, 1, 1);
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_MERGE);
