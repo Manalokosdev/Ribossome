@@ -2241,19 +2241,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (pairing_counter >= gene_length && gene_length > 0u) {
         // Attempt reproduction: create complementary genome offspring with mutations
-        // IMPORTANT: Only reset the pairing cycle when an offspring is actually materialized.
-        // Otherwise agents can get stuck in a loop where they reach full pairing, "give birth" to
-        // a zero-energy newborn (or fail to allocate a spawn slot), and immediately restart pairing.
-        //
-        // New rule: offspring receives 50% of parent's *current* energy.
-        // If the parent ends the pairing cycle at (or below) ~0 energy, spawning would create a
-        // newborn that dies immediately next frame (agent.energy <= 0), which looks like "no baby".
-        let inherited_energy = agent_energy_cur * 0.5;
-        if (inherited_energy > 0.0) {
-            let current_count = atomicLoad(&spawn_debug_counters[2]);
-            if (current_count < params.max_agents) {
-                let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
-                if (spawn_index < 2000u) {
+        let current_count = atomicLoad(&spawn_debug_counters[2]);
+        if (current_count < params.max_agents) {
+            let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
+            if (spawn_index < 2000u) {
                 // Generate hash for offspring randomization
                 // CRITICAL: Include agent_id to ensure each parent's offspring gets unique mutations
                 let offspring_hash = (hash3 ^ (spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu)) * 1664525u + 1013904223u;
@@ -2264,13 +2255,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Random rotation
                 offspring.rotation = hash_f32(offspring_hash) * 6.28318530718;
 
-                // Spawn near parent with a small jitter to avoid perfect overlap (prevents extreme repulsion impulses)
-                {
-                    let jitter_angle = hash_f32(offspring_hash ^ 0xBADC0FFEu) * 6.28318530718;
-                    let jitter_dist = 5.0 + hash_f32(offspring_hash ^ 0x1B56C4E9u) * 10.0;
-                    let jitter = vec2<f32>(cos(jitter_angle), sin(jitter_angle)) * jitter_dist;
-                    offspring.position = clamp_position(agent_pos + jitter);
-                }
+                // Spawn at parent position
+                offspring.position = clamp_position(agent_pos);
                 offspring.velocity = vec2<f32>(0.0);
 
                 // Initialize offspring energy; final value assigned after viability check
@@ -2535,6 +2521,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // Offspring receives 50% of parent's current energy.
                 // Pairing costs are NOT passed to the offspring.
+                let inherited_energy = agent_energy_cur * 0.5;
                 offspring.energy = inherited_energy;
                 agent_energy_cur -= inherited_energy;
 
@@ -2552,9 +2539,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
 
                 new_agents[spawn_index] = offspring;
-                // Reset pairing cycle only after a successful spawn write.
                 pairing_counter = 0u;
-                }
             }
         }
     }

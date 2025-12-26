@@ -4179,10 +4179,7 @@ impl GpuState {
         let frame_profiler = FrameProfiler::new(&device, &queue);
 
         // Initialize agents with minimal data - GPU will generate genome and build body
-        // NOTE: With wgpu::Limits::default(), max_storage_buffer_binding_size is typically 128 MiB.
-        // Agent is currently 2192 bytes (see debug_assert above), so per-agent storage buffer capacity is:
-        // floor(128 MiB / 2192) = 61_230 agents. Keep some headroom.
-        let max_agents = 60_000usize; // ~125.4 MiB per agent buffer; A+B ~250.9 MiB; +readback ~125.4 MiB
+        let max_agents = 60_000usize; // Increased with 2x world size (4x area): 3.4 KB/agent => ~170 MB per agent buffer
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
@@ -7917,11 +7914,7 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                // Scan slightly beyond agent_count to avoid dropping newborns when the
-                // CPU-side alive readback lags by a frame, but do NOT scan the full buffer
-                // capacity (that can pick up stale tail slots after snapshot loads).
-                let compact_count = (self.agent_count + 2000).min(self.agent_buffer_capacity as u32);
-                cpass.dispatch_workgroups((compact_count + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
 
                 cpass.set_pipeline(&self.cpu_spawn_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
