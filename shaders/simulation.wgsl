@@ -3702,7 +3702,7 @@ fn compact_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(1)
 fn reset_spawn_counter(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicStore(&spawn_debug_counters[0], 0u);
-    atomicStore(&spawn_debug_counters[2], 0u);
+
 }
 
 // ============================================================================

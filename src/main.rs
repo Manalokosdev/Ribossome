@@ -7937,7 +7937,7 @@ impl GpuState {
             // Ensure agents are materialized in buffer A for snapshot/save and for subsequent
             // snapshot-load batches.
             if !wrote_to_a_directly {
-                let expected_alive = (self.agent_count + cpu_spawn_count)
+                let expected_alive = (self.agent_count + cpu_spawn_count + 2000) // +2000 for GPU spawns
                     .min(self.agent_buffer_capacity as u32);
                 let bytes = (expected_alive as u64) * (std::mem::size_of::<Agent>() as u64);
                 if bytes > 0 {
