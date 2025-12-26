@@ -2241,14 +2241,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (pairing_counter >= gene_length && gene_length > 0u) {
         // Attempt reproduction: create complementary genome offspring with mutations
-        // NOTE: spawn_debug_counters are cleared at the start of each frame, so they do NOT
-        // reliably represent current alive count inside process_agents. We write spawns into
-        // a same-sized buffer keyed by agent_id and merge/compact later.
-        let spawn_slot = agent_id;
-        if (spawn_slot < params.max_agents) {
-            // Generate hash for offspring randomization
-            // CRITICAL: Include agent_id to ensure each parent's offspring gets unique mutations
-            let offspring_hash = (hash3 ^ (params.random_seed * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu)) * 1664525u + 1013904223u;
+        let current_count = atomicLoad(&spawn_debug_counters[2]);
+        if (current_count < params.max_agents) {
+            let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
+            if (spawn_index < 2000u) {
+                // Generate hash for offspring randomization
+                // CRITICAL: Include agent_id to ensure each parent's offspring gets unique mutations
+                let offspring_hash = (hash3 ^ (spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu)) * 1664525u + 1013904223u;
 
                 // Create brand new offspring agent (don't copy parent)
                 var offspring: Agent;
@@ -2544,7 +2543,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     offspring.body[bi]._pad = vec2<f32>(0.0);
                 }
 
-            new_agents[spawn_slot] = offspring;
+                new_agents[spawn_index] = offspring;
+            }
         }
         // Reset pairing cycle after reproduction
         pairing_counter = 0u;
@@ -3514,23 +3514,17 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
 // Merge spawned agents into main buffer
 @compute @workgroup_size(64)
 fn merge_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let slot = gid.x;
-    if (slot >= params.max_agents) {
+    let spawn_id = gid.x;
+    let spawn_count = atomicLoad(&spawn_debug_counters[0]);
+
+    if (spawn_id >= spawn_count) {
         return;
     }
 
-    let spawned = new_agents[slot];
-    if (spawned.alive == 0u) {
-        return;
-    }
-
-    // Clear the spawn slot so it can't be merged again next frame.
-    new_agents[slot].alive = 0u;
-
-    // Append to end of compacted alive array using alive counter as running size.
+    // Append to end of compacted alive array using alive counter as running size
     let target_index = atomicAdd(&spawn_debug_counters[2], 1u);
     if (target_index < params.max_agents) {
-        agents_out[target_index] = spawned;
+        agents_out[target_index] = new_agents[spawn_id];
     }
 }
 

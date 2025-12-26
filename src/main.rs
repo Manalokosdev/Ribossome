@@ -4699,8 +4699,7 @@ impl GpuState {
         // Spawn/death buffers
         let new_agents_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("New Agents Buffer"),
-            // Same size as the agent buffers so shaders can write spawns by `agent_id`.
-            size: (std::mem::size_of::<Agent>() * max_agents) as u64,
+            size: (std::mem::size_of::<Agent>() * MAX_SPAWN_REQUESTS) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -7923,7 +7922,7 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
 
                 let init_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
                 cpass.set_pipeline(&self.initialize_dead_pipeline);
@@ -8842,7 +8841,7 @@ impl GpuState {
                 // Merge spawned agents - workgroup_size(64), max 2000 spawns
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_MERGE);
