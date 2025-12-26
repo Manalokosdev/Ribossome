@@ -23,6 +23,8 @@ use winit::{
     window::Window,
 };
 
+mod naming;
+
 fn pack_f32_uniform(values: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * 4);
     for value in values {
@@ -64,16 +66,19 @@ const FUMAROLE_BUFFER_FLOATS: usize = 1 + MAX_FUMAROLES * FUMAROLE_STRIDE_F32;
 const FUMAROLE_BUFFER_BYTES: usize = FUMAROLE_BUFFER_FLOATS * 4;
 
 // Part base-angle override slots.
-// NOTE: Shader currently defines 42 part types, but we reserve 128 slots for future expansion.
-const PART_TYPE_COUNT: usize = 42;
+// NOTE: Shader currently defines 43 part types, but we reserve 128 slots for future expansion.
+const PART_TYPE_COUNT: usize = 43;
 const PART_OVERRIDE_SLOTS: usize = 128;
 const PART_OVERRIDE_VEC4S: usize = (PART_OVERRIDE_SLOTS + 3) / 4; // 32
 const PART_OVERRIDES_CSV_PATH: &str = "config/part_base_angle_overrides.csv";
 
-// Part (amino + organ) property table: 42 parts, each with 6x vec4<f32> entries.
+// Part (amino + organ) property table: 43 parts, each with 6x vec4<f32> entries.
 // This mirrors the AMINO_DATA layout in shaders/shared.wgsl.
 const PART_PROPS_VEC4S_PER_PART: usize = 6;
-const PART_PROPS_OVERRIDE_VEC4S_USED: usize = PART_TYPE_COUNT * PART_PROPS_VEC4S_PER_PART; // 252
+// NOTE: GPU buffer reserves 256 vec4s for part property overrides (matches shaders/shared.wgsl).
+// That fully covers 42 part types * 6 vec4s = 252, plus 4 extra vec4s.
+// Any part/vec4 blocks beyond this fixed-size buffer use shader defaults.
+const PART_PROPS_OVERRIDE_VEC4S_USED: usize = 256;
 // NOTE: Padded to keep bytemuck::Pod/Zeroable derives happy for this array length.
 // Only the first PART_PROPS_OVERRIDE_VEC4S_USED entries are used.
 const PART_PROPS_OVERRIDE_VEC4S: usize = 256;
@@ -83,12 +88,15 @@ const PART_PROPERTIES_JSON_PATH: &str = "config/part_properties.json";
 const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     // 0–19 amino acids
     "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y",
-    // 20–41 organs / specials (keep in sync with shaders/shared.wgsl table comments)
+    // 20–42 organs / specials (keep in sync with shaders/shared.wgsl table comments)
     "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "DISPLACER_A", "ENABLER", "DISPLACER_B",
     "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "VAMPIRE_MOUTH", "AGENT_ALPHA_SENSOR",
     "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
-    "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2",
+    "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2", "ANCHOR",
 ];
+
+const APP_NAME: &str = "Ribossome";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn ui_part_base_angle_overrides(ui: &mut egui::Ui, state: &mut GpuState) {
     ui.label("Overrides are in radians. NaN = use shader default.");
@@ -211,10 +219,24 @@ fn ui_part_properties_editor_popup(ui: &egui::Ui, state: &mut GpuState) {
                     let name = PART_TYPE_NAMES[part_idx];
                     let header = format!("{:02} {}", part_idx, name);
                     ui.collapsing(header, |ui| {
+                        let base = part_idx * PART_PROPS_VEC4S_PER_PART;
+                        let vec4s_available = if base >= PART_PROPS_OVERRIDE_VEC4S {
+                            0
+                        } else {
+                            (PART_PROPS_OVERRIDE_VEC4S - base).min(PART_PROPS_VEC4S_PER_PART)
+                        };
+
+                        if vec4s_available < PART_PROPS_VEC4S_PER_PART {
+                            ui.label(format!(
+                                "Note: only the first {} of {} vec4 blocks are editable (override buffer limit).",
+                                vec4s_available, PART_PROPS_VEC4S_PER_PART
+                            ));
+                        }
+
                         ui.horizontal(|ui| {
                             if ui.button("Reset this part to defaults").clicked() {
-                                for v in 0..PART_PROPS_VEC4S_PER_PART {
-                                    let k = part_idx * PART_PROPS_VEC4S_PER_PART + v;
+                                for v in 0..vec4s_available {
+                                    let k = base + v;
                                     state.part_props_override[k] = state.part_props_defaults[k];
                                 }
                                 state.part_properties_dirty = true;
@@ -237,22 +259,33 @@ fn ui_part_properties_editor_popup(ui: &egui::Ui, state: &mut GpuState) {
                                 ui.end_row();
 
                                 for v in 0..PART_PROPS_VEC4S_PER_PART {
-                                    let k = part_idx * PART_PROPS_VEC4S_PER_PART + v;
+                                    let k = base + v;
+                                    let in_override_buffer = k < PART_PROPS_OVERRIDE_VEC4S;
                                     for c in 0..4 {
                                         let label = VEC4_LABELS[v][c];
-                                        let def = state.part_props_defaults[k][c];
-                                        let mut val = state.part_props_override[k][c];
-                                        if val.is_nan() {
-                                            val = def;
-                                            state.part_props_override[k][c] = val;
-                                            state.part_properties_dirty = true;
+                                        let def = state
+                                            .part_props_defaults_full
+                                            .get(k)
+                                            .copied()
+                                            .unwrap_or([0.0; 4])[c];
+
+                                        let mut val = def;
+                                        if in_override_buffer {
+                                            val = state.part_props_override[k][c];
+                                            if val.is_nan() {
+                                                val = def;
+                                                state.part_props_override[k][c] = val;
+                                                state.part_properties_dirty = true;
+                                            }
                                         }
 
                                         ui.label(format!("v{}", v));
                                         ui.label(label);
 
-                                        let changed = ui.add(egui::DragValue::new(&mut val).speed(0.01)).changed();
-                                        if changed {
+                                        let changed = ui
+                                            .add_enabled(in_override_buffer, egui::DragValue::new(&mut val).speed(0.01))
+                                            .changed();
+                                        if changed && in_override_buffer {
                                             state.part_props_override[k][c] = val;
                                             state.part_properties_dirty = true;
                                         }
@@ -379,6 +412,9 @@ fn load_part_properties_json(
         }
         for v in 0..PART_PROPS_VEC4S_PER_PART {
             let dst = part.index * PART_PROPS_VEC4S_PER_PART + v;
+            if dst >= PART_PROPS_OVERRIDE_VEC4S {
+                continue;
+            }
             for c in 0..4 {
                 props[dst][c] = part.vec4[v][c].unwrap_or(f32::NAN);
             }
@@ -403,6 +439,11 @@ fn save_part_properties_json(
         let mut vec4 = [[None; 4]; PART_PROPS_VEC4S_PER_PART];
         for v in 0..PART_PROPS_VEC4S_PER_PART {
             let src = i * PART_PROPS_VEC4S_PER_PART + v;
+            if src >= PART_PROPS_OVERRIDE_VEC4S {
+                // This part/vec4 block is not representable in the fixed-size override buffer.
+                // Leave as None so the shader default is used.
+                continue;
+            }
             for c in 0..4 {
                 // Always emit a complete numeric table: if somehow NaN is present,
                 // fall back to the shader default.
@@ -428,10 +469,7 @@ fn save_part_properties_json(
 
 fn parse_shared_wgsl_part_defaults(
     path: &Path,
-) -> anyhow::Result<(
-    [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
-    [u32; PART_TYPE_COUNT],
-)> {
+) -> anyhow::Result<(Vec<[f32; 4]>, [u32; PART_TYPE_COUNT])> {
     let text = fs::read_to_string(path)?;
 
     // --- Parse AMINO_DATA vec4 list ---
@@ -445,38 +483,42 @@ fn parse_shared_wgsl_part_defaults(
     let amino_block = &amino_slice[..amino_end];
 
     let mut vec4s: Vec<[f32; 4]> = Vec::with_capacity(PART_PROPS_OVERRIDE_VEC4S_USED);
-    let mut i = 0usize;
+    let mut scan = 0usize;
     let pat = "vec4<f32>(";
-    while let Some(pos) = amino_block[i..].find(pat) {
-        let start = i + pos + pat.len();
+    while let Some(pos) = amino_block[scan..].find(pat) {
+        let start = scan + pos + pat.len();
         let rest = &amino_block[start..];
         let close = rest
             .find(')')
             .ok_or_else(|| anyhow::anyhow!("Unclosed vec4<f32>(...) in AMINO_DATA"))?;
         let inside = &rest[..close];
-        let mut vals = [0.0f32; 4];
-        let parts: Vec<&str> = inside.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+
+        let parts: Vec<&str> = inside
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         if parts.len() != 4 {
-            return Err(anyhow::anyhow!("Expected 4 floats in vec4, got {}: {inside}", parts.len()));
+            return Err(anyhow::anyhow!(
+                "Expected 4 floats in vec4, got {}: {inside}",
+                parts.len()
+            ));
         }
+
+        let mut vals = [0.0f32; 4];
         for k in 0..4 {
             vals[k] = parts[k].parse::<f32>()?;
         }
         vec4s.push(vals);
-        i = start + close + 1;
+        scan = start + close + 1;
     }
 
-    if vec4s.len() != PART_PROPS_OVERRIDE_VEC4S_USED {
+    if vec4s.len() < PART_PROPS_OVERRIDE_VEC4S_USED {
         return Err(anyhow::anyhow!(
-            "Expected {} vec4 entries in AMINO_DATA, found {}",
+            "Expected at least {} vec4 entries in AMINO_DATA, found {}",
             PART_PROPS_OVERRIDE_VEC4S_USED,
             vec4s.len()
         ));
-    }
-
-    let mut props = [[0.0f32; 4]; PART_PROPS_OVERRIDE_VEC4S];
-    for (idx, v) in vec4s.into_iter().enumerate() {
-        props[idx] = v;
     }
 
     // --- Parse AMINO_FLAGS list ---
@@ -548,14 +590,10 @@ fn parse_shared_wgsl_part_defaults(
         let mut acc: u32 = 0;
         for term in e.split('|') {
             let t = term.trim().trim_end_matches(',');
-            if t.is_empty() {
-                continue;
-            }
-            if t == "0u" || t == "0" {
+            if t.is_empty() || t == "0u" || t == "0" {
                 continue;
             }
             if let Some(sh_pos) = t.find("<<") {
-                // Accept forms like (1u<<9) or 1u<<9
                 let left = t[..sh_pos].trim().trim_start_matches('(').trim();
                 let right = t[sh_pos + 2..]
                     .trim()
@@ -591,12 +629,13 @@ fn parse_shared_wgsl_part_defaults(
             flags_list.len()
         ));
     }
+
     let mut flags = [0u32; PART_TYPE_COUNT];
     for (idx, v) in flags_list.into_iter().enumerate() {
         flags[idx] = v;
     }
 
-    Ok((props, flags))
+    Ok((vec4s, flags))
 }
 
 // Selected-agent CPU readback: use a small ring buffer so we can request ~60Hz updates
@@ -778,7 +817,13 @@ const TS_EGUI_PASS_START: u32 = 55;
 const TS_EGUI_PASS_END: u32 = 56;
 const TS_EGUI_ENC_END: u32 = 57;
 
-const GPU_TS_COUNT: u32 = 58;
+// --- No-fluid fallback breakdown (measured inside the fluid compute pass)
+// These are written only when `!fluid_enabled`, otherwise they will print as -1.
+const TS_NOFLUID_AFTER_DYE_DIFFUSE: u32 = 58;
+const TS_NOFLUID_AFTER_DYE_COPYBACK: u32 = 59;
+const TS_NOFLUID_AFTER_TRAIL_COMMIT: u32 = 60;
+
+const GPU_TS_COUNT: u32 = 61;
 
 const FRAME_PROFILER_READBACK_SLOTS: usize = 2;
 
@@ -900,6 +945,7 @@ impl BenchCollector {
 struct FrameProfiler {
     enabled: bool,
     gpu_supported: bool,
+    gpu_active: bool,
     capture_this_frame: bool,
     sample_interval: std::time::Duration,
     next_sample_time: std::time::Instant,
@@ -923,20 +969,33 @@ struct FrameProfiler {
     bench: Option<BenchCollector>,
     bench_verbose: bool,
     bench_exit_requested: bool,
+
+    // Optional: auto-exit after printing N GPU timestamp captures.
+    profile_max_captures: Option<u64>,
+    profile_captures_done: u64,
 }
 
 impl FrameProfiler {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let bench_enabled = std::env::var("ALSIM_BENCH")
-            .map(|value| value != "0")
-            .unwrap_or(false);
+        // Bench mode is intentionally disabled.
+        // (It has historically caused driver/device issues on some setups.)
+        let bench_enabled = false;
 
-        let mut enabled = std::env::var("ALSIM_PROFILE")
+        // Kept for backwards compatibility with existing env-var setups,
+        // but bench is disabled so this is unused.
+        let bench_gpu = false;
+
+        let profile_enabled = std::env::var("ALSIM_PROFILE")
             .map(|value| value != "0")
             .unwrap_or(false);
-        if bench_enabled {
-            enabled = true;
-        }
+        let enabled = profile_enabled || bench_enabled;
+
+        // IMPORTANT: GPU timestamp queries are disabled by default because they are causing
+        // device-loss crashes on some machines/drivers.
+        // To force-enable (at your own risk): ALSIM_GPU_TIMESTAMPS=1
+        let allow_gpu_timestamps = std::env::var("ALSIM_GPU_TIMESTAMPS")
+            .map(|value| value != "0")
+            .unwrap_or(false);
 
         // Default behavior is "blocking" (accurate per-sample printing but can stall the CPU).
         // Set ALSIM_PROFILE_WAIT=0 to avoid stalling; prints may be skipped until data is ready.
@@ -956,33 +1015,34 @@ impl FrameProfiler {
             sample_interval = std::time::Duration::from_millis(0);
         }
 
-        let bench_verbose = std::env::var("ALSIM_BENCH_VERBOSE")
-            .map(|v| v != "0")
-            .unwrap_or(false);
+        let bench_verbose = false;
 
-        let bench = if bench_enabled {
-            let warmup = std::env::var("ALSIM_BENCH_WARMUP")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(50);
-            let samples = std::env::var("ALSIM_BENCH_SAMPLES")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(300);
-            Some(BenchCollector::new(warmup, samples))
-        } else {
-            None
-        };
+        let bench = None;
 
-        // We use CommandEncoder::write_timestamp, which requires TIMESTAMP_QUERY_INSIDE_ENCODERS.
-        let gpu_supported = device.features().contains(
-            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-        );
+        let profile_max_captures = std::env::var("ALSIM_PROFILE_CAPTURES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&n| n > 0);
+
+        // We use both:
+        // - CommandEncoder::write_timestamp (requires TIMESTAMP_QUERY_INSIDE_ENCODERS)
+        // - (Compute/Render)Pass::write_timestamp (requires TIMESTAMP_QUERY_INSIDE_PASSES)
+        // Only enable GPU profiling when the device supports the full set *and* we allow it.
+        let gpu_supported = allow_gpu_timestamps
+            && device.features().contains(
+                wgpu::Features::TIMESTAMP_QUERY
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+            );
+
+        let gpu_active = enabled
+            && gpu_supported
+            && (profile_enabled || (bench_enabled && bench_gpu));
 
         let timestamp_period_ns = queue.get_timestamp_period() as f64;
         let now = std::time::Instant::now();
 
-        let (query_set, query_resolve, query_readback) = if enabled && gpu_supported {
+        let (query_set, query_resolve, query_readback) = if gpu_active {
             let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("FrameProfiler QuerySet"),
                 ty: wgpu::QueryType::Timestamp,
@@ -1023,6 +1083,7 @@ impl FrameProfiler {
         Self {
             enabled,
             gpu_supported,
+            gpu_active,
             capture_this_frame: false,
             sample_interval,
             next_sample_time: now + sample_interval,
@@ -1043,6 +1104,9 @@ impl FrameProfiler {
             bench,
             bench_verbose,
             bench_exit_requested: false,
+
+            profile_max_captures,
+            profile_captures_done: 0,
         }
     }
 
@@ -1055,7 +1119,7 @@ impl FrameProfiler {
     }
 
     fn begin_frame(&mut self) {
-        if !self.enabled || !self.gpu_supported {
+        if !self.enabled {
             self.capture_this_frame = false;
             return;
         }
@@ -1133,7 +1197,40 @@ impl FrameProfiler {
     }
 
     fn readback_and_print(&mut self, device: &wgpu::Device) {
-        if !self.enabled || !self.gpu_supported {
+        if !self.enabled {
+            return;
+        }
+
+        // CPU-only profiling mode (safe; no timestamp queries).
+        if !self.gpu_active {
+            if !self.capture_this_frame {
+                return;
+            }
+            println!(
+                "[perf] cpu(ms): update={:7.2} render={:7.2} egui={:7.2}",
+                self.last_cpu_update_ms,
+                self.last_cpu_render_ms,
+                self.last_cpu_egui_ms
+            );
+            self.capture_this_frame = false;
+            self.next_sample_time = std::time::Instant::now() + self.sample_interval;
+            return;
+        }
+
+        // Bench CPU-only path: if GPU profiling is disabled (either unsupported or opt-out),
+        // still advance the bench counter and request exit when done.
+        if let Some(bench) = &mut self.bench {
+            if !self.gpu_active {
+                let done = bench.on_sample(None, None, None, None, self.last_cpu_update_ms);
+                if done {
+                    bench.print_summary_once();
+                    self.bench_exit_requested = true;
+                }
+                return;
+            }
+        }
+
+        if !self.gpu_supported {
             return;
         }
         if self.query_readback.is_empty() {
@@ -1258,6 +1355,11 @@ impl FrameProfiler {
         let gpu_fluid_fumarole_dye = dt_ms(TS_FLUID_AFTER_ADVECT_DYE, TS_FLUID_AFTER_FUMAROLE_DYE);
         let gpu_fluid_advect_trail = dt_ms(TS_FLUID_AFTER_FUMAROLE_DYE, TS_FLUID_AFTER_ADVECT_TRAIL);
 
+        // No-fluid fallback micro-breakdown (only meaningful when `!fluid_enabled`).
+        let gpu_nofluid_dye_diffuse = dt_ms(TS_FLUID_PASS_START, TS_NOFLUID_AFTER_DYE_DIFFUSE);
+        let gpu_nofluid_dye_copyback = dt_ms(TS_NOFLUID_AFTER_DYE_DIFFUSE, TS_NOFLUID_AFTER_DYE_COPYBACK);
+        let gpu_nofluid_trail_commit = dt_ms(TS_NOFLUID_AFTER_DYE_COPYBACK, TS_NOFLUID_AFTER_TRAIL_COMMIT);
+
         let gpu_post = dt_ms(TS_POST_PASS_START, TS_UPDATE_AFTER_POST);
         let gpu_post_compact = dt_ms(TS_POST_PASS_START, TS_POST_AFTER_COMPACT);
         let gpu_post_cpu_spawn = dt_ms(TS_POST_AFTER_COMPACT, TS_POST_AFTER_CPU_SPAWN);
@@ -1349,6 +1451,13 @@ impl FrameProfiler {
         );
 
         println!(
+            "[perf] nofluid(ms): dyeDiffuse={:>6.2} dyeCopy={:>6.2} trailCommit={:>6.2}",
+            gpu_nofluid_dye_diffuse.unwrap_or(-1.0),
+            gpu_nofluid_dye_copyback.unwrap_or(-1.0),
+            gpu_nofluid_trail_commit.unwrap_or(-1.0),
+        );
+
+        println!(
             "[perf] post-kernels(ms): compact={:>6.2} cpuSpawn={:>6.2} merge={:>6.2} initDead={:>6.2} finalize={:>6.2} pausedProc={:>6.2} renderAgents={:>6.2} inspClr={:>6.2} inspDraw={:>6.2} inspOn={}",
             gpu_post_compact.unwrap_or(-1.0),
             gpu_post_cpu_spawn.unwrap_or(-1.0),
@@ -1370,6 +1479,14 @@ impl FrameProfiler {
             gpu_egui.unwrap_or(-1.0),
             gpu_egui_pass.unwrap_or(-1.0),
         );
+
+        // If requested, auto-exit after N captured samples.
+        if let Some(max) = self.profile_max_captures {
+            self.profile_captures_done = self.profile_captures_done.saturating_add(1);
+            if self.profile_captures_done >= max {
+                self.bench_exit_requested = true;
+            }
+        }
     }
 }
 
@@ -1725,7 +1842,7 @@ fn genome_base_color(base: u8) -> egui::Color32 {
 
 #[inline]
 fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
-    // 0–19: amino acids; 20–41: organs (colors mirror shaders/shared.wgsl AMINO_DATA[*][2].xyz)
+    // 0–19: amino acids; 20–42: organs (colors mirror shaders/shared.wgsl AMINO_DATA[*][2].xyz)
     if (base_type as usize) < AMINO_COLORS.len() {
         return AMINO_COLORS[base_type as usize];
     }
@@ -1753,6 +1870,7 @@ fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
         39 => [0.3, 1.0, 0.4],
         40 => [0.9, 0.2, 0.3],
         41 => [1.0, 0.3, 0.4],
+        42 => [0.6, 0.0, 0.8],
         _ => DEFAULT_PART_COLOR,
     }
 }
@@ -1807,6 +1925,7 @@ fn part_base_name(base_type: u32) -> &'static str {
         39 => "Alpha Magnitude Sensor (var)",
         40 => "Beta Magnitude Sensor",
         41 => "Beta Magnitude Sensor (var)",
+        42 => "Anchor",
         _ => "Organ",
     }
 }
@@ -2272,7 +2391,9 @@ fn string_to_genome(s: &str) -> anyhow::Result<[u32; GENOME_WORDS]> {
 fn save_agent_via_dialog(agent: &Agent) -> anyhow::Result<()> {
     let genome_ascii = genome_packed_to_ascii_words(&agent.genome_packed, agent.genome_offset, agent.gene_length);
     let genome_str = genome_to_string(&genome_ascii);
-    let default_name = format!("agent_{}.json", &genome_str[0..8.min(genome_str.len())]);
+    let agent_name = naming::agent::generate_agent_name(agent);
+    let genome_prefix = &genome_str[0..8.min(genome_str.len())];
+    let default_name = format!("agent_{}_g{}_{}.json", agent_name, agent.generation, genome_prefix);
 
     if let Some(path) = rfd::FileDialog::new()
         .add_filter("Agent", &["json"])
@@ -2399,6 +2520,7 @@ struct SimParams {
     window_height: f32,
     alpha_blur: f32,
     beta_blur: f32,
+    gamma_diffuse: f32,
     gamma_blur: f32,
     gamma_shift: f32,
     alpha_slope_bias: f32,
@@ -2425,6 +2547,7 @@ struct SimParams {
     agent_repulsion_strength: f32,
     gamma_strength: f32,
     prop_wash_strength: f32,
+    prop_wash_strength_fluid: f32,
     gamma_vis_min: f32,
     gamma_vis_max: f32,
     draw_enabled: u32,
@@ -2611,6 +2734,7 @@ struct DifficultySettings {
 // Default functions for backward compatibility with old settings files
 fn default_alpha_fluid_convolution() -> f32 { 0.05 }
 fn default_beta_fluid_convolution() -> f32 { 0.05 }
+fn default_fluid_enabled() -> bool { true }
 fn default_fluid_slope_force_scale() -> f32 { 100.0 }
 fn default_fluid_obstacle_strength() -> f32 { 200.0 }
 fn default_fluid_ooze_still_rate() -> f32 { 1.0 }
@@ -2620,6 +2744,7 @@ fn default_fluid_ooze_rate_gamma_unset() -> f32 { -1.0 }
 fn default_fluid_ooze_fade_rate_gamma_unset() -> f32 { -1.0 }
 fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
+fn default_prop_wash_strength_fluid_unset() -> f32 { -1.0 }
 fn default_dye_alpha_color() -> [f32; 3] { [0.0, 1.0, 0.0] }
 fn default_dye_beta_color() -> [f32; 3] { [1.0, 0.0, 0.0] }
 fn default_dye_precipitation() -> f32 { 1.0 }
@@ -2696,6 +2821,7 @@ struct SimulationSettings {
     slope_interval: u32,
     alpha_blur: f32,
     beta_blur: f32,
+    gamma_diffuse: f32,
     #[serde(default = "default_alpha_fluid_convolution")]
     alpha_fluid_convolution: f32,
     #[serde(default = "default_beta_fluid_convolution")]
@@ -2721,6 +2847,8 @@ struct SimulationSettings {
     amino_maintenance_cost: f32,
     pairing_cost: f32,
     prop_wash_strength: f32,
+    #[serde(default = "default_prop_wash_strength_fluid_unset")]
+    prop_wash_strength_fluid: f32,
     repulsion_strength: f32,
     agent_repulsion_strength: f32,
     limit_fps: bool,
@@ -2729,22 +2857,26 @@ struct SimulationSettings {
     gamma_debug_visual: bool,
     slope_debug_visual: bool,
     rain_debug_visual: bool,  // Visualization mode for rain patterns
+    #[serde(default = "default_fluid_enabled")]
+    fluid_enabled: bool,      // Enable/disable the fluid simulation + coupling
     fluid_show: bool,         // Show fluid simulation overlay
     fluid_dt: f32,            // Fluid solver dt (used by stable-fluids steps)
     fluid_decay: f32,         // Fluid decay/dissipation factor
     fluid_jacobi_iters: u32,  // Pressure solve iterations
     fluid_vorticity: f32,     // Vorticity confinement strength (0 disables)
     fluid_viscosity: f32,     // Viscosity (nu) for velocity diffusion (0 disables)
-    fluid_ooze_rate: f32,      // Chem↔dye transfer (ALPHA): equilibrium speed (0-transfer point)
-    fluid_ooze_fade_rate: f32, // Chem↔dye transfer (ALPHA): max-lift speed (full lift past this)
+    // Lift/sedimentation controls for chem<->dye coupling (shared across alpha/beta/gamma).
+    // NOTE: field names are legacy; see shaders/fluid.wgsl for the current mapping.
+    fluid_ooze_rate: f32,      // lift_min_speed (dye-cells/sec)
+    fluid_ooze_fade_rate: f32, // lift_multiplier (1/(dye-cells/sec))
     #[serde(default = "default_fluid_ooze_rate_beta_unset")]
-    fluid_ooze_rate_beta: f32, // Chem↔dye transfer (BETA): equilibrium speed (0-transfer point)
+    fluid_ooze_rate_beta: f32, // sedimentation_min_speed (dye-cells/sec)
     #[serde(default = "default_fluid_ooze_fade_rate_beta_unset")]
-    fluid_ooze_fade_rate_beta: f32, // Chem↔dye transfer (BETA): max-lift speed (full lift past this)
+    fluid_ooze_fade_rate_beta: f32, // sedimentation_multiplier (1/(dye-cells/sec))
     #[serde(default = "default_fluid_ooze_rate_gamma_unset")]
-    fluid_ooze_rate_gamma: f32, // Gamma lift/deposition: equilibrium speed (0-transfer point)
+    fluid_ooze_rate_gamma: f32, // (unused / legacy)
     #[serde(default = "default_fluid_ooze_fade_rate_gamma_unset")]
-    fluid_ooze_fade_rate_gamma: f32, // Gamma lift/deposition: max-lift speed (full lift past this)
+    fluid_ooze_fade_rate_gamma: f32, // (unused / legacy)
     #[serde(default = "default_fluid_ooze_still_rate")]
     fluid_ooze_still_rate: f32, // Chem→dye baseline ooze in still water (per-second fraction)
     #[serde(default = "default_fluid_dye_escape_rate")]
@@ -2825,6 +2957,7 @@ impl Default for SimulationSettings {
             slope_interval: 1,
             alpha_blur: 0.05,
             beta_blur: 0.05,
+            gamma_diffuse: 0.0,
             // If omitted in older settings files, serde defaults handle it
             alpha_fluid_convolution: 0.05,
             beta_fluid_convolution: 0.05,
@@ -2844,6 +2977,7 @@ impl Default for SimulationSettings {
             amino_maintenance_cost: 0.001,
             pairing_cost: 0.1,
             prop_wash_strength: 1.0,
+            prop_wash_strength_fluid: default_prop_wash_strength_fluid_unset(),
             repulsion_strength: 10.0,
             agent_repulsion_strength: 1.0,
             limit_fps: true,
@@ -2852,19 +2986,20 @@ impl Default for SimulationSettings {
             gamma_debug_visual: false,
             slope_debug_visual: false,
             rain_debug_visual: false,
+            fluid_enabled: true,
             fluid_show: false,  // Fluid simulation overlay disabled by default
             fluid_dt: 0.016,
             fluid_decay: 0.995,
             fluid_jacobi_iters: 31,
             fluid_vorticity: 0.0,
             fluid_viscosity: 0.05,
-            // Speed (in dye-cells/sec) where lift and deposition balance out.
-            fluid_ooze_rate: 0.2,
-            // Speed (in dye-cells/sec) where lift saturates.
-            fluid_ooze_fade_rate: 0.6,
-            // Beta channel uses alpha defaults unless overridden.
-            fluid_ooze_rate_beta: default_fluid_ooze_rate_beta_unset(),
-            fluid_ooze_fade_rate_beta: default_fluid_ooze_fade_rate_beta_unset(),
+            // Lift/sedimentation controls for chem<->dye coupling (shared across alpha/beta/gamma).
+            // Lift: requires minimum speed, then increases with speed.
+            fluid_ooze_rate: 0.2,      // lift_min_speed (dye-cells/sec)
+            fluid_ooze_fade_rate: 2.5, // lift_multiplier (1/(dye-cells/sec))
+            // Sedimentation: requires low speed, then increases as speed decreases.
+            fluid_ooze_rate_beta: 0.2,      // sedimentation_min_speed (dye-cells/sec)
+            fluid_ooze_fade_rate_beta: 2.5, // sedimentation_multiplier (1/(dye-cells/sec))
             // Gamma uses alpha defaults unless overridden.
             fluid_ooze_rate_gamma: default_fluid_ooze_rate_gamma_unset(),
             fluid_ooze_fade_rate_gamma: default_fluid_ooze_fade_rate_gamma_unset(),
@@ -2884,7 +3019,7 @@ impl Default for SimulationSettings {
             gamma_hidden: false,
             debug_per_segment: false,
             gamma_vis_min: 0.0,
-            gamma_vis_max: 1.0,
+            gamma_vis_max: 50.0,
             alpha_show: true,
             beta_show: true,
             gamma_show: true,
@@ -3085,6 +3220,8 @@ struct SimulationSnapshot {
     #[serde(default)]
     timestamp: String,
     #[serde(default)]
+    run_name: String,
+    #[serde(default)]
     epoch: u64,
     #[serde(default, deserialize_with = "de_settings_option_lossy")]
     settings: Option<SimulationSettings>,
@@ -3093,7 +3230,7 @@ struct SimulationSnapshot {
 }
 
 impl SimulationSnapshot {
-    fn new(epoch: u64, agents: &[Agent], settings: SimulationSettings) -> Self {
+    fn new(epoch: u64, agents: &[Agent], settings: SimulationSettings, run_name: String) -> Self {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         // agents should already be filtered for alive != 0 by caller
@@ -3119,6 +3256,7 @@ impl SimulationSnapshot {
         Self {
             version: SNAPSHOT_VERSION.to_string(),
             timestamp,
+            run_name,
             epoch,
             settings: Some(settings),
             agents: agent_snapshots,
@@ -3160,6 +3298,7 @@ impl SimulationSettings {
         self.slope_interval = self.slope_interval.clamp(1, 64);
         self.alpha_blur = self.alpha_blur.clamp(0.0, 1.0);
         self.beta_blur = self.beta_blur.clamp(0.0, 1.0);
+        self.gamma_diffuse = self.gamma_diffuse.clamp(0.0, 1.0);
         // Fluid convolution has been removed; keep fields for backward-compat/uniform layout but force them off.
         self.alpha_fluid_convolution = 0.0;
         self.beta_fluid_convolution = 0.0;
@@ -3177,14 +3316,21 @@ impl SimulationSettings {
         self.amino_maintenance_cost = self.amino_maintenance_cost.clamp(0.0, 0.01);
         self.pairing_cost = self.pairing_cost.clamp(0.0, 1.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
+        // Back-compat: older settings files won't have the fluid prop-wash strength.
+        // Use -1 sentinel default to mean "inherit direct wash".
+        if self.prop_wash_strength_fluid < 0.0 {
+            self.prop_wash_strength_fluid = self.prop_wash_strength;
+        }
+        self.prop_wash_strength_fluid = self.prop_wash_strength_fluid.clamp(0.0, 5.0);
         self.repulsion_strength = self.repulsion_strength.clamp(0.0, 100.0);
         self.agent_repulsion_strength = self.agent_repulsion_strength.clamp(0.0, 10.0);
         self.render_interval = self.render_interval.clamp(1, 10_000);
-        self.gamma_vis_min = self.gamma_vis_min.clamp(0.0, 1.0);
-        self.gamma_vis_max = self.gamma_vis_max.clamp(0.0, 1.0);
+        // Gamma is unbounded in simulation; visualization range must allow large values.
+        self.gamma_vis_min = self.gamma_vis_min.clamp(0.0, 100_000.0);
+        self.gamma_vis_max = self.gamma_vis_max.clamp(0.0, 100_000.0);
         if self.gamma_vis_min >= self.gamma_vis_max {
-            self.gamma_vis_max = (self.gamma_vis_min + 0.001).clamp(0.0, 1.0);
-            self.gamma_vis_min = (self.gamma_vis_max - 0.001).clamp(0.0, 1.0);
+            self.gamma_vis_max = (self.gamma_vis_min + 0.001).clamp(0.0, 100_000.0);
+            self.gamma_vis_min = (self.gamma_vis_max - 0.001).clamp(0.0, 100_000.0);
         }
         self.alpha_rain_variation = self.alpha_rain_variation.clamp(0.0, 1.0);
         self.beta_rain_variation = self.beta_rain_variation.clamp(0.0, 1.0);
@@ -3221,11 +3367,11 @@ impl SimulationSettings {
         }
 
         self.fluid_ooze_rate = self.fluid_ooze_rate.clamp(0.0, 100.0);
-        self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 500.0);
+        self.fluid_ooze_fade_rate = self.fluid_ooze_fade_rate.clamp(0.0, 50.0);
         self.fluid_ooze_rate_beta = self.fluid_ooze_rate_beta.clamp(0.0, 100.0);
-        self.fluid_ooze_fade_rate_beta = self.fluid_ooze_fade_rate_beta.clamp(0.0, 500.0);
+        self.fluid_ooze_fade_rate_beta = self.fluid_ooze_fade_rate_beta.clamp(0.0, 50.0);
         self.fluid_ooze_rate_gamma = self.fluid_ooze_rate_gamma.clamp(0.0, 100.0);
-        self.fluid_ooze_fade_rate_gamma = self.fluid_ooze_fade_rate_gamma.clamp(0.0, 500.0);
+        self.fluid_ooze_fade_rate_gamma = self.fluid_ooze_fade_rate_gamma.clamp(0.0, 50.0);
         self.fluid_ooze_still_rate = self.fluid_ooze_still_rate.clamp(0.0, 100.0);
         self.fluid_dye_escape_rate = self.fluid_dye_escape_rate.clamp(0.0, 50.0);
         self.fluid_dye_escape_rate_beta = self.fluid_dye_escape_rate_beta.clamp(0.0, 50.0);
@@ -3332,6 +3478,8 @@ struct GpuState {
 
     // Parsed shader defaults (for UI to show effective values).
     part_props_defaults: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+    // Full parsed shader defaults for UI display (may exceed fixed override buffer).
+    part_props_defaults_full: Vec<[f32; 4]>,
     part_flags_defaults: [u32; PART_TYPE_COUNT],
 
     // UI
@@ -3358,6 +3506,10 @@ struct GpuState {
     fluid_advect_dye_pipeline: wgpu::ComputePipeline,
     fluid_advect_trail_pipeline: wgpu::ComputePipeline,
     fluid_clear_dye_pipeline: wgpu::ComputePipeline,
+
+    // Non-fluid fallback: keep dye/trail layers usable as isotropic diffusion fields.
+    fluid_diffuse_dye_no_fluid_pipeline: wgpu::ComputePipeline,
+    fluid_copy_trail_no_fluid_pipeline: wgpu::ComputePipeline,
 
     // Fluid bind groups
     fluid_bind_group_ab: wgpu::BindGroup,
@@ -3440,6 +3592,18 @@ struct GpuState {
 
     frame_profiler: FrameProfiler,
 
+    // Safe performance measurement mode (does not use timestamp queries).
+    gpu_sync_profile: bool,
+    gpu_sync_profile_interval_frames: u32,
+    gpu_sync_profile_frame_counter: u32,
+    gpu_sync_profile_accum_update_ms: f64,
+    gpu_sync_profile_accum_render_ms: f64,
+
+    // Perf A/B toggles (env-var controlled)
+    perf_skip_trail_prep: bool,
+    perf_skip_nofluid_dye: bool,
+    perf_skip_nofluid_trail: bool,
+
     // Simulation speed control
     render_interval: u32, // Draw every N steps in fast mode
     current_mode: u32,    // 0=VSync 60 FPS, 1=Full Speed, 2=Fast Draw, 3=Slow 25 FPS
@@ -3465,6 +3629,10 @@ struct GpuState {
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
+
+    // Run naming
+    run_seed: u32,
+    run_name: String,
 
     // Mouse dragging state
     is_dragging: bool,
@@ -3500,6 +3668,7 @@ struct GpuState {
     // Environment field controls
     alpha_blur: f32,
     beta_blur: f32,
+    gamma_diffuse: f32,
     alpha_fluid_convolution: f32,
     beta_fluid_convolution: f32,
     gamma_blur: f32,
@@ -3543,6 +3712,7 @@ struct GpuState {
     gamma_debug_visual: bool,
     slope_debug_visual: bool,
     rain_debug_visual: bool,
+    fluid_enabled: bool,
     fluid_show: bool,  // Show fluid simulation overlay
     fluid_dt: f32,
     fluid_decay: f32,
@@ -3570,6 +3740,7 @@ struct GpuState {
     vector_force_x: f32,
     vector_force_y: f32,
     prop_wash_strength: f32,
+    prop_wash_strength_fluid: f32,
     gamma_hidden: bool,
     gamma_vis_min: f32,
     gamma_vis_max: f32,
@@ -3668,6 +3839,7 @@ impl GpuState {
 
         self.alpha_blur = settings.alpha_blur;
         self.beta_blur = settings.beta_blur;
+        self.gamma_diffuse = settings.gamma_diffuse;
         self.alpha_fluid_convolution = settings.alpha_fluid_convolution;
         self.beta_fluid_convolution = settings.beta_fluid_convolution;
         self.fluid_slope_force_scale = settings.fluid_slope_force_scale;
@@ -3694,6 +3866,7 @@ impl GpuState {
         self.amino_maintenance_cost = settings.amino_maintenance_cost;
         self.pairing_cost = settings.pairing_cost;
         self.prop_wash_strength = settings.prop_wash_strength;
+        self.prop_wash_strength_fluid = settings.prop_wash_strength_fluid;
         self.repulsion_strength = settings.repulsion_strength;
         self.agent_repulsion_strength = settings.agent_repulsion_strength;
 
@@ -3705,6 +3878,7 @@ impl GpuState {
         self.slope_debug_visual = settings.slope_debug_visual;
         self.rain_debug_visual = settings.rain_debug_visual;
 
+        self.fluid_enabled = settings.fluid_enabled;
         self.fluid_show = settings.fluid_show;
         self.fluid_dt = settings.fluid_dt;
         self.fluid_decay = settings.fluid_decay;
@@ -3864,7 +4038,34 @@ impl GpuState {
             pass.dispatch_workgroups(workgroups, workgroups, 1);
         }
 
-        self.queue.submit(Some(encoder.finish()));
+        if self.gpu_sync_profile {
+            let gpu_wait_start = std::time::Instant::now();
+            self.queue.submit(Some(encoder.finish()));
+            // Wait for all submitted GPU work to complete; this makes the wall time a rough
+            // proxy for GPU cost of this update submission (stable even when timestamp queries crash).
+            self.device.poll(wgpu::Maintain::Wait);
+
+            let gpu_update_ms = gpu_wait_start.elapsed().as_secs_f64() * 1000.0;
+            self.gpu_sync_profile_accum_update_ms += gpu_update_ms;
+            self.gpu_sync_profile_frame_counter += 1;
+
+            if self.gpu_sync_profile_frame_counter >= self.gpu_sync_profile_interval_frames {
+                let n = self.gpu_sync_profile_frame_counter.max(1) as f64;
+                let avg_update = self.gpu_sync_profile_accum_update_ms / n;
+                println!(
+                    "[gpu-sync] update(ms): avg={:.3} n={} skip(trail_prep={}, nofluid_dye={}, nofluid_trail={})",
+                    avg_update,
+                    self.gpu_sync_profile_frame_counter,
+                    self.perf_skip_trail_prep,
+                    self.perf_skip_nofluid_dye,
+                    self.perf_skip_nofluid_trail,
+                );
+                self.gpu_sync_profile_frame_counter = 0;
+                self.gpu_sync_profile_accum_update_ms = 0.0;
+            }
+        } else {
+            self.queue.submit(Some(encoder.finish()));
+        }
     }
 
     async fn new(window: Arc<Window>) -> Self {
@@ -3978,7 +4179,10 @@ impl GpuState {
         let frame_profiler = FrameProfiler::new(&device, &queue);
 
         // Initialize agents with minimal data - GPU will generate genome and build body
-        let max_agents = 50_000usize; // Increased with 2x world size (4x area): 3.4 KB/agent => ~170 MB per agent buffer
+        // NOTE: With wgpu::Limits::default(), max_storage_buffer_binding_size is typically 128 MiB.
+        // Agent is currently 2192 bytes (see debug_assert above), so per-agent storage buffer capacity is:
+        // floor(128 MiB / 2192) = 61_230 agents. Keep some headroom.
+        let max_agents = 60_000usize; // ~125.4 MiB per agent buffer; A+B ~250.9 MiB; +readback ~125.4 MiB
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
@@ -3991,6 +4195,8 @@ impl GpuState {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
+
+        let run_seed = seed as u32;
 
         // Create GPU agent buffers without pre-filling from CPU memory; we'll clear them via GPU commands next
         let agents_buffer_a = device.create_buffer(&wgpu::BufferDescriptor {
@@ -4300,6 +4506,7 @@ impl GpuState {
             window_height: surface_config.height as f32,
             alpha_blur: 0.05,
             beta_blur: 0.05,
+            gamma_diffuse: 0.0,
             gamma_blur: 0.9995,
             gamma_shift: 0.0,
             alpha_slope_bias: -5.0,
@@ -4324,8 +4531,9 @@ impl GpuState {
             agent_repulsion_strength: 1.0,
             gamma_strength: 10.0 * TERRAIN_FORCE_SCALE,
             prop_wash_strength: 1.0,
+            prop_wash_strength_fluid: 1.0,
             gamma_vis_min: 0.0,
-            gamma_vis_max: 1.0,
+            gamma_vis_max: 50.0,
             draw_enabled: 1,
             gamma_debug: 0,
             gamma_hidden: 0,
@@ -5662,13 +5870,13 @@ impl GpuState {
             0.0,                       // vector_force_y
             0.0,                       // vector_force_power
             0.0,                       // chem_ooze_still_rate
-            0.0,                       // beta chem speed equil
-            0.0,                       // beta chem speed max lift
+            0.0,                       // sedimentation_min_speed
+            0.0,                       // sedimentation_multiplier
             0.0,                       // dye_escape_rate_alpha
             0.0,                       // dye_escape_rate_beta
             1.0,                       // dye_deposit_scale (dye -> chem)
-            0.0,                       // gamma speed equil
-            0.0,                       // gamma speed max lift
+            0.0,                       // (unused / legacy)
+            0.0,                       // (unused / legacy)
             100.0, 0.0, 0.0,           // reserved (slope_steer_rate, _, _)
         ];
         let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
@@ -6096,6 +6304,24 @@ impl GpuState {
             cache: None,
         });
 
+        let fluid_diffuse_dye_no_fluid_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Diffuse Dye (No Fluid)"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "diffuse_dye_no_fluid",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_copy_trail_no_fluid_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Copy Trail (No Fluid)"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "copy_trail_no_fluid",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         let fluid_clear_dye_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Fluid Clear Dye"),
             layout: Some(&fluid_pipeline_layout),
@@ -6213,6 +6439,26 @@ impl GpuState {
         }
         profiler.mark("Settings loaded");
 
+        // Safe profiling/toggling for A/B cost measurements.
+        // These do NOT use GPU timestamp queries (which can be unstable on some drivers).
+        let gpu_sync_profile = std::env::var("ALSIM_GPU_SYNC_PROFILE")
+            .map(|value| value != "0")
+            .unwrap_or(false);
+        let gpu_sync_profile_interval_frames = std::env::var("ALSIM_GPU_SYNC_PROFILE_INTERVAL_FRAMES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(60)
+            .max(1);
+        let perf_skip_trail_prep = std::env::var("ALSIM_SKIP_TRAIL_PREP")
+            .map(|value| value != "0")
+            .unwrap_or(false);
+        let perf_skip_nofluid_dye = std::env::var("ALSIM_SKIP_NOFLUID_DYE")
+            .map(|value| value != "0")
+            .unwrap_or(false);
+        let perf_skip_nofluid_trail = std::env::var("ALSIM_SKIP_NOFLUID_TRAIL")
+            .map(|value| value != "0")
+            .unwrap_or(false);
+
         let mut state = Self {
             device,
             queue,
@@ -6318,6 +6564,17 @@ impl GpuState {
             last_egui_update_time: std::time::Instant::now() - std::time::Duration::from_secs(1),
             cached_egui_primitives: Vec::new(),
             frame_profiler,
+
+            gpu_sync_profile,
+            gpu_sync_profile_interval_frames,
+            gpu_sync_profile_frame_counter: 0,
+            gpu_sync_profile_accum_update_ms: 0.0,
+            gpu_sync_profile_accum_render_ms: 0.0,
+
+            perf_skip_trail_prep,
+            perf_skip_nofluid_dye,
+            perf_skip_nofluid_trail,
+
             render_interval: settings.render_interval,
             current_mode: if settings.limit_fps {
                 if settings.limit_fps_25 { 3 } else { 0 }
@@ -6338,6 +6595,10 @@ impl GpuState {
             last_sample_epoch: 0,
             max_history_points: 5000,
             last_autosave_epoch: 0,
+
+            run_seed,
+            run_name: naming::sim::generate_sim_name(&settings, run_seed, max_agents as u32),
+
             is_dragging: false,
             last_mouse_pos: None,
             selected_agent_index: None,
@@ -6363,6 +6624,7 @@ impl GpuState {
             visual_stride_pixels,
             alpha_blur: settings.alpha_blur,
             beta_blur: settings.beta_blur,
+            gamma_diffuse: settings.gamma_diffuse,
             alpha_fluid_convolution: settings.alpha_fluid_convolution,
             beta_fluid_convolution: settings.beta_fluid_convolution,
             gamma_blur: settings.gamma_blur,
@@ -6402,6 +6664,7 @@ impl GpuState {
             gamma_debug_visual: settings.gamma_debug_visual,
             slope_debug_visual: settings.slope_debug_visual,
             rain_debug_visual: settings.rain_debug_visual,
+            fluid_enabled: settings.fluid_enabled,
             fluid_show: settings.fluid_show,
             fluid_dt: settings.fluid_dt,
             fluid_decay: settings.fluid_decay,
@@ -6453,6 +6716,8 @@ impl GpuState {
             fluid_advect_dye_pipeline,
             fluid_advect_trail_pipeline,
             fluid_clear_dye_pipeline,
+            fluid_diffuse_dye_no_fluid_pipeline,
+            fluid_copy_trail_no_fluid_pipeline,
             fluid_bind_group_ab,
             fluid_bind_group_ba,
             fluid_time: 0.0,
@@ -6460,6 +6725,7 @@ impl GpuState {
             vector_force_x: settings.vector_force_x,
             vector_force_y: settings.vector_force_y,
             prop_wash_strength: settings.prop_wash_strength,
+            prop_wash_strength_fluid: settings.prop_wash_strength_fluid,
             gamma_hidden: settings.gamma_hidden,
             gamma_vis_min: settings.gamma_vis_min,
             gamma_vis_max: settings.gamma_vis_max,
@@ -6506,6 +6772,7 @@ impl GpuState {
             part_flags_override: [f32::NAN; PART_TYPE_COUNT],
             part_properties_dirty: false,
             part_props_defaults: [[0.0; 4]; PART_PROPS_OVERRIDE_VEC4S],
+            part_props_defaults_full: Vec::new(),
             part_flags_defaults: [0u32; PART_TYPE_COUNT],
             show_part_properties_editor: false,
             destroyed: false,
@@ -6532,8 +6799,15 @@ impl GpuState {
 
         // Parse shader defaults for the part property editor.
         match parse_shared_wgsl_part_defaults(Path::new("shaders/shared.wgsl")) {
-            Ok((props, flags)) => {
-                state.part_props_defaults = props;
+            Ok((props_full, flags)) => {
+                state.part_props_defaults_full = props_full;
+                for i in 0..PART_PROPS_OVERRIDE_VEC4S {
+                    state.part_props_defaults[i] = state
+                        .part_props_defaults_full
+                        .get(i)
+                        .copied()
+                        .unwrap_or([0.0; 4]);
+                }
                 state.part_flags_defaults = flags;
 
                 // Prefer a fully-populated numeric table: start overrides from defaults.
@@ -7207,6 +7481,7 @@ impl GpuState {
             slope_interval: self.slope_interval,
             alpha_blur: self.alpha_blur,
             beta_blur: self.beta_blur,
+            gamma_diffuse: self.gamma_diffuse,
             alpha_fluid_convolution: self.alpha_fluid_convolution,
             beta_fluid_convolution: self.beta_fluid_convolution,
             fluid_slope_force_scale: self.fluid_slope_force_scale,
@@ -7231,6 +7506,7 @@ impl GpuState {
             amino_maintenance_cost: self.amino_maintenance_cost,
             pairing_cost: self.pairing_cost,
             prop_wash_strength: self.prop_wash_strength,
+            prop_wash_strength_fluid: self.prop_wash_strength_fluid,
             repulsion_strength: self.repulsion_strength,
             agent_repulsion_strength: self.agent_repulsion_strength,
             limit_fps: self.limit_fps,
@@ -7239,6 +7515,7 @@ impl GpuState {
             gamma_debug_visual: self.gamma_debug_visual,
             slope_debug_visual: self.slope_debug_visual,
             rain_debug_visual: self.rain_debug_visual,
+            fluid_enabled: self.fluid_enabled,
             fluid_show: self.fluid_show,
             fluid_dt: self.fluid_dt,
             fluid_decay: self.fluid_decay,
@@ -7640,7 +7917,11 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
+                // Scan slightly beyond agent_count to avoid dropping newborns when the
+                // CPU-side alive readback lags by a frame, but do NOT scan the full buffer
+                // capacity (that can pick up stale tail slots after snapshot loads).
+                let compact_count = (self.agent_count + 2000).min(self.agent_buffer_capacity as u32);
+                cpass.dispatch_workgroups((compact_count + 63) / 64, 1, 1);
 
                 cpass.set_pipeline(&self.cpu_spawn_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
@@ -7906,6 +8187,7 @@ impl GpuState {
             window_height: self.surface_config.height as f32,
             alpha_blur: self.alpha_blur,
             beta_blur: self.beta_blur,
+            gamma_diffuse: self.gamma_diffuse,
             gamma_blur: self.gamma_blur,
             gamma_shift: self.gamma_shift,
             alpha_slope_bias: self.alpha_slope_bias,
@@ -7938,7 +8220,15 @@ impl GpuState {
             repulsion_strength: self.repulsion_strength,
             agent_repulsion_strength: self.agent_repulsion_strength,
             gamma_strength: self.repulsion_strength * TERRAIN_FORCE_SCALE,
+            // NOTE: prop wash also drives direct chem/gamma displacement in the simulation shader,
+            // so keep it active even when fluids are disabled.
             prop_wash_strength: self.prop_wash_strength,
+            // Fluid wash only affects injection into the fluid solver.
+            prop_wash_strength_fluid: if self.fluid_enabled {
+                self.prop_wash_strength_fluid
+            } else {
+                0.0
+            },
             gamma_vis_min,
             gamma_vis_max,
             // Allow drawing even when paused so camera movement & inspection are visible.
@@ -7999,10 +8289,24 @@ impl GpuState {
             vector_force_y: self.vector_force_y,
             inspector_zoom: self.inspector_zoom,
             agent_trail_decay: self.agent_trail_decay,
+            // Even when the full fluid solver is disabled, we can still use the dye/trail
+            // layers as isotropic diffusion fields; keep the overlay toggle functional.
             fluid_show: if self.fluid_show { 1 } else { 0 },
-            fluid_wind_push_strength: self.fluid_wind_push_strength,
-            alpha_fluid_convolution: self.alpha_fluid_convolution,
-            beta_fluid_convolution: self.beta_fluid_convolution,
+            fluid_wind_push_strength: if self.fluid_enabled {
+                self.fluid_wind_push_strength
+            } else {
+                0.0
+            },
+            alpha_fluid_convolution: if self.fluid_enabled {
+                self.alpha_fluid_convolution
+            } else {
+                0.0
+            },
+            beta_fluid_convolution: if self.fluid_enabled {
+                self.beta_fluid_convolution
+            } else {
+                0.0
+            },
             fluid_slope_force_scale: self.fluid_slope_force_scale,
             fluid_obstacle_strength: self.fluid_obstacle_strength,
             dye_alpha_color_r: self.dye_alpha_color[0],
@@ -8028,7 +8332,7 @@ impl GpuState {
                 self.fluid_decay,          // decay
                 FLUID_GRID_SIZE as f32,    // grid_size (as f32)
                 0.0, 0.0, 0.0, 0.0,        // mouse
-                // splat: x=ALPHA chem speed equil, y=ALPHA chem speed max lift, z=vorticity confinement, w=viscosity
+                // splat: x=lift_min_speed, y=lift_multiplier, z=vorticity confinement, w=viscosity
                 self.fluid_ooze_rate,
                 self.fluid_ooze_fade_rate,
                 self.fluid_vorticity,
@@ -8166,7 +8470,7 @@ impl GpuState {
 
             // Prepare trails every simulation frame (copy/decay + optional blur into trail_grid_inject).
             // The actual advection runs in the fluid pass.
-            if should_run_simulation {
+            if should_run_simulation && !self.perf_skip_trail_prep {
                 let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
                 let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
                 cpass.set_pipeline(&self.diffuse_trails_pipeline);
@@ -8245,10 +8549,12 @@ impl GpuState {
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_POPULATE_SPATIAL);
 
                 // Clear fluid force vectors before agents write to it
-                let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
-                cpass.set_pipeline(&self.clear_fluid_force_vectors_pipeline);
-                cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
-                cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                if self.fluid_enabled {
+                    let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+                    cpass.set_pipeline(&self.clear_fluid_force_vectors_pipeline);
+                    cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+                }
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
@@ -8302,7 +8608,7 @@ impl GpuState {
             self.frame_profiler
                 .write_ts_compute_pass(&mut cpass, TS_FLUID_PASS_START);
 
-            if should_run_simulation {
+            if should_run_simulation && self.fluid_enabled {
                 // Run fluid solver - forces already written by agents to force_vectors
                 // Stable Fluids order: inject_test_force (combines) → add_forces → diffuse → advect → project
                 {
@@ -8451,6 +8757,48 @@ impl GpuState {
                 }
             }
 
+            // Non-fluid fallback: keep dye + trail layers alive as simple diffusion fields.
+            // This preserves signaling/visualization even when the full fluid solver is off.
+            if should_run_simulation && !self.fluid_enabled {
+                let dye_workgroups = (GRID_DIM_U32 + 15) / 16;
+
+                // Diffuse dye once (A->B) then copy back (B->A) so the final stays in dye_a.
+                if !self.perf_skip_nofluid_dye {
+                    cpass.set_pipeline(&self.fluid_diffuse_dye_no_fluid_pipeline);
+                    cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_DIFFUSE);
+
+                    cpass.set_pipeline(&self.fluid_inject_dye_pipeline);
+                    cpass.set_bind_group(0, &self.fluid_bind_group_ba, &[]);
+                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_COPYBACK);
+                } else {
+                    // Keep marker progression stable when skipping.
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_DIFFUSE);
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_COPYBACK);
+                }
+
+                // Commit prepared trails (trail_grid_inject -> trail_grid) without advection.
+                if !self.perf_skip_nofluid_trail {
+                    cpass.set_pipeline(&self.fluid_copy_trail_no_fluid_pipeline);
+                    cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_TRAIL_COMMIT);
+                } else {
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_TRAIL_COMMIT);
+                }
+            }
+
             // End fluid compute pass, start new pass for remaining simulation work
             drop(cpass);
 
@@ -8469,6 +8817,8 @@ impl GpuState {
                 // Compact alive agents - workgroup_size(64)
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_swap, &[]);
+                // Keep this consistent with `compact_agents` in shaders/simulation.wgsl.
+
                 cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
 
                 self.frame_profiler
@@ -8808,7 +9158,7 @@ impl GpuState {
         if elapsed >= 1.0 {
             let fps = self.frame_count as f32 / elapsed;
             self.window
-                .set_title(&format!("Artificial Life Simulator - {:.1} FPS", fps));
+                .set_title(&format!("{} v{} - {:.1} FPS", APP_NAME, APP_VERSION, fps));
             self.frame_count = 0;
             self.last_fps_update = now;
         }
@@ -9038,8 +9388,11 @@ impl GpuState {
                 _ => String::new(),
             };
             self.window.set_title(&format!(
-                "Artificial Life Simulator{} - {:.1} FPS",
-                speed, fps
+                "{} v{}{} - {:.1} FPS",
+                APP_NAME,
+                APP_VERSION,
+                speed,
+                fps
             ));
             self.frame_count = 0;
             self.last_fps_update = now;
@@ -9370,7 +9723,7 @@ impl GpuState {
 
         // Create snapshot from living agents with current settings
         let current_settings = self.current_settings();
-        let snapshot = SimulationSnapshot::new(self.epoch, &living_agents, current_settings);
+        let snapshot = SimulationSnapshot::new(self.epoch, &living_agents, current_settings, self.run_name.clone());
 
         // Save to PNG
         save_simulation_snapshot(path, &alpha_grid, &beta_grid, &gamma_grid, &snapshot)?;
@@ -9417,6 +9770,7 @@ impl GpuState {
 
         // Load snapshot from PNG file
         let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
+        let loaded_run_name = snapshot.run_name.clone();
 
         // Snapshot compatibility gate.
         // - Empty version strings are treated as legacy "1.0".
@@ -9435,6 +9789,17 @@ impl GpuState {
             self.apply_settings(settings);
         } else {
             println!("ΓÜá Loaded snapshot without settings (old format) - using current settings");
+        }
+
+        // Restore run name if present; otherwise generate one for this session.
+        if !loaded_run_name.is_empty() {
+            self.run_name = loaded_run_name;
+        } else {
+            self.run_name = naming::sim::generate_sim_name(
+                &self.current_settings(),
+                self.run_seed,
+                self.agent_buffer_capacity as u32,
+            );
         }
 
         // Upload grids to GPU
@@ -9907,6 +10272,13 @@ impl GpuState {
             .unwrap()
             .as_nanos() as u64;
 
+        self.run_seed = (self.rng_state >> 32) as u32;
+        self.run_name = naming::sim::generate_sim_name(
+            &self.current_settings(),
+            self.run_seed,
+            self.agent_buffer_capacity as u32,
+        );
+
         // Clear and reinitialize GPU buffers using compute shaders
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Reset Encoder"),
@@ -10033,7 +10405,7 @@ fn render_splash_screen(
     queue: &wgpu::Queue,
 ) {
     // Load splash image
-    let splash_img = match image::open("maps/ribossome_splash_screen.png") {
+    let splash_img = match image::open("maps/banner_v0.1.jpeg") {
         Ok(img) => img.to_rgba8(),
         Err(_) => {
             // If image not found, just return
@@ -10316,7 +10688,16 @@ fn save_simulation_snapshot(
     }
     std::fs::rename(&tmp_path, path)?;
 
-    println!("Γ£ô Saved snapshot: {} agents, epoch {}", snapshot.agents.len(), snapshot.epoch);
+    if snapshot.run_name.is_empty() {
+        println!("Γ£ô Saved snapshot: {} agents, epoch {}", snapshot.agents.len(), snapshot.epoch);
+    } else {
+        println!(
+            "Γ£ô Saved snapshot: {} agents, epoch {}, run '{}'",
+            snapshot.agents.len(),
+            snapshot.epoch,
+            snapshot.run_name
+        );
+    }
     Ok(())
 }
 
@@ -10360,8 +10741,22 @@ fn load_simulation_snapshot(
             scrub_json_nulls(&mut value);
             let snapshot: SimulationSnapshot = serde_json::from_value(value)?;
 
-            println!("Γ£ô Loaded snapshot: {} agents, epoch {}, saved {}",
-                snapshot.agents.len(), snapshot.epoch, snapshot.timestamp);
+            if snapshot.run_name.is_empty() {
+                println!(
+                    "Γ£ô Loaded snapshot: {} agents, epoch {}, saved {}",
+                    snapshot.agents.len(),
+                    snapshot.epoch,
+                    snapshot.timestamp
+                );
+            } else {
+                println!(
+                    "Γ£ô Loaded snapshot: {} agents, epoch {}, saved {}, run '{}'",
+                    snapshot.agents.len(),
+                    snapshot.epoch,
+                    snapshot.timestamp,
+                    snapshot.run_name
+                );
+            }
 
             return Ok((alpha_grid, beta_grid, gamma_grid, snapshot));
         }
@@ -10380,7 +10775,7 @@ fn main() {
         event_loop
             .create_window(
                 winit::window::WindowAttributes::default()
-                    .with_title("Loading Ribossome...")
+                    .with_title(format!("{} v{}", APP_NAME, APP_VERSION))
                     .with_inner_size(winit::dpi::LogicalSize::new(1100, 600)), // 800 + 300 for inspector
             )
             .unwrap(),
@@ -10485,7 +10880,7 @@ fn main() {
                 let elapsed = now.duration_since(loading_start).as_secs_f32();
                 let dots = ".".repeat((elapsed * 2.0) as usize % 4);
                 let message = format!("{}{}", loading_messages[current_message_index], dots);
-                window.set_title(&format!("Ribossome - {}", &message));
+                window.set_title(&format!("{} v{} - {}", APP_NAME, APP_VERSION, &message));
                 // Also print to console so messages are visible
                 println!("Loading: {}", &message);
             }
@@ -10508,7 +10903,7 @@ fn main() {
                 }
 
                 state = Some(loaded_state);
-                window.set_title("GPU Artificial Life Simulator");
+                window.set_title(&format!("{} v{}", APP_NAME, APP_VERSION));
                 let _ = window.request_inner_size(winit::dpi::LogicalSize::new(1600, 800));
             }
         }
@@ -11529,6 +11924,13 @@ fn main() {
                                                         ui.label("(controls 3×3 blur strength per update)");
 
                                                         ui.add(
+                                                            egui::Slider::new(&mut state.gamma_diffuse, 0.0..=1.0)
+                                                                .text("Gamma Diffuse")
+                                                                .custom_formatter(|n, _| format!("{:.3}", n)),
+                                                        );
+                                                        ui.label("(controls 3×3 blur strength per update)");
+
+                                                        ui.add(
                                                             egui::Slider::new(&mut state.gamma_shift, 0.0..=1.0)
                                                                 .text("Gamma Shift Strength"),
                                                         );
@@ -11539,44 +11941,28 @@ fn main() {
 
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_ooze_rate, 0.0..=100.0)
-                                                                .text("Chem Speed Equilibrium (Alpha)"),
+                                                                .text("Lift Min Speed"),
                                                         );
 
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.fluid_ooze_fade_rate,
-                                                                0.0..=500.0,
+                                                                0.0..=50.0,
                                                             )
-                                                            .text("Chem Speed Max Lift (Alpha)"),
+                                                            .text("Lift Multiplier"),
                                                         );
 
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_ooze_rate_beta, 0.0..=100.0)
-                                                                .text("Chem Speed Equilibrium (Beta)"),
+                                                                .text("Sedimentation Min Speed"),
                                                         );
 
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.fluid_ooze_fade_rate_beta,
-                                                                0.0..=500.0,
+                                                                0.0..=50.0,
                                                             )
-                                                            .text("Chem Speed Max Lift (Beta)"),
-                                                        );
-
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.fluid_ooze_rate_gamma,
-                                                                0.0..=100.0,
-                                                            )
-                                                            .text("Chem Speed Equilibrium (Gamma)"),
-                                                        );
-
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.fluid_ooze_fade_rate_gamma,
-                                                                0.0..=500.0,
-                                                            )
-                                                            .text("Chem Speed Max Lift (Gamma)"),
+                                                            .text("Sedimentation Multiplier"),
                                                         );
 
                                                         ui.add(
@@ -11819,7 +12205,7 @@ fn main() {
                                                             .add(
                                                                 egui::Slider::new(
                                                                     &mut state.gamma_vis_min,
-                                                                    0.0..=1.0,
+                                                                    0.0..=100_000.0,
                                                                 )
                                                                 .text("Gamma Min"),
                                                             )
@@ -11828,21 +12214,21 @@ fn main() {
                                                             .add(
                                                                 egui::Slider::new(
                                                                     &mut state.gamma_vis_max,
-                                                                    0.0..=1.0,
+                                                                    0.0..=100_000.0,
                                                                 )
                                                                 .text("Gamma Max"),
                                                             )
                                                             .changed();
                                                         if state.gamma_vis_min >= state.gamma_vis_max {
                                                             state.gamma_vis_max =
-                                                                (state.gamma_vis_min + 0.001).min(1.0);
+                                                                (state.gamma_vis_min + 0.001).min(100_000.0);
                                                             state.gamma_vis_min =
                                                                 (state.gamma_vis_max - 0.001).max(0.0);
                                                         } else if min_changed || max_changed {
                                                             state.gamma_vis_min =
-                                                                state.gamma_vis_min.clamp(0.0, 1.0);
+                                                                state.gamma_vis_min.clamp(0.0, 100_000.0);
                                                             state.gamma_vis_max =
-                                                                state.gamma_vis_max.clamp(0.0, 1.0);
+                                                                state.gamma_vis_max.clamp(0.0, 100_000.0);
                                                         }
                                                         ui.label(
                                                             "Slope force scales with the Obstacle / Terrain Force slider.",
@@ -12289,6 +12675,10 @@ fn main() {
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Fluid Configuration");
 
+                                                        ui.horizontal(|ui| {
+                                                            ui.checkbox(&mut state.fluid_enabled, "Enable Fluids");
+                                                        });
+
                                                         ui.separator();
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_dt, 0.001..=0.05)
@@ -12331,11 +12721,23 @@ fn main() {
                                                                 &mut state.prop_wash_strength,
                                                                 0.0..=5.0,
                                                             )
-                                                            .text("Propeller Fluid Displacement")
+                                                            .text("Prop Wash Strength (Direct)")
                                                             .clamping(egui::SliderClamping::Always),
                                                         )
                                                         .on_hover_text(
-                                                            "Global multiplier for how strongly propellers inject/drag the fluid field (higher = stronger wash).",
+                                                            "Global multiplier for the *direct* propeller/displacer wash (chem/gamma displacement), independent of the fluid solver.",
+                                                        );
+
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.prop_wash_strength_fluid,
+                                                                0.0..=5.0,
+                                                            )
+                                                            .text("Prop Wash Strength (Fluid)")
+                                                            .clamping(egui::SliderClamping::Always),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Global multiplier for how strongly propellers/displacers inject forces into the fluid solver. Only has effect when fluids are enabled.",
                                                         );
 
                                                         ui.separator();
@@ -12512,6 +12914,15 @@ fn main() {
                                                     .inner_margin(egui::Margin::same(8.0));
 
                                                 frame.show(ui, |ui| {
+
+                                                ui.label(format!(
+                                                    "{} (gen {}, {} parts)",
+                                                    naming::agent::generate_agent_name(agent),
+                                                    agent.generation,
+                                                    (agent.body_count as usize).min(MAX_BODY_PARTS)
+                                                ));
+
+                                                ui.add_space(6.0);
 
                                                 // Energy bar
                                                 ui.vertical(|ui| {
@@ -12828,7 +13239,7 @@ fn main() {
                                     // Open file dialog
                                     if let Some(path) = rfd::FileDialog::new()
                                         .add_filter("PNG Image", &["png"])
-                                        .set_file_name(&format!("ribossome_epoch_{}.png", gpu_state.epoch))
+                                        .set_file_name(&format!("{}_epoch_{}.png", gpu_state.run_name, gpu_state.epoch))
                                         .save_file()
                                     {
                                         match gpu_state.save_snapshot_to_file(&path) {
@@ -13002,7 +13413,7 @@ fn main() {
                                                         .add(
                                                             egui::Slider::new(
                                                                 &mut state.gamma_vis_min,
-                                                                0.0..=1.0,
+                                                                0.0..=100_000.0,
                                                             )
                                                             .text("Gamma Min"),
                                                         )
@@ -13011,21 +13422,21 @@ fn main() {
                                                         .add(
                                                             egui::Slider::new(
                                                                 &mut state.gamma_vis_max,
-                                                                0.0..=1.0,
+                                                                0.0..=100_000.0,
                                                             )
                                                             .text("Gamma Max"),
                                                         )
                                                         .changed();
                                                     if state.gamma_vis_min >= state.gamma_vis_max {
                                                         state.gamma_vis_max =
-                                                            (state.gamma_vis_min + 0.001).min(1.0);
+                                                            (state.gamma_vis_min + 0.001).min(100_000.0);
                                                         state.gamma_vis_min =
                                                             (state.gamma_vis_max - 0.001).max(0.0);
                                                     } else if min_changed || max_changed {
                                                         state.gamma_vis_min =
-                                                            state.gamma_vis_min.clamp(0.0, 1.0);
+                                                            state.gamma_vis_min.clamp(0.0, 100_000.0);
                                                         state.gamma_vis_max =
-                                                            state.gamma_vis_max.clamp(0.0, 1.0);
+                                                            state.gamma_vis_max.clamp(0.0, 100_000.0);
                                                     }
 
                                             ui.collapsing("Compositing", |ui| {

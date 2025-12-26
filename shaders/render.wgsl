@@ -365,6 +365,29 @@ fn render_body_part_ctx(
         draw_asterisk_ctx(world_pos, star_size, vec4<f32>(orange_color, 0.9), ctx);
     }
 
+    // Anchor organ (type 42): purple hollow circle when inactive; filled when active.
+    if (base_type == 42u) {
+        let size = max(get_part_visual_size(part.part_type) * 1.2, 6.0);
+        let is_active = part._pad.y > 0.5;
+        let purple = vec3<f32>(0.6, 0.0, 0.8);
+        let blended = mix(purple, agent_color, params.agent_color_blend * 0.3);
+
+        if (is_active) {
+            draw_filled_circle_ctx(world_pos, size, vec4<f32>(blended, 0.9), ctx);
+        }
+
+        let outline_thickness = max(size * 0.25, 1.0);
+        let segments = 24u;
+        var prev_outline = world_pos + vec2<f32>(size, 0.0);
+        for (var s = 1u; s <= segments; s++) {
+            let t = f32(s) / f32(segments);
+            let ang = t * 6.28318530718;
+            let p = world_pos + vec2<f32>(cos(ang) * size, sin(ang) * size);
+            draw_thick_line_ctx(prev_outline, p, outline_thickness, vec4<f32>(blended, 0.95), ctx);
+            prev_outline = p;
+        }
+    }
+
     // 9. ORGAN: Alpha/Beta Sensors - visual marker scaled by sensing radius
     if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor) {
         // Extract organ parameters to calculate actual sensor radius

@@ -3,6 +3,21 @@
 
 // Helper: add a force into the low-res fluid force grid using bilinear splatting.
 // This reduces axis-aligned artifacts vs. writing into a single nearest cell.
+fn atomic_add_f32(idx: u32, v: f32) {
+    // CAS loop: atomic add for f32 stored as u32 bits.
+    // NOTE: naga currently disallows passing storage pointers into functions,
+    // so we address the global buffer by index here.
+    loop {
+        let old_bits = atomicLoad(&fluid_forces[idx]);
+        let old_val = bitcast<f32>(old_bits);
+        let new_bits = bitcast<u32>(old_val + v);
+        let res = atomicCompareExchangeWeak(&fluid_forces[idx], old_bits, new_bits);
+        if (res.exchanged) {
+            break;
+        }
+    }
+}
+
 fn add_fluid_force_splat(pos_world: vec2<f32>, f: vec2<f32>) {
     if (pos_world.x < 0.0 || pos_world.x >= f32(SIM_SIZE) || pos_world.y < 0.0 || pos_world.y >= f32(SIM_SIZE)) {
         return;
@@ -42,10 +57,20 @@ fn add_fluid_force_splat(pos_world: vec2<f32>, f: vec2<f32>) {
     let idx01 = u32(iy1) * FLUID_GRID_SIZE + u32(ix0);
     let idx11 = u32(iy1) * FLUID_GRID_SIZE + u32(ix1);
 
-    fluid_forces[idx00] = fluid_forces[idx00] + f * w00;
-    fluid_forces[idx10] = fluid_forces[idx10] + f * w10;
-    fluid_forces[idx01] = fluid_forces[idx01] + f * w01;
-    fluid_forces[idx11] = fluid_forces[idx11] + f * w11;
+    // Atomic accumulate into interleaved (x,y) entries per cell.
+    let base00 = idx00 * 2u;
+    let base10 = idx10 * 2u;
+    let base01 = idx01 * 2u;
+    let base11 = idx11 * 2u;
+
+    atomic_add_f32(base00 + 0u, f.x * w00);
+    atomic_add_f32(base00 + 1u, f.y * w00);
+    atomic_add_f32(base10 + 0u, f.x * w10);
+    atomic_add_f32(base10 + 1u, f.y * w10);
+    atomic_add_f32(base01 + 0u, f.x * w01);
+    atomic_add_f32(base01 + 1u, f.y * w01);
+    atomic_add_f32(base11 + 0u, f.x * w11);
+    atomic_add_f32(base11 + 1u, f.y * w11);
 }
 
 fn is_bad_f32(x: f32) -> bool {
@@ -346,8 +371,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let normalized_rel_speed = min(rel_speed / VEL_MAX, 1.0);
                             let speed_multiplier = clamp(1.0 - normalized_rel_speed, 0.0, 1.0);
 
-                            // Absorb up to 50% of victim's energy (reduced by mouth speed and disabler)
-                            let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier;
+                            // Absorb up to 50% of victim's energy (reduced by mouth speed and disabler).
+                            // Poison Resistance (type 29) also protects against vampire drain, using the
+                            // same per-organ 50% multiplier as poison damage.
+                            let vampire_protection = pow(0.5, f32(agents_out[closest_victim_id].poison_resistant_count));
+                            let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier * vampire_protection;
 
                             // Victim loses 2x the absorbed energy.
                             let energy_damage = absorbed_energy * 2.0;
@@ -1263,10 +1291,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        // Apply decay to non-sensor signals
-        // Sensors are direct sources, condensers output directly without accumulation
-        if (!amino_props.is_alpha_sensor && !amino_props.is_trail_energy_sensor) { new_alpha *= 0.99; }
-        if (!amino_props.is_beta_sensor && !amino_props.is_trail_energy_sensor) { new_beta *= 0.99; }
+        // Apply signal decay (requested): global decay for all parts (amino acids + organs).
+        new_alpha *= 0.997;
+        new_beta *= 0.997;
 
         // Smooth internal signal changes to prevent sudden oscillations (75% new, 25% old)
         let update_rate = 0.75;
@@ -1281,8 +1308,37 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ====== PHYSICS CALCULATIONS ======
     // Agent already centered at local (0,0) after morphology re-centering
     let center_of_mass = vec2<f32>(0.0);
-    let total_mass = agents_out[agent_id].total_mass; // Already calculated during morphology
+    // total_mass was calculated during morphology, but Anchor (type 42) can temporarily
+    // increase effective mass when active.
+    var total_mass = agents_out[agent_id].total_mass;
     let morphology_origin = agents_out[agent_id].morphology_origin;
+
+    // Anchor mass multiplier when active (stored in part._pad.y as 0/1).
+    let ANCHOR_MASS_MULT = 100.0;
+    var anchor_mass_extra = 0.0;
+    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+        let part_out = agents_out[agent_id].body[i];
+        let base_type_out = get_base_part_type(part_out.part_type);
+        if (base_type_out == 42u && part_out._pad.y > 0.5) {
+            let props = get_amino_acid_properties(base_type_out);
+            let base_mass = max(props.mass, 0.01);
+            anchor_mass_extra += base_mass * (ANCHOR_MASS_MULT - 1.0);
+        }
+    }
+    total_mass = max(total_mass + anchor_mass_extra, 0.05);
+    agents_out[agent_id].total_mass = total_mass;
+
+    // Anchor (type 42): if any anchor was active last frame, freeze the whole agent.
+    // Read from agents_in to avoid same-frame ordering dependence.
+    var anchor_active_prev = false;
+    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+        let part_in = agents_in[agent_id].body[i];
+        let base_type_in = get_base_part_type(part_in.part_type);
+        if (base_type_in == 42u && part_in._pad.y > 0.5) {
+            anchor_active_prev = true;
+            break;
+        }
+    }
 
     let drag_coefficient = total_mass * 0.5;
 
@@ -1358,7 +1414,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let offset_from_com = segment_midpoint - center_of_mass;
 
         // Moment of inertia (rotation-invariant; can be computed in local space)
-        let part_mass = max(amino_props.mass, 0.01);
+        let anchor_active = (base_type == 42u && part._pad.y > 0.5);
+        let base_part_mass = max(amino_props.mass, 0.01);
+        let part_mass = select(base_part_mass, base_part_mass * ANCHOR_MASS_MULT, anchor_active);
         moment_of_inertia += part_mass * dot(offset_from_com, offset_from_com);
         let r_com = apply_agent_rotation(offset_from_com, agent_rot);
         let rotated_midpoint = apply_agent_rotation(segment_midpoint, agent_rot);
@@ -1367,21 +1425,26 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part_weight = part_mass / total_mass;
 
         // Slope force per amino acid
-        var slope_gradient = read_gamma_slope(grid_index(world_pos));
-        // Preserve historical behavior: add global vector force at usage site.
-        if (params.vector_force_power > 0.0) {
-            let gravity_vector = vec2<f32>(
-                params.vector_force_x * params.vector_force_power,
-                params.vector_force_y * params.vector_force_power
-            );
-            slope_gradient += gravity_vector;
+        // Anchor (type 42): when active, ignore slope/global-vector contribution so
+        // the mass multiplier doesn't turn slope into extreme lateral sliding.
+        if (!anchor_active) {
+            var slope_gradient = read_gamma_slope(grid_index(world_pos));
+            // Preserve historical behavior: add global vector force at usage site.
+            if (params.vector_force_power > 0.0) {
+                let gravity_vector = vec2<f32>(
+                    params.vector_force_x * params.vector_force_power,
+                    params.vector_force_y * params.vector_force_power
+                );
+                slope_gradient += gravity_vector;
+            }
+            let slope_force = -slope_gradient * params.gamma_strength * part_mass;
+            force += slope_force;
+            torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
         }
-        let slope_force = -slope_gradient * params.gamma_strength * part_mass;
-        force += slope_force;
-        torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
 
         // Fluid force per amino acid (apply at the same point as slope force)
-        if (params.fluid_wind_push_strength != 0.0) {
+        // Anchor (type 42): when active, ignore wind push so it doesn't drift.
+        if (!anchor_active && params.fluid_wind_push_strength != 0.0) {
             // Default body parts (amino acids + organs) to coupling=1.0 unless explicitly overridden.
             let wind_coupling = select(
                 amino_props.fluid_wind_coupling,
@@ -1395,7 +1458,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Fluid velocity is in fluid-cell units; convert to world-units per simulation tick.
                     let v = sample_fluid_velocity_bilinear(world_pos);
                     let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
-                    let v_frame = v * (cell_to_world);
+                    // NOTE: fluid velocity is in (fluid-cells / second). Our agent integrator uses
+                    // per-tick deltas, so multiply by params.dt to convert seconds -> tick.
+                    let v_frame = v * (cell_to_world * params.dt);
 
                     // Overdamped: choose force so resulting velocity contribution ~ v_frame scaled.
                     let wind_force = v_frame * (wind_coupling * part_weight * params.fluid_wind_push_strength) * drag_coefficient;
@@ -1412,7 +1477,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Propeller force - check if this amino acid provides thrust
     // Propellers only work if agent has enough energy to cover their consumption cost
-    if (amino_props.is_propeller && agent_energy_cur >= amino_props.energy_consumption) {
+    if (PROPELLERS_ENABLED && amino_props.is_propeller && agent_energy_cur >= amino_props.energy_consumption) {
             // Determine local segment axis using neighbour part to make thrust perpendicular to actual segment, not radial.
             var segment_dir = vec2<f32>(0.0);
             if (i > 0u) {
@@ -1449,10 +1514,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     gy = clamp(gy, 0, i32(GRID_SIZE) - 1);
 
                     let center_idx = u32(gy) * GRID_SIZE + u32(gx);
-                    let distance = clamp(prop_strength * 2.0, 1.0, 5.0);
+                    // Throw distance in cells for the direct (fluidless) prop wash.
+                    // Increased range to make jets move material farther.
+                    let distance = clamp(prop_strength * 4.0, 1.0, 10.0);
                     let target_world = clamped_pos + prop_dir * distance * grid_scale;
-                    let target_gx = clamp(i32(round(target_world.x / grid_scale)), 0, i32(GRID_SIZE) - 1);
-                    let target_gy = clamp(i32(round(target_world.y / grid_scale)), 0, i32(GRID_SIZE) - 1);
+                    // IMPORTANT: keep mapping consistent with center cell selection.
+                    // Using round() here creates a systematic half-cell (+0.5,+0.5) bias -> diagonal (45°) artifacts.
+                    let target_gx = clamp(i32(target_world.x / grid_scale), 0, i32(GRID_SIZE) - 1);
+                    let target_gy = clamp(i32(target_world.y / grid_scale), 0, i32(GRID_SIZE) - 1);
                     let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
 
                     if (target_idx != center_idx) {
@@ -1468,7 +1537,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             // Capacities adjusted for 0..1 range
                             let alpha_capacity = max(0.0, 1.0 - target_alpha);
                             let beta_capacity = max(0.0, 1.0 - target_beta);
-                            let gamma_capacity = max(0.0, 1.0 - target_gamma);
+                            let gamma_capacity = max(0.0, 10.0 - target_gamma);
 
                             let gamma_transfer = min(min(center_gamma, transfer_amount), gamma_capacity);
                             let alpha_transfer = min(min(center_alpha, transfer_amount), alpha_capacity);
@@ -1519,7 +1588,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // INJECT PROPELLER FORCE DIRECTLY INTO FLUID FORCES BUFFER
                 // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
-                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength, 0.0);
+                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength_fluid, 0.0);
                 add_fluid_force_splat(world_pos, scaled_force);
             }
         }
@@ -1555,8 +1624,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // Displacer "chem sweep": move a fraction of local chem (alpha/beta)
                 // along the bipolar axis.
-                // This provides a *direct* displacer effect even when fluids are disabled
-                // (in that case prop_wash_strength is forced to 0 from the UI).
+                    // This provides a *direct* displacer effect even when fluids are disabled.
                 {
                     let clamped_pos = clamp_position(world_pos);
                     let grid_scale = f32(SIM_SIZE) / f32(GRID_SIZE);
@@ -1570,8 +1638,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     var center_gamma = max(read_gamma_height(center_idx), 0.0);
 
                     let base_seed = hash(agent_id * 747796405u + i * 2891336453u + params.random_seed * 196613u);
-                    let dist_plus = 1 + (hash(base_seed ^ 0xA3C59ACBu) % 3u);  // 1..3
-                    let dist_minus = 1 + (hash(base_seed ^ 0x1B56C4E9u) % 3u); // 1..3
+                    // Throw distance in cells for the direct (fluidless) displacer sweep.
+                    // Increased range to make displacers move material farther.
+                    let dist_plus = 1 + (hash(base_seed ^ 0xA3C59ACBu) % 6u);  // 1..6
+                    let dist_minus = 1 + (hash(base_seed ^ 0x1B56C4E9u) % 6u); // 1..6
 
                     // When fluids are enabled, keep the previous strong sweep (25% total).
                     // When fluids are disabled, use a smaller sweep that still depends on
@@ -1587,8 +1657,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // +dir transfer
                     {
                         let target_world = clamped_pos + dir * (f32(dist_plus) * grid_scale);
-                        let target_gx = clamp(i32(round(target_world.x / grid_scale)), 0, i32(GRID_SIZE) - 1);
-                        let target_gy = clamp(i32(round(target_world.y / grid_scale)), 0, i32(GRID_SIZE) - 1);
+                        let target_gx = clamp(i32(target_world.x / grid_scale), 0, i32(GRID_SIZE) - 1);
+                        let target_gy = clamp(i32(target_world.y / grid_scale), 0, i32(GRID_SIZE) - 1);
                         let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
 
                         if (target_idx != center_idx) {
@@ -1622,8 +1692,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // -dir transfer
                     {
                         let target_world = clamped_pos - dir * (f32(dist_minus) * grid_scale);
-                        let target_gx = clamp(i32(round(target_world.x / grid_scale)), 0, i32(GRID_SIZE) - 1);
-                        let target_gy = clamp(i32(round(target_world.y / grid_scale)), 0, i32(GRID_SIZE) - 1);
+                        let target_gx = clamp(i32(target_world.x / grid_scale), 0, i32(GRID_SIZE) - 1);
+                        let target_gy = clamp(i32(target_world.y / grid_scale), 0, i32(GRID_SIZE) - 1);
                         let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
 
                         if (target_idx != center_idx) {
@@ -1674,7 +1744,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let p_minus = world_pos - dir * offset_world;
 
                     let f = dir * displacer_strength;
-                    let force_scale = FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength, 0.0);
+                    let force_scale = FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength_fluid, 0.0);
 
                     // Inject +f at +offset and -f at -offset -> net force = 0.
                     add_fluid_force_splat(p_plus, (-f * force_scale));
@@ -1708,6 +1778,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mass_smoothing = clamp(1.0 - (total_mass * 2.5), 0.1, 0.95);
     agent_vel = mix(agent_vel, new_velocity, mass_smoothing);
 
+    if (anchor_active_prev) {
+        agent_vel = vec2<f32>(0.0);
+    }
+
     let v_len = length(agent_vel);
     if (v_len > VEL_MAX) {
         agent_vel = agent_vel * (VEL_MAX / v_len);
@@ -1727,11 +1801,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let com_world = agent_pos;
         if (com_world.x >= 0.0 && com_world.x < f32(SIM_SIZE) && com_world.y >= 0.0 && com_world.y < f32(SIM_SIZE)) {
             let curl = sample_fluid_curl(com_world);
-            angular_velocity += curl * params.fluid_wind_push_strength * WIND_CURL_ANGVEL_SCALE;
+            // Curl is in ~1/sec; convert to per-tick delta with params.dt.
+            angular_velocity += curl * params.fluid_wind_push_strength * WIND_CURL_ANGVEL_SCALE * params.dt;
         }
     }
     angular_velocity = angular_velocity * ANGULAR_BLEND;
     angular_velocity = clamp(angular_velocity, -ANGVEL_MAX, ANGVEL_MAX);
+
+    if (anchor_active_prev) {
+        angular_velocity = 0.0;
+    }
 
     // Update rotation
     if (!DISABLE_GLOBAL_ROTATION) {
@@ -1778,6 +1857,21 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // This includes amino acids and organs (mouths, etc.).
         local_alpha += chem_grid[idx].x;
         local_beta += chem_grid[idx].y;
+
+        // Anchor organ (type 42): signal-thresholded latch state.
+        // - L-promoter anchors (LW/LY): use alpha signal (param bit 7 = 0)
+        // - P-promoter anchors (PW/PY): use beta signal (param bit 7 = 1)
+        if (base_type == 42u) {
+            let organ_param = get_organ_param(part.part_type);
+            let is_beta_anchor = (organ_param & 128u) != 0u;
+            let signal = select(part.alpha_signal, part.beta_signal, is_beta_anchor);
+
+            // Requested behavior: purely sign-based.
+            // Active iff signal is positive; inactive if signal is 0 or negative.
+            let now_active = signal > 0.0;
+
+            agents_out[agent_id].body[i]._pad.y = select(0.0, 1.0, now_active);
+        }
 
         // Calculate actual mouth speed for mouth organs (distance moved since last frame)
         // Only non-vampire mouths need to track previous position for speed-based absorption
@@ -1959,7 +2053,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
             }
-        } else if (props.is_propeller) {
+        } else if (PROPELLERS_ENABLED && props.is_propeller) {
             // Propellers: base cost (always paid) + activity cost (linear with thrust)
             // Since thrust already scales quadratically with amp, cost should scale linearly with thrust
             let base_thrust = props.thrust_force * 3.0; // Max thrust with amp=1
@@ -2147,10 +2241,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (pairing_counter >= gene_length && gene_length > 0u) {
         // Attempt reproduction: create complementary genome offspring with mutations
-        let current_count = atomicLoad(&spawn_debug_counters[2]);
-        if (current_count < params.max_agents) {
-            let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
-            if (spawn_index < 2000u) {
+        // IMPORTANT: Only reset the pairing cycle when an offspring is actually materialized.
+        // Otherwise agents can get stuck in a loop where they reach full pairing, "give birth" to
+        // a zero-energy newborn (or fail to allocate a spawn slot), and immediately restart pairing.
+        //
+        // New rule: offspring receives 50% of parent's *current* energy.
+        // If the parent ends the pairing cycle at (or below) ~0 energy, spawning would create a
+        // newborn that dies immediately next frame (agent.energy <= 0), which looks like "no baby".
+        let inherited_energy = agent_energy_cur * 0.5;
+        if (inherited_energy > 0.0) {
+            let current_count = atomicLoad(&spawn_debug_counters[2]);
+            if (current_count < params.max_agents) {
+                let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
+                if (spawn_index < 2000u) {
                 // Generate hash for offspring randomization
                 // CRITICAL: Include agent_id to ensure each parent's offspring gets unique mutations
                 let offspring_hash = (hash3 ^ (spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu)) * 1664525u + 1013904223u;
@@ -2430,9 +2533,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
 
-                // New rule: offspring always receives 50% of parent's current energy.
+                // Offspring receives 50% of parent's current energy.
                 // Pairing costs are NOT passed to the offspring.
-                let inherited_energy = agent_energy_cur * 0.5;
                 offspring.energy = inherited_energy;
                 agent_energy_cur -= inherited_energy;
 
@@ -2450,10 +2552,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
 
                 new_agents[spawn_index] = offspring;
+                // Reset pairing cycle only after a successful spawn write.
+                pairing_counter = 0u;
+                }
             }
         }
-        // Reset pairing cycle after reproduction
-        pairing_counter = 0u;
     }
     agents_out[agent_id].pairing_counter = pairing_counter;
 
@@ -2557,6 +2660,7 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Fluid-directed convolution uses alpha_fluid_convolution/beta_fluid_convolution.
     let alpha_diffuse_strength = clamp(params.alpha_blur, 0.0, 1.0);
     let beta_diffuse_strength = clamp(params.beta_blur, 0.0, 1.0);
+    let gamma_diffuse_strength = clamp(params.gamma_diffuse, 0.0, 1.0);
     let alpha_conv_strength = clamp(params.alpha_fluid_convolution, 0.0, 1.0);
     let beta_conv_strength = clamp(params.beta_fluid_convolution, 0.0, 1.0);
     let gamma_strength = clamp(params.gamma_shift, 0.0, 1.0);
@@ -2568,6 +2672,7 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // the fluid-directed convolution on top.
     var alpha_sum = 0.0;
     var beta_sum = 0.0;
+    var gamma_sum = 0.0;
     for (var i = 0u; i < 9u; i++) {
         let dx = i32(i % 3u) - 1;
         let dy = i32(i / 3u) - 1;
@@ -2576,14 +2681,17 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
         let nidx = u32(ny_i) * GRID_SIZE + u32(nx_i);
         alpha_sum += chem_grid[nidx].x;
         beta_sum += chem_grid[nidx].y;
+        gamma_sum += read_gamma_height(nidx);
     }
 
     let alpha_avg = alpha_sum / 9.0;
     let beta_avg = beta_sum / 9.0;
+    let gamma_avg = gamma_sum / 9.0;
 
     // Apply blur factor (0 = no blur/keep current, 1 = full blur)
     let alpha_iso = mix(current_alpha, alpha_avg, alpha_diffuse_strength);
     let beta_iso = mix(current_beta, beta_avg, beta_diffuse_strength);
+    let gamma_iso = mix(current_gamma, gamma_avg, gamma_diffuse_strength);
 
     // Slope-based flux shift (mass-conserving advection along slopes).
     let slope_here = read_gamma_slope(idx);
@@ -2691,8 +2799,8 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Persistence applies as decay to alpha/beta.
     var final_alpha = clamp(alpha_base * persistence, 0.0, 1.0);
     var final_beta = clamp(beta_base * persistence, 0.0, 1.0);
-    // Gamma: no fluid-directed shift.
-    var final_gamma = max(current_gamma, 0.0);
+    // Gamma: classic diffusion only (separate from Env Persistence).
+    var final_gamma = max(gamma_iso, 0.0);
 
     // Stochastic rain - randomly add food/poison droplets (saturated drops)
     // Use position and random seed to generate unique random values per cell
@@ -3579,7 +3687,14 @@ fn initialize_dead_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn compact_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
 
-    if (agent_id >= params.agent_count) {
+    // IMPORTANT:
+    // Compact must cover a bit beyond `params.agent_count` to avoid dropping newborns
+    // when CPU-side `agent_count` readback lags by a frame.
+    // However, scanning the full `params.max_agents` would also pick up stale/garbage tail
+    // slots (e.g. after loading a snapshot with fewer agents), which can cause runaway
+    // "ghost" agents and continuous reproduction.
+    let scan_limit = min(params.agent_count + 2000u, params.max_agents);
+    if (agent_id >= scan_limit) {
         return;
     }
 
@@ -3641,7 +3756,7 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
         let prev = chem_grid[idx];
         chem_grid[idx] = vec2<f32>(prev.x, output_value);
     } else if (mode == 3u) {
-        gamma_grid[idx] = output_value;
+        write_gamma_height(idx, output_value);
     }
 }
 
