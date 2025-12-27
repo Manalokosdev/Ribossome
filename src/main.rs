@@ -1842,7 +1842,7 @@ fn genome_base_color(base: u8) -> egui::Color32 {
 
 #[inline]
 fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
-    // 0–19: amino acids; 20–42: organs (colors mirror shaders/shared.wgsl AMINO_DATA[*][2].xyz)
+    // 0–19: amino acids; 20–43: organs (colors mirror shaders/shared.wgsl AMINO_DATA[*][2].xyz)
     if (base_type as usize) < AMINO_COLORS.len() {
         return AMINO_COLORS[base_type as usize];
     }
@@ -1871,6 +1871,7 @@ fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
         40 => [0.9, 0.2, 0.3],
         41 => [1.0, 0.3, 0.4],
         42 => [0.6, 0.0, 0.8],
+        43 => [0.6, 0.3, 0.1],   // radiation protection (brown)
         _ => DEFAULT_PART_COLOR,
     }
 }
@@ -1926,6 +1927,7 @@ fn part_base_name(base_type: u32) -> &'static str {
         40 => "Beta Magnitude Sensor",
         41 => "Beta Magnitude Sensor (var)",
         42 => "Anchor",
+        43 => "Radiation Protection",
         _ => "Organ",
     }
 }
@@ -2498,6 +2500,13 @@ struct SpawnRequest {
     genome_override_offset: u32,
     genome_override_packed: [u32; GENOME_PACKED_WORDS],
     _pad_genome: [u32; 2],
+}
+
+#[derive(Copy, Clone)]
+struct SpawnerGenomeOverride {
+    len: u32,
+    offset: u32,
+    packed: [u32; GENOME_PACKED_WORDS],
 }
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -3573,6 +3582,12 @@ struct GpuState {
     cpu_spawn_queue: Vec<SpawnRequest>,
     spawn_request_count: u32,
     pending_spawn_upload: bool,
+
+    // Click-to-place spawner (loaded agent genome override)
+    spawner_armed: bool,
+    spawner_energy: f32,
+    spawner_override: Option<SpawnerGenomeOverride>,
+    spawner_last_world_pos: Option<[f32; 2]>,
     spawn_probability: f32,
     death_probability: f32,
     auto_replenish: bool,
@@ -6545,6 +6560,11 @@ impl GpuState {
             cpu_spawn_queue: Vec::new(),
             spawn_request_count: 0,
             pending_spawn_upload: false,
+
+            spawner_armed: false,
+            spawner_energy: 10.0,
+            spawner_override: None,
+            spawner_last_world_pos: None,
             spawn_probability: settings.spawn_probability,
             death_probability: settings.death_probability,
             auto_replenish: settings.auto_replenish,
@@ -6907,6 +6927,74 @@ impl GpuState {
 
         self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
         self.pending_spawn_upload = true;
+        self.window.request_redraw();
+    }
+
+    fn screen_to_world(&self, screen_pos: [f32; 2]) -> [f32; 2] {
+        // Screen coords to normalized coords (0..1)
+        let norm_x = screen_pos[0] / self.surface_config.width as f32;
+        let norm_y = screen_pos[1] / self.surface_config.height as f32;
+
+        // Account for aspect ratio when projecting into world space
+        let aspect = if self.surface_config.width > 0 {
+            self.surface_config.height as f32 / self.surface_config.width as f32
+        } else {
+            1.0
+        };
+        let half_view_x = SIM_SIZE / (2.0 * self.camera_zoom);
+        let half_view_y = half_view_x * aspect;
+
+        let mut world_x = self.camera_pan[0] + (norm_x - 0.5) * 2.0 * half_view_x;
+        let mut world_y = self.camera_pan[1] - (norm_y - 0.5) * 2.0 * half_view_y; // Y inverted
+
+        // Wrap to world bounds
+        world_x = world_x.rem_euclid(SIM_SIZE);
+        world_y = world_y.rem_euclid(SIM_SIZE);
+
+        [world_x, world_y]
+    }
+
+    fn spawner_spawn_at_world_pos(&mut self, mut world_pos: [f32; 2]) {
+        let Some(override_data) = self.spawner_override else {
+            return;
+        };
+
+        // (0,0) is treated by the shader as a sentinel for "random position".
+        // Nudge slightly so the user can still spawn near origin.
+        if world_pos[0] == 0.0 && world_pos[1] == 0.0 {
+            world_pos = [0.001, 0.001];
+        }
+
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(6364136223846793005u64)
+            .wrapping_add(1442695040888963407u64);
+        let seed = (self.rng_state >> 32) as u32;
+
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(6364136223846793005u64)
+            .wrapping_add(1442695040888963407u64);
+        let genome_seed = (self.rng_state >> 32) as u32;
+
+        let request = SpawnRequest {
+            seed,
+            genome_seed,
+            flags: 1, // Bit 0 = use genome_override
+            _pad_seed: 0,
+            position: world_pos,
+            energy: self.spawner_energy,
+            rotation: 0.0, // 0 = random rotation in shader
+            genome_override_len: override_data.len,
+            genome_override_offset: override_data.offset,
+            genome_override_packed: override_data.packed,
+            _pad_genome: [0u32; 2],
+        };
+
+        self.cpu_spawn_queue.push(request);
+        self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
+        self.pending_spawn_upload = true;
+        self.spawner_last_world_pos = Some(world_pos);
         self.window.request_redraw();
     }
 
@@ -7854,13 +7942,21 @@ impl GpuState {
             return;
         }
 
+        // Clamp the requested spawn count to what we can actually upload/process in this call.
+        // This prevents dispatching `process_cpu_spawns` with a larger count than the number of
+        // requests uploaded into `spawn_requests_buffer` (which would cause stale requests to be
+        // re-processed) and prevents draining more requests than were processed.
+        let spawn_count = cpu_spawn_count
+            .min(MAX_SPAWN_REQUESTS as u32)
+            .min(self.cpu_spawn_queue.len() as u32);
+
         // The spawn/merge/compact shaders use `params.cpu_spawn_count`, `params.agent_count`, and
         // `params.max_agents` for bounds checks. During snapshot load this path can run before
         // `update()` has written a fresh params buffer, which would result in 0 spawns.
         {
             let mut params = self.sim_params_cpu;
             params.max_agents = self.agent_buffer_capacity as u32;
-            params.cpu_spawn_count = cpu_spawn_count;
+            params.cpu_spawn_count = spawn_count;
             params.agent_count = self.agent_count;
             self.sim_params_cpu = params;
             self.queue
@@ -7873,24 +7969,20 @@ impl GpuState {
                 label: Some("Paused Spawn Encoder"),
             });
 
-        if cpu_spawn_count > 0 {
+        if spawn_count > 0 {
             encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
 
             // Upload spawn requests for this batch so GPU has per-request seeds/data
             // Limit to the count actually being processed (capped at 2000 elsewhere)
-            let upload_len = (cpu_spawn_count as usize)
-                .min(self.cpu_spawn_queue.len())
-                .min(2000);
-            if upload_len > 0 {
-                let slice = &self.cpu_spawn_queue[..upload_len];
-                self.queue.write_buffer(
-                    &self.spawn_requests_buffer,
-                    0,
-                    bytemuck::cast_slice(slice),
-                );
-                // After upload we no longer need to treat this as pending
-                self.pending_spawn_upload = false;
-            }
+            let upload_len = spawn_count as usize;
+            let slice = &self.cpu_spawn_queue[..upload_len];
+            self.queue.write_buffer(
+                &self.spawn_requests_buffer,
+                0,
+                bytemuck::cast_slice(slice),
+            );
+            // After upload we no longer need to treat this as pending
+            self.pending_spawn_upload = false;
 
             // Spawn-only path can run while paused and skips the normal A->B process pass.
             // That means the "current" agent data lives in the ping-pong-selected input buffer
@@ -7918,7 +8010,7 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.cpu_spawn_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups((cpu_spawn_count + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((spawn_count + 63) / 64, 1, 1);
 
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
@@ -7937,7 +8029,7 @@ impl GpuState {
             // Ensure agents are materialized in buffer A for snapshot/save and for subsequent
             // snapshot-load batches.
             if !wrote_to_a_directly {
-                let expected_alive = (self.agent_count + cpu_spawn_count + 2000) // +2000 for GPU spawns
+                let expected_alive = (self.agent_count + spawn_count + 2000) // +2000 for GPU spawns
                     .min(self.agent_buffer_capacity as u32);
                 let bytes = (expected_alive as u64) * (std::mem::size_of::<Agent>() as u64);
                 if bytes > 0 {
@@ -7966,8 +8058,8 @@ impl GpuState {
         self.process_completed_alive_readbacks();
 
         // Clear the processed spawn requests from the queue
-        if cpu_spawn_count > 0 {
-            let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue.len());
+        if spawn_count > 0 {
+            let drain_count = (spawn_count as usize).min(self.cpu_spawn_queue.len());
             self.cpu_spawn_queue.drain(0..drain_count);
             self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
             if self.cpu_spawn_queue.is_empty() {
@@ -9520,26 +9612,7 @@ impl GpuState {
     }
 
     fn select_agent_at_screen_pos(&mut self, screen_pos: [f32; 2]) {
-        // Convert screen coordinates to world coordinates
-        // Screen coords to normalized coords (0..1)
-        let norm_x = screen_pos[0] / self.surface_config.width as f32;
-        let norm_y = screen_pos[1] / self.surface_config.height as f32;
-
-        // Account for aspect ratio when projecting into world space
-        let aspect = if self.surface_config.width > 0 {
-            self.surface_config.height as f32 / self.surface_config.width as f32
-        } else {
-            1.0
-        };
-        let half_view_x = SIM_SIZE / (2.0 * self.camera_zoom);
-        let half_view_y = half_view_x * aspect;
-
-        let mut world_x = self.camera_pan[0] + (norm_x - 0.5) * 2.0 * half_view_x;
-        let mut world_y = self.camera_pan[1] - (norm_y - 0.5) * 2.0 * half_view_y; // Y inverted
-
-        // Wrap to world bounds
-        world_x = world_x.rem_euclid(SIM_SIZE);
-        world_y = world_y.rem_euclid(SIM_SIZE);
+        let [world_x, world_y] = self.screen_to_world(screen_pos);
 
         // Read back agents from GPU
         let current_buffer = if self.ping_pong {
@@ -11022,9 +11095,14 @@ fn main() {
                                 } else if button == winit::event::MouseButton::Left
                                     && button_state == ElementState::Pressed
                                 {
-                                    // Left click - select agent for debug panel
                                     if let Some(mouse_pos) = state.last_mouse_pos {
-                                        state.select_agent_at_screen_pos(mouse_pos);
+                                        if state.spawner_armed && state.spawner_override.is_some() {
+                                            let world_pos = state.screen_to_world(mouse_pos);
+                                            state.spawner_spawn_at_world_pos(world_pos);
+                                        } else {
+                                            // Left click - select agent for debug panel
+                                            state.select_agent_at_screen_pos(mouse_pos);
+                                        }
                                     }
                                 }
                             }
@@ -11766,6 +11844,55 @@ fn main() {
                                                                 }
                                                             }
                                                         });
+
+                                                        ui.separator();
+                                                        ui.heading("Spawner");
+                                                        ui.label(format!(
+                                                            "Loaded agent: {}",
+                                                            if state.spawner_override.is_some() { "Yes" } else { "No" }
+                                                        ));
+
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button("Load Agent For Spawner...").clicked() {
+                                                                match load_agent_via_dialog() {
+                                                                    Ok(genome) => {
+                                                                        let (
+                                                                            genome_override_len,
+                                                                            genome_override_offset,
+                                                                            genome_override_packed,
+                                                                        ) = genome_pack_ascii_words(&genome);
+
+                                                                        state.spawner_override = Some(
+                                                                            SpawnerGenomeOverride {
+                                                                                len: genome_override_len,
+                                                                                offset: genome_override_offset,
+                                                                                packed: genome_override_packed,
+                                                                            },
+                                                                        );
+                                                                    }
+                                                                    Err(err) => {
+                                                                        eprintln!("Load canceled or failed: {err:?}");
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            ui.checkbox(
+                                                                &mut state.spawner_armed,
+                                                                "Armed (click to spawn)",
+                                                            );
+                                                        });
+
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.spawner_energy, 0.0..=1000.0)
+                                                                .text("Spawn energy"),
+                                                        );
+
+                                                        if let Some(pos) = state.spawner_last_world_pos {
+                                                            ui.label(format!(
+                                                                "Last spawn: ({:.1}, {:.1})",
+                                                                pos[0], pos[1]
+                                                            ));
+                                                        }
 
                                                         ui.separator();
                                                         ui.heading("Reproduction & Selection");
@@ -12899,6 +13026,13 @@ fn main() {
 
                                     // Inspector overlay - energy and pairing bars (always visible when agent selected)
                                     if let Some(agent) = &state.selected_agent_data {
+                                        let radiation_protection_count: u32 = agent
+                                            .body
+                                            .iter()
+                                            .take((agent.body_count as usize).min(MAX_BODY_PARTS))
+                                            .filter(|part| part.base_type() == 43)
+                                            .count() as u32;
+
                                         let screen_width = state.surface_config.width as f32;
                                         let inspector_x = screen_width - 300.0;
 
@@ -12924,6 +13058,18 @@ fn main() {
                                                     naming::agent::generate_agent_name(agent),
                                                     agent.generation,
                                                     (agent.body_count as usize).min(MAX_BODY_PARTS)
+                                                ));
+
+                                                ui.label(format!("Age: {}", agent.age));
+
+                                                ui.label(format!(
+                                                    "Radiation protection: {}",
+                                                    radiation_protection_count
+                                                ));
+
+                                                ui.label(format!(
+                                                    "Poison protection: {}",
+                                                    agent.poison_resistant_count
                                                 ));
 
                                                 ui.add_space(6.0);
