@@ -8080,6 +8080,10 @@ impl GpuState {
                 label: Some("Paused Spawn Encoder"),
             });
 
+        // Always clear both spawn_debug_counters[0] and [2] so compact/merge never uses stale
+        // offsets when this path is used (manual spawns / snapshot loads / paused spawns).
+        encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
+
         if cpu_spawn_count > 0 {
             encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
 
