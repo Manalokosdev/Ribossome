@@ -3433,6 +3433,9 @@ struct GpuState {
     init_dead_params_buffer: wgpu::Buffer, // 16-byte uniform: [max_agents, 0, 0, 0]
     init_dead_writer_bind_group_layout: wgpu::BindGroupLayout,
     init_dead_writer_bind_group: wgpu::BindGroup,
+    reproduction_bind_group_a: wgpu::BindGroup,
+    reproduction_bind_group_b: wgpu::BindGroup,
+    reproduction_pipeline: wgpu::ComputePipeline,
     alive_readbacks: [Arc<wgpu::Buffer>; 2],
     alive_readback_pending: [Arc<Mutex<Option<Result<u32, ()>>>>; 2],
     alive_readback_inflight: [bool; 2],
@@ -4781,17 +4784,31 @@ impl GpuState {
         // Load main shader (concatenate shared + render + simulation modules, composite is separate)
         // Inject compile-time constants here so resolution changes are centralized in Rust.
         let shader_source = format!(
-            "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}",
+            "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}",
             FLUID_GRID_SIZE,
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
-            include_str!("../shaders/simulation.wgsl")
+            include_str!("../shaders/simulation.wgsl"),
+            include_str!("../shaders/reproduction.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
         profiler.mark("Main shader compiled");
+
+        // Load compact_merge shader (dedicated compact and merge operations)
+        // Uses minimal bindings - doesn't need full simulation environment
+        let compact_merge_shader_source = format!(
+            "const FLUID_GRID_SIZE: u32 = {}u;\n{}",
+            FLUID_GRID_SIZE,
+            include_str!("../shaders/compact_merge_minimal.wgsl")
+        );
+        let compact_merge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Compact Merge Shader"),
+            source: wgpu::ShaderSource::Wgsl(compact_merge_shader_source.into()),
+        });
+        profiler.mark("Compact/Merge shader compiled");
 
         // Load composite shader (standalone, minimal dependencies)
         let composite_shader_source = format!(
@@ -5144,7 +5161,6 @@ impl GpuState {
             });
         profiler.mark("Compute bind layout");
 
-        // Bind group for the minimal init-dead indirect args writer kernel.
         let init_dead_writer_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("InitDead Writer Bind Group Layout"),
@@ -5368,6 +5384,177 @@ impl GpuState {
                 },
             ],
         });
+
+        // Create reproduction bind groups - binding 1 is INPUT buffer (read-write)
+        // Reproduction reads/writes agents_in to update pairing_counter and energy,
+        // then process_agents reads the updated values.
+        // Binding 0 uses the OUTPUT buffer as a dummy since reproduction doesn't reference agents_in.
+        let reproduction_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Reproduction Bind Group A"),
+            layout: &compute_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: agents_buffer_b.as_entire_binding(),  // Dummy (reproduction doesn't use binding 0)
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: agents_buffer_a.as_entire_binding(),  // INPUT buffer (read-write)
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: chem_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: fluid_dye_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: visual_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: agent_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: trail_grid_inject.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: fluid_velocity_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: new_agents_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: spawn_debug_counters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: spawn_requests_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: selected_agent_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: gamma_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: trail_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: environment_init_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: fluid_force_vectors.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: agent_spatial_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
+                },
+            ],
+        });
+
+        let reproduction_bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Reproduction Bind Group B"),
+            layout: &compute_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: agents_buffer_a.as_entire_binding(),  // Dummy (reproduction doesn't use binding 0)
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: agents_buffer_b.as_entire_binding(),  // INPUT buffer (read-write)
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: chem_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: fluid_dye_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: visual_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: agent_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: trail_grid_inject.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: fluid_velocity_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: new_agents_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: spawn_debug_counters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: spawn_requests_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: selected_agent_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: gamma_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: trail_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: environment_init_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: fluid_force_vectors.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: agent_spatial_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
+                },
+            ],
+        });
+
         profiler.mark("Compute bind groups");
 
         // Create composite bind group (uses separate bind group from compute)
@@ -5399,6 +5586,15 @@ impl GpuState {
                 push_constant_ranges: &[],
             });
         profiler.mark("initDead writer pipeline layout");
+
+        let reproduction_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Reproduction Pipeline"),
+            layout: Some(&compute_pipeline_layout),
+            module: &shader,
+            entry_point: "reproduce_agents",
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let process_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Process Agents Pipeline"),
@@ -5532,8 +5728,8 @@ impl GpuState {
         let merge_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Merge Agents Pipeline"),
             layout: Some(&compute_pipeline_layout),
-            module: &shader,
-            entry_point: "merge_agents",
+            module: &compact_merge_shader,
+            entry_point: "merge_agents_cooperative",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -5542,7 +5738,7 @@ impl GpuState {
         let compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Compact Agents Pipeline"),
             layout: Some(&compute_pipeline_layout),
-            module: &shader,
+            module: &compact_merge_shader,
             entry_point: "compact_agents",
             compilation_options: Default::default(),
             cache: None,
@@ -6507,6 +6703,9 @@ impl GpuState {
             visual_texture_view,
             sampler,
             process_pipeline,
+            reproduction_bind_group_a,
+            reproduction_bind_group_b,
+            reproduction_pipeline,
             clear_fluid_force_vectors_pipeline,
             diffuse_pipeline,
             diffuse_commit_pipeline,
@@ -8533,6 +8732,17 @@ impl GpuState {
 
             // Run simulation compute passes, but skip everything when paused or no living agents
             if should_run_simulation {
+                // REPRODUCTION FIRST: Update pairing_counter and energy in agents_in
+                // Uses reproduction bind groups where binding 1 = agents_in (read-write)
+                let reproduction_bg = if self.ping_pong {
+                    &self.reproduction_bind_group_b
+                } else {
+                    &self.reproduction_bind_group_a
+                };
+                cpass.set_pipeline(&self.reproduction_pipeline);
+                cpass.set_bind_group(0, reproduction_bg, &[]);
+                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
                 // Spatial grid clear disabled: we use an epoch-stamped spatial grid.
                 // populate_agent_spatial_grid writes the epoch stamp for touched cells;
                 // all readers ignore cells whose stamp != current epoch.
@@ -8567,16 +8777,6 @@ impl GpuState {
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
-
-                // Drain energy from neighbors (vampire mouths) - workgroup_size(256)
-                // Runs after process_agents so it can operate on agents_out without requiring
-                // write access to agents_in (which would slow down all compute).
-                cpass.set_pipeline(&self.drain_energy_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
-
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
             }
 
             if !should_run_simulation {
@@ -8589,6 +8789,31 @@ impl GpuState {
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
+            }
+        }
+
+        // Start a new compute pass for drain_energy to ensure a memory barrier for agents_out.
+        // process_agents writes to agents_out, and drain_energy reads from it.
+        // In WebGPU, read-after-write in the same pass is not guaranteed to be visible.
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass (Drain Energy)"),
+                timestamp_writes: None,
+            });
+
+            if should_run_simulation {
+                // Drain energy from neighbors (vampire mouths) - workgroup_size(256)
+                // Runs after process_agents so it can operate on agents_out without requiring
+                // write access to agents_in (which would slow down all compute).
+                cpass.set_pipeline(&self.drain_energy_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
+            }
+
+            if !should_run_simulation {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
             }

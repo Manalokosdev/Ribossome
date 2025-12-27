@@ -2179,385 +2179,47 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     // Note: alive counting is handled in the compaction/merge passes
 
-    // ====== SPAWN/REPRODUCTION LOGIC ======
-    // Better RNG using hash function with time and agent variation
-    let hash_base = (agent_id + params.random_seed) * 747796405u + 2891336453u;
-    let hash2 = hash_base ^ (hash_base >> 13u);
-    let hash3 = hash2 * 1103515245u;
+    // ====== RNA PAIRING ADVANCEMENT ======
+    // Pairing counter probabilistically increments based on energy and chemical signals.
+    // When it reaches gene_length, reproduction.wgsl will spawn offspring.
+    if (agent_gene_length > 0u && pairing_counter < agent_gene_length) {
+        // If the agent has no energy capacity (no storage), it cannot sustain pairing.
+        if (agent_energy_capacity > 0.0) {
+            // Average local chemical signals across all body parts
+            let local_alpha_avg = select(0.0, local_alpha / f32(body_count), body_count > 0u);
+            let local_beta_avg = select(0.0, local_beta / f32(body_count), body_count > 0u);
+            
+            // Probability to increment/decrement counter based on conditions
+            let pos_idx = grid_index(agent_pos);
+            let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_counter * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;
+            let rnd = f32(hash(seed)) / 4294967295.0;
+            let energy_for_pair = max(agent_energy_cur, 0.0);
 
-    // ====== RNA PAIRING REPRODUCTION (probabilistic counter) ======
-    // Pairing counter probabilistically increments; reproduce when it reaches gene_length
+            // Use averaged local signals for pairing drive
+            let energy_scaled = sqrt(energy_for_pair);
+            let alpha_gate = clamp(local_alpha_avg, 0.0, 1.0);
+            let beta_gate = clamp(local_beta_avg, 0.0, 1.0);
+            let pairing_drive = alpha_gate - beta_gate; // [-1, +1]
 
-    // Cached gene_length (active bases) and genome_offset (left padding).
-    // With packed genomes, we treat indices outside [offset, offset+len) as 'X'.
-    var gene_length = agent_gene_length;
-    let genome_offset = agent_genome_offset;
+            let base_p = params.spawn_probability * energy_scaled * 0.1;
+            let pair_p = clamp(base_p * max(pairing_drive, 0.0), 0.0, 1.0);
+            let unpair_p = clamp(base_p * max(-pairing_drive, 0.0), 0.0, 1.0);
 
-    var energy_invested = 0.0; // Track energy spent on pairing for offspring
-
-    if (gene_length > 0u && pairing_counter < gene_length) {
-        // If the agent has no energy capacity (no storage), it cannot sustain pairing/reproduction.
-        // This also prevents "capacity clamped to 0" agents from reproducing at zero energy.
-        if (capacity <= 0.0) {
-            // Keep pairing_counter unchanged.
-        } else {
-        // Try to increment (or decrement) the counter based on conditions
-        let pos_idx = grid_index(agent_pos);
-        let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_counter * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;
-        let rnd = f32(hash(seed)) / 4294967295.0;
-        let energy_for_pair = max(agent_energy_cur, 0.0);
-
-        // Probability to increment counter
-        // Apply sqrt scaling: diminishing returns for high energy.
-        // IMPORTANT: do not add +1 here; at energy==0, pairing probability should be 0.
-        let energy_scaled = sqrt(energy_for_pair);
-        // Apply radiation_factor (beta acts as reproductive inhibitor)
-        // Pairing drive is alpha minus beta, measured locally across body parts.
-        // Positive drive increases pairing probability; negative drive causes probabilistic un-pairing.
-        // Clamp each side to keep probabilities bounded.
-        let alpha_gate = clamp(local_alpha, 0.0, 1.0);
-        let beta_gate = clamp(local_beta, 0.0, 1.0);
-        let pairing_drive = alpha_gate - beta_gate; // [-1, +1]
-
-        let base_p = params.spawn_probability * energy_scaled * 0.1;
-        let pair_p = clamp(base_p * max(pairing_drive, 0.0), 0.0, 1.0);
-        let unpair_p = clamp(base_p * max(-pairing_drive, 0.0), 0.0, 1.0);
-
-        // Pairing/un-pairing are mutually exclusive in a frame.
-        if (rnd < pair_p) {
-            // Pairing cost per increment
-            let pairing_cost = params.pairing_cost;
-            if (agent_energy_cur >= pairing_cost) {
-                pairing_counter += 1u;
-                agent_energy_cur -= pairing_cost;
-                energy_invested += pairing_cost;
-            }
-        } else if (rnd < (pair_p + unpair_p)) {
-            // Un-pairing event: lose one paired base (no energy refund).
-            pairing_counter = select(pairing_counter - 1u, 0u, pairing_counter == 0u);
-        }
-        }
-    }
-
-    if (pairing_counter >= gene_length && gene_length > 0u) {
-        // Attempt reproduction: create complementary genome offspring with mutations
-        // IMPORTANT: Only reset the pairing cycle when an offspring is actually materialized.
-        // Otherwise agents can get stuck in a loop where they reach full pairing, "give birth" to
-        // a zero-energy newborn (or fail to allocate a spawn slot), and immediately restart pairing.
-        //
-        // New rule: offspring receives 50% of parent's *current* energy.
-        // If the parent ends the pairing cycle at (or below) ~0 energy, spawning would create a
-        // newborn that dies immediately next frame (agent.energy <= 0), which looks like "no baby".
-        let inherited_energy = agent_energy_cur * 0.5;
-        if (inherited_energy > 0.0) {
-            let current_count = atomicLoad(&spawn_debug_counters[2]);
-            if (current_count < params.max_agents) {
-                let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
-                if (spawn_index < 2000u) {
-                // Generate hash for offspring randomization
-                // CRITICAL: Include agent_id to ensure each parent's offspring gets unique mutations
-                let offspring_hash = (hash3 ^ (spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu)) * 1664525u + 1013904223u;
-
-                // Create brand new offspring agent (don't copy parent)
-                var offspring: Agent;
-
-                // Random rotation
-                offspring.rotation = hash_f32(offspring_hash) * 6.28318530718;
-
-                // Spawn near parent with a small jitter to avoid perfect overlap (prevents extreme repulsion impulses)
-                {
-                    let jitter_angle = hash_f32(offspring_hash ^ 0xBADC0FFEu) * 6.28318530718;
-                    let jitter_dist = 5.0 + hash_f32(offspring_hash ^ 0x1B56C4E9u) * 10.0;
-                    let jitter = vec2<f32>(cos(jitter_angle), sin(jitter_angle)) * jitter_dist;
-                    offspring.position = clamp_position(agent_pos + jitter);
+            // Pairing/un-pairing are mutually exclusive in a frame
+            if (rnd < pair_p) {
+                // Pairing cost per increment
+                let pairing_cost = params.pairing_cost;
+                if (agent_energy_cur >= pairing_cost) {
+                    pairing_counter += 1u;
+                    agent_energy_cur -= pairing_cost;
                 }
-                offspring.velocity = vec2<f32>(0.0);
-
-                // Initialize offspring energy; final value assigned after viability check
-                offspring.energy = 0.0;
-
-                offspring.energy_capacity = 0.0; // Will be calculated when morphology builds
-                offspring.torque_debug = 0.0;
-                offspring.morphology_origin = vec2<f32>(0.0);
-
-                // Initialize as alive, will build body on first frame
-                offspring.alive = 1u;
-                offspring.body_count = 0u; // Forces morphology rebuild
-                offspring.pairing_counter = 0u;
-                offspring.is_selected = 0u;
-                // Lineage and lifecycle
-                offspring.generation = agent_generation + 1u;
-                offspring.age = 0u;
-                offspring.total_mass = 0.0; // Will be computed after morphology build
-                offspring.poison_resistant_count = 0u; // Will be computed after morphology build
-
-                // Default genome metadata.
-                offspring.gene_length = 0u;
-                offspring.genome_offset = 0u;
-                for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
-                    offspring.genome_packed[w] = 0u;
-                }
-
-                // Child genome: materialize to a temporary ASCII buffer only for reproduction/mutation,
-                // then pack back into offspring.genome_packed.
-                var offspring_ascii: array<u32, GENOME_ASCII_WORDS>;
-                if (params.asexual_reproduction == 1u) {
-                    // Asexual reproduction: direct copy of bases.
-                    for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
-                        let bi0 = w * 4u + 0u;
-                        let bi1 = w * 4u + 1u;
-                        let bi2 = w * 4u + 2u;
-                        let bi3 = w * 4u + 3u;
-                        let b0 = genome_get_base_ascii(agent_genome_packed, bi0, genome_offset, gene_length) & 0xFFu;
-                        let b1 = genome_get_base_ascii(agent_genome_packed, bi1, genome_offset, gene_length) & 0xFFu;
-                        let b2 = genome_get_base_ascii(agent_genome_packed, bi2, genome_offset, gene_length) & 0xFFu;
-                        let b3 = genome_get_base_ascii(agent_genome_packed, bi3, genome_offset, gene_length) & 0xFFu;
-                        offspring_ascii[w] = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
-                    }
-                } else {
-                    // Sexual reproduction: reverse complement of parent (preserves legacy 'X' padding semantics).
-                    for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
-                        offspring_ascii[w] = genome_revcomp_ascii_word(agent_genome_packed, genome_offset, gene_length, w);
-                    }
-                }
-
-                // Sample beta concentration at parent's location to calculate radiation-induced mutation rate
-                let parent_idx = grid_index(agent_pos);
-                let beta_concentration = chem_grid[parent_idx].y;
-
-                // Beta acts as mutagenic radiation - increases mutation rate with power-of-5 curve
-                // This creates clear ecological zones: safe (beta 0-4), moderate (4-7), extreme (7-10)
-                // At beta=0: 1x mutations, beta=5: ~2x, beta=7: ~6x, beta=10: ~11x
-                // Beta grid is now in 0..1 range; normalize directly
-                let beta_normalized = clamp(beta_concentration, 0.0, 1.0);
-                // Gentler mutation amplification to reduce genome erosion in high-beta zones
-                let mutation_multiplier = 1.0 + pow(beta_normalized, 3.0) * 4.0;
-                var effective_mutation_rate = params.mutation_rate * mutation_multiplier;
-                // Clamp mutation probability to 1.0 to avoid guaranteed mutation when rate>1
-                effective_mutation_rate = min(effective_mutation_rate, 1.0);
-
-                // Determine active gene region (non-'X' bytes) in offspring after reverse complement
-                var first_non_x: u32 = GENOME_LENGTH;
-                var last_non_x: u32 = 0xFFFFFFFFu;
-                for (var bi = 0u; bi < GENOME_LENGTH; bi++) {
-                    let word = bi / 4u;
-                    let byte_offset = bi % 4u;
-                    let b = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
-                    if (b != 88u) {
-                        if (first_non_x == GENOME_LENGTH) { first_non_x = bi; }
-                        last_non_x = bi;
-                    }
-                }
-                var active_start: u32 = 0u;
-                var active_end: u32 = 0xFFFFFFFFu;
-                if (last_non_x != 0xFFFFFFFFu) {
-                    active_start = first_non_x;
-                    active_end = last_non_x;
-                }
-
-                // Optional insertion mutation: with small probability, insert new random bases at begin/end/middle
-                // Keep indels codon-aligned (multiples of 3) to avoid catastrophic frameshifts.
-                // Then re-center the active gene region within the fixed GENOME_BYTES buffer with 'X' padding
-                {
-                    let insert_seed = offspring_hash ^ 0xB5297A4Du;
-                    let insert_roll = hash_f32(insert_seed);
-                    let can_insert = (last_non_x != 0xFFFFFFFFu);
-                    if (can_insert && insert_roll < (effective_mutation_rate * 0.20)) {
-                        // Extract current active sequence into a local array
-                        var seq: array<u32, GENOME_LENGTH>;
-                        var L: u32 = 0u;
-                        for (var bi = active_start; bi <= active_end; bi++) {
-                            if (L < GENOME_LENGTH) {
-                                let word = bi / 4u;
-                                let byte_offset = bi % 4u;
-                                seq[L] = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
-                                L += 1u;
-                            }
-                        }
-                        // Compute max insert size so we don't exceed GENOME_BYTES
-                        let max_ins = select(GENOME_LENGTH - L, 0u, L >= GENOME_LENGTH);
-                        // NOTE: Use k=3 so we preserve the codon frame.
-                        let k = 3u;
-                        if (max_ins >= k) {
-                            // Choose insertion position: 0..L
-                            let mode = hash(insert_seed ^ 0x1B56C4E9u) % 3u; // 0=begin,1=end,2=middle
-                            var pos: u32 = 0u;
-                            if (mode == 0u) { pos = 0u; }
-                            else if (mode == 1u) { pos = L; }
-                            else { pos = hash(insert_seed ^ 0x2C9F85A1u) % (L + 1u); }
-                            // Shift right by k from end to pos
-                            var j: i32 = i32(L);
-                            loop {
-                                j = j - 1;
-                                if (j < i32(pos)) { break; }
-                                seq[u32(j) + k] = seq[u32(j)];
-                            }
-                            // Fill inserted k bases with random RNA
-                            for (var t = 0u; t < k; t++) {
-                                let nb = get_random_rna_base(insert_seed ^ (t * 1664525u + 1013904223u));
-                                seq[pos + t] = nb;
-                            }
-                            L = min(GENOME_LENGTH, L + k);
-                            // Re-center into a new buffer with 'X' padding
-                            var out_bytes: array<u32, GENOME_LENGTH>;
-                            for (var t = 0u; t < GENOME_LENGTH; t++) { out_bytes[t] = 88u; }
-                            let left_pad = (GENOME_LENGTH - L) / 2u;
-                            for (var t = 0u; t < L; t++) {
-                                out_bytes[left_pad + t] = seq[t];
-                            }
-                            // Write back to offspring ASCII words
-                            for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
-                                let b0 = out_bytes[w * 4u + 0u] & 0xFFu;
-                                let b1 = out_bytes[w * 4u + 1u] & 0xFFu;
-                                let b2 = out_bytes[w * 4u + 2u] & 0xFFu;
-                                let b3 = out_bytes[w * 4u + 3u] & 0xFFu;
-                                let word_val = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
-                                offspring_ascii[w] = word_val;
-                            }
-                            // Update active region after insertion
-                            active_start = left_pad;
-                            active_end = left_pad + L - 1u;
-                        }
-                    }
-                }
-
-                // Optional deletion mutation: mirror insert behavior but remove bases from begin/end/middle
-                // Keep deletions codon-aligned (multiples of 3) to avoid catastrophic frameshifts.
-                {
-                    let delete_seed = offspring_hash ^ 0xE7037ED1u;
-                    let delete_roll = hash_f32(delete_seed);
-                    let has_active = (active_end != 0xFFFFFFFFu);
-                    if (has_active && delete_roll < (effective_mutation_rate * 0.35)) {
-                        // Extract current active sequence into a local array
-                        var seq: array<u32, GENOME_LENGTH>;
-                        var L: u32 = 0u;
-                        for (var bi = active_start; bi <= active_end; bi++) {
-                            if (L < GENOME_LENGTH) {
-                                let word = bi / 4u;
-                                let byte_offset = bi % 4u;
-                                seq[L] = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
-                                L += 1u;
-                            }
-                        }
-                        if (L > MIN_GENE_LENGTH) {
-                            let removable = L - MIN_GENE_LENGTH;
-                            // NOTE: Use k=3 so we preserve the codon frame.
-                            let k = 3u;
-                            if (removable >= k) {
-                                var pos: u32 = 0u;
-                                let mode = hash(delete_seed ^ 0x1B56C4E9u) % 3u; // 0=begin,1=end,2=middle
-                                if (mode == 0u) {
-                                    pos = 0u;
-                                } else if (mode == 1u) {
-                                    pos = L - k;
-                                } else {
-                                    pos = hash(delete_seed ^ 0x2C9F85A1u) % (L - k + 1u);
-                                }
-                                // Shift left to remove k bases starting at pos
-                                var j = pos;
-                                loop {
-                                    if (j + k >= L) { break; }
-                                    seq[j] = seq[j + k];
-                                    j = j + 1u;
-                                }
-                                L = L - k;
-                                // Re-center into buffer with 'X' padding
-                                var out_bytes: array<u32, GENOME_LENGTH>;
-                                for (var t = 0u; t < GENOME_LENGTH; t++) { out_bytes[t] = 88u; }
-                                let left_pad = (GENOME_LENGTH - L) / 2u;
-                                for (var t = 0u; t < L; t++) {
-                                    out_bytes[left_pad + t] = seq[t];
-                                }
-                                for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
-                                    let b0 = out_bytes[w * 4u + 0u] & 0xFFu;
-                                    let b1 = out_bytes[w * 4u + 1u] & 0xFFu;
-                                    let b2 = out_bytes[w * 4u + 2u] & 0xFFu;
-                                    let b3 = out_bytes[w * 4u + 3u] & 0xFFu;
-                                    let word_val = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
-                                    offspring_ascii[w] = word_val;
-                                }
-                                active_start = left_pad;
-                                active_end = left_pad + L - 1u;
-                            }
-                        }
-                    }
-                }
-
-                // Probabilistic point mutations only within active region
-                var mutated_count = 0u;
-                if (active_end != 0xFFFFFFFFu) {
-                    for (var bi = active_start; bi <= active_end; bi++) {
-                        let mutation_seed = offspring_hash * (bi + 1u) * 2654435761u;
-                        let mutation_chance = hash_f32(mutation_seed);
-                        if (mutation_chance < effective_mutation_rate) {
-                            let word = bi / 4u;
-                            let byte_offset = bi % 4u;
-                            let new_base = get_random_rna_base(mutation_seed * 1664525u);
-                            let mask = ~(0xFFu << (byte_offset * 8u));
-                            let current_word = offspring_ascii[word];
-                            let updated_word = (current_word & mask) | (new_base << (byte_offset * 8u));
-                            offspring_ascii[word] = updated_word;
-                            mutated_count += 1u;
-                        }
-                    }
-                }
-
-                // Compute and cache gene_length once for the offspring.
-                if (active_end != 0xFFFFFFFFu) {
-                    offspring.gene_length = active_end - active_start + 1u;
-                    offspring.genome_offset = active_start;
-                } else {
-                    offspring.gene_length = 0u;
-                    offspring.genome_offset = 0u;
-                }
-
-                // Pack ASCII offspring genome into 2-bit packed representation.
-                {
-                    var packed: array<u32, GENOME_PACKED_WORDS>;
-                    for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
-                        packed[w] = 0u;
-                    }
-                    for (var bi = 0u; bi < GENOME_LENGTH; bi++) {
-                        let word_ascii = bi / 4u;
-                        let byte_offset = bi % 4u;
-                        let b = (offspring_ascii[word_ascii] >> (byte_offset * 8u)) & 0xFFu;
-                        if (b != 88u) {
-                            let code = genome_base_ascii_to_2bit(b);
-                            let wi = bi / GENOME_BASES_PER_PACKED_WORD;
-                            let bit_index = (bi % GENOME_BASES_PER_PACKED_WORD) * 2u;
-                            packed[wi] = packed[wi] | (code << bit_index);
-                        }
-                    }
-                    for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
-                        offspring.genome_packed[w] = packed[w];
-                    }
-                }
-
-                // Offspring receives 50% of parent's current energy.
-                // Pairing costs are NOT passed to the offspring.
-                offspring.energy = inherited_energy;
-                agent_energy_cur -= inherited_energy;
-
-                // Mutation diagnostics omitted from Agent; could be added to a dedicated debug buffer if needed
-
-                // Initialize body array to zeros
-                for (var bi = 0u; bi < MAX_BODY_PARTS; bi++) {
-                    offspring.body[bi].pos = vec2<f32>(0.0);
-                    offspring.body[bi].data = 0.0;
-                    offspring.body[bi].part_type = 0u;
-                    offspring.body[bi].alpha_signal = 0.0;
-                    offspring.body[bi].beta_signal = 0.0;
-                    offspring.body[bi]._pad.x = bitcast<f32>(0u); // Packed prev_pos will be set on first morphology build
-                    offspring.body[bi]._pad = vec2<f32>(0.0);
-                }
-
-                new_agents[spawn_index] = offspring;
-                // Reset pairing cycle only after a successful spawn write.
-                pairing_counter = 0u;
-                }
+            } else if (rnd < (pair_p + unpair_p)) {
+                // Un-pairing event: lose one paired base (no energy refund)
+                pairing_counter = select(pairing_counter - 1u, 0u, pairing_counter == 0u);
             }
         }
     }
+
     agents_out[agent_id].pairing_counter = pairing_counter;
 
     // Always write selected agent to readback buffer for inspector (even when drawing disabled)
@@ -2567,7 +2229,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         unrotated_agent.rotation = 0.0;
         // Speed info now stored per-mouth in body[63].pos during loop above (for debugging)
         // Store the calculated gene_length (we already computed it above for reproduction)
-        unrotated_agent.gene_length = gene_length;
+        unrotated_agent.gene_length = agent_gene_length;
         // Copy generation/age/total_mass (already in agents_out) unchanged
         selected_agent_buffer[0] = unrotated_agent;
     }
@@ -2577,7 +2239,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agents_out[agent_id].velocity = agent_vel;
     agents_out[agent_id].rotation = agent_rot;
     agents_out[agent_id].energy = agent_energy_cur;
-    agents_out[agent_id].gene_length = gene_length;
+    agents_out[agent_id].gene_length = agent_gene_length;
     // Increment age for living agents
     if (agents_out[agent_id].alive == 1u) {
         agents_out[agent_id].age = agents_out[agent_id].age + 1u;
@@ -3524,7 +3186,8 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(64)
 fn merge_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let spawn_id = gid.x;
-    let spawn_count = atomicLoad(&spawn_debug_counters[0]);
+    // Clamp spawn count to buffer size (2000) to avoid OOB reads if more agents tried to spawn than fit
+    let spawn_count = min(atomicLoad(&spawn_debug_counters[0]), 2000u);
 
     if (spawn_id >= spawn_count) {
         return;
