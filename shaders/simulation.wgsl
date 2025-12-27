@@ -87,6 +87,11 @@ fn sanitize_f32(x: f32) -> f32 {
 // and instead only influence motion indirectly through the fluid.
 const PROPELLERS_APPLY_DIRECT_FORCE: bool = true;
 
+// Reproduction cooldowns.
+// NOTE: WGSL `const` must be declared at module scope.
+const REPRO_COOLDOWN_FRAMES: u32 = 60u;        // Applied to the parent after reproducing
+const OFFSPRING_COOLDOWN_FRAMES: u32 = 6u;     // Applied to newborns (set to 0u to disable)
+
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
@@ -528,7 +533,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // agents_out. If we don't write genome every frame, the buffer we write into will retain
     // stale/garbage genome data for existing agents.
     //
-    // IMPORTANT: Naga/WGSL validation can reject dynamic indexing into certain array expressions.
     // Use constant indices for the fixed-size packed genome.
     agents_out[agent_id].genome_packed[0u] = agent_genome_packed[0u];
     agents_out[agent_id].genome_packed[1u] = agent_genome_packed[1u];
@@ -1190,7 +1194,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Emits alpha or beta based on genome pairing completion percentage
         if (base_type == 36u) {
             // Get pairing percentage (0.0 to 1.0)
-            let pairing_percentage = f32(agent_pairing_counter) / f32(GENOME_BYTES);
+            // NOTE: pairing_counter packs cooldown in the high 16 bits.
+            let pairing_progress = agent_pairing_counter & 0xFFFFu;
+            let pairing_percentage = f32(pairing_progress) / f32(GENOME_BYTES);
 
             // Extract parameter (0-127) and promoter bit
             let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
@@ -2230,11 +2236,26 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Cached gene_length (active bases) and genome_offset (left padding).
     // With packed genomes, we treat indices outside [offset, offset+len) as 'X'.
     var gene_length = agent_gene_length;
+    // Prevent "machine-gun" reproduction when gene_length becomes tiny (e.g. 1-3).
+    // This only affects the pairing/reproduction threshold, not morphology.
+    let pairing_target = max(gene_length, 24u);
     let genome_offset = agent_genome_offset;
+
+    // Parent post-reproduction cooldown (no Agent struct changes).
+    // We pack the cooldown timer into the high 16 bits of pairing_counter.
+    // - low  16 bits: pairing progress
+    // - high 16 bits: cooldown frames remaining
+    var repro_cooldown: u32 = pairing_counter >> 16u;
+    var pairing_progress: u32 = pairing_counter & 0xFFFFu;
+    if (repro_cooldown > 0u) {
+        repro_cooldown = repro_cooldown - 1u;
+        pairing_progress = 0u;
+    }
+    let can_pair_and_reproduce = repro_cooldown == 0u;
 
     var energy_invested = 0.0; // Track energy spent on pairing for offspring
 
-    if (gene_length > 0u && pairing_counter < gene_length) {
+    if (can_pair_and_reproduce && gene_length > 0u && pairing_progress < pairing_target) {
         // If the agent has no energy capacity (no storage), it cannot sustain pairing/reproduction.
         // This also prevents "capacity clamped to 0" agents from reproducing at zero energy.
         if (capacity <= 0.0) {
@@ -2242,7 +2263,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else {
         // Try to increment (or decrement) the counter based on conditions
         let pos_idx = grid_index(agent_pos);
-        let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_counter * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;
+        let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_progress * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;
         let rnd = f32(hash(seed)) / 4294967295.0;
         let energy_for_pair = max(agent_energy_cur, 0.0);
 
@@ -2267,18 +2288,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Pairing cost per increment
             let pairing_cost = params.pairing_cost;
             if (agent_energy_cur >= pairing_cost) {
-                pairing_counter += 1u;
+                pairing_progress += 1u;
                 agent_energy_cur -= pairing_cost;
                 energy_invested += pairing_cost;
             }
         } else if (rnd < (pair_p + unpair_p)) {
             // Un-pairing event: lose one paired base (no energy refund).
-            pairing_counter = select(pairing_counter - 1u, 0u, pairing_counter == 0u);
+            pairing_progress = select(pairing_progress - 1u, 0u, pairing_progress == 0u);
         }
         }
     }
 
-    if (pairing_counter >= gene_length && gene_length > 0u) {
+    if (can_pair_and_reproduce && pairing_progress >= pairing_target && gene_length > 0u) {
         // Attempt reproduction: create complementary genome offspring with mutations
         let current_count = atomicLoad(&spawn_debug_counters[2]);
         if (current_count < params.max_agents) {
@@ -2294,10 +2315,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Random rotation
                 offspring.rotation = hash_f32(offspring_hash) * 6.28318530718;
 
-                // Spawn near parent with minimal jitter (1-3 units) to prevent perfect overlap
+                // Spawn near parent with minimal jitter (fixed radius) to prevent perfect overlap
                 {
                     let jitter_angle = hash_f32(offspring_hash ^ 0xBADC0FFEu) * 6.28318530718;
-                    let jitter_dist = 1.0 + hash_f32(offspring_hash ^ 0x1B56C4E9u) * 2.0;
+                    let jitter_dist = 2.0;
                     let jitter = vec2<f32>(cos(jitter_angle), sin(jitter_angle)) * jitter_dist;
                     offspring.position = clamp_position(agent_pos + jitter);
                 }
@@ -2313,7 +2334,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Initialize as alive, will build body on first frame
                 offspring.alive = 1u;
                 offspring.body_count = 0u; // Forces morphology rebuild
-                offspring.pairing_counter = 0u;
+                // Pairing counter packs cooldown in the high 16 bits.
+                offspring.pairing_counter = OFFSPRING_COOLDOWN_FRAMES << 16u;
                 offspring.is_selected = 0u;
                 // Lineage and lifecycle
                 offspring.generation = agent_generation + 1u;
@@ -2598,9 +2620,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         // Reset pairing cycle after reproduction
-        pairing_counter = 0u;
+        pairing_progress = 0u;
+        repro_cooldown = REPRO_COOLDOWN_FRAMES;
     }
-    agents_out[agent_id].pairing_counter = pairing_counter;
+    agents_out[agent_id].pairing_counter = (repro_cooldown << 16u) | (pairing_progress & 0xFFFFu);
 
     // Always write selected agent to readback buffer for inspector (even when drawing disabled)
     if (agent_is_selected == 1u) {
@@ -3634,10 +3657,11 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent.torque_debug = 0.0;
     agent.alive = 1u;
     agent.body_count = 0u;
-    agent.pairing_counter = 0u;
+    // Restore pairing/generation/age from CPU snapshot (or 0 for normal spawns).
+    agent.pairing_counter = request._pad_genome[1u];
     agent.is_selected = 0u;
-    agent.generation = 0u;
-    agent.age = 0u;
+    agent.generation = request._pad_seed;
+    agent.age = request._pad_genome[0u];
     agent.total_mass = 0.0;
     agent.poison_resistant_count = 0u;
 

@@ -159,6 +159,8 @@ struct SpawnRequest {
     seed: u32,
     genome_seed: u32,
     flags: u32,
+    // NOTE: This is padding for alignment, but we also use it during
+    // snapshot restore as the initial generation.
     _pad_seed: u32,
     position: vec2<f32>,
     energy: f32,
@@ -166,6 +168,8 @@ struct SpawnRequest {
     genome_override_len: u32,
     genome_override_offset: u32,
     genome_override_packed: array<u32, GENOME_PACKED_WORDS>,
+    // NOTE: This is padding for alignment, but we also use it during
+    // snapshot restore as [age, pairing_counter].
     _pad_genome: array<u32, 2>,
 }
 
