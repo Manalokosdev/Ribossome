@@ -8628,10 +8628,9 @@ impl GpuState {
         self.frame_profiler.write_ts_encoder(&mut encoder, TS_UPDATE_START);
 
         // Clear counters (spawn_counter is reset in-shader at end of previous frame)
-        if should_run_simulation {
-            encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
-        }
-        // Do NOT clear spawn_counter here; we may set it from CPU spawns below.
+        // IMPORTANT: Always clear both spawn_debug_counters[0] and [2] to avoid stale offsets
+        // in compact/merge when simulation is paused or should_run_simulation is false.
+        encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
 
         // Select bind groups based on ping-pong orientation
         // bg_process: agents_in -> agents_out
