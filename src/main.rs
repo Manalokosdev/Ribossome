@@ -643,6 +643,10 @@ fn parse_shared_wgsl_part_defaults(
 const SELECTED_AGENT_READBACK_SLOTS: usize = 4;
 const SELECTED_AGENT_READBACK_INTERVAL_MS: u64 = 16; // ~60Hz
 
+// Optional GPU->CPU readback of spawn/repro counters for debugging.
+// Enable with ALSIM_SPAWN_DEBUG=1. Throttled to avoid stalling.
+const SPAWN_COUNTERS_READBACK_INTERVAL_MS: u64 = 250;
+
 // Shared genome/body sizing (must stay in sync with shader constants)
 const MAX_BODY_PARTS: usize = 64;
 const GENOME_BYTES: usize = 256; // ASCII bases including padding
@@ -653,7 +657,7 @@ const GENOME_BASES_PER_PACKED_WORD: usize = 16;
 const MIN_GENE_LENGTH: usize = 6;
 const MAX_SPAWN_REQUESTS: usize = 2000;
 
-const SNAPSHOT_VERSION: &str = "1.1";
+const SNAPSHOT_VERSION: &str = "1.2";
 
 // RGB colors per amino acid, kept in sync with shader get_amino_acid_properties()
 const AMINO_COLORS: [[f32; 3]; 20] = [
@@ -3455,7 +3459,12 @@ struct GpuState {
     selected_agent_readback_slot: usize,
     selected_agent_readback_last_request: std::time::Instant,
     new_agents_buffer: wgpu::Buffer, // Buffer for spawned agents
-    spawn_readback: wgpu::Buffer,  // Readback for spawn count
+    spawn_readback: Arc<wgpu::Buffer>,  // Readback for spawn_debug_counters (2 snapshots per request)
+    spawn_readback_pending: Arc<Mutex<Option<Result<([u32; 3], [u32; 3], u64), ()>>>>,
+    spawn_readback_inflight: bool,
+    spawn_readback_last_request: std::time::Instant,
+    spawn_readback_epoch_inflight: u64,
+    spawn_debug_enabled: bool,
     spawn_requests_buffer: wgpu::Buffer, // CPU spawn requests seeds
 
     // Grid readback buffers for snapshot save
@@ -3534,6 +3543,7 @@ struct GpuState {
 
     // Pipelines
     process_pipeline: wgpu::ComputePipeline,
+    reproduce_pipeline: wgpu::ComputePipeline,
     clear_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_commit_pipeline: wgpu::ComputePipeline,
@@ -4712,9 +4722,11 @@ impl GpuState {
                 .collect();
 
         // Spawn/death buffers
+        // NOTE: new_agents is used as a staging area for both reproduction and CPU spawns.
+        // We size it to max_agents so reproduction can write to new_agents[agent_id] deterministically.
         let new_agents_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("New Agents Buffer"),
-            size: (std::mem::size_of::<Agent>() * MAX_SPAWN_REQUESTS) as u64,
+            size: (std::mem::size_of::<Agent>() * max_agents) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -4730,12 +4742,27 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
-        let spawn_readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Spawn Readback"),
-            size: 4,
+        // Two snapshots of spawn_debug_counters (after reproduce, after merge): 2 * 12 bytes.
+        let spawn_readback = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Spawn Counters Readback"),
+            size: 24,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
+        }));
+        let spawn_readback_pending: Arc<Mutex<Option<Result<([u32; 3], [u32; 3], u64), ()>>>> =
+            Arc::new(Mutex::new(None));
+        let spawn_readback_inflight = false;
+        let spawn_readback_last_request = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(SPAWN_COUNTERS_READBACK_INTERVAL_MS))
+            .unwrap_or_else(std::time::Instant::now);
+        let spawn_readback_epoch_inflight = 0u64;
+        let spawn_debug_enabled = match std::env::var("ALSIM_SPAWN_DEBUG") {
+            Ok(v) => {
+                let v = v.trim();
+                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+            }
+            Err(_) => false,
+        };
         profiler.mark("Counters and readbacks");
 
         // Grid readback buffers for snapshot save
@@ -5422,6 +5449,16 @@ impl GpuState {
         });
         profiler.mark("process_agents pipeline");
 
+        let reproduce_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Reproduce Agents Pipeline"),
+            layout: Some(&compute_pipeline_layout),
+            module: &shader,
+            entry_point: "reproduce_agents",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        profiler.mark("reproduce_agents pipeline");
+
         let diffuse_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Diffuse Pipeline (stage1)"),
             layout: Some(&compute_pipeline_layout),
@@ -5576,7 +5613,7 @@ impl GpuState {
             label: Some("CPU Spawn Requests Pipeline"),
             layout: Some(&compute_pipeline_layout),
             module: &shader,
-            entry_point: "process_cpu_spawns",
+            entry_point: "merge_cpu_spawns",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -6512,6 +6549,11 @@ impl GpuState {
                 - std::time::Duration::from_secs(1),
             new_agents_buffer,
             spawn_readback,
+            spawn_readback_pending,
+            spawn_readback_inflight,
+            spawn_readback_last_request,
+            spawn_readback_epoch_inflight,
+            spawn_debug_enabled,
             spawn_requests_buffer,
             chem_grid_readback,
             gamma_grid_readback,
@@ -6519,6 +6561,7 @@ impl GpuState {
             visual_texture_view,
             sampler,
             process_pipeline,
+            reproduce_pipeline,
             clear_fluid_force_vectors_pipeline,
             diffuse_pipeline,
             diffuse_commit_pipeline,
@@ -6896,6 +6939,10 @@ impl GpuState {
 
     // Queue N random agents to be spawned next frame via the GPU merge pass
     fn queue_random_spawns(&mut self, count: usize) {
+        // Manual mass spawns can create dense clusters; give them a longer initial reproduction
+        // cooldown so they don't immediately form runaway reproduction hotspots.
+        const CPU_SPAWN_INITIAL_REPRO_COOLDOWN_FRAMES: u32 = 600;
+
         for _ in 0..count {
             // Advance RNG using same method as update()
             self.rng_state ^= self.rng_state << 13;
@@ -6919,7 +6966,7 @@ impl GpuState {
                 genome_override_len: 0,
                 genome_override_offset: 0,
                 genome_override_packed: [0u32; GENOME_PACKED_WORDS],
-                _pad_genome: [0u32; 2],
+                _pad_genome: [0u32, CPU_SPAWN_INITIAL_REPRO_COOLDOWN_FRAMES << 16],
             };
 
             self.cpu_spawn_queue.push(request);
@@ -6988,7 +7035,8 @@ impl GpuState {
             genome_override_len: override_data.len,
             genome_override_offset: override_data.offset,
             genome_override_packed: override_data.packed,
-            _pad_genome: [0u32; 2],
+            // Long initial cooldown for manual spawns to avoid immediate reproduction explosions.
+            _pad_genome: [0u32, 600u32 << 16],
         };
 
         self.cpu_spawn_queue.push(request);
@@ -7709,6 +7757,26 @@ impl GpuState {
             }
         }
 
+        // Optional spawn/repro counters readback (env-var gated).
+        if self.spawn_debug_enabled {
+            let message = {
+                let mut guard = self.spawn_readback_pending.lock().unwrap();
+                guard.take()
+            };
+            if let Some(result) = message {
+                if let Ok((after_repro, after_merge, epoch)) = result {
+                    // after_* = [merge_count, repro_eligible_counter, alive_counter]
+                    println!(
+                        "SpawnCounters(epoch={epoch}): repro eligible={} | post-merge merged={} alive={}",
+                        after_repro[1],
+                        after_merge[0],
+                        after_merge[2],
+                    );
+                }
+                self.spawn_readback_inflight = false;
+            }
+        }
+
         // Selected agent readback is optional and should never stall the frame.
         // Drain any completed slot(s); last completion wins.
         for slot in 0..self.selected_agent_readbacks.len() {
@@ -7769,7 +7837,7 @@ impl GpuState {
             buffer.as_ref().destroy();
         }
         self.new_agents_buffer.destroy();
-        self.spawn_readback.destroy();
+        self.spawn_readback.as_ref().destroy();
         self.spawn_requests_buffer.destroy();
         self.visual_texture.destroy();
 
@@ -7807,6 +7875,69 @@ impl GpuState {
             self.alive_readback_inflight[slot] = false;
         }
         slot
+    }
+
+    fn should_request_spawn_counters_readback(&self, should_run_simulation: bool) -> bool {
+        if !self.spawn_debug_enabled {
+            return false;
+        }
+        if !should_run_simulation {
+            return false;
+        }
+        if self.spawn_readback_inflight {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        now.duration_since(self.spawn_readback_last_request)
+            >= std::time::Duration::from_millis(SPAWN_COUNTERS_READBACK_INTERVAL_MS)
+    }
+
+    fn kickoff_spawn_counters_readback(&mut self) {
+        if !self.spawn_debug_enabled {
+            return;
+        }
+        if self.spawn_readback_inflight {
+            return;
+        }
+
+        let epoch = self.spawn_readback_epoch_inflight;
+        let buffer_for_map = self.spawn_readback.as_ref().slice(..);
+        let buffer_for_callback = self.spawn_readback.clone();
+        let pending = self.spawn_readback_pending.clone();
+
+        self.spawn_readback_inflight = true;
+
+        buffer_for_map.map_async(wgpu::MapMode::Read, move |result| {
+            let message = match result {
+                Ok(()) => {
+                    let slice = buffer_for_callback.slice(..);
+                    let data = slice.get_mapped_range();
+
+                    let read_u32 = |base: usize| -> u32 {
+                        u32::from_le_bytes([
+                            data[base + 0],
+                            data[base + 1],
+                            data[base + 2],
+                            data[base + 3],
+                        ])
+                    };
+
+                    // Two snapshots: [0..12) and [12..24)
+                    let after_repro = [read_u32(0), read_u32(4), read_u32(8)];
+                    let after_merge = [read_u32(12), read_u32(16), read_u32(20)];
+
+                    drop(data);
+                    buffer_for_callback.as_ref().unmap();
+
+                    Ok((after_repro, after_merge, epoch))
+                }
+                Err(_) => Err(()),
+            };
+
+            if let Ok(mut guard) = pending.lock() {
+                *guard = Some(message);
+            }
+        });
     }
 
     fn copy_state_to_staging(
@@ -7971,6 +8102,9 @@ impl GpuState {
 
         if spawn_count > 0 {
             encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
+            // Manual CPU spawns are rare and user-driven; discard any staged simulation spawns
+            // for this epoch to avoid interactions between reproduction staging and CPU spawns.
+            encoder.clear_buffer(&self.new_agents_buffer, 0, None);
 
             // Upload spawn requests for this batch so GPU has per-request seeds/data
             // Limit to the count actually being processed (capped at 2000 elsewhere)
@@ -8006,7 +8140,9 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
+                // compact_agents scans the full agent buffer (max_agents).
+                let compact_scan = self.agent_buffer_capacity as u32;
+                cpass.dispatch_workgroups((compact_scan + 63) / 64, 1, 1);
 
                 cpass.set_pipeline(&self.cpu_spawn_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
@@ -8014,7 +8150,9 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
+                // merge_agents scans the full new_agents buffer (max_agents).
+                let merge_scan = self.agent_buffer_capacity as u32;
+                cpass.dispatch_workgroups((merge_scan + 63) / 64, 1, 1);
 
                 let init_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
                 cpass.set_pipeline(&self.initialize_dead_pipeline);
@@ -8029,9 +8167,9 @@ impl GpuState {
             // Ensure agents are materialized in buffer A for snapshot/save and for subsequent
             // snapshot-load batches.
             if !wrote_to_a_directly {
-                let expected_alive = (self.agent_count + spawn_count + 2000) // +2000 for GPU spawns
-                    .min(self.agent_buffer_capacity as u32);
-                let bytes = (expected_alive as u64) * (std::mem::size_of::<Agent>() as u64);
+                // Copy the full buffer to avoid under-copying when CPU-side agent_count lags
+                // behind GPU compaction/CPU-spawn merges.
+                let bytes = (self.agent_buffer_capacity as u64) * (std::mem::size_of::<Agent>() as u64);
                 if bytes > 0 {
                     encoder.copy_buffer_to_buffer(
                         &self.agents_buffer_b,
@@ -8204,6 +8342,18 @@ impl GpuState {
         // When paused or no living agents, freeze simulation side-effects.
         // Approach: don't dispatch simulation kernels at all when paused or no agents alive.
         let should_run_simulation = !self.is_paused && has_living_agents;
+
+        // Optional: snapshot spawn/repro counters twice this frame (after reproduce, after merge).
+        // This is throttled and should never block a frame.
+        let mut request_spawn_counters_readback = false;
+        if self.should_request_spawn_counters_readback(should_run_simulation) {
+            request_spawn_counters_readback = true;
+            self.spawn_readback_last_request = std::time::Instant::now();
+            self.spawn_readback_epoch_inflight = self.epoch;
+            if let Ok(mut guard) = self.spawn_readback_pending.lock() {
+                *guard = None;
+            }
+        }
 
         // Calculate rain values with variation
         let time = self.epoch as f32;
@@ -8655,6 +8805,12 @@ impl GpuState {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
 
+                // Reproduction is isolated into its own pass.
+                // IMPORTANT: this must run before process_agents so spawns come from agents_in.
+                cpass.set_pipeline(&self.reproduce_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
                 // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(256)
                 // Agents will write propeller forces to fluid_force_vectors buffer with 100x boost
                 cpass.set_pipeline(&self.process_pipeline);
@@ -8692,6 +8848,17 @@ impl GpuState {
 
         self.frame_profiler
             .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_SIM);
+
+        // Snapshot spawn/repro counters after reproduce pass.
+        if request_spawn_counters_readback {
+            encoder.copy_buffer_to_buffer(
+                &self.spawn_debug_counters,
+                0,
+                self.spawn_readback.as_ref(),
+                0,
+                12,
+            );
+        }
 
         // End the first compute pass to ensure agent writes to fluid_force_vectors are visible
         // Start a new compute pass for fluid simulation
@@ -8915,7 +9082,8 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_swap, &[]);
                 // Keep this consistent with `compact_agents` in shaders/simulation.wgsl.
 
-                cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
+                let compact_scan = self.agent_buffer_capacity as u32;
+                cpass.dispatch_workgroups((compact_scan + 63) / 64, 1, 1);
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_COMPACT);
@@ -8930,10 +9098,12 @@ impl GpuState {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_CPU_SPAWN);
 
-                // Merge spawned agents - workgroup_size(64), max 2000 spawns
+                // Merge spawned agents - workgroup_size(64)
+                // merge_agents scans the full new_agents buffer (max_agents).
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
+                let merge_scan = self.agent_buffer_capacity as u32;
+                cpass.dispatch_workgroups((merge_scan + 63) / 64, 1, 1);
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_MERGE);
@@ -8967,6 +9137,17 @@ impl GpuState {
 
             // End post-fluid pass 1. Start pass 2 so init-dead args buffer can be used as INDIRECT.
             drop(cpass);
+
+            // Snapshot spawn/repro counters after merge (before reset_spawn_counter in pass 2).
+            if request_spawn_counters_readback {
+                encoder.copy_buffer_to_buffer(
+                    &self.spawn_debug_counters,
+                    0,
+                    self.spawn_readback.as_ref(),
+                    12,
+                    12,
+                );
+            }
 
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Post-Fluid Compute Pass 2"),
@@ -9224,6 +9405,10 @@ impl GpuState {
         self.slope_counter = (self.slope_counter + 1) % slope_interval;
 
         self.kickoff_alive_readback(slot, alive_buffer);
+
+        if request_spawn_counters_readback {
+            self.kickoff_spawn_counters_readback();
+        }
 
         self.perform_optional_readbacks(should_draw);
 
@@ -9853,10 +10038,10 @@ impl GpuState {
         // - Empty version strings are treated as legacy "1.0".
         // - Current builds write SNAPSHOT_VERSION.
         match snapshot.version.as_str() {
-            "" | "1.0" | "1.1" => {}
+            "" | "1.0" | "1.1" | "1.2" => {}
             other => {
                 anyhow::bail!(
-                    "Unsupported snapshot version '{other}'. This build supports snapshot versions 1.0 and 1.1."
+                    "Unsupported snapshot version '{other}'. This build supports snapshot versions 1.0, 1.1, and 1.2."
                 );
             }
         }
