@@ -39,7 +39,7 @@ fn merge_agents_cooperative(@builtin(global_invocation_id) gid: vec3<u32>) {
     let spawn_id = gid.x;
 
     // Clamp spawn count to buffer size (2000) to avoid OOB reads
-    let spawn_count = min(atomicLoad(&spawn_debug_counters[0]), 2000u);
+    let spawn_count = min(atomicLoad(&spawn_debug_counters[0]), 2048u);
 
     if (spawn_id >= spawn_count) {
         return;

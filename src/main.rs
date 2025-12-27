@@ -651,7 +651,9 @@ const GENOME_PACKED_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const GENOME_BASES_PER_PACKED_WORD: usize = 16;
 #[allow(dead_code)]
 const MIN_GENE_LENGTH: usize = 6;
-const MAX_SPAWN_REQUESTS: usize = 2000;
+// NOTE: Keep this a multiple of 64 so we can dispatch a fixed workgroup count
+// (MAX_SPAWN_REQUESTS/64) and rely on early returns in the kernels.
+const MAX_SPAWN_REQUESTS: usize = 2048;
 
 const SNAPSHOT_VERSION: &str = "1.1";
 
@@ -4181,11 +4183,14 @@ impl GpuState {
 
         let frame_profiler = FrameProfiler::new(&device, &queue);
 
-        // Initialize agents with minimal data - GPU will generate genome and build body
+        // Initialize agents with minimal data - GPU will generate genome and build body.
         // NOTE: With wgpu::Limits::default(), max_storage_buffer_binding_size is typically 128 MiB.
         // Agent is currently 2192 bytes (see debug_assert above), so per-agent storage buffer capacity is:
         // floor(128 MiB / 2192) = 61_230 agents. Keep some headroom.
-        let max_agents = 60_000usize; // ~125.4 MiB per agent buffer; A+B ~250.9 MiB; +readback ~125.4 MiB
+        // IMPORTANT: keep max_agents a multiple of 64 so compute dispatch can use `max_agents/64`
+        // without ceil-dispatch and still cover the full buffer.
+        let max_agents_raw = 60_000usize;
+        let max_agents = (max_agents_raw + 63) & !63usize;
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
@@ -8108,6 +8113,15 @@ impl GpuState {
                 (&self.compute_bind_group_a, false)
             };
 
+            // Cheap tail-safety: clear the compaction destination buffer so any unwritten slots
+            // remain fully zeroed (prevents stale/ghost agents from reappearing).
+            let compact_dst = if wrote_to_a_directly {
+                &self.agents_buffer_a
+            } else {
+                &self.agents_buffer_b
+            };
+            encoder.clear_buffer(compact_dst, 0, None);
+
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Paused Spawn Pass"),
@@ -8116,19 +8130,16 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                // Scan slightly beyond agent_count to avoid dropping newborns when the
-                // CPU-side alive readback lags by a frame, but do NOT scan the full buffer
-                // capacity (that can pick up stale tail slots after snapshot loads).
-                let compact_count = (self.agent_count + 2000).min(self.agent_buffer_capacity as u32);
-                cpass.dispatch_workgroups((compact_count + 63) / 64, 1, 1);
+                // Scan ENTIRE buffer to ensure no alive agents are missed
+                cpass.dispatch_workgroups(self.agent_buffer_capacity as u32 / 64, 1, 1);
 
                 cpass.set_pipeline(&self.cpu_spawn_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups((cpu_spawn_count + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((MAX_SPAWN_REQUESTS as u32) / 64, 1, 1);
 
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((MAX_SPAWN_REQUESTS as u32) / 64, 1, 1);
 
                 let init_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
                 cpass.set_pipeline(&self.initialize_dead_pipeline);
@@ -8631,6 +8642,9 @@ impl GpuState {
             (&self.compute_bind_group_a, &self.compute_bind_group_b)
         };
 
+        // Pass 1: environment prep + optional reproduction.
+        // We intentionally end this pass before running the main agent simulation so that any
+        // reproduction writes to the agent buffer are guaranteed visible.
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Compute Pass"),
@@ -8749,7 +8763,24 @@ impl GpuState {
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
+            }
 
+            if !should_run_simulation {
+                // Keep timestamp progression stable when paused.
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
+            }
+        }
+
+        // Pass 2: main agent simulation.
+        // This pass boundary is the synchronization point for reproduction -> simulation.
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass (After Reproduction)"),
+                timestamp_writes: None,
+            });
+
+            if should_run_simulation {
                 // Populate agent spatial grid with agent positions - workgroup_size(256)
                 cpass.set_pipeline(&self.populate_agent_spatial_grid_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
@@ -8781,8 +8812,6 @@ impl GpuState {
 
             if !should_run_simulation {
                 // Keep timestamp progression stable when paused.
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_POPULATE_SPATIAL);
                 self.frame_profiler
@@ -9027,45 +9056,88 @@ impl GpuState {
             // End fluid compute pass, start new pass for remaining simulation work
             drop(cpass);
 
+            // Cheap tail-safety: clear the compaction destination buffer so any unwritten slots
+            // remain fully zeroed (prevents stale/ghost agents from reappearing).
+            if should_run_simulation {
+                // When ping_pong=true, process runs B->A and compaction uses bg_swap A->B.
+                // When ping_pong=false, process runs A->B and compaction uses bg_swap B->A.
+                let compact_dst = if self.ping_pong {
+                    &self.agents_buffer_b
+                } else {
+                    &self.agents_buffer_a
+                };
+                encoder.clear_buffer(compact_dst, 0, None);
+            }
+
             self.frame_profiler
                 .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_FLUID);
 
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Post-Fluid Compute Pass"),
-                timestamp_writes: None,
-            });
-
-            self.frame_profiler
-                .write_ts_compute_pass(&mut cpass, TS_POST_PASS_START);
-
-            if should_run_simulation {
-                // Compact alive agents - workgroup_size(64)
-                cpass.set_pipeline(&self.compact_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                // Keep this consistent with `compact_agents` in shaders/simulation.wgsl.
-
-                cpass.dispatch_workgroups((self.agent_count + 63) / 64, 1, 1);
+            // Post-fluid Pass 1: compact/merge (and optional paused render-only process).
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Post-Fluid Compute Pass"),
+                    timestamp_writes: None,
+                });
 
                 self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_COMPACT);
+                    .write_ts_compute_pass(&mut cpass, TS_POST_PASS_START);
 
-                // Process CPU spawn requests - workgroup_size(64)
-                if cpu_spawn_count > 0 {
-                    cpass.set_pipeline(&self.cpu_spawn_pipeline);
+                if should_run_simulation {
+                    // Compact alive agents - workgroup_size(64), scan ENTIRE buffer
+                    cpass.set_pipeline(&self.compact_pipeline);
                     cpass.set_bind_group(0, bg_swap, &[]);
-                    cpass.dispatch_workgroups((cpu_spawn_count + 63) / 64, 1, 1);
+
+                    cpass.dispatch_workgroups(self.agent_buffer_capacity as u32 / 64, 1, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_COMPACT);
+
+                    // Process CPU spawn requests - workgroup_size(64)
+                    if cpu_spawn_count > 0 {
+                        cpass.set_pipeline(&self.cpu_spawn_pipeline);
+                        cpass.set_bind_group(0, bg_swap, &[]);
+                        cpass.dispatch_workgroups((MAX_SPAWN_REQUESTS as u32) / 64, 1, 1);
+                    }
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_CPU_SPAWN);
+
+                    // Merge spawned agents - workgroup_size(64), max MAX_SPAWN_REQUESTS spawns
+                    cpass.set_pipeline(&self.merge_pipeline);
+                    cpass.set_bind_group(0, bg_swap, &[]);
+                    cpass.dispatch_workgroups((MAX_SPAWN_REQUESTS as u32) / 64, 1, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_MERGE);
+                } else if should_draw && self.agent_count > 0 {
+                    // When paused or no living agents: run process pipeline for rendering only (dt=0, probabilities=0)
+                    // but skip compaction, spawning, and buffer swapping
+
+                    cpass.set_pipeline(&self.process_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                    self.frame_profiler.write_ts_compute_pass(
+                        &mut cpass,
+                        TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
+                    );
                 }
 
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_CPU_SPAWN);
+                if should_run_simulation {
+                    self.frame_profiler.write_ts_compute_pass(
+                        &mut cpass,
+                        TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
+                    );
+                }
+            }
 
-                // Merge spawned agents - workgroup_size(64), max 2000 spawns
-                cpass.set_pipeline(&self.merge_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                cpass.dispatch_workgroups((2000 + 63) / 64, 1, 1);
-
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_MERGE);
+            // Post-fluid Pass 1b: write init-dead indirect args.
+            // This pass boundary ensures merge/compact counters are visible when we compute args.
+            if should_run_simulation {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Post-Fluid Compute Pass (Init-Dead Args)"),
+                    timestamp_writes: None,
+                });
 
                 // Compute indirect dispatch args for init-dead (based on alive_total).
                 // NOTE: Must be in a separate compute pass from the indirect dispatch because
@@ -9073,29 +9145,7 @@ impl GpuState {
                 cpass.set_pipeline(&self.write_init_dead_dispatch_args_pipeline);
                 cpass.set_bind_group(0, &self.init_dead_writer_bind_group, &[]);
                 cpass.dispatch_workgroups(1, 1, 1);
-            } else if should_draw && self.agent_count > 0 {
-                // When paused or no living agents: run process pipeline for rendering only (dt=0, probabilities=0)
-                // but skip compaction, spawning, and buffer swapping
-
-                cpass.set_pipeline(&self.process_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
-
-                self.frame_profiler.write_ts_compute_pass(
-                    &mut cpass,
-                    TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
-                );
             }
-
-            if should_run_simulation {
-                self.frame_profiler.write_ts_compute_pass(
-                    &mut cpass,
-                    TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
-                );
-            }
-
-            // End post-fluid pass 1. Start pass 2 so init-dead args buffer can be used as INDIRECT.
-            drop(cpass);
 
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Post-Fluid Compute Pass 2"),

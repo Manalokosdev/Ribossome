@@ -2188,7 +2188,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Average local chemical signals across all body parts
             let local_alpha_avg = select(0.0, local_alpha / f32(body_count), body_count > 0u);
             let local_beta_avg = select(0.0, local_beta / f32(body_count), body_count > 0u);
-            
+
             // Probability to increment/decrement counter based on conditions
             let pos_idx = grid_index(agent_pos);
             let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_counter * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;

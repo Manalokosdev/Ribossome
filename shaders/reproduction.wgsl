@@ -1,3 +1,5 @@
+const MAX_SPAWN_REQUESTS: u32 = 2048u;
+
 @compute @workgroup_size(256)
 fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
@@ -17,7 +19,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ====== REPRODUCTION LOGIC ======
     // NOTE: Pairing counter advancement happens in process_agents (simulation.wgsl).
     // This shader only checks if pairing is complete and spawns offspring.
-    
+
     let gene_length = agent.gene_length;
     let genome_offset = agent.genome_offset;
     let agent_genome_packed = agent.genome_packed;
@@ -36,44 +38,12 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Attempt reproduction: create complementary genome offspring with mutations
         let inherited_energy = agent_energy_cur * 0.5;
         if (inherited_energy > 0.0) {
-            // IMPORTANT:
-            // `spawn_debug_counters[2]` (alive counter) is produced by `compact_agents`, which runs
-            // later in the frame (post-fluid). During reproduction it may still be 0.
-            //
-            // Also IMPORTANT:
-            // merge_agents() uses spawn_debug_counters[0] as the authoritative spawn_count and will
-            // unconditionally copy new_agents[0..spawn_count). Therefore we MUST only increment
-            // spawn_debug_counters[0] when we are guaranteed to write a valid new_agents slot.
-            //
-            // Use the same CAS reservation pattern as `process_cpu_spawns`.
+            // Atomically reserve a spawn slot
+            // spawn_debug_counters[0] is reset to 0 at frame start and tracks total spawns
+            let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
 
-            let approx_alive = params.agent_count;
-            if (approx_alive >= params.max_agents) {
-                // No room.
-            } else {
-                var spawn_index: u32 = 0u;
-                var reserved = false;
-                loop {
-                    let current_spawn = atomicLoad(&spawn_debug_counters[0]);
-                    if (current_spawn >= 2000u) {
-                        break;
-                    }
-                    if (approx_alive + current_spawn >= params.max_agents) {
-                        break;
-                    }
-                    let result = atomicCompareExchangeWeak(
-                        &spawn_debug_counters[0],
-                        current_spawn,
-                        current_spawn + 1u,
-                    );
-                    if (result.exchanged) {
-                        spawn_index = result.old_value;
-                        reserved = true;
-                        break;
-                    }
-                }
-
-                if (reserved) {
+            // Only proceed if we have room in the spawn request buffer
+            if (spawn_index < MAX_SPAWN_REQUESTS) {
                 // Generate hash for offspring randomization
                 let offspring_hash = (hash3 ^ (spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu)) * 1664525u + 1013904223u;
 
@@ -340,16 +310,12 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
 
                 new_agents[spawn_index] = offspring;
-                
-                // Deduct energy from parent and reset pairing counter
-                agent_energy_cur -= inherited_energy;
-                
-                // Update agent state in the INPUT buffer
-                // process_agents will read these updated values
+
+                // Update agent state in the INPUT buffer after successful spawn
+                // Energy was already deducted when creating offspring
                 agent.energy = agent_energy_cur;
                 agent.pairing_counter = 0u;  // Reset after successful spawn
                 agents_out[agent_id] = agent;
-                }
             }
         }
     }
