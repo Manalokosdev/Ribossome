@@ -8604,6 +8604,12 @@ impl GpuState {
             // Use the reliable paused spawn path for all manual spawns
             println!("Using reliable spawn path for {} requests", cpu_spawn_count);
             self.process_spawn_requests_only(cpu_spawn_count, true);
+
+            // IMPORTANT: Avoid processing the same CPU spawn batch twice.
+            // process_spawn_requests_only() already materializes + merges these requests.
+            // If we keep cpu_spawn_count > 0, the normal post-fluid cpu_spawn_pipeline will
+            // run again and generate duplicates/hotspots.
+            cpu_spawn_count = 0;
         }
 
         let diffusion_interval = self.diffusion_interval.max(1);
