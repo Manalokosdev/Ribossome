@@ -87,11 +87,6 @@ fn sanitize_f32(x: f32) -> f32 {
 // and instead only influence motion indirectly through the fluid.
 const PROPELLERS_APPLY_DIRECT_FORCE: bool = true;
 
-// Reproduction cooldowns.
-// NOTE: WGSL `const` must be declared at module scope.
-const REPRO_COOLDOWN_FRAMES: u32 = 60u;        // Applied to the parent after reproducing
-const OFFSPRING_COOLDOWN_FRAMES: u32 = 6u;     // Applied to newborns (set to 0u to disable)
-
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
@@ -136,185 +131,14 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Vampire reach.
+    // Vampire reach and corresponding grid search radius.
+    // NOTE: cap to 10 (previous behavior) to avoid pathological loop sizes.
     let max_drain_distance = 50.0; // Fixed 50 unit radius
-
-    // Collect nearby agents ONCE using the same spiral grid scan used elsewhere.
-    // Each mouth will select a victim from this candidate set using a mouth-distance check.
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
-    let my_grid_x = u32(clamp(agent.position.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-    let my_grid_y = u32(clamp(agent.position.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+    let cell_size = f32(SIM_SIZE) / f32(SPATIAL_GRID_SIZE);
+    let grid_radius = clamp(i32(ceil(max_drain_distance / cell_size)), 1, 10);
 
-    var neighbor_count = 0u;
-    var neighbor_ids: array<u32, 64>;
-    var neighbor_seen = 0u;
-
-    for (var radius: i32 = 0; radius <= 10; radius++) {
-        if (radius == 0) {
-            // Center cell
-            let check_x = i32(my_grid_x);
-            let check_y = i32(my_grid_y);
-            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) &&
-                check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                if (stamp == current_stamp) {
-                    let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                    let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                    if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                        let neighbor_alive = agents_out[neighbor_id].alive;
-                        let neighbor_energy = agents_out[neighbor_id].energy;
-                        let neighbor_age = agents_out[neighbor_id].age;
-                        if (neighbor_alive != 0u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                            neighbor_seen++;
-                            if (neighbor_count < 64u) {
-                                neighbor_ids[neighbor_count] = neighbor_id;
-                                neighbor_count++;
-                            } else {
-                                let seed = (agent_id * 747796405u) ^ (params.epoch * 2891336453u) ^ (params.random_seed * 196613u) ^ check_cell;
-                                let r = hash(seed) % neighbor_seen;
-                                if (r < 64u) {
-                                    neighbor_ids[r] = neighbor_id;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Top and bottom edges
-            for (var dx: i32 = -radius; dx <= radius; dx++) {
-                // Top
-                var check_x = i32(my_grid_x) + dx;
-                var check_y = i32(my_grid_y) - radius;
-                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) &&
-                    check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                    if (stamp == current_stamp) {
-                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                            let neighbor_alive = agents_out[neighbor_id].alive;
-                            let neighbor_energy = agents_out[neighbor_id].energy;
-                            let neighbor_age = agents_out[neighbor_id].age;
-                            if (neighbor_alive != 0u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                neighbor_seen++;
-                                if (neighbor_count < 64u) {
-                                    neighbor_ids[neighbor_count] = neighbor_id;
-                                    neighbor_count++;
-                                } else {
-                                    let seed = (agent_id * 747796405u) ^ (params.epoch * 2891336453u) ^ (params.random_seed * 196613u) ^ check_cell;
-                                    let r = hash(seed) % neighbor_seen;
-                                    if (r < 64u) {
-                                        neighbor_ids[r] = neighbor_id;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Bottom
-                check_x = i32(my_grid_x) + dx;
-                check_y = i32(my_grid_y) + radius;
-                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) &&
-                    check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                    if (stamp == current_stamp) {
-                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                            let neighbor_alive = agents_out[neighbor_id].alive;
-                            let neighbor_energy = agents_out[neighbor_id].energy;
-                            let neighbor_age = agents_out[neighbor_id].age;
-                            if (neighbor_alive != 0u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                neighbor_seen++;
-                                if (neighbor_count < 64u) {
-                                    neighbor_ids[neighbor_count] = neighbor_id;
-                                    neighbor_count++;
-                                } else {
-                                    let seed = (agent_id * 747796405u) ^ (params.epoch * 2891336453u) ^ (params.random_seed * 196613u) ^ check_cell;
-                                    let r = hash(seed) % neighbor_seen;
-                                    if (r < 64u) {
-                                        neighbor_ids[r] = neighbor_id;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Left and right edges (excluding corners already covered)
-            for (var dy: i32 = -radius + 1; dy <= radius - 1; dy++) {
-                // Left
-                var check_x = i32(my_grid_x) - radius;
-                var check_y = i32(my_grid_y) + dy;
-                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) &&
-                    check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                    if (stamp == current_stamp) {
-                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                            let neighbor_alive = agents_out[neighbor_id].alive;
-                            let neighbor_energy = agents_out[neighbor_id].energy;
-                            let neighbor_age = agents_out[neighbor_id].age;
-                            if (neighbor_alive != 0u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                neighbor_seen++;
-                                if (neighbor_count < 64u) {
-                                    neighbor_ids[neighbor_count] = neighbor_id;
-                                    neighbor_count++;
-                                } else {
-                                    let seed = (agent_id * 747796405u) ^ (params.epoch * 2891336453u) ^ (params.random_seed * 196613u) ^ check_cell;
-                                    let r = hash(seed) % neighbor_seen;
-                                    if (r < 64u) {
-                                        neighbor_ids[r] = neighbor_id;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Right
-                check_x = i32(my_grid_x) + radius;
-                check_y = i32(my_grid_y) + dy;
-                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) &&
-                    check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                    if (stamp == current_stamp) {
-                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                            let neighbor_alive = agents_out[neighbor_id].alive;
-                            let neighbor_energy = agents_out[neighbor_id].energy;
-                            let neighbor_age = agents_out[neighbor_id].age;
-                            if (neighbor_alive != 0u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                neighbor_seen++;
-                                if (neighbor_count < 64u) {
-                                    neighbor_ids[neighbor_count] = neighbor_id;
-                                    neighbor_count++;
-                                } else {
-                                    let seed = (agent_id * 747796405u) ^ (params.epoch * 2891336453u) ^ (params.random_seed * 196613u) ^ check_cell;
-                                    let r = hash(seed) % neighbor_seen;
-                                    if (r < 64u) {
-                                        neighbor_ids[r] = neighbor_id;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Process each vampire mouth organ
+    // Process each vampire mouth organ (F=4u, G=5u, H=6u)
     var total_energy_gained = 0.0;
 
     for (var mi = 0u; mi < vampire_mouth_count; mi++) {
@@ -322,114 +146,251 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         let part = agents_out[agent_id].body[i];
         let mouth_local_pos = part.pos;
 
-        // World position for this mouth.
+        // World position for this mouth. Keep this computed regardless of enable state so
+        // we can always update the tracking data.
         let rotated_pos = apply_agent_rotation(mouth_local_pos, agent.rotation);
         let mouth_world_pos = agent.position + rotated_pos;
 
-        // Cooldown timer (stored in _pad.x) should tick regardless of enable state
-        var current_cooldown = agents_out[agent_id].body[i]._pad.x;
-        if (current_cooldown > 0.0) {
-            current_cooldown = max(current_cooldown - 1.0, 0.0);
-            agents_out[agent_id].body[i]._pad.x = current_cooldown;
-        }
+            // Cooldown timer (stored in _pad.x) should tick regardless of enable state
+            var current_cooldown = agents_out[agent_id].body[i]._pad.x;
+            if (current_cooldown > 0.0) {
+                current_cooldown -= 1.0;
+                agents_out[agent_id].body[i]._pad.x = current_cooldown;
+            }
 
-        // Disabler gating
-        var block = 0.0;
-        if (has_disabler) {
-            for (var j = 0u; j < body_count; j++) {
-                let check_type = get_base_part_type(agents_out[agent_id].body[j].part_type);
-                if (check_type == 26u) {
-                    let disabler_pos = agents_out[agent_id].body[j].pos;
-                    let d = length(mouth_local_pos - disabler_pos);
-                    if (d < 20.0) {
-                        block += max(0.0, 1.0 - d / 20.0);
+            // Disabler gating:
+            // Vampire mouths act by default, but are suppressed when "inhibitor/enabler" organs
+            // (type 26) are placed nearby on the same agent body.
+            var block = 0.0;
+            if (has_disabler) {
+                for (var j = 0u; j < body_count; j++) {
+                    let check_type = get_base_part_type(agents_out[agent_id].body[j].part_type);
+                    if (check_type == 26u) {  // "Enabler" used as disabler for vampire mouths
+                        let disabler_pos = agents_out[agent_id].body[j].pos;
+                        let d = length(mouth_local_pos - disabler_pos);
+                        if (d < 20.0) {
+                            block += max(0.0, 1.0 - d / 20.0);
+                        }
                     }
                 }
             }
-        }
-        block = min(block, 1.0);
-        let quadratic_block = block * block;
-        let mouth_activity = 1.0 - quadratic_block;
+            block = min(block, 1.0);
+            let quadratic_block = block * block;
+            let mouth_activity = 1.0 - quadratic_block;
 
-        // Only work if not fully suppressed
-        if (mouth_activity > 0.0001) {
-            // Select closest in-range victim from the pre-collected neighbor list.
-            var closest_victim_id = 0xFFFFFFFFu;
-            var closest_dist = 1e30;
-            for (var n = 0u; n < neighbor_count; n++) {
-                let neighbor_id = neighbor_ids[n];
-                let neighbor = agents_out[neighbor_id];
-                if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                    let dist = length(mouth_world_pos - neighbor.position);
-                    if (dist < max_drain_distance && dist < closest_dist) {
-                        closest_dist = dist;
-                        closest_victim_id = neighbor_id;
+            // Only work if not fully suppressed
+            if (mouth_activity > 0.0001) {
+                // Mouth-centered spiral search over spatial grid.
+                // We break early on the first in-range victim to save compute.
+                var closest_victim_id = 0xFFFFFFFFu;
+
+                let mouth_grid_x = u32(clamp(mouth_world_pos.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+                let mouth_grid_y = u32(clamp(mouth_world_pos.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+
+                var found_victim = false;
+                for (var radius: i32 = 0; radius <= grid_radius; radius++) {
+                    if (found_victim) {
+                        break;
+                    }
+                    if (radius == 0) {
+                        // Single center cell
+                        let check_x = i32(mouth_grid_x);
+                        let check_y = i32(mouth_grid_y);
+                        let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                        let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                        if (stamp == current_stamp) {
+                            let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                            let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                            if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                let neighbor = agents_out[neighbor_id];
+                                if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                    let dist = length(mouth_world_pos - neighbor.position);
+                                    if (dist < max_drain_distance) {
+                                        closest_victim_id = neighbor_id;
+                                        found_victim = true;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Top and bottom edges
+                        for (var dx: i32 = -radius; dx <= radius; dx++) {
+                            if (found_victim) {
+                                break;
+                            }
+                            // Top
+                            var check_x = i32(mouth_grid_x) + dx;
+                            var check_y = i32(mouth_grid_y) - radius;
+                            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                                if (stamp == current_stamp) {
+                                    let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                                    let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                                    if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                        let neighbor = agents_out[neighbor_id];
+                                        if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                            let dist = length(mouth_world_pos - neighbor.position);
+                                            if (dist < max_drain_distance) {
+                                                closest_victim_id = neighbor_id;
+                                                found_victim = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Bottom
+                            if (!found_victim) {
+                                check_x = i32(mouth_grid_x) + dx;
+                                check_y = i32(mouth_grid_y) + radius;
+                                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                                    if (stamp == current_stamp) {
+                                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                            let neighbor = agents_out[neighbor_id];
+                                            if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                                let dist = length(mouth_world_pos - neighbor.position);
+                                                if (dist < max_drain_distance) {
+                                                    closest_victim_id = neighbor_id;
+                                                    found_victim = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Left and right edges (excluding corners already covered)
+                        for (var dy: i32 = -radius + 1; dy <= radius - 1; dy++) {
+                            if (found_victim) {
+                                break;
+                            }
+                            // Left
+                            var check_x = i32(mouth_grid_x) - radius;
+                            var check_y = i32(mouth_grid_y) + dy;
+                            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                                if (stamp == current_stamp) {
+                                    let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                                    let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                                    if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                        let neighbor = agents_out[neighbor_id];
+                                        if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                            let dist = length(mouth_world_pos - neighbor.position);
+                                            if (dist < max_drain_distance) {
+                                                closest_victim_id = neighbor_id;
+                                                found_victim = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Right
+                            if (!found_victim) {
+                                check_x = i32(mouth_grid_x) + radius;
+                                check_y = i32(mouth_grid_y) + dy;
+                                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
+                                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                                    if (stamp == current_stamp) {
+                                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
+                                            let neighbor = agents_out[neighbor_id];
+                                            if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                                let dist = length(mouth_world_pos - neighbor.position);
+                                                if (dist < max_drain_distance) {
+                                                    closest_victim_id = neighbor_id;
+                                                    found_victim = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-            }
 
-            // Drain from closest victim only
-            if (closest_victim_id != 0xFFFFFFFFu) {
-                // Try to claim the victim's spatial grid cell atomically
-                // This prevents multiple DIFFERENT vampires from draining the same victim simultaneously
-                // But allows the same vampire to drain with multiple mouths
-                let victim_pos = agents_out[closest_victim_id].position;
-                let victim_scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
-                let victim_grid_x = u32(clamp(victim_pos.x * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-                let victim_grid_y = u32(clamp(victim_pos.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-                let victim_cell = victim_grid_y * SPATIAL_GRID_SIZE + victim_grid_x;
-
-                // Atomic claim: mark victim with high bit to indicate it's being drained this frame.
-                // The high bit preserves the victim ID for physics (unmask with & 0x7FFFFFFF).
-                // IMPORTANT: this claim must be exclusive across vampires to avoid
-                // cross-invocation RMW races on victim energy.
-                let victim_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(victim_cell)]);
-                var can_drain = false;
-                if (victim_stamp == current_stamp) {
-                    let current_cell = atomicLoad(&agent_spatial_grid[spatial_id_index(victim_cell)]);
-
-                    // Check if cell contains the victim (with or without high bit)
-                    let cell_agent_id = current_cell & 0x7FFFFFFFu;
-                    let is_claimed = (current_cell & 0x80000000u) != 0u;
-
-                    if (cell_agent_id == closest_victim_id && !is_claimed) {
-                        // Victim is unclaimed - try to mark with high bit
-                        let claimed_victim_id = closest_victim_id | 0x80000000u;
-                        let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[spatial_id_index(victim_cell)], closest_victim_id, claimed_victim_id);
-                        can_drain = claim_result.exchanged;
-                    }
+                if (!found_victim) {
+                    agents_out[agent_id].body[i]._pad.y = 0.0;
                 }
 
-                // Only proceed if we can drain this victim AND cooldown is ready
-                if (can_drain && current_cooldown <= 0.0) {
-                    // Vampire drain scales down with disabler suppression AND mouth movement speed
-                    let victim_energy = agents_out[closest_victim_id].energy;
+                // Drain from closest victim only
+                if (closest_victim_id != 0xFFFFFFFFu) {
+                    // Try to claim the victim's spatial grid cell atomically
+                    // This prevents multiple DIFFERENT vampires from draining the same victim simultaneously
+                    // But allows the same vampire to drain with multiple mouths
+                    let victim_pos = agents_out[closest_victim_id].position;
+                    let victim_scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
+                    let victim_grid_x = u32(clamp(victim_pos.x * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+                    let victim_grid_y = u32(clamp(victim_pos.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+                    let victim_cell = victim_grid_y * SPATIAL_GRID_SIZE + victim_grid_x;
 
-                    if (victim_energy > 0.0001) {
-                        // Linear speed-based absorption reduction using RELATIVE victim speed.
-                        // IMPORTANT: don't use mouth-tip delta here; rotation can make the tip move far
-                        // faster than VEL_MAX even when the agent is behaving normally, which would
-                        // zero-out vampire drains permanently.
-                        let agent_vel = agent.velocity;
-                        let victim_vel = agents_out[closest_victim_id].velocity;
-                        let rel_speed = length(agent_vel - victim_vel);
-                        let normalized_rel_speed = min(rel_speed / VEL_MAX, 1.0);
-                        let speed_multiplier = clamp(1.0 - normalized_rel_speed, 0.0, 1.0);
+                    // Atomic claim: mark victim with high bit to indicate it's being drained this frame.
+                    // The high bit preserves the victim ID for physics (unmask with & 0x7FFFFFFF).
+                    // IMPORTANT: this claim must be exclusive across vampires to avoid
+                    // cross-invocation RMW races on victim energy.
+                    let victim_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(victim_cell)]);
+                    var can_drain = false;
+                    if (victim_stamp == current_stamp) {
+                        let current_cell = atomicLoad(&agent_spatial_grid[spatial_id_index(victim_cell)]);
 
-                        // Absorb up to 50% of victim's energy (reduced by mouth speed and disabler)
-                        let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier;
+                        // Check if cell contains the victim (with or without high bit)
+                        let cell_agent_id = current_cell & 0x7FFFFFFFu;
+                        let is_claimed = (current_cell & 0x80000000u) != 0u;
 
-                        // Victim loses 2x the absorbed energy.
-                        let energy_damage = absorbed_energy * 2.0;
-                        agents_out[closest_victim_id].energy = max(0.0, victim_energy - energy_damage);
+                        if (cell_agent_id == closest_victim_id && !is_claimed) {
+                            // Victim is unclaimed - try to mark with high bit
+                            let claimed_victim_id = closest_victim_id | 0x80000000u;
+                            let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[spatial_id_index(victim_cell)], closest_victim_id, claimed_victim_id);
+                            can_drain = claim_result.exchanged;
+                        }
+                    }
 
-                        total_energy_gained += absorbed_energy;
+                    // Only proceed if we can drain this victim AND cooldown is ready
+                    if (can_drain && current_cooldown <= 0.0) {
+                        // Vampire drain scales down with disabler suppression AND mouth movement speed
+                        let victim_energy = agents_out[closest_victim_id].energy;
 
-                        // Store absorbed amount in _pad.y for visualization
-                        agents_out[agent_id].body[i]._pad.y = absorbed_energy;
+                        if (victim_energy > 0.0001) {
+                            // Linear speed-based absorption reduction using RELATIVE victim speed.
+                            // IMPORTANT: don't use mouth-tip delta here; rotation can make the tip move far
+                            // faster than VEL_MAX even when the agent is behaving normally, which would
+                            // zero-out vampire drains permanently.
+                            let agent_vel = agent.velocity;
+                            let victim_vel = agents_out[closest_victim_id].velocity;
+                            let rel_speed = length(agent_vel - victim_vel);
+                            let normalized_rel_speed = min(rel_speed / VEL_MAX, 1.0);
+                            let speed_multiplier = clamp(1.0 - normalized_rel_speed, 0.0, 1.0);
 
-                        // Set cooldown timer
-                        agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
+                            // Absorb up to 50% of victim's energy (reduced by mouth speed and disabler).
+                            // Poison Resistance (type 29) also protects against vampire drain, using the
+                            // same per-organ 50% multiplier as poison damage.
+                            let vampire_protection = pow(0.5, f32(agents_out[closest_victim_id].poison_resistant_count));
+                            let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier * vampire_protection;
+
+                            // Victim loses 2x the absorbed energy.
+                            let energy_damage = absorbed_energy * 2.0;
+                            agents_out[closest_victim_id].energy = max(0.0, victim_energy - energy_damage);
+
+                            total_energy_gained += absorbed_energy;
+
+                            // Store absorbed amount in _pad.y for visualization
+                            agents_out[agent_id].body[i]._pad.y = absorbed_energy;
+
+                            // Set cooldown timer
+                            agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
+                        } else {
+                            agents_out[agent_id].body[i]._pad.y = 0.0;
+                        }
                     } else {
                         agents_out[agent_id].body[i]._pad.y = 0.0;
                     }
@@ -439,12 +400,9 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else {
                 agents_out[agent_id].body[i]._pad.y = 0.0;
             }
-        } else {
-            agents_out[agent_id].body[i]._pad.y = 0.0;
-        }
 
-        // Store current position for next frame's movement calculation
-        agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
+            // Store current position for next frame's movement calculation
+            agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
     }
 
     // Add gained energy to this agent
@@ -500,35 +458,24 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_genome_offset = agents_in[agent_id].genome_offset;
     let agent_genome_packed = agents_in[agent_id].genome_packed;
 
-    // Reproduction stages offspring deterministically into new_agents[parent_id].
-    // If this slot is alive, the parent reproduced this frame and we must zero
-    // pairing state in agents_out to prevent same-frame re-accumulation.
-    let reproduced_this_frame = new_agents[agent_id].alive != 0u;
-
     // Working state for this invocation.
     var agent_pos = agent_position;
     var agent_vel = agent_velocity;
     var agent_rot = agent_rotation;
     var agent_energy_cur = agent_energy;
-    var pairing_counter = select(agent_pairing_counter, 0u, reproduced_this_frame);
-
-    // Reproduction runs before process_agents. If this parent reproduced, it should start this
-    // frame with the remaining half of its energy (offspring got the other half).
-    if (reproduced_this_frame) {
-        agent_energy_cur = agent_energy_cur * 0.5;
-    }
+    var pairing_counter = agent_pairing_counter;
 
     // Initialize output scalars explicitly (avoid full Agent megacopy).
     agents_out[agent_id].position = agent_position;
     agents_out[agent_id].velocity = agent_velocity;
     agents_out[agent_id].rotation = agent_rotation;
-    agents_out[agent_id].energy = agent_energy_cur;
+    agents_out[agent_id].energy = agent_energy;
     agents_out[agent_id].energy_capacity = agent_energy_capacity;
     agents_out[agent_id].torque_debug = agent_torque_debug;
     agents_out[agent_id].morphology_origin = agent_morphology_origin;
     agents_out[agent_id].alive = agent_alive;
     agents_out[agent_id].body_count = agent_body_count;
-    agents_out[agent_id].pairing_counter = pairing_counter;
+    agents_out[agent_id].pairing_counter = agent_pairing_counter;
     agents_out[agent_id].is_selected = agent_is_selected;
     agents_out[agent_id].generation = agent_generation;
     agents_out[agent_id].age = agent_age;
@@ -544,6 +491,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // agents_out. If we don't write genome every frame, the buffer we write into will retain
     // stale/garbage genome data for existing agents.
     //
+    // IMPORTANT: Naga/WGSL validation can reject dynamic indexing into certain array expressions.
     // Use constant indices for the fixed-size packed genome.
     agents_out[agent_id].genome_packed[0u] = agent_genome_packed[0u];
     agents_out[agent_id].genome_packed[1u] = agent_genome_packed[1u];
@@ -1205,9 +1153,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Emits alpha or beta based on genome pairing completion percentage
         if (base_type == 36u) {
             // Get pairing percentage (0.0 to 1.0)
-            // NOTE: pairing_counter packs cooldown in the high 16 bits.
-            let pairing_progress = agent_pairing_counter & 0xFFFFu;
-            let pairing_percentage = f32(pairing_progress) / f32(GENOME_BYTES);
+            let pairing_percentage = f32(agent_pairing_counter) / f32(GENOME_BYTES);
 
             // Extract parameter (0-127) and promoter bit
             let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
@@ -1447,9 +1393,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let base_type = get_base_part_type(part.part_type);
         let amino_props = get_amino_acid_properties(base_type);
 
-        // During newborn grace, treat vampire mouths as inactive so they don't
-        // disable normal mouths (and drain_energy already early-returns for newborns).
-        if (base_type == 33u && agents_out[agent_id].age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+        if (base_type == 33u) {
             has_vampire_mouth = true;
         }
 
@@ -2235,83 +2179,58 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     // Note: alive counting is handled in the compaction/merge passes
 
-    // ====== SPAWN/REPRODUCTION LOGIC ======
-    // Better RNG using hash function with time and agent variation
-    let hash_base = (agent_id + params.random_seed) * 747796405u + 2891336453u;
-    let hash2 = hash_base ^ (hash_base >> 13u);
-    let hash3 = hash2 * 1103515245u;
-
-    // ====== RNA PAIRING REPRODUCTION (probabilistic counter) ======
-    // Pairing counter probabilistically increments; reproduce when it reaches gene_length
-
-    // Cached gene_length (active bases) and genome_offset (left padding).
-    // With packed genomes, we treat indices outside [offset, offset+len) as 'X'.
-    var gene_length = agent_gene_length;
-    // Prevent "machine-gun" reproduction when gene_length becomes tiny (e.g. 1-3).
-    // This only affects the pairing/reproduction threshold, not morphology.
-    let pairing_target = max(gene_length, 24u);
-    let genome_offset = agent_genome_offset;
-
-    // Pairing counter packs a cooldown timer into the high 16 bits.
-    // Offspring spawns start with cooldown, and snapshot restores may contain cooldown.
-    // Parents that reproduce this frame are reset to 0 via `reproduced_this_frame`.
-    // - low  16 bits: pairing progress
-    // - high 16 bits: cooldown frames remaining
-    var repro_cooldown: u32 = pairing_counter >> 16u;
-    var pairing_progress: u32 = pairing_counter & 0xFFFFu;
-    if (repro_cooldown > 0u) {
-        repro_cooldown = repro_cooldown - 1u;
-        pairing_progress = 0u;
+    // ====== RNA PAIRING ADVANCEMENT ======
+    // Pairing counter probabilistically increments based on energy and chemical signals.
+    // When it reaches gene_length, reproduction.wgsl will spawn offspring.
+    
+    // CRITICAL: Handle reproduction completion BEFORE pairing advancement.
+    // Reproduction shader writes offspring when pairing_counter >= gene_length,
+    // but it doesn't update the parent (different buffer). We must reset here.
+    if (pairing_counter >= agent_gene_length && agent_gene_length > 0u) {
+        // Reproduction happened - deduct 50% energy and reset counter
+        agent_energy_cur *= 0.5;
+        pairing_counter = 0u;
     }
-    let can_pair_and_reproduce = (repro_cooldown == 0u) && (!reproduced_this_frame);
+    
+    if (agent_gene_length > 0u && pairing_counter < agent_gene_length) {
+        // If the agent has no energy capacity (no storage), it cannot sustain pairing.
+        if (agent_energy_capacity > 0.0) {
+            // Average local chemical signals across all body parts
+            let local_alpha_avg = select(0.0, local_alpha / f32(body_count), body_count > 0u);
+            let local_beta_avg = select(0.0, local_beta / f32(body_count), body_count > 0u);
 
-    if (can_pair_and_reproduce && gene_length > 0u && pairing_progress < pairing_target) {
-        // If the agent has no energy capacity (no storage), it cannot sustain pairing/reproduction.
-        // This also prevents "capacity clamped to 0" agents from reproducing at zero energy.
-        if (capacity <= 0.0) {
-            // Keep pairing_counter unchanged.
-        } else {
-        // Try to increment (or decrement) the counter based on conditions
-        let pos_idx = grid_index(agent_pos);
-        let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_progress * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;
-        let rnd = f32(hash(seed)) / 4294967295.0;
-        let energy_for_pair = max(agent_energy_cur, 0.0);
+            // Probability to increment/decrement counter based on conditions
+            let pos_idx = grid_index(agent_pos);
+            let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_counter * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;
+            let rnd = f32(hash(seed)) / 4294967295.0;
+            let energy_for_pair = max(agent_energy_cur, 0.0);
 
-        // Probability to increment counter
-        // Apply sqrt scaling: diminishing returns for high energy.
-        // IMPORTANT: do not add +1 here; at energy==0, pairing probability should be 0.
-        let energy_scaled = sqrt(energy_for_pair);
-        // Apply radiation_factor (beta acts as reproductive inhibitor)
-        // Pairing drive is alpha minus beta, measured locally across body parts.
-        // Positive drive increases pairing probability; negative drive causes probabilistic un-pairing.
-        // Clamp each side to keep probabilities bounded.
-        let alpha_gate = clamp(local_alpha, 0.0, 1.0);
-        let beta_gate = clamp(local_beta, 0.0, 1.0);
-        let pairing_drive = alpha_gate - beta_gate; // [-1, +1]
+            // Use averaged local signals for pairing drive
+            let energy_scaled = sqrt(energy_for_pair);
+            let alpha_gate = clamp(local_alpha_avg, 0.0, 1.0);
+            let beta_gate = clamp(local_beta_avg, 0.0, 1.0);
+            let pairing_drive = alpha_gate - beta_gate; // [-1, +1]
 
-        let base_p = params.spawn_probability * energy_scaled * 0.1;
-        let pair_p = clamp(base_p * max(pairing_drive, 0.0), 0.0, 1.0);
+            let base_p = params.spawn_probability * energy_scaled * 0.1;
+            let pair_p = clamp(base_p * max(pairing_drive, 0.0), 0.0, 1.0);
+            let unpair_p = clamp(base_p * max(-pairing_drive, 0.0), 0.0, 1.0);
 
-        // NOTE: Un-pairing has been removed; pairing can only advance.
-        // Negative pairing_drive just means "no progress" this frame.
-        if (rnd < pair_p) {
-            // Pairing cost per increment
-            let pairing_cost = params.pairing_cost;
-            if (agent_energy_cur >= pairing_cost) {
-                pairing_progress += 1u;
-                agent_energy_cur -= pairing_cost;
+            // Pairing/un-pairing are mutually exclusive in a frame
+            if (rnd < pair_p) {
+                // Pairing cost per increment
+                let pairing_cost = params.pairing_cost;
+                if (agent_energy_cur >= pairing_cost) {
+                    pairing_counter += 1u;
+                    agent_energy_cur -= pairing_cost;
+                }
+            } else if (rnd < (pair_p + unpair_p)) {
+                // Un-pairing event: lose one paired base (no energy refund)
+                pairing_counter = select(pairing_counter - 1u, 0u, pairing_counter == 0u);
             }
         }
-        }
     }
 
-    // NOTE: Offspring spawning is handled in a dedicated pass (`reproduce_agents`).
-    // This pass only advances pairing_progress and manages the cooldown timer.
-    agents_out[agent_id].pairing_counter = select(
-        (repro_cooldown << 16u) | (pairing_progress & 0xFFFFu),
-        0u,
-        reproduced_this_frame,
-    );
+    agents_out[agent_id].pairing_counter = pairing_counter;
 
     // Always write selected agent to readback buffer for inspector (even when drawing disabled)
     if (agent_is_selected == 1u) {
@@ -2320,7 +2239,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         unrotated_agent.rotation = 0.0;
         // Speed info now stored per-mouth in body[63].pos during loop above (for debugging)
         // Store the calculated gene_length (we already computed it above for reproduction)
-        unrotated_agent.gene_length = gene_length;
+        unrotated_agent.gene_length = agent_gene_length;
         // Copy generation/age/total_mass (already in agents_out) unchanged
         selected_agent_buffer[0] = unrotated_agent;
     }
@@ -2330,7 +2249,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agents_out[agent_id].velocity = agent_vel;
     agents_out[agent_id].rotation = agent_rot;
     agents_out[agent_id].energy = agent_energy_cur;
-    agents_out[agent_id].gene_length = gene_length;
+    agents_out[agent_id].gene_length = agent_gene_length;
     // Increment age for living agents
     if (agents_out[agent_id].alive == 1u) {
         agents_out[agent_id].age = agents_out[agent_id].age + 1u;
@@ -3273,427 +3192,22 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
 // SPAWN/DEATH MANAGEMENT SHADERS
 // ============================================================================
 
-fn try_claim_spawn_slot() -> u32 {
-    // Returns 0xFFFFFFFF on failure.
-    loop {
-        let current_spawn = atomicLoad(&spawn_debug_counters[0]);
-        if (current_spawn >= 2000u) {
-            return 0xFFFFFFFFu;
-        }
-        let result = atomicCompareExchangeWeak(
-            &spawn_debug_counters[0],
-            current_spawn,
-            current_spawn + 1u,
-        );
-        if (result.exchanged) {
-            return result.old_value;
-        }
-    }
-
-    // Unreachable, but required for some validators.
-    return 0xFFFFFFFFu;
-}
-
-// Dedicated reproduction pass.
-// - Reads the pairing/cooldown state from agents_in (previous frame).
-// - Emits offspring into `new_agents[]` and increments spawn counter.
-// - Parent pairing state reset happens in `process_agents` (so it lands in agents_out).
-@compute @workgroup_size(256)
-fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let agent_id = gid.x;
-    if (agent_id >= params.agent_count) {
-        return;
-    }
-
-    if (agents_in[agent_id].alive == 0u) {
-        return;
-    }
-
-    let agent_is_selected = agents_in[agent_id].is_selected;
-
-    let pairing_counter = agents_in[agent_id].pairing_counter;
-    let repro_cooldown: u32 = pairing_counter >> 16u;
-    let pairing_progress: u32 = pairing_counter & 0xFFFFu;
-
-    let gene_length = agents_in[agent_id].gene_length;
-    if (gene_length == 0u) {
-        return;
-    }
-    let pairing_target = max(gene_length, 24u);
-    if (repro_cooldown != 0u || pairing_progress < pairing_target) {
-        return;
-    }
-
-    // Count how many agents became eligible to reproduce this frame.
-    atomicAdd(&spawn_debug_counters[1], 1u);
-
-    // Generate hash for offspring randomization.
-    // Include agent_id and spawn_index to keep mutations unique.
-    let base_hash = hash((params.random_seed ^ (agent_id * 747796405u)) ^ (params.epoch * 2891336453u));
-    let offspring_hash = (base_hash ^ (agent_id * 0x85ebca6bu)) * 1664525u + 1013904223u;
-
-    let agent_pos = agents_in[agent_id].position;
-    let agent_generation = agents_in[agent_id].generation;
-    let body_count = agents_in[agent_id].body_count;
-    let genome_offset = agents_in[agent_id].genome_offset;
-
-    // Pull genome into a local fixed array with constant indices.
-    var parent_genome_packed: array<u32, GENOME_PACKED_WORDS>;
-    parent_genome_packed[0u] = agents_in[agent_id].genome_packed[0u];
-    parent_genome_packed[1u] = agents_in[agent_id].genome_packed[1u];
-    parent_genome_packed[2u] = agents_in[agent_id].genome_packed[2u];
-    parent_genome_packed[3u] = agents_in[agent_id].genome_packed[3u];
-    parent_genome_packed[4u] = agents_in[agent_id].genome_packed[4u];
-    parent_genome_packed[5u] = agents_in[agent_id].genome_packed[5u];
-    parent_genome_packed[6u] = agents_in[agent_id].genome_packed[6u];
-    parent_genome_packed[7u] = agents_in[agent_id].genome_packed[7u];
-    parent_genome_packed[8u] = agents_in[agent_id].genome_packed[8u];
-    parent_genome_packed[9u] = agents_in[agent_id].genome_packed[9u];
-    parent_genome_packed[10u] = agents_in[agent_id].genome_packed[10u];
-    parent_genome_packed[11u] = agents_in[agent_id].genome_packed[11u];
-    parent_genome_packed[12u] = agents_in[agent_id].genome_packed[12u];
-    parent_genome_packed[13u] = agents_in[agent_id].genome_packed[13u];
-    parent_genome_packed[14u] = agents_in[agent_id].genome_packed[14u];
-    parent_genome_packed[15u] = agents_in[agent_id].genome_packed[15u];
-
-    // Create brand new offspring agent (don't copy parent).
-    var offspring: Agent;
-
-    // Random rotation.
-    offspring.rotation = hash_f32(offspring_hash) * 6.28318530718;
-
-    // Spawn near parent with minimal jitter (fixed radius) to prevent perfect overlap.
-    {
-        let jitter_angle = hash_f32(offspring_hash ^ 0xBADC0FFEu) * 6.28318530718;
-        let jitter_dist = 2.0;
-        let jitter = vec2<f32>(cos(jitter_angle), sin(jitter_angle)) * jitter_dist;
-        offspring.position = clamp_position(agent_pos + jitter);
-    }
-    offspring.velocity = vec2<f32>(0.0);
-
-    // Initialize offspring energy; final value assigned after transfer.
-    offspring.energy = 0.0;
-    offspring.energy_capacity = 0.0; // Will be calculated when morphology builds.
-    offspring.torque_debug = 0.0;
-    offspring.morphology_origin = vec2<f32>(0.0);
-
-    // Initialize as alive, will build body on first frame.
-    offspring.alive = 1u;
-    offspring.body_count = 0u; // Forces morphology rebuild.
-    // Pairing counter packs cooldown in the high 16 bits.
-    offspring.pairing_counter = OFFSPRING_COOLDOWN_FRAMES << 16u;
-    offspring.is_selected = 0u;
-    // Lineage and lifecycle.
-    offspring.generation = agent_generation + 1u;
-    offspring.age = 0u;
-    offspring.total_mass = 0.0; // Will be computed after morphology build.
-    offspring.poison_resistant_count = 0u; // Will be computed after morphology build.
-
-    // Default genome metadata.
-    offspring.gene_length = 0u;
-    offspring.genome_offset = 0u;
-    for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
-        offspring.genome_packed[w] = 0u;
-    }
-
-    // Child genome: materialize to a temporary ASCII buffer only for reproduction/mutation,
-    // then pack back into offspring.genome_packed.
-    var offspring_ascii: array<u32, GENOME_ASCII_WORDS>;
-    if (params.asexual_reproduction == 1u) {
-        // Asexual reproduction: direct copy of bases.
-        for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
-            let bi0 = w * 4u + 0u;
-            let bi1 = w * 4u + 1u;
-            let bi2 = w * 4u + 2u;
-            let bi3 = w * 4u + 3u;
-            let b0 = genome_get_base_ascii(parent_genome_packed, bi0, genome_offset, gene_length) & 0xFFu;
-            let b1 = genome_get_base_ascii(parent_genome_packed, bi1, genome_offset, gene_length) & 0xFFu;
-            let b2 = genome_get_base_ascii(parent_genome_packed, bi2, genome_offset, gene_length) & 0xFFu;
-            let b3 = genome_get_base_ascii(parent_genome_packed, bi3, genome_offset, gene_length) & 0xFFu;
-            offspring_ascii[w] = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
-        }
-    } else {
-        // Sexual reproduction: reverse complement of parent (preserves legacy 'X' padding semantics).
-        for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
-            offspring_ascii[w] = genome_revcomp_ascii_word(parent_genome_packed, genome_offset, gene_length, w);
-        }
-    }
-
-    // Count mutation protection organs (base_type 43) - each reduces mutation rate by 30%.
-    var mutation_protection_count = 0u;
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-        let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
-        if (base_type == 43u) {
-            mutation_protection_count++;
-        }
-    }
-    let protection_multiplier = pow(0.7, f32(mutation_protection_count));
-
-    // Sample beta concentration at parent's location to calculate radiation-induced mutation rate.
-    let parent_idx = grid_index(agent_pos);
-    let beta_concentration = chem_grid[parent_idx].y;
-
-    // Beta grid is now in 0..1 range; normalize directly.
-    let beta_normalized = clamp(beta_concentration, 0.0, 1.0);
-    // Gentler mutation amplification to reduce genome erosion in high-beta zones.
-    let mutation_multiplier = 1.0 + pow(beta_normalized, 3.0) * 4.0;
-    var effective_mutation_rate = params.mutation_rate * mutation_multiplier * protection_multiplier;
-    effective_mutation_rate = min(effective_mutation_rate, 1.0);
-
-    // Determine active gene region (non-'X' bytes) in offspring after reverse complement.
-    var first_non_x: u32 = GENOME_LENGTH;
-    var last_non_x: u32 = 0xFFFFFFFFu;
-    for (var bi = 0u; bi < GENOME_LENGTH; bi++) {
-        let word = bi / 4u;
-        let byte_offset = bi % 4u;
-        let b = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
-        if (b != 88u) {
-            if (first_non_x == GENOME_LENGTH) { first_non_x = bi; }
-            last_non_x = bi;
-        }
-    }
-    var active_start: u32 = 0u;
-    var active_end: u32 = 0xFFFFFFFFu;
-    if (last_non_x != 0xFFFFFFFFu) {
-        active_start = first_non_x;
-        active_end = last_non_x;
-    }
-
-    // Optional insertion mutation (codon-aligned).
-    {
-        let insert_seed = offspring_hash ^ 0xB5297A4Du;
-        let insert_roll = hash_f32(insert_seed);
-        let can_insert = (last_non_x != 0xFFFFFFFFu);
-        if (can_insert && insert_roll < (effective_mutation_rate * 0.20)) {
-            var seq: array<u32, GENOME_LENGTH>;
-            var L: u32 = 0u;
-            for (var bi = active_start; bi <= active_end; bi++) {
-                if (L < GENOME_LENGTH) {
-                    let word = bi / 4u;
-                    let byte_offset = bi % 4u;
-                    seq[L] = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
-                    L += 1u;
-                }
-            }
-            let max_ins = select(GENOME_LENGTH - L, 0u, L >= GENOME_LENGTH);
-            let k = 3u;
-            if (max_ins >= k) {
-                let mode = hash(insert_seed ^ 0x1B56C4E9u) % 3u; // 0=begin,1=end,2=middle
-                var pos: u32 = 0u;
-                if (mode == 0u) { pos = 0u; }
-                else if (mode == 1u) { pos = L; }
-                else { pos = hash(insert_seed ^ 0x2C9F85A1u) % (L + 1u); }
-
-                var j: i32 = i32(L);
-                loop {
-                    j = j - 1;
-                    if (j < i32(pos)) { break; }
-                    seq[u32(j) + k] = seq[u32(j)];
-                }
-
-                for (var t = 0u; t < k; t++) {
-                    let nb = get_random_rna_base(insert_seed ^ (t * 1664525u + 1013904223u));
-                    seq[pos + t] = nb;
-                }
-                L = min(GENOME_LENGTH, L + k);
-
-                var out_bytes: array<u32, GENOME_LENGTH>;
-                for (var t = 0u; t < GENOME_LENGTH; t++) { out_bytes[t] = 88u; }
-                let left_pad = (GENOME_LENGTH - L) / 2u;
-                for (var t = 0u; t < L; t++) {
-                    out_bytes[left_pad + t] = seq[t];
-                }
-                for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
-                    let b0 = out_bytes[w * 4u + 0u] & 0xFFu;
-                    let b1 = out_bytes[w * 4u + 1u] & 0xFFu;
-                    let b2 = out_bytes[w * 4u + 2u] & 0xFFu;
-                    let b3 = out_bytes[w * 4u + 3u] & 0xFFu;
-                    let word_val = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
-                    offspring_ascii[w] = word_val;
-                }
-                active_start = left_pad;
-                active_end = left_pad + L - 1u;
-            }
-        }
-    }
-
-    // Optional deletion mutation (codon-aligned).
-    {
-        let delete_seed = offspring_hash ^ 0xE7037ED1u;
-        let delete_roll = hash_f32(delete_seed);
-        let has_active = (active_end != 0xFFFFFFFFu);
-        if (has_active && delete_roll < (effective_mutation_rate * 0.35)) {
-            var seq: array<u32, GENOME_LENGTH>;
-            var L: u32 = 0u;
-            for (var bi = active_start; bi <= active_end; bi++) {
-                if (L < GENOME_LENGTH) {
-                    let word = bi / 4u;
-                    let byte_offset = bi % 4u;
-                    seq[L] = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
-                    L += 1u;
-                }
-            }
-            if (L > MIN_GENE_LENGTH) {
-                let removable = L - MIN_GENE_LENGTH;
-                let k = 3u;
-                if (removable >= k) {
-                    var pos: u32 = 0u;
-                    let mode = hash(delete_seed ^ 0x1B56C4E9u) % 3u; // 0=begin,1=end,2=middle
-                    if (mode == 0u) {
-                        pos = 0u;
-                    } else if (mode == 1u) {
-                        pos = L - k;
-                    } else {
-                        pos = hash(delete_seed ^ 0x2C9F85A1u) % (L - k + 1u);
-                    }
-
-                    var j = pos;
-                    loop {
-                        if (j + k >= L) { break; }
-                        seq[j] = seq[j + k];
-                        j = j + 1u;
-                    }
-                    L = L - k;
-
-                    var out_bytes: array<u32, GENOME_LENGTH>;
-                    for (var t = 0u; t < GENOME_LENGTH; t++) { out_bytes[t] = 88u; }
-                    let left_pad = (GENOME_LENGTH - L) / 2u;
-                    for (var t = 0u; t < L; t++) {
-                        out_bytes[left_pad + t] = seq[t];
-                    }
-                    for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
-                        let b0 = out_bytes[w * 4u + 0u] & 0xFFu;
-                        let b1 = out_bytes[w * 4u + 1u] & 0xFFu;
-                        let b2 = out_bytes[w * 4u + 2u] & 0xFFu;
-                        let b3 = out_bytes[w * 4u + 3u] & 0xFFu;
-                        let word_val = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
-                        offspring_ascii[w] = word_val;
-                    }
-                    active_start = left_pad;
-                    active_end = left_pad + L - 1u;
-                }
-            }
-        }
-    }
-
-    // Probabilistic point mutations only within active region.
-    if (active_end != 0xFFFFFFFFu) {
-        for (var bi = active_start; bi <= active_end; bi++) {
-            let mutation_seed = offspring_hash * (bi + 1u) * 2654435761u;
-            let mutation_chance = hash_f32(mutation_seed);
-            if (mutation_chance < effective_mutation_rate) {
-                let word = bi / 4u;
-                let byte_offset = bi % 4u;
-                let new_base = get_random_rna_base(mutation_seed * 1664525u);
-                let mask = ~(0xFFu << (byte_offset * 8u));
-                let current_word = offspring_ascii[word];
-                let updated_word = (current_word & mask) | (new_base << (byte_offset * 8u));
-                offspring_ascii[word] = updated_word;
-            }
-        }
-    }
-
-    // Compute and cache gene_length once for the offspring.
-    if (active_end != 0xFFFFFFFFu) {
-        offspring.gene_length = active_end - active_start + 1u;
-        offspring.genome_offset = active_start;
-    } else {
-        offspring.gene_length = 0u;
-        offspring.genome_offset = 0u;
-    }
-
-    // Pack ASCII offspring genome into 2-bit packed representation.
-    {
-        var packed: array<u32, GENOME_PACKED_WORDS>;
-        for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
-            packed[w] = 0u;
-        }
-        for (var bi = 0u; bi < GENOME_LENGTH; bi++) {
-            let word_ascii = bi / 4u;
-            let byte_offset = bi % 4u;
-            let b = (offspring_ascii[word_ascii] >> (byte_offset * 8u)) & 0xFFu;
-            if (b != 88u) {
-                let code = genome_base_ascii_to_2bit(b);
-                let wi = bi / GENOME_BASES_PER_PACKED_WORD;
-                let bit_index = (bi % GENOME_BASES_PER_PACKED_WORD) * 2u;
-                packed[wi] = packed[wi] | (code << bit_index);
-            }
-        }
-        for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
-            offspring.genome_packed[w] = packed[w];
-        }
-    }
-
-    // Energy transfer:
-    // Reproduction runs before process_agents, so it must not touch agents_out.
-    // We compute the inherited energy from the parent snapshot in agents_in;
-    // the parent energy reduction is applied in process_agents when it observes
-    // reproduced_this_frame.
-    let parent_energy = agents_in[agent_id].energy;
-    let inherited_energy = parent_energy * 0.5;
-    offspring.energy = inherited_energy;
-
-    // Initialize body array to zeros.
-    for (var bi = 0u; bi < MAX_BODY_PARTS; bi++) {
-        offspring.body[bi].pos = vec2<f32>(0.0);
-        offspring.body[bi].data = 0.0;
-        offspring.body[bi].part_type = 0u;
-        offspring.body[bi].alpha_signal = 0.0;
-        offspring.body[bi].beta_signal = 0.0;
-        offspring.body[bi]._pad.x = bitcast<f32>(0u); // Packed prev_pos will be set on first morphology build.
-        offspring.body[bi]._pad = vec2<f32>(0.0);
-    }
-
-    // Deterministic spawn staging: one slot per parent agent.
-    // This avoids spawn-slot contention and makes double-spawn impossible without
-    // requiring a global spawn index allocator.
-    // NOTE: We intentionally do NOT increment a "spawn count" here; staging is unconditional.
-    // Only merge enforces capacity and (optionally) counts successful merges.
-    new_agents[agent_id] = offspring;
-
-    // NOTE: Parent pairing/energy changes are applied in process_agents.
-}
-
 // Merge spawned agents into main buffer
 @compute @workgroup_size(64)
 fn merge_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let slot = gid.x;
+    let spawn_id = gid.x;
+    // Clamp spawn count to buffer size (2000) to avoid OOB reads if more agents tried to spawn than fit
+    let spawn_count = min(atomicLoad(&spawn_debug_counters[0]), 2000u);
 
-    // Full scan: new_agents is sized to max_agents and cleared after merge,
-    // so scanning the full buffer is safe and avoids missing any staged spawns.
-    let scan_limit = params.max_agents;
-    if (slot >= scan_limit) {
+    if (spawn_id >= spawn_count) {
         return;
     }
 
-    let spawned = new_agents[slot];
-    if (spawned.alive == 0u) {
-        return;
+    // Append to end of compacted alive array using alive counter as running size
+    let target_index = atomicAdd(&spawn_debug_counters[2], 1u);
+    if (target_index < params.max_agents) {
+        agents_out[target_index] = new_agents[spawn_id];
     }
-
-    // Append to end of compacted alive array.
-    // IMPORTANT: never let alive_counter exceed max_agents (it breaks init-dead dispatch sizing).
-    var target_index: u32 = 0xFFFFFFFFu;
-    loop {
-        let alive_now = atomicLoad(&spawn_debug_counters[2]);
-        if (alive_now >= params.max_agents) {
-            break;
-        }
-        let result = atomicCompareExchangeWeak(&spawn_debug_counters[2], alive_now, alive_now + 1u);
-        if (result.exchanged) {
-            target_index = result.old_value;
-            break;
-        }
-    }
-
-    if (target_index != 0xFFFFFFFFu) {
-        agents_out[target_index] = spawned;
-        // Count successful merges (purely diagnostic).
-        atomicAdd(&spawn_debug_counters[0], 1u);
-    }
-
-    // Clear staged spawn so it can't be merged again next frame.
-    new_agents[slot].alive = 0u;
 }
 
 @compute @workgroup_size(64)
@@ -3705,13 +3219,25 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let request = spawn_requests[request_id];
 
-    // Stage CPU spawns after the compacted alive prefix.
-    // This avoids collisions with reproduce_agents (which uses new_agents[agent_id])
-    // and does not rely on the CPU-side `params.agent_count` being perfectly in sync.
-    let alive_total = atomicLoad(&spawn_debug_counters[2]);
-    let spawn_index = alive_total + request_id;
-    if (spawn_index >= params.max_agents) {
+    let alive_now = atomicLoad(&spawn_debug_counters[2]);
+    if (alive_now >= params.max_agents) {
         return;
+    }
+
+    var spawn_index: u32 = 0u;
+    loop {
+        let current_spawn = atomicLoad(&spawn_debug_counters[0]);
+        if (current_spawn >= 2000u) {
+            return;
+        }
+        if (alive_now + current_spawn >= params.max_agents) {
+            return;
+        }
+        let result = atomicCompareExchangeWeak(&spawn_debug_counters[0], current_spawn, current_spawn + 1u);
+        if (result.exchanged) {
+            spawn_index = result.old_value;
+            break;
+        }
     }
 
     let world_span = f32(SIM_SIZE);
@@ -3739,12 +3265,10 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
     agent.torque_debug = 0.0;
     agent.alive = 1u;
     agent.body_count = 0u;
-    // Start with the same short cooldown as newborns so freshly CPU-spawned clusters
-    // don't immediately explode into reproduction before the first few sim steps.
-    agent.pairing_counter = OFFSPRING_COOLDOWN_FRAMES << 16u;
+    agent.pairing_counter = 0u;
     agent.is_selected = 0u;
-    agent.generation = request._pad_seed;
-    agent.age = request._pad_genome[0u];
+    agent.generation = 0u;
+    agent.age = 0u;
     agent.total_mass = 0.0;
     agent.poison_resistant_count = 0u;
 
@@ -3808,138 +3332,6 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
     new_agents[spawn_index] = agent;
 }
 
-// Dedicated CPU spawn merge kernel.
-// - Reads spawn_requests[0..cpu_spawn_count)
-// - Appends them directly into agents_out using alive_counter (spawn_debug_counters[2])
-// - Avoids relying on CPU-side params.agent_count and avoids new_agents staging collisions.
-@compute @workgroup_size(64)
-fn merge_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let request_id = gid.x;
-    if (request_id >= params.cpu_spawn_count) {
-        return;
-    }
-
-    let request = spawn_requests[request_id];
-
-    // Append to end of compacted alive array.
-    // IMPORTANT: never let alive_counter exceed max_agents (it breaks init-dead dispatch sizing).
-    var target_index: u32 = 0xFFFFFFFFu;
-    loop {
-        let alive_now = atomicLoad(&spawn_debug_counters[2]);
-        if (alive_now >= params.max_agents) {
-            break;
-        }
-        let result = atomicCompareExchangeWeak(&spawn_debug_counters[2], alive_now, alive_now + 1u);
-        if (result.exchanged) {
-            target_index = result.old_value;
-            break;
-        }
-    }
-    if (target_index == 0xFFFFFFFFu) {
-        return;
-    }
-
-    let world_span = f32(SIM_SIZE);
-    var base_seed = request.seed ^ (request_id * 747796405u);
-    var genome_seed = request.genome_seed ^ (request_id * 2891336453u);
-
-    var spawn_pos = vec2<f32>(request.position);
-    if (spawn_pos.x == 0.0 && spawn_pos.y == 0.0) {
-        let rx = hash_f32(base_seed ^ 0xA3C59ACBu);
-        let ry = hash_f32(base_seed ^ 0x1B56C4E9u);
-        spawn_pos = vec2<f32>(rx * world_span, ry * world_span);
-    }
-
-    var rotation = request.rotation;
-    if (rotation == 0.0) {
-        rotation = hash_f32(base_seed ^ 0xDEADBEEFu) * 6.28318530718;
-    }
-
-    var agent: Agent;
-    agent.position = clamp_position(spawn_pos);
-    agent.velocity = vec2<f32>(0.0);
-    agent.rotation = rotation;
-    agent.energy = max(request.energy, 0.0);
-    agent.energy_capacity = 0.0; // Will be calculated after morphology builds
-    agent.torque_debug = 0.0;
-    agent.morphology_origin = vec2<f32>(0.0);
-    agent.alive = 1u;
-    agent.body_count = 0u;
-
-    // Default to a short newborn cooldown so CPU-spawned clusters don't instantly reproduce.
-    // If a caller provided a non-zero pairing_counter (e.g. snapshot restore), preserve it.
-    if (request._pad_genome[1u] != 0u) {
-        agent.pairing_counter = request._pad_genome[1u];
-    } else {
-        agent.pairing_counter = OFFSPRING_COOLDOWN_FRAMES << 16u;
-    }
-
-    agent.is_selected = 0u;
-    agent.generation = request._pad_seed;
-    agent.age = request._pad_genome[0u];
-    agent.total_mass = 0.0;
-    agent.poison_resistant_count = 0u;
-
-    // If flags bit 0 set, use provided genome override (packed)
-    if ((request.flags & 1u) != 0u) {
-        agent.gene_length = request.genome_override_len;
-        agent.genome_offset = request.genome_override_offset;
-        agent.genome_packed[0u] = request.genome_override_packed[0u];
-        agent.genome_packed[1u] = request.genome_override_packed[1u];
-        agent.genome_packed[2u] = request.genome_override_packed[2u];
-        agent.genome_packed[3u] = request.genome_override_packed[3u];
-        agent.genome_packed[4u] = request.genome_override_packed[4u];
-        agent.genome_packed[5u] = request.genome_override_packed[5u];
-        agent.genome_packed[6u] = request.genome_override_packed[6u];
-        agent.genome_packed[7u] = request.genome_override_packed[7u];
-        agent.genome_packed[8u] = request.genome_override_packed[8u];
-        agent.genome_packed[9u] = request.genome_override_packed[9u];
-        agent.genome_packed[10u] = request.genome_override_packed[10u];
-        agent.genome_packed[11u] = request.genome_override_packed[11u];
-        agent.genome_packed[12u] = request.genome_override_packed[12u];
-        agent.genome_packed[13u] = request.genome_override_packed[13u];
-        agent.genome_packed[14u] = request.genome_override_packed[14u];
-        agent.genome_packed[15u] = request.genome_override_packed[15u];
-    } else {
-        // Create centered variable-length genome with implicit 'X' padding on both sides.
-        genome_seed = hash(genome_seed ^ base_seed);
-        let gene_span = GENOME_LENGTH - MIN_GENE_LENGTH;
-        let gene_len = MIN_GENE_LENGTH + (hash(genome_seed) % (gene_span + 1u));
-        let left_pad = (GENOME_LENGTH - gene_len) / 2u;
-
-        agent.gene_length = gene_len;
-        agent.genome_offset = left_pad;
-        for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
-            agent.genome_packed[w] = 0u;
-        }
-
-        for (var k = 0u; k < gene_len; k++) {
-            genome_seed = hash(genome_seed ^ (k * 1664525u + 1013904223u));
-            let base_ascii = get_random_rna_base(genome_seed);
-            let code = genome_base_ascii_to_2bit(base_ascii);
-            let bi = left_pad + k;
-            let wi = bi / GENOME_BASES_PER_PACKED_WORD;
-            let bit_index = (bi % GENOME_BASES_PER_PACKED_WORD) * 2u;
-            agent.genome_packed[wi] = agent.genome_packed[wi] | (code << bit_index);
-        }
-    }
-
-    for (var i = 0u; i < MAX_BODY_PARTS; i++) {
-        agent.body[i].pos = vec2<f32>(0.0);
-        agent.body[i].data = 0.0;
-        agent.body[i].part_type = 0u;
-        agent.body[i].alpha_signal = 0.0;
-        agent.body[i].beta_signal = 0.0;
-        agent.body[i]._pad.x = bitcast<f32>(0u);
-        agent.body[i]._pad = vec2<f32>(0.0);
-    }
-
-    agents_out[target_index] = agent;
-
-    // Count successful merges (purely diagnostic).
-    atomicAdd(&spawn_debug_counters[0], 1u);
-}
-
 @compute @workgroup_size(256)
 fn initialize_dead_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let alive_total = atomicLoad(&spawn_debug_counters[2]);
@@ -3968,10 +3360,13 @@ fn initialize_dead_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn compact_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
 
-    // Full scan: agent buffers are cleared on startup and the dead tail is sanitized
-    // every frame (initialize_dead_agents), so scanning max_agents is safe and avoids
-    // dropping agents when CPU-side agent_count lags.
-    let scan_limit = params.max_agents;
+    // IMPORTANT:
+    // Compact must cover a bit beyond `params.agent_count` to avoid dropping newborns
+    // when CPU-side `agent_count` readback lags by a frame.
+    // However, scanning the full `params.max_agents` would also pick up stale/garbage tail
+    // slots (e.g. after loading a snapshot with fewer agents), which can cause runaway
+    // "ghost" agents and continuous reproduction.
+    let scan_limit = min(params.agent_count + 2000u, params.max_agents);
     if (agent_id >= scan_limit) {
         return;
     }
@@ -3989,7 +3384,6 @@ fn compact_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(1)
 fn reset_spawn_counter(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicStore(&spawn_debug_counters[0], 0u);
-
 }
 
 // ============================================================================

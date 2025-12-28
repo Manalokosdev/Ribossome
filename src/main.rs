@@ -643,10 +643,6 @@ fn parse_shared_wgsl_part_defaults(
 const SELECTED_AGENT_READBACK_SLOTS: usize = 4;
 const SELECTED_AGENT_READBACK_INTERVAL_MS: u64 = 16; // ~60Hz
 
-// Optional GPU->CPU readback of spawn/repro counters for debugging.
-// Enable with ALSIM_SPAWN_DEBUG=1. Throttled to avoid stalling.
-const SPAWN_COUNTERS_READBACK_INTERVAL_MS: u64 = 250;
-
 // Shared genome/body sizing (must stay in sync with shader constants)
 const MAX_BODY_PARTS: usize = 64;
 const GENOME_BYTES: usize = 256; // ASCII bases including padding
@@ -655,9 +651,11 @@ const GENOME_PACKED_WORDS: usize = GENOME_BYTES / 16; // 16 bases per packed u32
 const GENOME_BASES_PER_PACKED_WORD: usize = 16;
 #[allow(dead_code)]
 const MIN_GENE_LENGTH: usize = 6;
-const MAX_SPAWN_REQUESTS: usize = 2000;
+// NOTE: Keep this a multiple of 64 so we can dispatch a fixed workgroup count
+// (MAX_SPAWN_REQUESTS/64) and rely on early returns in the kernels.
+const MAX_SPAWN_REQUESTS: usize = 2048;
 
-const SNAPSHOT_VERSION: &str = "1.2";
+const SNAPSHOT_VERSION: &str = "1.1";
 
 // RGB colors per amino acid, kept in sync with shader get_amino_acid_properties()
 const AMINO_COLORS: [[f32; 3]; 20] = [
@@ -1846,7 +1844,7 @@ fn genome_base_color(base: u8) -> egui::Color32 {
 
 #[inline]
 fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
-    // 0–19: amino acids; 20–43: organs (colors mirror shaders/shared.wgsl AMINO_DATA[*][2].xyz)
+    // 0–19: amino acids; 20–42: organs (colors mirror shaders/shared.wgsl AMINO_DATA[*][2].xyz)
     if (base_type as usize) < AMINO_COLORS.len() {
         return AMINO_COLORS[base_type as usize];
     }
@@ -1875,7 +1873,6 @@ fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
         40 => [0.9, 0.2, 0.3],
         41 => [1.0, 0.3, 0.4],
         42 => [0.6, 0.0, 0.8],
-        43 => [0.6, 0.3, 0.1],   // radiation protection (brown)
         _ => DEFAULT_PART_COLOR,
     }
 }
@@ -1931,7 +1928,6 @@ fn part_base_name(base_type: u32) -> &'static str {
         40 => "Beta Magnitude Sensor",
         41 => "Beta Magnitude Sensor (var)",
         42 => "Anchor",
-        43 => "Radiation Protection",
         _ => "Organ",
     }
 }
@@ -2504,13 +2500,6 @@ struct SpawnRequest {
     genome_override_offset: u32,
     genome_override_packed: [u32; GENOME_PACKED_WORDS],
     _pad_genome: [u32; 2],
-}
-
-#[derive(Copy, Clone)]
-struct SpawnerGenomeOverride {
-    len: u32,
-    offset: u32,
-    packed: [u32; GENOME_PACKED_WORDS],
 }
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -3446,10 +3435,15 @@ struct GpuState {
     init_dead_params_buffer: wgpu::Buffer, // 16-byte uniform: [max_agents, 0, 0, 0]
     init_dead_writer_bind_group_layout: wgpu::BindGroupLayout,
     init_dead_writer_bind_group: wgpu::BindGroup,
+    reproduction_bind_group_a: wgpu::BindGroup,
+    reproduction_bind_group_b: wgpu::BindGroup,
+    reproduction_pipeline: wgpu::ComputePipeline,
     alive_readbacks: [Arc<wgpu::Buffer>; 2],
-    alive_readback_pending: [Arc<Mutex<Option<Result<u32, ()>>>>; 2],
+    alive_readback_pending: [Arc<Mutex<Option<Result<(u32, u32), ()>>>>; 2],
     alive_readback_inflight: [bool; 2],
     alive_readback_slot: usize,
+    alive_readback_last_applied_epoch: u32,
+    alive_readback_zero_streak: u8,
     debug_readback: wgpu::Buffer,
     agents_readback: wgpu::Buffer, // Readback for agent inspection
     selected_agent_buffer: wgpu::Buffer, // GPU buffer for selected agent
@@ -3459,12 +3453,7 @@ struct GpuState {
     selected_agent_readback_slot: usize,
     selected_agent_readback_last_request: std::time::Instant,
     new_agents_buffer: wgpu::Buffer, // Buffer for spawned agents
-    spawn_readback: Arc<wgpu::Buffer>,  // Readback for spawn_debug_counters (2 snapshots per request)
-    spawn_readback_pending: Arc<Mutex<Option<Result<([u32; 3], [u32; 3], u64), ()>>>>,
-    spawn_readback_inflight: bool,
-    spawn_readback_last_request: std::time::Instant,
-    spawn_readback_epoch_inflight: u64,
-    spawn_debug_enabled: bool,
+    spawn_readback: wgpu::Buffer,  // Readback for spawn count
     spawn_requests_buffer: wgpu::Buffer, // CPU spawn requests seeds
 
     // Grid readback buffers for snapshot save
@@ -3543,7 +3532,6 @@ struct GpuState {
 
     // Pipelines
     process_pipeline: wgpu::ComputePipeline,
-    reproduce_pipeline: wgpu::ComputePipeline,
     clear_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_commit_pipeline: wgpu::ComputePipeline,
@@ -3592,12 +3580,6 @@ struct GpuState {
     cpu_spawn_queue: Vec<SpawnRequest>,
     spawn_request_count: u32,
     pending_spawn_upload: bool,
-
-    // Click-to-place spawner (loaded agent genome override)
-    spawner_armed: bool,
-    spawner_energy: f32,
-    spawner_override: Option<SpawnerGenomeOverride>,
-    spawner_last_world_pos: Option<[f32; 2]>,
     spawn_probability: f32,
     death_probability: f32,
     auto_replenish: bool,
@@ -4203,8 +4185,14 @@ impl GpuState {
 
         let frame_profiler = FrameProfiler::new(&device, &queue);
 
-        // Initialize agents with minimal data - GPU will generate genome and build body
-        let max_agents = 60_000usize; // Increased with 2x world size (4x area): 3.4 KB/agent => ~170 MB per agent buffer
+        // Initialize agents with minimal data - GPU will generate genome and build body.
+        // NOTE: With wgpu::Limits::default(), max_storage_buffer_binding_size is typically 128 MiB.
+        // Agent is currently 2192 bytes (see debug_assert above), so per-agent storage buffer capacity is:
+        // floor(128 MiB / 2192) = 61_230 agents. Keep some headroom.
+        // IMPORTANT: keep max_agents a multiple of 64 so compute dispatch can use `max_agents/64`
+        // without ceil-dispatch and still cover the full buffer.
+        let max_agents_raw = 60_000usize;
+        let max_agents = (max_agents_raw + 63) & !63usize;
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
@@ -4679,7 +4667,7 @@ impl GpuState {
             })),
         ];
 
-        let alive_readback_pending: [Arc<Mutex<Option<Result<u32, ()>>>>; 2] =
+        let alive_readback_pending: [Arc<Mutex<Option<Result<(u32, u32), ()>>>>; 2] =
             [Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None))];
 
         let debug_readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -4722,11 +4710,9 @@ impl GpuState {
                 .collect();
 
         // Spawn/death buffers
-        // NOTE: new_agents is used as a staging area for both reproduction and CPU spawns.
-        // We size it to max_agents so reproduction can write to new_agents[agent_id] deterministically.
         let new_agents_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("New Agents Buffer"),
-            size: (std::mem::size_of::<Agent>() * max_agents) as u64,
+            size: (std::mem::size_of::<Agent>() * MAX_SPAWN_REQUESTS) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -4742,27 +4728,12 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
-        // Two snapshots of spawn_debug_counters (after reproduce, after merge): 2 * 12 bytes.
-        let spawn_readback = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Spawn Counters Readback"),
-            size: 24,
+        let spawn_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Spawn Readback"),
+            size: 4,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        }));
-        let spawn_readback_pending: Arc<Mutex<Option<Result<([u32; 3], [u32; 3], u64), ()>>>> =
-            Arc::new(Mutex::new(None));
-        let spawn_readback_inflight = false;
-        let spawn_readback_last_request = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_millis(SPAWN_COUNTERS_READBACK_INTERVAL_MS))
-            .unwrap_or_else(std::time::Instant::now);
-        let spawn_readback_epoch_inflight = 0u64;
-        let spawn_debug_enabled = match std::env::var("ALSIM_SPAWN_DEBUG") {
-            Ok(v) => {
-                let v = v.trim();
-                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-            }
-            Err(_) => false,
-        };
+        });
         profiler.mark("Counters and readbacks");
 
         // Grid readback buffers for snapshot save
@@ -4820,17 +4791,31 @@ impl GpuState {
         // Load main shader (concatenate shared + render + simulation modules, composite is separate)
         // Inject compile-time constants here so resolution changes are centralized in Rust.
         let shader_source = format!(
-            "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}",
+            "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}",
             FLUID_GRID_SIZE,
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
-            include_str!("../shaders/simulation.wgsl")
+            include_str!("../shaders/simulation.wgsl"),
+            include_str!("../shaders/reproduction.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
         profiler.mark("Main shader compiled");
+
+        // Load compact_merge shader (dedicated compact and merge operations)
+        // Uses minimal bindings - doesn't need full simulation environment
+        let compact_merge_shader_source = format!(
+            "const FLUID_GRID_SIZE: u32 = {}u;\n{}",
+            FLUID_GRID_SIZE,
+            include_str!("../shaders/compact_merge_minimal.wgsl")
+        );
+        let compact_merge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Compact Merge Shader"),
+            source: wgpu::ShaderSource::Wgsl(compact_merge_shader_source.into()),
+        });
+        profiler.mark("Compact/Merge shader compiled");
 
         // Load composite shader (standalone, minimal dependencies)
         let composite_shader_source = format!(
@@ -5183,7 +5168,6 @@ impl GpuState {
             });
         profiler.mark("Compute bind layout");
 
-        // Bind group for the minimal init-dead indirect args writer kernel.
         let init_dead_writer_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("InitDead Writer Bind Group Layout"),
@@ -5407,6 +5391,177 @@ impl GpuState {
                 },
             ],
         });
+
+        // Create reproduction bind groups - binding 1 is INPUT buffer (read-write)
+        // Reproduction reads/writes agents_in to update pairing_counter and energy,
+        // then process_agents reads the updated values.
+        // Binding 0 uses the OUTPUT buffer as a dummy since reproduction doesn't reference agents_in.
+        let reproduction_bind_group_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Reproduction Bind Group A"),
+            layout: &compute_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: agents_buffer_b.as_entire_binding(),  // Dummy (reproduction doesn't use binding 0)
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: agents_buffer_a.as_entire_binding(),  // INPUT buffer (read-write)
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: chem_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: fluid_dye_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: visual_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: agent_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: trail_grid_inject.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: fluid_velocity_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: new_agents_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: spawn_debug_counters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: spawn_requests_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: selected_agent_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: gamma_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: trail_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: environment_init_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: fluid_force_vectors.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: agent_spatial_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
+                },
+            ],
+        });
+
+        let reproduction_bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Reproduction Bind Group B"),
+            layout: &compute_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: agents_buffer_a.as_entire_binding(),  // Dummy (reproduction doesn't use binding 0)
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: agents_buffer_b.as_entire_binding(),  // INPUT buffer (read-write)
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: chem_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: fluid_dye_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: visual_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: agent_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: trail_grid_inject.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: fluid_velocity_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: new_agents_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: spawn_debug_counters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: spawn_requests_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: selected_agent_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: gamma_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: trail_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: environment_init_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: fluid_force_vectors.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: agent_spatial_grid_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
+                },
+            ],
+        });
+
         profiler.mark("Compute bind groups");
 
         // Create composite bind group (uses separate bind group from compute)
@@ -5439,6 +5594,15 @@ impl GpuState {
             });
         profiler.mark("initDead writer pipeline layout");
 
+        let reproduction_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Reproduction Pipeline"),
+            layout: Some(&compute_pipeline_layout),
+            module: &shader,
+            entry_point: "reproduce_agents",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         let process_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Process Agents Pipeline"),
             layout: Some(&compute_pipeline_layout),
@@ -5448,16 +5612,6 @@ impl GpuState {
             cache: None,
         });
         profiler.mark("process_agents pipeline");
-
-        let reproduce_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Reproduce Agents Pipeline"),
-            layout: Some(&compute_pipeline_layout),
-            module: &shader,
-            entry_point: "reproduce_agents",
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        profiler.mark("reproduce_agents pipeline");
 
         let diffuse_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Diffuse Pipeline (stage1)"),
@@ -5581,8 +5735,8 @@ impl GpuState {
         let merge_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Merge Agents Pipeline"),
             layout: Some(&compute_pipeline_layout),
-            module: &shader,
-            entry_point: "merge_agents",
+            module: &compact_merge_shader,
+            entry_point: "merge_agents_cooperative",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -5591,7 +5745,7 @@ impl GpuState {
         let compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Compact Agents Pipeline"),
             layout: Some(&compute_pipeline_layout),
-            module: &shader,
+            module: &compact_merge_shader,
             entry_point: "compact_agents",
             compilation_options: Default::default(),
             cache: None,
@@ -5613,7 +5767,7 @@ impl GpuState {
             label: Some("CPU Spawn Requests Pipeline"),
             layout: Some(&compute_pipeline_layout),
             module: &shader,
-            entry_point: "merge_cpu_spawns",
+            entry_point: "process_cpu_spawns",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -6537,6 +6691,8 @@ impl GpuState {
             alive_readback_pending,
             alive_readback_inflight: [false; 2],
             alive_readback_slot: 0,
+            alive_readback_last_applied_epoch: 0,
+            alive_readback_zero_streak: 0,
             debug_readback,
             agents_readback,
             selected_agent_buffer,
@@ -6549,11 +6705,6 @@ impl GpuState {
                 - std::time::Duration::from_secs(1),
             new_agents_buffer,
             spawn_readback,
-            spawn_readback_pending,
-            spawn_readback_inflight,
-            spawn_readback_last_request,
-            spawn_readback_epoch_inflight,
-            spawn_debug_enabled,
             spawn_requests_buffer,
             chem_grid_readback,
             gamma_grid_readback,
@@ -6561,7 +6712,9 @@ impl GpuState {
             visual_texture_view,
             sampler,
             process_pipeline,
-            reproduce_pipeline,
+            reproduction_bind_group_a,
+            reproduction_bind_group_b,
+            reproduction_pipeline,
             clear_fluid_force_vectors_pipeline,
             diffuse_pipeline,
             diffuse_commit_pipeline,
@@ -6603,11 +6756,6 @@ impl GpuState {
             cpu_spawn_queue: Vec::new(),
             spawn_request_count: 0,
             pending_spawn_upload: false,
-
-            spawner_armed: false,
-            spawner_energy: 10.0,
-            spawner_override: None,
-            spawner_last_world_pos: None,
             spawn_probability: settings.spawn_probability,
             death_probability: settings.death_probability,
             auto_replenish: settings.auto_replenish,
@@ -6939,10 +7087,6 @@ impl GpuState {
 
     // Queue N random agents to be spawned next frame via the GPU merge pass
     fn queue_random_spawns(&mut self, count: usize) {
-        // Manual mass spawns can create dense clusters; give them a longer initial reproduction
-        // cooldown so they don't immediately form runaway reproduction hotspots.
-        const CPU_SPAWN_INITIAL_REPRO_COOLDOWN_FRAMES: u32 = 600;
-
         for _ in 0..count {
             // Advance RNG using same method as update()
             self.rng_state ^= self.rng_state << 13;
@@ -6966,7 +7110,7 @@ impl GpuState {
                 genome_override_len: 0,
                 genome_override_offset: 0,
                 genome_override_packed: [0u32; GENOME_PACKED_WORDS],
-                _pad_genome: [0u32, CPU_SPAWN_INITIAL_REPRO_COOLDOWN_FRAMES << 16],
+                _pad_genome: [0u32; 2],
             };
 
             self.cpu_spawn_queue.push(request);
@@ -6974,75 +7118,6 @@ impl GpuState {
 
         self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
         self.pending_spawn_upload = true;
-        self.window.request_redraw();
-    }
-
-    fn screen_to_world(&self, screen_pos: [f32; 2]) -> [f32; 2] {
-        // Screen coords to normalized coords (0..1)
-        let norm_x = screen_pos[0] / self.surface_config.width as f32;
-        let norm_y = screen_pos[1] / self.surface_config.height as f32;
-
-        // Account for aspect ratio when projecting into world space
-        let aspect = if self.surface_config.width > 0 {
-            self.surface_config.height as f32 / self.surface_config.width as f32
-        } else {
-            1.0
-        };
-        let half_view_x = SIM_SIZE / (2.0 * self.camera_zoom);
-        let half_view_y = half_view_x * aspect;
-
-        let mut world_x = self.camera_pan[0] + (norm_x - 0.5) * 2.0 * half_view_x;
-        let mut world_y = self.camera_pan[1] - (norm_y - 0.5) * 2.0 * half_view_y; // Y inverted
-
-        // Wrap to world bounds
-        world_x = world_x.rem_euclid(SIM_SIZE);
-        world_y = world_y.rem_euclid(SIM_SIZE);
-
-        [world_x, world_y]
-    }
-
-    fn spawner_spawn_at_world_pos(&mut self, mut world_pos: [f32; 2]) {
-        let Some(override_data) = self.spawner_override else {
-            return;
-        };
-
-        // (0,0) is treated by the shader as a sentinel for "random position".
-        // Nudge slightly so the user can still spawn near origin.
-        if world_pos[0] == 0.0 && world_pos[1] == 0.0 {
-            world_pos = [0.001, 0.001];
-        }
-
-        self.rng_state = self
-            .rng_state
-            .wrapping_mul(6364136223846793005u64)
-            .wrapping_add(1442695040888963407u64);
-        let seed = (self.rng_state >> 32) as u32;
-
-        self.rng_state = self
-            .rng_state
-            .wrapping_mul(6364136223846793005u64)
-            .wrapping_add(1442695040888963407u64);
-        let genome_seed = (self.rng_state >> 32) as u32;
-
-        let request = SpawnRequest {
-            seed,
-            genome_seed,
-            flags: 1, // Bit 0 = use genome_override
-            _pad_seed: 0,
-            position: world_pos,
-            energy: self.spawner_energy,
-            rotation: 0.0, // 0 = random rotation in shader
-            genome_override_len: override_data.len,
-            genome_override_offset: override_data.offset,
-            genome_override_packed: override_data.packed,
-            // Long initial cooldown for manual spawns to avoid immediate reproduction explosions.
-            _pad_genome: [0u32, 600u32 << 16],
-        };
-
-        self.cpu_spawn_queue.push(request);
-        self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
-        self.pending_spawn_upload = true;
-        self.spawner_last_world_pos = Some(world_pos);
         self.window.request_redraw();
     }
 
@@ -7749,31 +7824,10 @@ impl GpuState {
                 guard.take()
             };
             if let Some(result) = message {
-                if let Ok(new_count) = result {
-                    self.agent_count = new_count;
-                    self.alive_count = new_count;
+                if let Ok((epoch, new_count)) = result {
+                    self.apply_alive_count_readback(epoch, new_count);
                 }
                 self.alive_readback_inflight[idx] = false;
-            }
-        }
-
-        // Optional spawn/repro counters readback (env-var gated).
-        if self.spawn_debug_enabled {
-            let message = {
-                let mut guard = self.spawn_readback_pending.lock().unwrap();
-                guard.take()
-            };
-            if let Some(result) = message {
-                if let Ok((after_repro, after_merge, epoch)) = result {
-                    // after_* = [merge_count, repro_eligible_counter, alive_counter]
-                    println!(
-                        "SpawnCounters(epoch={epoch}): repro eligible={} | post-merge merged={} alive={}",
-                        after_repro[1],
-                        after_merge[0],
-                        after_merge[2],
-                    );
-                }
-                self.spawn_readback_inflight = false;
             }
         }
 
@@ -7837,7 +7891,7 @@ impl GpuState {
             buffer.as_ref().destroy();
         }
         self.new_agents_buffer.destroy();
-        self.spawn_readback.as_ref().destroy();
+        self.spawn_readback.destroy();
         self.spawn_requests_buffer.destroy();
         self.visual_texture.destroy();
 
@@ -7867,9 +7921,8 @@ impl GpuState {
                 guard.take()
             };
             if let Some(result) = message {
-                if let Ok(new_count) = result {
-                    self.agent_count = new_count;
-                    self.alive_count = new_count;
+                if let Ok((epoch, new_count)) = result {
+                    self.apply_alive_count_readback(epoch, new_count);
                 }
             }
             self.alive_readback_inflight[slot] = false;
@@ -7877,67 +7930,28 @@ impl GpuState {
         slot
     }
 
-    fn should_request_spawn_counters_readback(&self, should_run_simulation: bool) -> bool {
-        if !self.spawn_debug_enabled {
-            return false;
-        }
-        if !should_run_simulation {
-            return false;
-        }
-        if self.spawn_readback_inflight {
-            return false;
-        }
-        let now = std::time::Instant::now();
-        now.duration_since(self.spawn_readback_last_request)
-            >= std::time::Duration::from_millis(SPAWN_COUNTERS_READBACK_INTERVAL_MS)
-    }
-
-    fn kickoff_spawn_counters_readback(&mut self) {
-        if !self.spawn_debug_enabled {
-            return;
-        }
-        if self.spawn_readback_inflight {
+    fn apply_alive_count_readback(&mut self, epoch: u32, new_count: u32) {
+        // Readbacks can complete out-of-order (we use multiple staging slots). Never let an
+        // older completion overwrite a newer count.
+        if epoch < self.alive_readback_last_applied_epoch {
             return;
         }
 
-        let epoch = self.spawn_readback_epoch_inflight;
-        let buffer_for_map = self.spawn_readback.as_ref().slice(..);
-        let buffer_for_callback = self.spawn_readback.clone();
-        let pending = self.spawn_readback_pending.clone();
-
-        self.spawn_readback_inflight = true;
-
-        buffer_for_map.map_async(wgpu::MapMode::Read, move |result| {
-            let message = match result {
-                Ok(()) => {
-                    let slice = buffer_for_callback.slice(..);
-                    let data = slice.get_mapped_range();
-
-                    let read_u32 = |base: usize| -> u32 {
-                        u32::from_le_bytes([
-                            data[base + 0],
-                            data[base + 1],
-                            data[base + 2],
-                            data[base + 3],
-                        ])
-                    };
-
-                    // Two snapshots: [0..12) and [12..24)
-                    let after_repro = [read_u32(0), read_u32(4), read_u32(8)];
-                    let after_merge = [read_u32(12), read_u32(16), read_u32(20)];
-
-                    drop(data);
-                    buffer_for_callback.as_ref().unmap();
-
-                    Ok((after_repro, after_merge, epoch))
-                }
-                Err(_) => Err(()),
-            };
-
-            if let Ok(mut guard) = pending.lock() {
-                *guard = Some(message);
+        // Avoid UI/sim flicker: a single 0 readback can happen if we sample the alive counter
+        // right after it was cleared (e.g. on a step where sim kernels were gated). Require two
+        // consecutive 0s before accepting a transition from nonzero -> 0.
+        if new_count == 0 && (self.alive_count > 0 || self.agent_count > 0) {
+            self.alive_readback_zero_streak = self.alive_readback_zero_streak.saturating_add(1);
+            if self.alive_readback_zero_streak < 2 {
+                return;
             }
-        });
+        } else {
+            self.alive_readback_zero_streak = 0;
+        }
+
+        self.alive_readback_last_applied_epoch = epoch;
+        self.agent_count = new_count;
+        self.alive_count = new_count;
     }
 
     fn copy_state_to_staging(
@@ -7956,6 +7970,7 @@ impl GpuState {
         let buffer_for_map = alive_buffer.clone();
         let buffer_for_callback = buffer_for_map.clone();
         let pending = self.alive_readback_pending[slot].clone();
+        let request_epoch = self.epoch as u32;
         self.alive_readback_inflight[slot] = true;
         buffer_for_map
             .slice(..)
@@ -7967,7 +7982,7 @@ impl GpuState {
                         let new_count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                         drop(data);
                         buffer_for_callback.unmap();
-                        Ok(new_count)
+                        Ok((request_epoch, new_count))
                     }
                     Err(_) => {
                         Err(())
@@ -8073,21 +8088,13 @@ impl GpuState {
             return;
         }
 
-        // Clamp the requested spawn count to what we can actually upload/process in this call.
-        // This prevents dispatching `process_cpu_spawns` with a larger count than the number of
-        // requests uploaded into `spawn_requests_buffer` (which would cause stale requests to be
-        // re-processed) and prevents draining more requests than were processed.
-        let spawn_count = cpu_spawn_count
-            .min(MAX_SPAWN_REQUESTS as u32)
-            .min(self.cpu_spawn_queue.len() as u32);
-
         // The spawn/merge/compact shaders use `params.cpu_spawn_count`, `params.agent_count`, and
         // `params.max_agents` for bounds checks. During snapshot load this path can run before
         // `update()` has written a fresh params buffer, which would result in 0 spawns.
         {
             let mut params = self.sim_params_cpu;
             params.max_agents = self.agent_buffer_capacity as u32;
-            params.cpu_spawn_count = spawn_count;
+            params.cpu_spawn_count = cpu_spawn_count;
             params.agent_count = self.agent_count;
             self.sim_params_cpu = params;
             self.queue
@@ -8100,23 +8107,28 @@ impl GpuState {
                 label: Some("Paused Spawn Encoder"),
             });
 
-        if spawn_count > 0 {
+        // Always clear both spawn_debug_counters[0] and [2] so compact/merge never uses stale
+        // offsets when this path is used (manual spawns / snapshot loads / paused spawns).
+        encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
+
+        if cpu_spawn_count > 0 {
             encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
-            // Manual CPU spawns are rare and user-driven; discard any staged simulation spawns
-            // for this epoch to avoid interactions between reproduction staging and CPU spawns.
-            encoder.clear_buffer(&self.new_agents_buffer, 0, None);
 
             // Upload spawn requests for this batch so GPU has per-request seeds/data
             // Limit to the count actually being processed (capped at 2000 elsewhere)
-            let upload_len = spawn_count as usize;
-            let slice = &self.cpu_spawn_queue[..upload_len];
-            self.queue.write_buffer(
-                &self.spawn_requests_buffer,
-                0,
-                bytemuck::cast_slice(slice),
-            );
-            // After upload we no longer need to treat this as pending
-            self.pending_spawn_upload = false;
+            let upload_len = (cpu_spawn_count as usize)
+                .min(self.cpu_spawn_queue.len())
+                .min(2000);
+            if upload_len > 0 {
+                let slice = &self.cpu_spawn_queue[..upload_len];
+                self.queue.write_buffer(
+                    &self.spawn_requests_buffer,
+                    0,
+                    bytemuck::cast_slice(slice),
+                );
+                // After upload we no longer need to treat this as pending
+                self.pending_spawn_upload = false;
+            }
 
             // Spawn-only path can run while paused and skips the normal A->B process pass.
             // That means the "current" agent data lives in the ping-pong-selected input buffer
@@ -8132,6 +8144,15 @@ impl GpuState {
                 (&self.compute_bind_group_a, false)
             };
 
+            // Cheap tail-safety: clear the compaction destination buffer so any unwritten slots
+            // remain fully zeroed (prevents stale/ghost agents from reappearing).
+            let compact_dst = if wrote_to_a_directly {
+                &self.agents_buffer_a
+            } else {
+                &self.agents_buffer_b
+            };
+            encoder.clear_buffer(compact_dst, 0, None);
+
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Paused Spawn Pass"),
@@ -8140,19 +8161,16 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                // compact_agents scans the full agent buffer (max_agents).
-                let compact_scan = self.agent_buffer_capacity as u32;
-                cpass.dispatch_workgroups((compact_scan + 63) / 64, 1, 1);
+                // Scan ENTIRE buffer to ensure no alive agents are missed
+                cpass.dispatch_workgroups(self.agent_buffer_capacity as u32 / 64, 1, 1);
 
                 cpass.set_pipeline(&self.cpu_spawn_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups((spawn_count + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((MAX_SPAWN_REQUESTS as u32) / 64, 1, 1);
 
                 cpass.set_pipeline(&self.merge_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                // merge_agents scans the full new_agents buffer (max_agents).
-                let merge_scan = self.agent_buffer_capacity as u32;
-                cpass.dispatch_workgroups((merge_scan + 63) / 64, 1, 1);
+                cpass.dispatch_workgroups((MAX_SPAWN_REQUESTS as u32) / 64, 1, 1);
 
                 let init_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
                 cpass.set_pipeline(&self.initialize_dead_pipeline);
@@ -8167,9 +8185,9 @@ impl GpuState {
             // Ensure agents are materialized in buffer A for snapshot/save and for subsequent
             // snapshot-load batches.
             if !wrote_to_a_directly {
-                // Copy the full buffer to avoid under-copying when CPU-side agent_count lags
-                // behind GPU compaction/CPU-spawn merges.
-                let bytes = (self.agent_buffer_capacity as u64) * (std::mem::size_of::<Agent>() as u64);
+                let expected_alive = (self.agent_count + cpu_spawn_count)
+                    .min(self.agent_buffer_capacity as u32);
+                let bytes = (expected_alive as u64) * (std::mem::size_of::<Agent>() as u64);
                 if bytes > 0 {
                     encoder.copy_buffer_to_buffer(
                         &self.agents_buffer_b,
@@ -8196,8 +8214,8 @@ impl GpuState {
         self.process_completed_alive_readbacks();
 
         // Clear the processed spawn requests from the queue
-        if spawn_count > 0 {
-            let drain_count = (spawn_count as usize).min(self.cpu_spawn_queue.len());
+        if cpu_spawn_count > 0 {
+            let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue.len());
             self.cpu_spawn_queue.drain(0..drain_count);
             self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
             if self.cpu_spawn_queue.is_empty() {
@@ -8343,18 +8361,6 @@ impl GpuState {
         // Approach: don't dispatch simulation kernels at all when paused or no agents alive.
         let should_run_simulation = !self.is_paused && has_living_agents;
 
-        // Optional: snapshot spawn/repro counters twice this frame (after reproduce, after merge).
-        // This is throttled and should never block a frame.
-        let mut request_spawn_counters_readback = false;
-        if self.should_request_spawn_counters_readback(should_run_simulation) {
-            request_spawn_counters_readback = true;
-            self.spawn_readback_last_request = std::time::Instant::now();
-            self.spawn_readback_epoch_inflight = self.epoch;
-            if let Ok(mut guard) = self.spawn_readback_pending.lock() {
-                *guard = None;
-            }
-        }
-
         // Calculate rain values with variation
         let time = self.epoch as f32;
 
@@ -8438,7 +8444,15 @@ impl GpuState {
             pairing_cost: self.pairing_cost,
             max_agents: self.agent_buffer_capacity as u32,
             cpu_spawn_count,
-            agent_count: self.agent_count,
+            // IMPORTANT:
+            // Do not rely on async CPU readback of alive_count/agent_count to bound
+            // simulation dispatch. In Full Speed / Fast Draw modes, the readback can
+            // lag behind newly spawned agents, causing them to be skipped for several
+            // steps (which looks like hotspots / missing updates).
+            //
+            // All core kernels already early-return on `alive==0`, so it is safe to
+            // dispatch over the full buffer capacity for correctness.
+            agent_count: self.agent_buffer_capacity as u32,
             random_seed: (self.rng_state >> 32) as u32,
             debug_mode: if self.rain_debug_visual {
                 2
@@ -8625,21 +8639,16 @@ impl GpuState {
         }
 
         // Handle CPU spawns - only when not paused (consistent with autospawn)
-        // IMPORTANT: process_spawn_requests_only() already runs the spawn/merge pipeline.
-        // If we leave cpu_spawn_count > 0 afterwards, the normal post-fluid pass would run
-        // process_cpu_spawns again and effectively double-spawn the same batch.
         if !self.is_paused && cpu_spawn_count > 0 {
+            // Use the reliable paused spawn path for all manual spawns
             println!("Using reliable spawn path for {} requests", cpu_spawn_count);
             self.process_spawn_requests_only(cpu_spawn_count, true);
 
+            // IMPORTANT: Avoid processing the same CPU spawn batch twice.
+            // process_spawn_requests_only() already materializes + merges these requests.
+            // If we keep cpu_spawn_count > 0, the normal post-fluid cpu_spawn_pipeline will
+            // run again and generate duplicates/hotspots.
             cpu_spawn_count = 0;
-            let mut params = self.sim_params_cpu;
-            params.max_agents = self.agent_buffer_capacity as u32;
-            params.agent_count = self.agent_count;
-            params.cpu_spawn_count = 0;
-            self.sim_params_cpu = params;
-            self.queue
-                .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         }
 
         let diffusion_interval = self.diffusion_interval.max(1);
@@ -8664,10 +8673,9 @@ impl GpuState {
         self.frame_profiler.write_ts_encoder(&mut encoder, TS_UPDATE_START);
 
         // Clear counters (spawn_counter is reset in-shader at end of previous frame)
-        if should_run_simulation {
-            encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
-        }
-        // Do NOT clear spawn_counter here; we may set it from CPU spawns below.
+        // IMPORTANT: Always clear both spawn_debug_counters[0] and [2] to avoid stale offsets
+        // in compact/merge when simulation is paused or should_run_simulation is false.
+        encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
 
         // Select bind groups based on ping-pong orientation
         // bg_process: agents_in -> agents_out
@@ -8678,6 +8686,9 @@ impl GpuState {
             (&self.compute_bind_group_a, &self.compute_bind_group_b)
         };
 
+        // Pass 1: environment prep + optional reproduction.
+        // We intentionally end this pass before running the main agent simulation so that any
+        // reproduction writes to the agent buffer are guaranteed visible.
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Compute Pass"),
@@ -8779,17 +8790,53 @@ impl GpuState {
 
             // Run simulation compute passes, but skip everything when paused or no living agents
             if should_run_simulation {
+                // REPRODUCTION FIRST: Update pairing_counter and energy in agents_in
+                // Uses reproduction bind groups where binding 1 = agents_in (read-write)
+                let reproduction_bg = if self.ping_pong {
+                    &self.reproduction_bind_group_b
+                } else {
+                    &self.reproduction_bind_group_a
+                };
+                cpass.set_pipeline(&self.reproduction_pipeline);
+                cpass.set_bind_group(0, reproduction_bg, &[]);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
+
                 // Spatial grid clear disabled: we use an epoch-stamped spatial grid.
                 // populate_agent_spatial_grid writes the epoch stamp for touched cells;
                 // all readers ignore cells whose stamp != current epoch.
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
+            }
 
+            if !should_run_simulation {
+                // Keep timestamp progression stable when paused.
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
+            }
+        }
+
+        // Pass 2: main agent simulation.
+        // This pass boundary is the synchronization point for reproduction -> simulation.
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass (After Reproduction)"),
+                timestamp_writes: None,
+            });
+
+            if should_run_simulation {
                 // Populate agent spatial grid with agent positions - workgroup_size(256)
                 cpass.set_pipeline(&self.populate_agent_spatial_grid_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_POPULATE_SPATIAL);
@@ -8805,42 +8852,57 @@ impl GpuState {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
 
-                // Reproduction is isolated into its own pass.
-                // IMPORTANT: this must run before process_agents so spawns come from agents_in.
-                cpass.set_pipeline(&self.reproduce_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
-
                 // Process all agents (sense, update, modify env, draw, spawn/death) - workgroup_size(256)
                 // Agents will write propeller forces to fluid_force_vectors buffer with 100x boost
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
-
-                // Drain energy from neighbors (vampire mouths) - workgroup_size(256)
-                // Runs after process_agents so it can operate on agents_out without requiring
-                // write access to agents_in (which would slow down all compute).
-                cpass.set_pipeline(&self.drain_energy_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
-
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
             }
 
             if !should_run_simulation {
                 // Keep timestamp progression stable when paused.
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_POPULATE_SPATIAL);
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
+            }
+        }
+
+        // Start a new compute pass for drain_energy to ensure a memory barrier for agents_out.
+        // process_agents writes to agents_out, and drain_energy reads from it.
+        // In WebGPU, read-after-write in the same pass is not guaranteed to be visible.
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass (Drain Energy)"),
+                timestamp_writes: None,
+            });
+
+            if should_run_simulation {
+                // Drain energy from neighbors (vampire mouths) - workgroup_size(256)
+                // Runs after process_agents so it can operate on agents_out without requiring
+                // write access to agents_in (which would slow down all compute).
+                cpass.set_pipeline(&self.drain_energy_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
+            }
+
+            if !should_run_simulation {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
             }
@@ -8848,17 +8910,6 @@ impl GpuState {
 
         self.frame_profiler
             .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_SIM);
-
-        // Snapshot spawn/repro counters after reproduce pass.
-        if request_spawn_counters_readback {
-            encoder.copy_buffer_to_buffer(
-                &self.spawn_debug_counters,
-                0,
-                self.spawn_readback.as_ref(),
-                0,
-                12,
-            );
-        }
 
         // End the first compute pass to ensure agent writes to fluid_force_vectors are visible
         // Start a new compute pass for fluid simulation
@@ -9065,48 +9116,88 @@ impl GpuState {
             // End fluid compute pass, start new pass for remaining simulation work
             drop(cpass);
 
+            // Cheap tail-safety: clear the compaction destination buffer so any unwritten slots
+            // remain fully zeroed (prevents stale/ghost agents from reappearing).
+            if should_run_simulation {
+                // When ping_pong=true, process runs B->A and compaction uses bg_swap A->B.
+                // When ping_pong=false, process runs A->B and compaction uses bg_swap B->A.
+                let compact_dst = if self.ping_pong {
+                    &self.agents_buffer_b
+                } else {
+                    &self.agents_buffer_a
+                };
+                encoder.clear_buffer(compact_dst, 0, None);
+            }
+
             self.frame_profiler
                 .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_FLUID);
 
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Post-Fluid Compute Pass"),
-                timestamp_writes: None,
-            });
-
-            self.frame_profiler
-                .write_ts_compute_pass(&mut cpass, TS_POST_PASS_START);
-
-            if should_run_simulation {
-                // Compact alive agents - workgroup_size(64)
-                cpass.set_pipeline(&self.compact_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                // Keep this consistent with `compact_agents` in shaders/simulation.wgsl.
-
-                let compact_scan = self.agent_buffer_capacity as u32;
-                cpass.dispatch_workgroups((compact_scan + 63) / 64, 1, 1);
+            // Post-fluid Pass 1: compact/merge (and optional paused render-only process).
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Post-Fluid Compute Pass"),
+                    timestamp_writes: None,
+                });
 
                 self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_COMPACT);
+                    .write_ts_compute_pass(&mut cpass, TS_POST_PASS_START);
 
-                // Process CPU spawn requests - workgroup_size(64)
-                if cpu_spawn_count > 0 {
-                    cpass.set_pipeline(&self.cpu_spawn_pipeline);
+                if should_run_simulation {
+                    // Compact alive agents - workgroup_size(64), scan ENTIRE buffer
+                    cpass.set_pipeline(&self.compact_pipeline);
                     cpass.set_bind_group(0, bg_swap, &[]);
-                    cpass.dispatch_workgroups((cpu_spawn_count + 63) / 64, 1, 1);
+
+                    cpass.dispatch_workgroups(self.agent_buffer_capacity as u32 / 64, 1, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_COMPACT);
+
+                    // Process CPU spawn requests - workgroup_size(64)
+                    if cpu_spawn_count > 0 {
+                        cpass.set_pipeline(&self.cpu_spawn_pipeline);
+                        cpass.set_bind_group(0, bg_swap, &[]);
+                        cpass.dispatch_workgroups((MAX_SPAWN_REQUESTS as u32) / 64, 1, 1);
+                    }
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_CPU_SPAWN);
+
+                    // Merge spawned agents - workgroup_size(64), max MAX_SPAWN_REQUESTS spawns
+                    cpass.set_pipeline(&self.merge_pipeline);
+                    cpass.set_bind_group(0, bg_swap, &[]);
+                    cpass.dispatch_workgroups((MAX_SPAWN_REQUESTS as u32) / 64, 1, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_MERGE);
+                } else if should_draw && self.agent_count > 0 {
+                    // When paused or no living agents: run process pipeline for rendering only (dt=0, probabilities=0)
+                    // but skip compaction, spawning, and buffer swapping
+
+                    cpass.set_pipeline(&self.process_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+
+                    self.frame_profiler.write_ts_compute_pass(
+                        &mut cpass,
+                        TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
+                    );
                 }
 
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_CPU_SPAWN);
+                if should_run_simulation {
+                    self.frame_profiler.write_ts_compute_pass(
+                        &mut cpass,
+                        TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
+                    );
+                }
+            }
 
-                // Merge spawned agents - workgroup_size(64)
-                // merge_agents scans the full new_agents buffer (max_agents).
-                cpass.set_pipeline(&self.merge_pipeline);
-                cpass.set_bind_group(0, bg_swap, &[]);
-                let merge_scan = self.agent_buffer_capacity as u32;
-                cpass.dispatch_workgroups((merge_scan + 63) / 64, 1, 1);
-
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_MERGE);
+            // Post-fluid Pass 1b: write init-dead indirect args.
+            // This pass boundary ensures merge/compact counters are visible when we compute args.
+            if should_run_simulation {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Post-Fluid Compute Pass (Init-Dead Args)"),
+                    timestamp_writes: None,
+                });
 
                 // Compute indirect dispatch args for init-dead (based on alive_total).
                 // NOTE: Must be in a separate compute pass from the indirect dispatch because
@@ -9114,39 +9205,6 @@ impl GpuState {
                 cpass.set_pipeline(&self.write_init_dead_dispatch_args_pipeline);
                 cpass.set_bind_group(0, &self.init_dead_writer_bind_group, &[]);
                 cpass.dispatch_workgroups(1, 1, 1);
-            } else if should_draw && self.agent_count > 0 {
-                // When paused or no living agents: run process pipeline for rendering only (dt=0, probabilities=0)
-                // but skip compaction, spawning, and buffer swapping
-
-                cpass.set_pipeline(&self.process_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
-
-                self.frame_profiler.write_ts_compute_pass(
-                    &mut cpass,
-                    TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
-                );
-            }
-
-            if should_run_simulation {
-                self.frame_profiler.write_ts_compute_pass(
-                    &mut cpass,
-                    TS_POST_AFTER_PROCESS_PAUSED_RENDER_ONLY,
-                );
-            }
-
-            // End post-fluid pass 1. Start pass 2 so init-dead args buffer can be used as INDIRECT.
-            drop(cpass);
-
-            // Snapshot spawn/repro counters after merge (before reset_spawn_counter in pass 2).
-            if request_spawn_counters_readback {
-                encoder.copy_buffer_to_buffer(
-                    &self.spawn_debug_counters,
-                    0,
-                    self.spawn_readback.as_ref(),
-                    12,
-                    12,
-                );
             }
 
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -9405,10 +9463,6 @@ impl GpuState {
         self.slope_counter = (self.slope_counter + 1) % slope_interval;
 
         self.kickoff_alive_readback(slot, alive_buffer);
-
-        if request_spawn_counters_readback {
-            self.kickoff_spawn_counters_readback();
-        }
 
         self.perform_optional_readbacks(should_draw);
 
@@ -9797,7 +9851,26 @@ impl GpuState {
     }
 
     fn select_agent_at_screen_pos(&mut self, screen_pos: [f32; 2]) {
-        let [world_x, world_y] = self.screen_to_world(screen_pos);
+        // Convert screen coordinates to world coordinates
+        // Screen coords to normalized coords (0..1)
+        let norm_x = screen_pos[0] / self.surface_config.width as f32;
+        let norm_y = screen_pos[1] / self.surface_config.height as f32;
+
+        // Account for aspect ratio when projecting into world space
+        let aspect = if self.surface_config.width > 0 {
+            self.surface_config.height as f32 / self.surface_config.width as f32
+        } else {
+            1.0
+        };
+        let half_view_x = SIM_SIZE / (2.0 * self.camera_zoom);
+        let half_view_y = half_view_x * aspect;
+
+        let mut world_x = self.camera_pan[0] + (norm_x - 0.5) * 2.0 * half_view_x;
+        let mut world_y = self.camera_pan[1] - (norm_y - 0.5) * 2.0 * half_view_y; // Y inverted
+
+        // Wrap to world bounds
+        world_x = world_x.rem_euclid(SIM_SIZE);
+        world_y = world_y.rem_euclid(SIM_SIZE);
 
         // Read back agents from GPU
         let current_buffer = if self.ping_pong {
@@ -10038,10 +10111,10 @@ impl GpuState {
         // - Empty version strings are treated as legacy "1.0".
         // - Current builds write SNAPSHOT_VERSION.
         match snapshot.version.as_str() {
-            "" | "1.0" | "1.1" | "1.2" => {}
+            "" | "1.0" | "1.1" => {}
             other => {
                 anyhow::bail!(
-                    "Unsupported snapshot version '{other}'. This build supports snapshot versions 1.0, 1.1, and 1.2."
+                    "Unsupported snapshot version '{other}'. This build supports snapshot versions 1.0 and 1.1."
                 );
             }
         }
@@ -11280,14 +11353,9 @@ fn main() {
                                 } else if button == winit::event::MouseButton::Left
                                     && button_state == ElementState::Pressed
                                 {
+                                    // Left click - select agent for debug panel
                                     if let Some(mouse_pos) = state.last_mouse_pos {
-                                        if state.spawner_armed && state.spawner_override.is_some() {
-                                            let world_pos = state.screen_to_world(mouse_pos);
-                                            state.spawner_spawn_at_world_pos(world_pos);
-                                        } else {
-                                            // Left click - select agent for debug panel
-                                            state.select_agent_at_screen_pos(mouse_pos);
-                                        }
+                                        state.select_agent_at_screen_pos(mouse_pos);
                                     }
                                 }
                             }
@@ -12029,55 +12097,6 @@ fn main() {
                                                                 }
                                                             }
                                                         });
-
-                                                        ui.separator();
-                                                        ui.heading("Spawner");
-                                                        ui.label(format!(
-                                                            "Loaded agent: {}",
-                                                            if state.spawner_override.is_some() { "Yes" } else { "No" }
-                                                        ));
-
-                                                        ui.horizontal(|ui| {
-                                                            if ui.button("Load Agent For Spawner...").clicked() {
-                                                                match load_agent_via_dialog() {
-                                                                    Ok(genome) => {
-                                                                        let (
-                                                                            genome_override_len,
-                                                                            genome_override_offset,
-                                                                            genome_override_packed,
-                                                                        ) = genome_pack_ascii_words(&genome);
-
-                                                                        state.spawner_override = Some(
-                                                                            SpawnerGenomeOverride {
-                                                                                len: genome_override_len,
-                                                                                offset: genome_override_offset,
-                                                                                packed: genome_override_packed,
-                                                                            },
-                                                                        );
-                                                                    }
-                                                                    Err(err) => {
-                                                                        eprintln!("Load canceled or failed: {err:?}");
-                                                                    }
-                                                                }
-                                                            }
-
-                                                            ui.checkbox(
-                                                                &mut state.spawner_armed,
-                                                                "Armed (click to spawn)",
-                                                            );
-                                                        });
-
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.spawner_energy, 0.0..=1000.0)
-                                                                .text("Spawn energy"),
-                                                        );
-
-                                                        if let Some(pos) = state.spawner_last_world_pos {
-                                                            ui.label(format!(
-                                                                "Last spawn: ({:.1}, {:.1})",
-                                                                pos[0], pos[1]
-                                                            ));
-                                                        }
 
                                                         ui.separator();
                                                         ui.heading("Reproduction & Selection");
@@ -13211,13 +13230,6 @@ fn main() {
 
                                     // Inspector overlay - energy and pairing bars (always visible when agent selected)
                                     if let Some(agent) = &state.selected_agent_data {
-                                        let radiation_protection_count: u32 = agent
-                                            .body
-                                            .iter()
-                                            .take((agent.body_count as usize).min(MAX_BODY_PARTS))
-                                            .filter(|part| part.base_type() == 43)
-                                            .count() as u32;
-
                                         let screen_width = state.surface_config.width as f32;
                                         let inspector_x = screen_width - 300.0;
 
@@ -13243,18 +13255,6 @@ fn main() {
                                                     naming::agent::generate_agent_name(agent),
                                                     agent.generation,
                                                     (agent.body_count as usize).min(MAX_BODY_PARTS)
-                                                ));
-
-                                                ui.label(format!("Age: {}", agent.age));
-
-                                                ui.label(format!(
-                                                    "Radiation protection: {}",
-                                                    radiation_protection_count
-                                                ));
-
-                                                ui.label(format!(
-                                                    "Poison protection: {}",
-                                                    agent.poison_resistant_count
                                                 ));
 
                                                 ui.add_space(6.0);
