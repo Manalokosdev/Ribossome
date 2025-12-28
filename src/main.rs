@@ -8221,6 +8221,10 @@ impl GpuState {
             if self.cpu_spawn_queue.is_empty() {
                 self.pending_spawn_upload = false;
             }
+
+            // We guarantee agents are materialized in buffer A by the end of this path.
+            // Make that buffer the "current" ping-pong input for subsequent simulation frames.
+            self.ping_pong = false;
         }
     }
 
@@ -10006,11 +10010,15 @@ impl GpuState {
         encoder.copy_buffer_to_buffer(&self.gamma_grid, 0, &self.gamma_grid_readback, 0, gamma_grid_size_bytes);
 
         // Copy agents from GPU.
-        // NOTE: Snapshot persistence expects agents to be materialized in buffer A.
-        // Saving from a ping-pong-selected buffer can capture an empty/inactive buffer during
-        // load/spawn transitions, producing "0 agents" snapshots.
+        // IMPORTANT: The authoritative, most-recent agent data lives in the ping-pong-selected
+        // "current" buffer. Saving only from buffer A can capture stale/cleared data when the
+        // latest results are in buffer B.
         let agents_size_bytes = (std::mem::size_of::<Agent>() * self.agent_buffer_capacity) as u64;
-        let source_buffer = &self.agents_buffer_a;
+        let source_buffer = if self.ping_pong {
+            &self.agents_buffer_b
+        } else {
+            &self.agents_buffer_a
+        };
         encoder.copy_buffer_to_buffer(source_buffer, 0, &self.agents_readback, 0, agents_size_bytes);
 
         self.queue.submit(Some(encoder.finish()));
@@ -10067,6 +10075,13 @@ impl GpuState {
     }
 
     fn load_snapshot_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
+        // Snapshot load can race with in-flight async readbacks.
+        // We must not submit commands that touch a buffer while it is mapped.
+        // Don't call `unmap()` blindly (wgpu panics if the buffer isn't mapped);
+        // instead, wait briefly and drain completions so the existing callbacks unmap.
+        self.device.poll(wgpu::Maintain::Wait);
+        self.process_completed_alive_readbacks();
+
         // Reset simulation state before loading to prevent crashes on subsequent loads
         // Clear alive counter
         // Clear [spawn, debug, alive] counters
@@ -10102,6 +10117,23 @@ impl GpuState {
         self.agent_count = 0;
         self.alive_count = 0;
         self.spawn_request_count = 0;
+
+        self.pending_spawn_upload = false;
+
+        // Reset readback state so epoch-0 readbacks are accepted.
+        self.alive_readback_last_applied_epoch = 0;
+        self.alive_readback_zero_streak = 0;
+        for inflight in &mut self.alive_readback_inflight {
+            *inflight = false;
+        }
+        for pending in &self.alive_readback_pending {
+            if let Ok(mut guard) = pending.lock() {
+                *guard = None;
+            }
+        }
+
+        // Canonicalize buffer orientation during load: spawn path materializes into A.
+        self.ping_pong = false;
 
         // Load snapshot from PNG file
         let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
@@ -10549,6 +10581,13 @@ impl GpuState {
     fn fast_reset(&mut self) {
         // Reset all simulation state without recreating GPU resources
 
+        // IMPORTANT:
+        // Reset can be triggered while async readbacks are still mapped/in-flight.
+        // Wait for any in-flight maps to complete and drain their callbacks so buffers
+        // get unmapped by the existing code paths before we submit new work.
+        self.device.poll(wgpu::Maintain::Wait);
+        self.process_completed_alive_readbacks();
+
         // Reset agent count
         self.agent_count = 0;
         self.alive_count = 0;
@@ -10579,6 +10618,38 @@ impl GpuState {
         self.selected_agent_index = None;
         self.selected_agent_data = None;
         self.follow_selected_agent = false;
+
+        // Reset async readback state.
+        // IMPORTANT: alive-count readbacks are epoch-tagged and can complete out-of-order.
+        // If we reset `epoch` back to 0 but keep the last-applied epoch from the previous run,
+        // then post-reset readbacks would be ignored as "out-of-order", making the sim appear
+        // permanently empty (including spawns).
+        self.alive_readback_last_applied_epoch = 0;
+        self.alive_readback_zero_streak = 0;
+        for inflight in &mut self.alive_readback_inflight {
+            *inflight = false;
+        }
+        for pending in &self.alive_readback_pending {
+            if let Ok(mut guard) = pending.lock() {
+                *guard = None;
+            }
+        }
+
+        self.alive_readback_slot = 0;
+
+        for inflight in &mut self.selected_agent_readback_inflight {
+            *inflight = false;
+        }
+        for pending in &self.selected_agent_readback_pending {
+            if let Ok(mut guard) = pending.lock() {
+                *guard = None;
+            }
+        }
+        self.selected_agent_readback_last_request = std::time::Instant::now()
+            - std::time::Duration::from_secs(1);
+
+        // Canonicalize ping-pong orientation after reset so "current agents" lives in buffer A.
+        self.ping_pong = false;
 
         // Reset statistics
         self.population_history.clear();
