@@ -3439,9 +3439,11 @@ struct GpuState {
     reproduction_bind_group_b: wgpu::BindGroup,
     reproduction_pipeline: wgpu::ComputePipeline,
     alive_readbacks: [Arc<wgpu::Buffer>; 2],
-    alive_readback_pending: [Arc<Mutex<Option<Result<u32, ()>>>>; 2],
+    alive_readback_pending: [Arc<Mutex<Option<Result<(u32, u32), ()>>>>; 2],
     alive_readback_inflight: [bool; 2],
     alive_readback_slot: usize,
+    alive_readback_last_applied_epoch: u32,
+    alive_readback_zero_streak: u8,
     debug_readback: wgpu::Buffer,
     agents_readback: wgpu::Buffer, // Readback for agent inspection
     selected_agent_buffer: wgpu::Buffer, // GPU buffer for selected agent
@@ -4665,7 +4667,7 @@ impl GpuState {
             })),
         ];
 
-        let alive_readback_pending: [Arc<Mutex<Option<Result<u32, ()>>>>; 2] =
+        let alive_readback_pending: [Arc<Mutex<Option<Result<(u32, u32), ()>>>>; 2] =
             [Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None))];
 
         let debug_readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -6689,6 +6691,8 @@ impl GpuState {
             alive_readback_pending,
             alive_readback_inflight: [false; 2],
             alive_readback_slot: 0,
+            alive_readback_last_applied_epoch: 0,
+            alive_readback_zero_streak: 0,
             debug_readback,
             agents_readback,
             selected_agent_buffer,
@@ -7820,9 +7824,8 @@ impl GpuState {
                 guard.take()
             };
             if let Some(result) = message {
-                if let Ok(new_count) = result {
-                    self.agent_count = new_count;
-                    self.alive_count = new_count;
+                if let Ok((epoch, new_count)) = result {
+                    self.apply_alive_count_readback(epoch, new_count);
                 }
                 self.alive_readback_inflight[idx] = false;
             }
@@ -7918,14 +7921,37 @@ impl GpuState {
                 guard.take()
             };
             if let Some(result) = message {
-                if let Ok(new_count) = result {
-                    self.agent_count = new_count;
-                    self.alive_count = new_count;
+                if let Ok((epoch, new_count)) = result {
+                    self.apply_alive_count_readback(epoch, new_count);
                 }
             }
             self.alive_readback_inflight[slot] = false;
         }
         slot
+    }
+
+    fn apply_alive_count_readback(&mut self, epoch: u32, new_count: u32) {
+        // Readbacks can complete out-of-order (we use multiple staging slots). Never let an
+        // older completion overwrite a newer count.
+        if epoch < self.alive_readback_last_applied_epoch {
+            return;
+        }
+
+        // Avoid UI/sim flicker: a single 0 readback can happen if we sample the alive counter
+        // right after it was cleared (e.g. on a step where sim kernels were gated). Require two
+        // consecutive 0s before accepting a transition from nonzero -> 0.
+        if new_count == 0 && (self.alive_count > 0 || self.agent_count > 0) {
+            self.alive_readback_zero_streak = self.alive_readback_zero_streak.saturating_add(1);
+            if self.alive_readback_zero_streak < 2 {
+                return;
+            }
+        } else {
+            self.alive_readback_zero_streak = 0;
+        }
+
+        self.alive_readback_last_applied_epoch = epoch;
+        self.agent_count = new_count;
+        self.alive_count = new_count;
     }
 
     fn copy_state_to_staging(
@@ -7944,6 +7970,7 @@ impl GpuState {
         let buffer_for_map = alive_buffer.clone();
         let buffer_for_callback = buffer_for_map.clone();
         let pending = self.alive_readback_pending[slot].clone();
+        let request_epoch = self.epoch as u32;
         self.alive_readback_inflight[slot] = true;
         buffer_for_map
             .slice(..)
@@ -7955,7 +7982,7 @@ impl GpuState {
                         let new_count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                         drop(data);
                         buffer_for_callback.unmap();
-                        Ok(new_count)
+                        Ok((request_epoch, new_count))
                     }
                     Err(_) => {
                         Err(())
