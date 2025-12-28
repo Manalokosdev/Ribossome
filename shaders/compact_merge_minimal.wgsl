@@ -101,23 +101,17 @@ fn merge_agents_cooperative(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // CRITICAL: Check if we have capacity before attempting merge
-    // If current alive count + remaining spawns would exceed max_agents, skip
-    let current_alive = atomicLoad(&spawn_debug_counters[2]);
-    if (current_alive + spawn_count > params.max_agents) {
-        // No capacity - spawns are lost
-        return;
-    }
-
     // Read the new agent that was created by reproduction
     let new_agent = new_agents[spawn_id];
 
-    // Append to end of compacted alive array using alive counter as running size
-    // This is the CRITICAL FIX: we atomically reserve the next slot AFTER compaction
+    // CRITICAL FIX: Each thread must atomically reserve AND bounds-check its slot.
+    // The old code checked capacity once then let all threads write, causing overwrites.
+    // Now: reserve slot first, then bounds-check the reserved index.
     let target_index = atomicAdd(&spawn_debug_counters[2], 1u);
 
-    // Write the spawn to the reserved slot
+    // Only write if we stayed within capacity
     if (target_index < params.max_agents) {
         agents_out[target_index] = new_agent;
     }
+    // If target_index >= max_agents, this spawn is silently dropped (capacity exceeded)
 }

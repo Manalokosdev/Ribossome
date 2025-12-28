@@ -2182,6 +2182,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ====== RNA PAIRING ADVANCEMENT ======
     // Pairing counter probabilistically increments based on energy and chemical signals.
     // When it reaches gene_length, reproduction.wgsl will spawn offspring.
+    
+    // CRITICAL: Handle reproduction completion BEFORE pairing advancement.
+    // Reproduction shader writes offspring when pairing_counter >= gene_length,
+    // but it doesn't update the parent (different buffer). We must reset here.
+    if (pairing_counter >= agent_gene_length && agent_gene_length > 0u) {
+        // Reproduction happened - deduct 50% energy and reset counter
+        agent_energy_cur *= 0.5;
+        pairing_counter = 0u;
+    }
+    
     if (agent_gene_length > 0u && pairing_counter < agent_gene_length) {
         // If the agent has no energy capacity (no storage), it cannot sustain pairing.
         if (agent_energy_capacity > 0.0) {

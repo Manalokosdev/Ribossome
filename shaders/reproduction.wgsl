@@ -311,11 +311,9 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 new_agents[spawn_index] = offspring;
 
-                // Update agent state in the INPUT buffer after successful spawn
-                // Energy was already deducted when creating offspring
-                agent.energy = agent_energy_cur;
-                agent.pairing_counter = 0u;  // Reset after successful spawn
-                agents_out[agent_id] = agent;
+                // NOTE: Do NOT update parent here! Reproduction writes to a different buffer
+                // than process_agents, so these updates would be lost.
+                // Instead, process_agents detects spawn completion and handles energy/counter reset.
             }
         }
     }

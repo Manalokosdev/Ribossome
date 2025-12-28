@@ -8417,7 +8417,15 @@ impl GpuState {
             pairing_cost: self.pairing_cost,
             max_agents: self.agent_buffer_capacity as u32,
             cpu_spawn_count,
-            agent_count: self.agent_count,
+            // IMPORTANT:
+            // Do not rely on async CPU readback of alive_count/agent_count to bound
+            // simulation dispatch. In Full Speed / Fast Draw modes, the readback can
+            // lag behind newly spawned agents, causing them to be skipped for several
+            // steps (which looks like hotspots / missing updates).
+            //
+            // All core kernels already early-return on `alive==0`, so it is safe to
+            // dispatch over the full buffer capacity for correctness.
+            agent_count: self.agent_buffer_capacity as u32,
             random_seed: (self.rng_state >> 32) as u32,
             debug_mode: if self.rain_debug_visual {
                 2
@@ -8764,7 +8772,11 @@ impl GpuState {
                 };
                 cpass.set_pipeline(&self.reproduction_pipeline);
                 cpass.set_bind_group(0, reproduction_bg, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
 
                 // Spatial grid clear disabled: we use an epoch-stamped spatial grid.
                 // populate_agent_spatial_grid writes the epoch stamp for touched cells;
@@ -8793,7 +8805,11 @@ impl GpuState {
                 // Populate agent spatial grid with agent positions - workgroup_size(256)
                 cpass.set_pipeline(&self.populate_agent_spatial_grid_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_POPULATE_SPATIAL);
@@ -8813,7 +8829,11 @@ impl GpuState {
                 // Agents will write propeller forces to fluid_force_vectors buffer with 100x boost
                 cpass.set_pipeline(&self.process_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
@@ -8845,7 +8865,11 @@ impl GpuState {
                 // write access to agents_in (which would slow down all compute).
                 cpass.set_pipeline(&self.drain_energy_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
