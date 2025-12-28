@@ -2209,7 +2209,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let energy_scaled = sqrt(energy_for_pair);
             let alpha_gate = clamp(local_alpha_avg, 0.0, 1.0);
             let beta_gate = clamp(local_beta_avg, 0.0, 1.0);
-            let pairing_drive = alpha_gate - beta_gate; // [-1, +1]
+            // TEMPORARY: deactivate alpha/beta influence on pairing
+            // let pairing_drive = alpha_gate - beta_gate; // [-1, +1]
+            let pairing_drive = 1.0; // Always max pairing rate (no chemical influence)
 
             let base_p = params.spawn_probability * energy_scaled * 0.1;
             let pair_p = clamp(base_p * max(pairing_drive, 0.0), 0.0, 1.0);

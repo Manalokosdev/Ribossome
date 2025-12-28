@@ -655,7 +655,15 @@ const MIN_GENE_LENGTH: usize = 6;
 // (MAX_SPAWN_REQUESTS/64) and rely on early returns in the kernels.
 const MAX_SPAWN_REQUESTS: usize = 2048;
 
+// Spawn/merge/compact WGSL kernels assume a hard cap of 2000 CPU spawns per batch.
+// Keep this <= MAX_SPAWN_REQUESTS.
+const MAX_CPU_SPAWNS_PER_BATCH: u32 = 2000;
+
 const SNAPSHOT_VERSION: &str = "1.1";
+
+// Snapshot files embed agent data as JSON inside a PNG.
+// To keep file sizes and save times reasonable, we store a random sample when populations are huge.
+const MAX_SNAPSHOT_AGENTS: usize = 10_000;
 
 // RGB colors per amino acid, kept in sync with shader get_amino_acid_properties()
 const AMINO_COLORS: [[f32; 3]; 20] = [
@@ -3236,16 +3244,21 @@ impl SimulationSnapshot {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         // agents should already be filtered for alive != 0 by caller
-        // Randomly sample up to 5000 agents if there are more
+        // Randomly sample up to MAX_SNAPSHOT_AGENTS agents if there are more
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
 
-        let sampled_agents: Vec<&Agent> = if agents.len() <= 5000 {
+        let sampled_agents: Vec<&Agent> = if agents.len() <= MAX_SNAPSHOT_AGENTS {
             // Keep all agents
             agents.iter().collect()
         } else {
-            // Sample 5000 random agents
-            agents.iter().collect::<Vec<_>>().choose_multiple(&mut rng, 5000).copied().collect()
+            // Sample MAX_SNAPSHOT_AGENTS random agents
+            agents
+                .iter()
+                .collect::<Vec<_>>()
+                .choose_multiple(&mut rng, MAX_SNAPSHOT_AGENTS)
+                .copied()
+                .collect()
         };
 
         let agent_snapshots: Vec<AgentSnapshot> = sampled_agents
@@ -4805,10 +4818,12 @@ impl GpuState {
         profiler.mark("Main shader compiled");
 
         // Load compact_merge shader (dedicated compact and merge operations)
-        // Uses minimal bindings - doesn't need full simulation environment
+        // IMPORTANT: It must share the exact Agent/SimParams/bindings from shared.wgsl,
+        // otherwise compaction will misread `alive` and effectively "drop" prior batches.
         let compact_merge_shader_source = format!(
-            "const FLUID_GRID_SIZE: u32 = {}u;\n{}",
+            "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}",
             FLUID_GRID_SIZE,
+            include_str!("../shaders/shared_types_only.wgsl"),
             include_str!("../shaders/compact_merge_minimal.wgsl")
         );
         let compact_merge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -8088,6 +8103,12 @@ impl GpuState {
             return;
         }
 
+        // The spawn/compact/merge WGSL path is designed around a 2000-per-batch limit.
+        // Allowing larger counts (e.g. 2048) causes partial uploads and inconsistent counters.
+        let cpu_spawn_count = cpu_spawn_count
+            .min(MAX_CPU_SPAWNS_PER_BATCH)
+            .min(MAX_SPAWN_REQUESTS as u32);
+
         // The spawn/merge/compact shaders use `params.cpu_spawn_count`, `params.agent_count`, and
         // `params.max_agents` for bounds checks. During snapshot load this path can run before
         // `update()` has written a fresh params buffer, which would result in 0 spawns.
@@ -8118,7 +8139,7 @@ impl GpuState {
             // Limit to the count actually being processed (capped at 2000 elsewhere)
             let upload_len = (cpu_spawn_count as usize)
                 .min(self.cpu_spawn_queue.len())
-                .min(2000);
+                .min(MAX_CPU_SPAWNS_PER_BATCH as usize);
             if upload_len > 0 {
                 let slice = &self.cpu_spawn_queue[..upload_len];
                 self.queue.write_buffer(
@@ -8172,10 +8193,11 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
                 cpass.dispatch_workgroups((MAX_SPAWN_REQUESTS as u32) / 64, 1, 1);
 
-                let init_groups = ((self.agent_buffer_capacity as u32) + 255) / 256;
-                cpass.set_pipeline(&self.initialize_dead_pipeline);
-                cpass.set_bind_group(0, bg_compact_merge, &[]);
-                cpass.dispatch_workgroups(init_groups, 1, 1);
+                // NOTE: In this spawn-only path we already fully clear the compaction
+                // destination buffer (`compact_dst`) before compact/merge. That guarantees
+                // the tail is zeroed/dead, so we do not need to run initialize-dead here.
+                // Skipping it also avoids any risk of clearing freshly-merged agents if
+                // the alive counter read is not yet visible on some backends.
 
                 cpass.set_pipeline(&self.finalize_merge_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
@@ -10064,6 +10086,23 @@ impl GpuState {
 
         println!("Saving snapshot with {} living agents", living_agents.len());
 
+        // Autosave robustness: never overwrite the autosave file with an empty snapshot.
+        // A transient 0-living capture (e.g. wrong buffer sampled or counters temporarily stale)
+        // can permanently break the next startup if it replaces the last good autosave.
+        if living_agents.is_empty() {
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|name| name.eq_ignore_ascii_case(AUTO_SNAPSHOT_FILE_NAME))
+                .unwrap_or(false)
+            {
+                println!(
+                    "ΓÜá Skipping autosave overwrite: captured 0 living agents (keeping previous autosave)"
+                );
+                return Ok(());
+            }
+        }
+
         // Create snapshot from living agents with current settings
         let current_settings = self.current_settings();
         let snapshot = SimulationSnapshot::new(self.epoch, &living_agents, current_settings, self.run_name.clone());
@@ -10214,7 +10253,7 @@ impl GpuState {
             }
 
             let batch = (self.cpu_spawn_queue.len() as u32)
-                .min(MAX_SPAWN_REQUESTS as u32)
+                .min(MAX_CPU_SPAWNS_PER_BATCH)
                 .min(capacity_left as u32);
 
             println!(
@@ -10248,7 +10287,11 @@ impl GpuState {
             self.queue.submit(Some(encoder.finish()));
         }
 
-        // Immediately save to autosave to ensure continuity (after agents are spawned)
+        // Immediately update autosave to ensure continuity.
+        // Use the same GPU readback path as manual snapshots so the autosave reflects the
+        // fully-materialized simulation state (after spawn-only batching).
+        // `save_snapshot_to_file()` also has a guard to avoid overwriting autosave with a
+        // transient 0-living capture.
         let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
         if let Err(e) = self.save_snapshot_to_file(autosave_path) {
             eprintln!("ΓÜá Failed to update autosave after loading snapshot: {:?}", e);
