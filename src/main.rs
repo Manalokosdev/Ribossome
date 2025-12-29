@@ -3544,6 +3544,7 @@ struct GpuState {
 
     // Pipelines
     process_pipeline: wgpu::ComputePipeline,
+    microswim_pipeline: wgpu::ComputePipeline,
     clear_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_commit_pipeline: wgpu::ComputePipeline,
@@ -4803,11 +4804,12 @@ impl GpuState {
         // Load main shader (concatenate shared + render + simulation modules, composite is separate)
         // Inject compile-time constants here so resolution changes are centralized in Rust.
         let shader_source = format!(
-            "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}",
+            "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}\n{}",
             FLUID_GRID_SIZE,
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
             include_str!("../shaders/simulation.wgsl"),
+            include_str!("../shaders/microswim.wgsl"),
             include_str!("../shaders/reproduction.wgsl")
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -5626,6 +5628,16 @@ impl GpuState {
             cache: None,
         });
         profiler.mark("process_agents pipeline");
+
+        let microswim_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Microswim Agents Pipeline"),
+            layout: Some(&compute_pipeline_layout),
+            module: &shader,
+            entry_point: "microswim_agents",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        profiler.mark("microswim_agents pipeline");
 
         let diffuse_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Diffuse Pipeline (stage1)"),
@@ -6726,6 +6738,7 @@ impl GpuState {
             visual_texture_view,
             sampler,
             process_pipeline,
+            microswim_pipeline,
             reproduction_bind_group_a,
             reproduction_bind_group_b,
             reproduction_pipeline,
@@ -8884,9 +8897,6 @@ impl GpuState {
                     1,
                     1,
                 );
-
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
             }
 
             if !should_run_simulation {
@@ -8895,9 +8905,30 @@ impl GpuState {
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_POPULATE_SPATIAL);
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
             }
+        }
+
+        // Start a new compute pass for microswimming to ensure a memory barrier for agents_out.
+        // process_agents writes to agents_out, and microswim_agents reads/writes it.
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass (Microswim)"),
+                timestamp_writes: None,
+            });
+
+            if should_run_simulation {
+                cpass.set_pipeline(&self.microswim_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
+            }
+
+            // This marker now represents "after process + microswim".
+            self.frame_profiler
+                .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
         }
 
         // Start a new compute pass for drain_energy to ensure a memory barrier for agents_out.
