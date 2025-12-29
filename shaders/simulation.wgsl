@@ -1495,6 +1495,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let drag_coefficient = total_mass * 0.5;
+    let dt_safe = max(params.dt, 1e-3);
 
     // Morphology swim strength (reuses the existing prop-wash UI knobs as a convenient control).
     // This is applied as per-part drag later (no direct angular-velocity injection).
@@ -1612,7 +1613,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
 
-            // Per-tick deformation displacement.
+            // Deformation displacement.
             // IMPORTANT: use local delta rotated by the *current* agent rotation so that rigid-body
             // rotation between frames does NOT create fake deformation (this was making compact
             // "ball" agents drift even when they aren't waving).
@@ -1626,16 +1627,24 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 continue;
             }
 
-            var v_def = apply_agent_rotation(delta_local, agent_rot);
-            let vdef_len = length(v_def);
-            if (vdef_len > MORPHOLOGY_MAX_WORLD_DELTA) {
-                v_def = v_def * (MORPHOLOGY_MAX_WORLD_DELTA / max(vdef_len, 1e-6));
+            // Convert to a deformation *velocity* so propulsion strength is stable across dt.
+            // (Using per-tick displacement makes thrust shrink when dt is reduced.)
+            var delta_world = apply_agent_rotation(delta_local, agent_rot);
+            let dlen = length(delta_world);
+            if (dlen > MORPHOLOGY_MAX_WORLD_DELTA) {
+                delta_world = delta_world * (MORPHOLOGY_MAX_WORLD_DELTA / max(dlen, 1e-6));
             }
 
-            // Relative motion of this part vs the fluid.
+            var v_def = delta_world / dt_safe;
+            let vdef_len = length(v_def);
+            if (vdef_len > MORPHOLOGY_MAX_WORLD_VEL) {
+                v_def = v_def * (MORPHOLOGY_MAX_WORLD_VEL / max(vdef_len, 1e-6));
+            }
+
+            // Relative motion of this part vs the surrounding medium.
             // NOTE: use only internal deformation here so agents don't "swim" from rigid translation
             // (they are already overdamped at the agent level).
-            let v_rel = v_def - v_medium_frame;
+            let v_rel = v_def - (v_medium_frame / dt_safe);
 
             // Anisotropic resistive drag: C = c_perp*I + (c_par-c_perp)*t*t^T
             let tx = t_world.x;
@@ -1652,8 +1661,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             // Convert velocity-like drag into force consistent with overdamped integrator.
+            // Scale by segment length (RFT-style) so long tails contribute proportionally.
             // part_weight * drag_coefficient == ~part_mass*0.5.
-            let swim_force = (-Cv) * (morph_swim_strength * part_weight) * drag_coefficient;
+            let seg_weight = max(seg_len, 0.0);
+            let swim_force = (-Cv) * (morph_swim_strength * part_weight * seg_weight) * drag_coefficient;
             force += swim_force;
             torque += (r_com.x * swim_force.y - r_com.y * swim_force.x);
         }
