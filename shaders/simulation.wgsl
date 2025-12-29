@@ -857,7 +857,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     v = v * (MORPHOLOGY_MAX_WORLD_VEL / max(vlen, 1e-6));
                 }
 
-                let scaled_force = -v * FLUID_FORCE_SCALE * 0.1 * strength;
+                // Push fluid in the same direction as the deformation velocity.
+                let scaled_force = v * FLUID_FORCE_SCALE * 0.1 * strength;
                 add_fluid_force_splat(new_world, scaled_force);
             }
         }
@@ -1664,7 +1665,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Scale by segment length (RFT-style) so long tails contribute proportionally.
             // part_weight * drag_coefficient == ~part_mass*0.5.
             let seg_weight = max(seg_len, 0.0);
-            let swim_force = (-Cv) * (morph_swim_strength * part_weight * seg_weight) * drag_coefficient;
+            // NOTE: if propulsion feels inverted, the sign convention here is the first suspect.
+            // Cv == C * v_rel. The force applied to the agent is what the medium exerts on the body.
+            // Empirically, using +Cv here matches the expected thrust direction in this simulation.
+            let swim_force = (Cv) * (morph_swim_strength * part_weight * seg_weight) * drag_coefficient;
             force += swim_force;
             torque += (r_com.x * swim_force.y - r_com.y * swim_force.x);
         }
