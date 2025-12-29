@@ -806,39 +806,59 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Inject morphology-driven motion into the fluid.
-    // This is intentionally simple: estimate per-part velocity from (new_world - old_world) / dt,
-    // then splat a matching force into the fluid solver.
+    // IMPORTANT: use *internal deformation only* (local deltas), not rigid-body rotation/translation.
+    // Otherwise, agents can "propel" just by rotating (or via recentering gauge), even when not waving.
     if (MORPHOLOGY_INJECT_FLUID_FORCE && !first_build) {
         let strength = max(params.prop_wash_strength_fluid, 0.0) * MORPHOLOGY_FLUID_COUPLING;
         if (strength > 0.0) {
             let dt_safe = max(params.dt, 1e-3);
-            let old_rot = agent_rotation;
             let new_rot = agents_out[agent_id].rotation;
+
+            // Remove any uniform shift from recentering by subtracting the mass-weighted mean local delta.
+            var mean_delta_local = vec2<f32>(0.0);
+            var wsum = 0.0;
+            for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+                let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+                let props = get_amino_acid_properties(base_type);
+                let w = max(props.mass, 0.01);
+                mean_delta_local += (agents_out[agent_id].body[i].pos - prev_body_pos[i]) * w;
+                wsum += w;
+            }
+            if (wsum > 1e-6) {
+                mean_delta_local = mean_delta_local / wsum;
+            }
 
             for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
                 let old_local = prev_body_pos[i];
                 let new_local = agents_out[agent_id].body[i].pos;
 
-                let old_world = agent_position + apply_agent_rotation(old_local, old_rot);
+                // World position of the part (for splatting), using the current output rotation.
                 let new_world = agent_position + apply_agent_rotation(new_local, new_rot);
 
-                var delta_world = new_world - old_world;
+                // Deformation-only displacement in world space (per tick).
+                // Rotate by the *physical* agent rotation from the start of the tick so rigid-body
+                // rotation changes do not appear as deformation.
+                var delta_local = (new_local - old_local) - mean_delta_local;
+                let delta_len = length(delta_local);
+                if (delta_len < 1e-4) {
+                    continue;
+                }
+
+                var delta_world = apply_agent_rotation(delta_local, agent_rotation);
                 let dlen = length(delta_world);
                 if (dlen > MORPHOLOGY_MAX_WORLD_DELTA) {
                     delta_world = delta_world * (MORPHOLOGY_MAX_WORLD_DELTA / max(dlen, 1e-6));
                 }
-                let delta_len2 = dot(delta_world, delta_world);
-                if (delta_len2 > 1e-6) {
-                    // Convert displacement to a velocity-like vector.
-                    var v = delta_world / dt_safe;
-                    let vlen = length(v);
-                    if (vlen > MORPHOLOGY_MAX_WORLD_VEL) {
-                        v = v * (MORPHOLOGY_MAX_WORLD_VEL / max(vlen, 1e-6));
-                    }
 
-                    let scaled_force = -v * FLUID_FORCE_SCALE * 0.1 * strength;
-                    add_fluid_force_splat(new_world, scaled_force);
+                // Convert displacement to a velocity-like vector.
+                var v = delta_world / dt_safe;
+                let vlen = length(v);
+                if (vlen > MORPHOLOGY_MAX_WORLD_VEL) {
+                    v = v * (MORPHOLOGY_MAX_WORLD_VEL / max(vlen, 1e-6));
                 }
+
+                let scaled_force = -v * FLUID_FORCE_SCALE * 0.1 * strength;
+                add_fluid_force_splat(new_world, scaled_force);
             }
         }
     }
