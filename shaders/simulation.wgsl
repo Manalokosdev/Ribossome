@@ -107,8 +107,18 @@ const MORPHOLOGY_SWIM_COUPLING: f32 = 1.0;
 // Drag anisotropy: perpendicular drag > tangential drag.
 const MORPHOLOGY_SWIM_C_PAR: f32 = 0.15;
 const MORPHOLOGY_SWIM_C_PERP: f32 = 0.6;
+// If false, morphology propulsion is computed against a gridless, uniform medium (fluid-at-rest).
+// Real fluid forces can still be applied elsewhere (see wind/fluid coupling below).
+const MORPHOLOGY_SWIM_USE_REAL_FLUID: bool = false;
 // Clamp per-tick contribution to avoid explosive drift.
 const MORPHOLOGY_SWIM_MAX_FRAME_VEL: f32 = 3.0;
+
+// Option 2: morphology determines a target orientation, physics follows.
+// We estimate how the morphology rotated between frames (best-fit 2D rotation between
+// previous and current body configurations) and apply a small corrective angular velocity.
+const MORPHOLOGY_ORIENT_FOLLOW_ENABLED: bool = true;
+const MORPHOLOGY_ORIENT_FOLLOW_STRENGTH: f32 = 0.25;
+const MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL: f32 = 0.15;
 
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -748,6 +758,52 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // NOTE: morphology recentering may update agents_out.rotation (avg_angle compensation).
     // We intentionally do NOT sync `agent_rot` here: `agent_rot` is the agent's physical rotation
     // integrated from torque, while the recentering rotation is a morphology gauge correction.
+
+    // Morphology-follow orientation (Option 2): estimate rigid rotation of the body between frames.
+    // This is zero when parts don't move, and tends to be stable for compact "ball" shapes
+    // because the correlation magnitude becomes tiny and we gate it out.
+    var morph_orient_delta = 0.0;
+    if (MORPHOLOGY_ORIENT_FOLLOW_ENABLED && !first_build && body_count_val > 1u) {
+        var old_com = vec2<f32>(0.0);
+        var new_com = vec2<f32>(0.0);
+        var wsum = 0.0;
+
+        for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+            let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+            let props = get_amino_acid_properties(base_type);
+            let w = max(props.mass, 0.01);
+            old_com += prev_body_pos[i] * w;
+            new_com += agents_out[agent_id].body[i].pos * w;
+            wsum += w;
+        }
+
+        if (wsum > 1e-6) {
+            old_com = old_com / wsum;
+            new_com = new_com / wsum;
+
+            var Sxx = 0.0;
+            var Sxy = 0.0;
+
+            for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+                let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+                let props = get_amino_acid_properties(base_type);
+                let w = max(props.mass, 0.01);
+
+                let p = prev_body_pos[i] - old_com;
+                let q = agents_out[agent_id].body[i].pos - new_com;
+
+                Sxx += (p.x * q.x + p.y * q.y) * w;
+                Sxy += (p.x * q.y - p.y * q.x) * w;
+            }
+
+            // If the body is nearly isotropic/compact, the best-fit rotation is ill-defined.
+            // Gate it out to avoid noisy spinning.
+            let corr2 = Sxx * Sxx + Sxy * Sxy;
+            if (corr2 > 1e-6) {
+                morph_orient_delta = atan2(Sxy, Sxx);
+            }
+        }
+    }
 
     // Inject morphology-driven motion into the fluid.
     // This is intentionally simple: estimate per-part velocity from (new_world - old_world) / dt,
@@ -1527,15 +1583,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let t_local = select(seg_local / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-6);
             let t_world = normalize(apply_agent_rotation(t_local, agent_rot));
 
-            // Fluid velocity at this part (world units per tick).
-            // IMPORTANT: when fluids are disabled, the velocity buffer can hold stale values.
-            // Gate sampling behind the same switch used elsewhere (fluid_wind_push_strength).
-            var v_fluid_frame = vec2<f32>(0.0);
-            if (params.fluid_wind_push_strength != 0.0) {
+            var v_medium_frame = vec2<f32>(0.0);
+            if (MORPHOLOGY_SWIM_USE_REAL_FLUID && params.fluid_wind_push_strength != 0.0) {
                 if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
                     let v = sample_fluid_velocity_bilinear(world_pos);
                     let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
-                    v_fluid_frame = v * (cell_to_world * params.dt);
+                    v_medium_frame = v * (cell_to_world * params.dt);
                 }
             }
 
@@ -1562,7 +1615,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Relative motion of this part vs the fluid.
             // NOTE: use only internal deformation here so agents don't "swim" from rigid translation
             // (they are already overdamped at the agent level).
-            let v_rel = v_def - v_fluid_frame;
+            let v_rel = v_def - v_medium_frame;
 
             // Anisotropic resistive drag: C = c_perp*I + (c_par-c_perp)*t*t^T
             let tx = t_world.x;
@@ -1955,6 +2008,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Overdamped rotation: angular_velocity = torque / rotational_drag
     let rotational_drag = moment_of_inertia * 20.0; // Increased rotational drag for stability
     var angular_velocity = torque / rotational_drag;
+
+    // Option 2: morphology-follow orientation.
+    // Convert the estimated morphology rotation between frames into a small, bounded angular velocity.
+    if (MORPHOLOGY_ORIENT_FOLLOW_ENABLED) {
+        let w_morph = clamp(morph_orient_delta * MORPHOLOGY_ORIENT_FOLLOW_STRENGTH, -MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL, MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL);
+        angular_velocity += w_morph;
+    }
 
     // Add spin from local fluid vorticity (curl). This makes vortices visibly rotate agents.
     if (params.fluid_wind_push_strength != 0.0) {
