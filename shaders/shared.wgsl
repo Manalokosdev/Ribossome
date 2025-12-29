@@ -634,9 +634,8 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     p.energy_absorption_rate = v3.x; p.beta_absorption_rate = v3.y; p.beta_damage = v3.z; p.parameter1 = v3.w;
     p.signal_decay = v4.x; p.alpha_left_mult = v4.y; p.alpha_right_mult = v4.z; p.beta_left_mult = v4.w;
     p.beta_right_mult = v5.x;
-    // Stored in AMINO_DATA[t][5].y (spare slot). If left as 0.0, default to 1.0.
-    let raw_wind_coupling = v5.y;
-    p.fluid_wind_coupling = select(1.0, raw_wind_coupling, raw_wind_coupling != 0.0);
+    // Force full coupling for all parts (amino acids + organs).
+    p.fluid_wind_coupling = 1.0;
 
     p.is_propeller          = (f & (1u<<0))  != 0u;
     p.is_displacer          = (f & (1u<<8))  != 0u;

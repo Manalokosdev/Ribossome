@@ -99,7 +99,8 @@ const MORPHOLOGY_MAX_WORLD_VEL: f32 = 20.0;
 
 // Virtual fluid propulsion: simplified resistive-force model.
 // Agents propel by pushing against a homogeneous, gridless medium.
-const MORPHOLOGY_SWIM_ENABLED: bool = true;
+// Disabled: we now use the real fluid with two-way coupling.
+const MORPHOLOGY_SWIM_ENABLED: bool = false;
 // Overall strength multiplier (tuned via UI prop_wash_strength_fluid).
 const MORPHOLOGY_SWIM_COUPLING: f32 = 1.0;
 // Base drag coefficient for the virtual medium.
@@ -112,6 +113,18 @@ const MORPHOLOGY_SWIM_ANISOTROPY: f32 = 1.8;
 const MORPHOLOGY_SWIM_USE_REAL_FLUID: bool = false;
 // Clamp per-tick contribution to avoid explosive drift.
 const MORPHOLOGY_SWIM_MAX_FRAME_VEL: f32 = 3.0;
+
+// Simple anisotropic fluid coupling (penalty method).
+// Anisotropic drag allows undulation to generate net thrust by damping
+// perpendicular motion more than parallel motion.
+const FLUID_TWO_WAY_COUPLING_ENABLED: bool = false;
+
+// Simple isotropic fluid coupling (penalty method).
+const FLUID_COUPLING_SIMPLE_ENABLED: bool = true;
+// Anisotropic coupling: perpendicular drag > parallel drag along segment tangent.
+// This allows undulation to generate net thrust.
+const FLUID_COUPLING_ANISOTROPY: f32 = 1.0;
+
 
 // Heading correction for morphology swimming:
 // Keep the agent's rotation roughly aligned with its actual velocity direction.
@@ -817,7 +830,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Inject morphology-driven motion into the fluid.
     // IMPORTANT: use *internal deformation only* (local deltas), not rigid-body rotation/translation.
     // Otherwise, agents can "propel" just by rotating (or via recentering gauge), even when not waving.
-    if (MORPHOLOGY_INJECT_FLUID_FORCE && !first_build && params.fluid_wind_push_strength != 0.0) {
+    // NOTE: When FLUID_TWO_WAY_COUPLING_ENABLED is on, we perform a more physically grounded two-way
+    // coupling inside the physics pass (per-part slip + reaction force). Disable this older one-way
+    // deformation->fluid injection to avoid double-counting.
+    if (!FLUID_TWO_WAY_COUPLING_ENABLED && MORPHOLOGY_INJECT_FLUID_FORCE && !first_build && params.fluid_wind_push_strength != 0.0) {
         let strength = max(params.prop_wash_strength_fluid, 0.0) * MORPHOLOGY_FLUID_COUPLING;
         if (strength > 0.0) {
             let dt_safe = max(params.dt, 1e-3);
@@ -1507,6 +1523,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let drag_coefficient = total_mass * 0.5;
     let dt_safe = max(params.dt, 1e-3);
 
+    // Strength for real-fluid two-way coupling (reuses existing UI knob).
+    let fluid_two_way_strength = max(params.prop_wash_strength_fluid, 0.0) * MORPHOLOGY_FLUID_COUPLING;
+
     // Morphology swim strength (reuses the existing prop-wash UI knobs as a convenient control).
     // This is applied as per-part drag later (no direct angular-velocity injection).
     let morph_swim_strength = select(
@@ -1599,71 +1618,68 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let part_weight = part_mass / total_mass;
 
-        // Virtual fluid propulsion: simplified resistive-force model.
-        // Each body part experiences drag proportional to its velocity through a virtual medium.
-        if (morph_swim_strength > 0.0 && !anchor_active_prev) {
-            var v_medium_frame = vec2<f32>(0.0);
-            if (MORPHOLOGY_SWIM_USE_REAL_FLUID && params.fluid_wind_push_strength != 0.0) {
+        // Simple fluid coupling (two-way): body parts exchange momentum with fluid.
+        if (FLUID_COUPLING_SIMPLE_ENABLED && fluid_two_way_strength > 0.0 && !anchor_active) {
+            // Default body parts (amino acids + organs) to coupling=1.0 unless explicitly overridden.
+            let wind_coupling = select(
+                amino_props.fluid_wind_coupling,
+                0.5,
+                (amino_props.fluid_wind_coupling == 0.0)
+            );
+
+            if (wind_coupling != 0.0) {
                 if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
-                    let v = sample_fluid_velocity_bilinear(world_pos);
+                    let dt_safe = max(params.dt, 1e-3);
+
+                    // Fluid velocity (fluid-cells/sec) -> world-units per tick.
+                    let v_cell_per_sec = sample_fluid_velocity_bilinear(world_pos);
                     let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
-                    v_medium_frame = v * (cell_to_world * params.dt);
+                    let v_fluid_frame = v_cell_per_sec * (cell_to_world * dt_safe);
+
+                    // Part velocity per tick (agent translation + internal deformation).
+                    let delta_local = part.pos - prev_body_pos[i];
+                    var delta_world = apply_agent_rotation(delta_local, agent_rot);
+                    let dlen = length(delta_world);
+                    if (dlen > MORPHOLOGY_MAX_WORLD_DELTA) {
+                        delta_world = delta_world * (MORPHOLOGY_MAX_WORLD_DELTA / max(dlen, 1e-6));
+                    }
+                    let v_part_frame = agent_vel + delta_world;
+
+                    // Segment tangent in world space (defines anisotropy axis).
+                    var seg_local = vec2<f32>(1.0, 0.0);
+                    if (i > 0u) {
+                        seg_local = part.pos - agents_out[agent_id].body[i - 1u].pos;
+                    } else if (body_count > 1u) {
+                        seg_local = agents_out[agent_id].body[1u].pos - part.pos;
+                    }
+                    let seg_len = length(seg_local);
+                    let t_local = select(seg_local / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-6);
+                    let t_world = -normalize(apply_agent_rotation(t_local, agent_rot));
+
+                    // Slip (world-units per tick): part vs fluid.
+                    let slip_frame = v_part_frame - v_fluid_frame;
+                    let slip_par = dot(slip_frame, t_world) * t_world;
+                    let slip_perp = slip_frame - slip_par;
+
+                    // Coupling factor: use prop_wash_strength_fluid as the overall coupling strength.
+                    // Scale by segment length for more realistic drag (longer segments have more surface area).
+                    let k = clamp(wind_coupling * part_weight * fluid_two_way_strength * amino_props.segment_length * 0.1, 0.0, 10.0);
+
+                    // Agent delta-velocity per tick (in world units/tick).
+                    // Perpendicular drag is stronger -> undulation can generate net thrust.
+                    let dv_agent_frame = -(k * slip_par + (k * FLUID_COUPLING_ANISOTROPY) * slip_perp);
+
+                    // Convert dv (tick units) into overdamped force.
+                    let drag_force = dv_agent_frame * drag_coefficient;
+                    force += drag_force;
+                    torque += (r_com.x * drag_force.y - r_com.y * drag_force.x);
+
+                    // Fluid receives equal-and-opposite acceleration.
+                    let inv = 1.0 / (cell_to_world * dt_safe * dt_safe);
+                    let f_user = (-dv_agent_frame) * inv;
+                    add_fluid_force_splat(world_pos, f_user);
                 }
             }
-
-            // Compute part's deformation velocity (internal motion, not rigid-body translation).
-            let old_local = prev_body_pos[i];
-            let new_local = part.pos;
-            let delta_local = new_local - old_local;
-
-            // Deadzone: ignore tiny jitter.
-            let delta_len = length(delta_local);
-            if (delta_len < 1e-4) {
-                continue;
-            }
-
-            // Convert local delta to world-space velocity.
-            var delta_world = apply_agent_rotation(delta_local, agent_rot);
-            let dlen = length(delta_world);
-            if (dlen > MORPHOLOGY_MAX_WORLD_DELTA) {
-                delta_world = delta_world * (MORPHOLOGY_MAX_WORLD_DELTA / max(dlen, 1e-6));
-            }
-
-            var v_def = delta_world / dt_safe;
-            let vdef_len = length(v_def);
-            if (vdef_len > MORPHOLOGY_MAX_WORLD_VEL) {
-                v_def = v_def * (MORPHOLOGY_MAX_WORLD_VEL / max(vdef_len, 1e-6));
-            }
-
-            // Relative velocity: deformation minus medium flow.
-            let v_rel = v_def - (v_medium_frame / dt_safe);
-            let v_rel_len = length(v_rel);
-            if (v_rel_len < 1e-6) {
-                continue;
-            }
-
-            // Motion direction (normalized velocity).
-            let motion_dir = v_rel / v_rel_len;
-
-            // Simple anisotropic drag:
-            // Drag perpendicular to motion is stronger than drag parallel to motion.
-            // This creates thrust when the body undulates.
-            let drag_parallel = MORPHOLOGY_SWIM_BASE_DRAG;
-            let drag_perp = MORPHOLOGY_SWIM_BASE_DRAG * MORPHOLOGY_SWIM_ANISOTROPY;
-
-            // Project velocity onto parallel and perpendicular components.
-            // For a body segment, we approximate the "long axis" as the velocity direction itself.
-            // This avoids the neighbor-difference tangent calculation that can amplify side-to-side motion.
-            let v_parallel = dot(v_rel, motion_dir) * motion_dir;
-            let v_perp = v_rel - v_parallel;
-
-            // Apply drag forces (opposing motion).
-            let drag_force = -(drag_parallel * v_parallel + drag_perp * v_perp);
-
-            // Scale by part mass and coupling strength.
-            let swim_force = drag_force * (morph_swim_strength * part_weight) * drag_coefficient;
-            force += swim_force;
-            torque += (r_com.x * swim_force.y - r_com.y * swim_force.x);
         }
 
         // Slope force per amino acid
@@ -1684,9 +1700,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
         }
 
-        // Fluid force per amino acid (apply at the same point as slope force)
-        // Anchor (type 42): when active, ignore wind push so it doesn't drift.
-        if (!anchor_active && params.fluid_wind_push_strength != 0.0) {
+        // One-way fluid->agent wind push is replaced by FLUID_COUPLING_SIMPLE_ENABLED above.
+        if (!FLUID_COUPLING_SIMPLE_ENABLED && !anchor_active && params.fluid_wind_push_strength != 0.0) {
             // Default body parts (amino acids + organs) to coupling=1.0 unless explicitly overridden.
             let wind_coupling = select(
                 amino_props.fluid_wind_coupling,
