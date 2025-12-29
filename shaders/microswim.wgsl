@@ -1,6 +1,5 @@
 // Dedicated microswimming compute pass.
-// Reads previous stable-frame body positions from `agents_in` and current positions from `agents_out`.
-// Applies an RFT-like anisotropic-drag thrust based on pure deformation only.
+// RFT-based thrust with sideways jiggle ELIMINATED via parallel-only thrust projection.
 
 @compute @workgroup_size(256)
 fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -9,12 +8,10 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    if (!MORPHOLOGY_SWIM_SEPARATE_PASS || !MORPHOLOGY_SWIM_ENABLED) {
+    if (!ms_enabled()) {
         return;
     }
 
-    // NOTE: process_agents has already produced the current-frame state in agents_out.
-    // agents_in still contains the previous frame's stable, recentered local geometry.
     if (agents_out[agent_id].alive == 0u) {
         return;
     }
@@ -23,8 +20,6 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let body_count_in = min(agents_in[agent_id].body_count, MAX_BODY_PARTS);
     let first_build = (body_count_in == 0u);
 
-    // Anchor (type 42): if any anchor was active last frame, freeze the whole agent.
-    // Read from agents_in to avoid same-frame ordering dependence.
     var anchor_active_prev = false;
     for (var i = 0u; i < body_count_in; i++) {
         let part_in = agents_in[agent_id].body[i];
@@ -38,10 +33,9 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Morphology swim strength (reuses the existing prop-wash UI knobs as a convenient control).
     let morph_swim_strength = select(
         0.0,
-        max(max(params.prop_wash_strength, 0.0), max(params.prop_wash_strength_fluid, 0.0)) * MORPHOLOGY_SWIM_COUPLING,
+        max(max(params.prop_wash_strength, 0.0), max(params.prop_wash_strength_fluid, 0.0)) * ms_f32(MSP_COUPLING),
         (!first_build)
     );
 
@@ -53,106 +47,121 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dt_safe = max(params.dt, 1e-3);
 
     var thrust_world = vec2<f32>(0.0);
+    var torque_world = 0.0;
     var total_weight = 0.0;
+    var total_deformation_sq = 0.0;
 
-    let c_par = MORPHOLOGY_SWIM_BASE_DRAG;
-    let c_perp = MORPHOLOGY_SWIM_BASE_DRAG * MORPHOLOGY_SWIM_ANISOTROPY;
+    let c_par  = ms_f32(MSP_BASE_DRAG);
+    let c_perp = ms_f32(MSP_BASE_DRAG) * ms_f32(MSP_ANISOTROPY);
 
-    // Iterate true segments between consecutive parts.
-    // RFT (low-Re swimming): net drag/thrust scales with filament length (ds), not mass.
-    // We therefore weight each segment contribution by its current geometric length.
     for (var j = 1u; j < body_count_out; j++) {
-        // Segment endpoints (local), previous and current.
         let seg_start_prev = agents_in[agent_id].body[j - 1u].pos;
-        let seg_end_prev = agents_in[agent_id].body[j].pos;
-        let seg_start_new = agents_out[agent_id].body[j - 1u].pos;
-        let seg_end_new = agents_out[agent_id].body[j].pos;
+        let seg_end_prev   = agents_in[agent_id].body[j].pos;
+        let seg_start_new  = agents_out[agent_id].body[j - 1u].pos;
+        let seg_end_new    = agents_out[agent_id].body[j].pos;
 
-        // Pure deformation displacement in the stable local frame.
-        let delta_start_local = seg_start_new - seg_start_prev;
-        let delta_end_local = seg_end_new - seg_end_prev;
+        let delta_start = seg_start_new - seg_start_prev;
+        let delta_end   = seg_end_new   - seg_end_prev;
 
-        // Segment midpoint deformation velocity (world units per tick)
-        let v_seg_local = (delta_start_local + delta_end_local) * 0.5;
+        total_deformation_sq += dot(delta_start, delta_start) + dot(delta_end, delta_end);
+
+        var v_seg_local = (delta_start + delta_end) * 0.5;
         var v_seg_world = apply_agent_rotation(v_seg_local, agent_rot);
 
-        // Clamp huge jumps (e.g. from abrupt morphology changes)
-        let dlen = length(v_seg_world);
-        if (dlen > MORPHOLOGY_MAX_WORLD_DELTA) {
-            v_seg_world = v_seg_world * (MORPHOLOGY_MAX_WORLD_DELTA / max(dlen, 1e-6));
-        }
-        v_seg_world = v_seg_world / dt_safe;
-        let vlen = length(v_seg_world);
-        if (vlen > MORPHOLOGY_MAX_WORLD_VEL) {
-            v_seg_world = v_seg_world * (MORPHOLOGY_MAX_WORLD_VEL / max(vlen, 1e-6));
-        }
-
-        // Segment tangent direction (defines parallel/perp axes)
-        let seg_vec_new = seg_end_new - seg_start_new;
-        let seg_vec_len = length(seg_vec_new);
-        if (seg_vec_len < 1e-4) {
+        // Noise filters
+        let raw_displacement_len = length(v_seg_local);
+        if (raw_displacement_len < ms_f32(MSP_MIN_SEG_DISPLACEMENT)) {
             continue;
         }
+        if (raw_displacement_len > MORPHOLOGY_MAX_WORLD_DELTA * 0.5) {
+            v_seg_world *= (MORPHOLOGY_MAX_WORLD_DELTA * 0.5) / max(raw_displacement_len, 1e-6);
+        }
+
+        v_seg_world /= dt_safe;
+        let vlen = length(v_seg_world);
+        if (vlen > MORPHOLOGY_MAX_WORLD_VEL * 0.5) {
+            v_seg_world *= (MORPHOLOGY_MAX_WORLD_VEL * 0.5) / max(vlen, 1e-6);
+        }
+
+        let seg_vec_new = seg_end_new - seg_start_new;
+        let seg_vec_len = length(seg_vec_new);
+        if (seg_vec_len < 0.01) {
+            continue;
+        }
+
+        // Filter growth/recentering
+        let seg_vec_prev = seg_end_prev - seg_start_prev;
+        let prev_len = length(seg_vec_prev);
+        if (prev_len > 0.01) {
+            let len_ratio = seg_vec_len / prev_len;
+            if (len_ratio < ms_f32(MSP_MIN_LENGTH_RATIO) || len_ratio > ms_f32(MSP_MAX_LENGTH_RATIO)) {
+                continue;
+            }
+        }
+
         let seg_len_world = seg_vec_len;
         let tangent_local = seg_vec_new / seg_vec_len;
         let tangent_world = normalize(apply_agent_rotation(tangent_local, agent_rot));
 
-        // Decompose velocity into parallel and perpendicular components
         let v_parallel = dot(v_seg_world, tangent_world) * tangent_world;
-        let v_perp = v_seg_world - v_parallel;
+        let v_perp     = v_seg_world - v_parallel;
 
-        // RFT sign convention:
-        // `drag_per_len` is the drag force on the filament (opposes motion), with higher drag for
-        // perpendicular motion (c_perp > c_par). The force on the swimmer is the opposite of the
-        // filament's force on the swimmer, i.e. it points opposite the local deformation velocity.
-        let drag_per_len = (-c_par * v_parallel) + (-c_perp * v_perp);
-        let segment_thrust = drag_per_len * seg_len_world;
+        // Drag on filament
+        let drag_per_len = -c_par * v_parallel - c_perp * v_perp;
 
-        thrust_world += segment_thrust;
+        // CRITICAL FIX: Only parallel drag contributes to net thrust
+        // → Sideways motion cancels out perfectly, forward waves still propel strongly
+        let segment_thrust_parallel_only = (-c_par * v_parallel) * seg_len_world;  // reaction: +c_par * v_parallel * ds
+
+        thrust_world += segment_thrust_parallel_only;
+
+        // --- Torque from asymmetric drag (2D)
+        // We intentionally use FULL anisotropic drag here so sideways loops generate a turning moment.
+        // Lever arm is the segment midpoint (in world space, relative to agent center).
+        let seg_mid_local = (seg_start_new + seg_end_new) * 0.5;
+        let lever_arm_world = apply_agent_rotation(seg_mid_local, agent_rot);
+        let segment_thrust_full = drag_per_len * seg_len_world;
+        torque_world += lever_arm_world.x * segment_thrust_full.y - lever_arm_world.y * segment_thrust_full.x;
+
         total_weight += seg_len_world;
     }
 
-    if (total_weight <= 1e-6) {
+    if (total_deformation_sq < ms_f32(MSP_MIN_TOTAL_DEFORMATION_SQ) || total_weight <= 1e-6) {
         return;
     }
 
-    // Average thrust per unit length (keeps behavior consistent across different body sizes).
-    thrust_world = thrust_world / total_weight;
+    thrust_world /= total_weight;
 
-    // Convert to a desired velocity contribution and clamp.
+    // Torque physics summary:
+    // - Each segment experiences anisotropic "fluid" drag from deformation velocity.
+    // - The resulting reaction force (segment_thrust_full) applied at an offset (lever arm) produces torque:
+    //     $\tau = r_x F_y - r_y F_x$
+    // - Averaging by total segment length keeps the effect size independent of body resolution.
+    torque_world /= total_weight;
+
     var final_thrust_vel = thrust_world * morph_swim_strength;
     let tl = length(final_thrust_vel);
-    if (tl > MORPHOLOGY_SWIM_MAX_FRAME_VEL) {
-        final_thrust_vel = final_thrust_vel * (MORPHOLOGY_SWIM_MAX_FRAME_VEL / max(tl, 1e-6));
+    let max_frame_vel = ms_f32(MSP_MAX_FRAME_VEL);
+    if (tl > max_frame_vel) {
+        final_thrust_vel *= max_frame_vel / max(tl, 1e-6);
     }
 
-    // Apply as a velocity delta for the next frame.
-    // (process_agents has already integrated position this frame.)
     var agent_vel = agents_out[agent_id].velocity + final_thrust_vel;
     let v_len = length(agent_vel);
     if (v_len > VEL_MAX) {
-        agent_vel = agent_vel * (VEL_MAX / max(v_len, 1e-6));
+        agent_vel *= VEL_MAX / max(v_len, 1e-6);
     }
     agents_out[agent_id].velocity = agent_vel;
 
-    // Optional: heading alignment, applied as a small rotation update for the next frame.
-    if (MORPHOLOGY_SWIM_HEADING_ALIGN_ENABLED && !DISABLE_GLOBAL_ROTATION) {
-        let spd = length(agent_vel);
-        if (spd > MORPHOLOGY_SWIM_HEADING_ALIGN_MIN_SPEED) {
-            let vel_dir = agent_vel / spd;
-            let forward = vec2<f32>(cos(agent_rot), sin(agent_rot));
-            let c = forward.x * vel_dir.y - forward.y * vel_dir.x;
-            let d = forward.x * vel_dir.x + forward.y * vel_dir.y;
-            let angle_err = atan2(c, d);
-            let speed_scale = clamp(spd / MORPHOLOGY_SWIM_HEADING_ALIGN_FULL_SPEED, 0.0, 1.0);
-            let delta_rot = clamp(
-                angle_err * MORPHOLOGY_SWIM_HEADING_ALIGN_STRENGTH,
-                -MORPHOLOGY_SWIM_HEADING_ALIGN_MAX_ANGVEL,
-                MORPHOLOGY_SWIM_HEADING_ALIGN_MAX_ANGVEL
-            ) * speed_scale * ANGULAR_BLEND;
+    // Apply turning directly (Agent does not store angular_velocity in this pass).
+    // Turning should be proportional to the agent's *movement through the fluid*.
+    // We scale by swim translation speed so asymmetric deformation doesn't spin in-place without net motion.
+    let swim_speed = length(final_thrust_vel);
+    let speed_scale = clamp(swim_speed / max(max_frame_vel, 1e-6), 0.0, 1.0);
+    // Clamp per-frame rotation to match the rest of the simulation's stability budget.
+    let delta_rot = torque_world * ms_f32(MSP_TORQUE_STRENGTH) * morph_swim_strength * dt_safe * speed_scale;
+    agents_out[agent_id].rotation = agents_out[agent_id].rotation + clamp(delta_rot, -ANGVEL_MAX, ANGVEL_MAX);
 
-            let clamped_delta_rot = clamp(delta_rot, -ANGVEL_MAX, ANGVEL_MAX);
-            agents_out[agent_id].rotation = agent_rot + clamped_delta_rot;
-        }
-    }
+    // Optional debug: accumulate morphology-driven turning torque for inspector.
+    agents_out[agent_id].torque_debug += torque_world;
 }

@@ -370,6 +370,49 @@ var<storage, read_write> agent_grid: array<vec4<f32>>; // Separate agent render 
 @group(0) @binding(6)
 var<uniform> params: SimParams;
 
+// Microswimming parameters (morphology-based propulsion)
+// IMPORTANT: keep this as a flat float buffer (no Rust<->WGSL struct mirroring).
+// Packed as vec4<f32> to avoid uniform-array scalar stride pitfalls.
+// Layout (f32 indices):
+//  0 enabled (0/1)
+//  1 coupling
+//  2 base_drag
+//  3 anisotropy
+//  4 max_frame_vel
+//  5 torque_strength
+//  6 min_seg_displacement
+//  7 min_total_deformation_sq
+//  8 min_length_ratio
+//  9 max_length_ratio
+//  10..15 reserved
+const MSP_ENABLED: u32 = 0u;
+const MSP_COUPLING: u32 = 1u;
+const MSP_BASE_DRAG: u32 = 2u;
+const MSP_ANISOTROPY: u32 = 3u;
+const MSP_MAX_FRAME_VEL: u32 = 4u;
+const MSP_TORQUE_STRENGTH: u32 = 5u;
+const MSP_MIN_SEG_DISPLACEMENT: u32 = 6u;
+const MSP_MIN_TOTAL_DEFORMATION_SQ: u32 = 7u;
+const MSP_MIN_LENGTH_RATIO: u32 = 8u;
+const MSP_MAX_LENGTH_RATIO: u32 = 9u;
+const MSP_VEC4_COUNT: u32 = 4u;
+
+@group(0) @binding(19)
+var<uniform> microswim_params: array<vec4<f32>, MSP_VEC4_COUNT>;
+
+fn ms_f32(i: u32) -> f32 {
+    let v = microswim_params[i >> 2u];
+    let lane = i & 3u;
+    if (lane == 0u) { return v.x; }
+    if (lane == 1u) { return v.y; }
+    if (lane == 2u) { return v.z; }
+    return v.w;
+}
+
+fn ms_enabled() -> bool {
+    return ms_f32(MSP_ENABLED) > 0.5;
+}
+
 // Agent trail dye injection buffer (prepared each frame from trail_grid, then written by agents).
 @group(0) @binding(7)
 var<storage, read_write> trail_grid_inject: array<vec4<f32>>;

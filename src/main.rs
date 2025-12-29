@@ -58,6 +58,10 @@ const AUTO_SNAPSHOT_FILE_NAME: &str = "autosave_snapshot.png";
 const AUTO_SNAPSHOT_INTERVAL: u64 = 10000; // Save every 10,000 epochs
 const RAIN_THUMB_SIZE: usize = 128;
 
+// Microswim params are provided to shaders as a flat f32 list, packed into vec4-aligned uniform storage.
+// Keep this a multiple of 4 so WGSL can declare it as `array<vec4<f32>, N>`.
+const MICROSWIM_PARAM_FLOATS: usize = 16;
+
 // Fumaroles (fluid-only). Keep in sync with shaders/fluid.wgsl.
 const MAX_FUMAROLES: usize = 64;
 const FUMAROLE_STRIDE_F32: usize = 10;
@@ -2758,6 +2762,17 @@ fn default_dye_alpha_color() -> [f32; 3] { [0.0, 1.0, 0.0] }
 fn default_dye_beta_color() -> [f32; 3] { [1.0, 0.0, 0.0] }
 fn default_dye_precipitation() -> f32 { 1.0 }
 
+fn default_microswim_enabled() -> bool { true }
+fn default_microswim_coupling() -> f32 { 1.0 }
+fn default_microswim_base_drag() -> f32 { 0.2 }
+fn default_microswim_anisotropy() -> f32 { 5.0 }
+fn default_microswim_max_frame_vel() -> f32 { 2.0 }
+fn default_microswim_torque_strength() -> f32 { 0.1 }
+fn default_microswim_min_seg_displacement() -> f32 { 0.005 }
+fn default_microswim_min_total_deformation_sq() -> f32 { 0.0001 }
+fn default_microswim_min_length_ratio() -> f32 { 0.8 }
+fn default_microswim_max_length_ratio() -> f32 { 1.25 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 struct FumaroleSettings {
@@ -2858,6 +2873,28 @@ struct SimulationSettings {
     prop_wash_strength: f32,
     #[serde(default = "default_prop_wash_strength_fluid_unset")]
     prop_wash_strength_fluid: f32,
+
+    // Microswimming (morphology-based propulsion) tuning.
+    #[serde(default = "default_microswim_enabled")]
+    microswim_enabled: bool,
+    #[serde(default = "default_microswim_coupling")]
+    microswim_coupling: f32,
+    #[serde(default = "default_microswim_base_drag")]
+    microswim_base_drag: f32,
+    #[serde(default = "default_microswim_anisotropy")]
+    microswim_anisotropy: f32,
+    #[serde(default = "default_microswim_max_frame_vel")]
+    microswim_max_frame_vel: f32,
+    #[serde(default = "default_microswim_torque_strength")]
+    microswim_torque_strength: f32,
+    #[serde(default = "default_microswim_min_seg_displacement")]
+    microswim_min_seg_displacement: f32,
+    #[serde(default = "default_microswim_min_total_deformation_sq")]
+    microswim_min_total_deformation_sq: f32,
+    #[serde(default = "default_microswim_min_length_ratio")]
+    microswim_min_length_ratio: f32,
+    #[serde(default = "default_microswim_max_length_ratio")]
+    microswim_max_length_ratio: f32,
     repulsion_strength: f32,
     agent_repulsion_strength: f32,
     limit_fps: bool,
@@ -2987,6 +3024,17 @@ impl Default for SimulationSettings {
             pairing_cost: 0.1,
             prop_wash_strength: 1.0,
             prop_wash_strength_fluid: default_prop_wash_strength_fluid_unset(),
+
+            microswim_enabled: default_microswim_enabled(),
+            microswim_coupling: default_microswim_coupling(),
+            microswim_base_drag: default_microswim_base_drag(),
+            microswim_anisotropy: default_microswim_anisotropy(),
+            microswim_max_frame_vel: default_microswim_max_frame_vel(),
+            microswim_torque_strength: default_microswim_torque_strength(),
+            microswim_min_seg_displacement: default_microswim_min_seg_displacement(),
+            microswim_min_total_deformation_sq: default_microswim_min_total_deformation_sq(),
+            microswim_min_length_ratio: default_microswim_min_length_ratio(),
+            microswim_max_length_ratio: default_microswim_max_length_ratio(),
             repulsion_strength: 10.0,
             agent_repulsion_strength: 1.0,
             limit_fps: true,
@@ -3336,6 +3384,23 @@ impl SimulationSettings {
             self.prop_wash_strength_fluid = self.prop_wash_strength;
         }
         self.prop_wash_strength_fluid = self.prop_wash_strength_fluid.clamp(0.0, 5.0);
+
+        // Microswimming
+        self.microswim_coupling = self.microswim_coupling.clamp(0.0, 10.0);
+        self.microswim_base_drag = self.microswim_base_drag.clamp(0.0, 5.0);
+        self.microswim_anisotropy = self.microswim_anisotropy.clamp(0.0, 50.0);
+        self.microswim_max_frame_vel = self.microswim_max_frame_vel.clamp(0.0, 20.0);
+        self.microswim_torque_strength = self.microswim_torque_strength.clamp(0.0, 5.0);
+        self.microswim_min_seg_displacement = self.microswim_min_seg_displacement.clamp(0.0, 0.5);
+        self.microswim_min_total_deformation_sq = self.microswim_min_total_deformation_sq.clamp(0.0, 10.0);
+        self.microswim_min_length_ratio = self.microswim_min_length_ratio.clamp(0.0, 5.0);
+        self.microswim_max_length_ratio = self.microswim_max_length_ratio.clamp(0.0, 5.0);
+        if self.microswim_min_length_ratio > self.microswim_max_length_ratio {
+            std::mem::swap(
+                &mut self.microswim_min_length_ratio,
+                &mut self.microswim_max_length_ratio,
+            );
+        }
         self.repulsion_strength = self.repulsion_strength.clamp(0.0, 100.0);
         self.agent_repulsion_strength = self.agent_repulsion_strength.clamp(0.0, 10.0);
         self.render_interval = self.render_interval.clamp(1, 10_000);
@@ -3435,11 +3500,13 @@ struct GpuState {
     visual_grid_buffer: wgpu::Buffer,
     agent_grid_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
+    microswim_params_buffer: wgpu::Buffer,
 
     // CPU-side mirror of the uniform params buffer.
     // Some compute paths (e.g. snapshot-load spawning) can run before `update()` has populated
     // the params buffer for the current frame.
     sim_params_cpu: SimParams,
+    microswim_params_cpu: [f32; MICROSWIM_PARAM_FLOATS],
     environment_init_cpu: EnvironmentInitParams,
     environment_init_params_buffer: wgpu::Buffer,
     spawn_debug_counters: wgpu::Buffer, // [spawn_counter, debug_counter, alive_counter]
@@ -3673,7 +3740,7 @@ struct GpuState {
     // GUI state
     window: Arc<Window>,
     egui_renderer: egui_wgpu::Renderer,
-    ui_tab: usize, // 0=Simulation, 1=Agents, 2=Environment
+    ui_tab: usize, // Control panel tab index
     ui_visible: bool, // Toggle control panel visibility with spacebar
     selected_fumarole_index: usize,
     // Debug
@@ -3761,6 +3828,19 @@ struct GpuState {
     vector_force_y: f32,
     prop_wash_strength: f32,
     prop_wash_strength_fluid: f32,
+
+    // Microswimming (morphology-based propulsion) runtime controls.
+    microswim_enabled: bool,
+    microswim_coupling: f32,
+    microswim_base_drag: f32,
+    microswim_anisotropy: f32,
+    microswim_max_frame_vel: f32,
+    microswim_torque_strength: f32,
+    microswim_min_seg_displacement: f32,
+    microswim_min_total_deformation_sq: f32,
+    microswim_min_length_ratio: f32,
+    microswim_max_length_ratio: f32,
+
     gamma_hidden: bool,
     gamma_vis_min: f32,
     gamma_vis_max: f32,
@@ -3887,6 +3967,17 @@ impl GpuState {
         self.pairing_cost = settings.pairing_cost;
         self.prop_wash_strength = settings.prop_wash_strength;
         self.prop_wash_strength_fluid = settings.prop_wash_strength_fluid;
+
+        self.microswim_enabled = settings.microswim_enabled;
+        self.microswim_coupling = settings.microswim_coupling;
+        self.microswim_base_drag = settings.microswim_base_drag;
+        self.microswim_anisotropy = settings.microswim_anisotropy;
+        self.microswim_max_frame_vel = settings.microswim_max_frame_vel;
+        self.microswim_torque_strength = settings.microswim_torque_strength;
+        self.microswim_min_seg_displacement = settings.microswim_min_seg_displacement;
+        self.microswim_min_total_deformation_sq = settings.microswim_min_total_deformation_sq;
+        self.microswim_min_length_ratio = settings.microswim_min_length_ratio;
+        self.microswim_max_length_ratio = settings.microswim_max_length_ratio;
         self.repulsion_strength = settings.repulsion_strength;
         self.agent_repulsion_strength = settings.agent_repulsion_strength;
 
@@ -4632,6 +4723,37 @@ impl GpuState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Microswim params buffer must exist before settings load (bind groups reference it),
+        // so initialize with defaults and overwrite after `SimulationSettings` is loaded.
+        let microswim_params_f32_init: [f32; MICROSWIM_PARAM_FLOATS] = [
+            // vec4 0
+            if default_microswim_enabled() { 1.0 } else { 0.0 },
+            default_microswim_coupling(),
+            default_microswim_base_drag(),
+            default_microswim_anisotropy(),
+            // vec4 1
+            default_microswim_max_frame_vel(),
+            default_microswim_torque_strength(),
+            default_microswim_min_seg_displacement(),
+            default_microswim_min_total_deformation_sq(),
+            // vec4 2
+            default_microswim_min_length_ratio(),
+            default_microswim_max_length_ratio(),
+            0.0,
+            0.0,
+            // vec4 3 (reserved)
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let microswim_params_bytes = pack_f32_uniform(&microswim_params_f32_init);
+        let microswim_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Microswim Params"),
+            contents: &microswim_params_bytes,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let spawn_debug_counters = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spawn/Debug Counters"),
             size: 12, // 3 x u32 ([0]=spawn, [1]=debug, [2]=alive)
@@ -5180,6 +5302,16 @@ impl GpuState {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 19,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
         profiler.mark("Compute bind layout");
@@ -5322,6 +5454,10 @@ impl GpuState {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: microswim_params_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -5404,6 +5540,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: microswim_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -5492,6 +5632,10 @@ impl GpuState {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: microswim_params_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -5574,6 +5718,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: microswim_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -6668,6 +6816,32 @@ impl GpuState {
         }
         profiler.mark("Settings loaded");
 
+        // Now that settings are loaded, push microswim params into the already-created buffer.
+        let microswim_params_f32: [f32; MICROSWIM_PARAM_FLOATS] = [
+            // vec4 0
+            if settings.microswim_enabled { 1.0 } else { 0.0 },
+            settings.microswim_coupling,
+            settings.microswim_base_drag,
+            settings.microswim_anisotropy,
+            // vec4 1
+            settings.microswim_max_frame_vel,
+            settings.microswim_torque_strength,
+            settings.microswim_min_seg_displacement,
+            settings.microswim_min_total_deformation_sq,
+            // vec4 2
+            settings.microswim_min_length_ratio,
+            settings.microswim_max_length_ratio,
+            0.0,
+            0.0,
+            // vec4 3 (reserved)
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let microswim_params_bytes = pack_f32_uniform(&microswim_params_f32);
+        queue.write_buffer(&microswim_params_buffer, 0, &microswim_params_bytes);
+
         // Safe profiling/toggling for A/B cost measurements.
         // These do NOT use GPU timestamp queries (which can be unstable on some drivers).
         let gpu_sync_profile = std::env::var("ALSIM_GPU_SYNC_PROFILE")
@@ -6707,6 +6881,7 @@ impl GpuState {
             visual_grid_buffer,
             agent_grid_buffer,
             params_buffer,
+            microswim_params_buffer,
             environment_init_params_buffer,
             spawn_debug_counters,
             init_dead_dispatch_args,
@@ -6961,6 +7136,17 @@ impl GpuState {
             vector_force_y: settings.vector_force_y,
             prop_wash_strength: settings.prop_wash_strength,
             prop_wash_strength_fluid: settings.prop_wash_strength_fluid,
+
+            microswim_enabled: settings.microswim_enabled,
+            microswim_coupling: settings.microswim_coupling,
+            microswim_base_drag: settings.microswim_base_drag,
+            microswim_anisotropy: settings.microswim_anisotropy,
+            microswim_max_frame_vel: settings.microswim_max_frame_vel,
+            microswim_torque_strength: settings.microswim_torque_strength,
+            microswim_min_seg_displacement: settings.microswim_min_seg_displacement,
+            microswim_min_total_deformation_sq: settings.microswim_min_total_deformation_sq,
+            microswim_min_length_ratio: settings.microswim_min_length_ratio,
+            microswim_max_length_ratio: settings.microswim_max_length_ratio,
             gamma_hidden: settings.gamma_hidden,
             gamma_vis_min: settings.gamma_vis_min,
             gamma_vis_max: settings.gamma_vis_max,
@@ -7000,6 +7186,7 @@ impl GpuState {
             settings_path: settings_path.clone(),
             last_saved_settings: settings.clone(),
             sim_params_cpu: SimParams::zeroed(),
+            microswim_params_cpu: microswim_params_f32,
             environment_init_cpu: environment_init,
             part_base_angle_overrides: [f32::NAN; PART_OVERRIDE_SLOTS],
             part_base_angle_overrides_dirty: false,
@@ -7519,6 +7706,10 @@ impl GpuState {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: self.microswim_params_buffer.as_entire_binding(),
+                },
             ],
         });
         self.compute_bind_group_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -7600,6 +7791,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: self.microswim_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -7742,6 +7937,17 @@ impl GpuState {
             pairing_cost: self.pairing_cost,
             prop_wash_strength: self.prop_wash_strength,
             prop_wash_strength_fluid: self.prop_wash_strength_fluid,
+
+            microswim_enabled: self.microswim_enabled,
+            microswim_coupling: self.microswim_coupling,
+            microswim_base_drag: self.microswim_base_drag,
+            microswim_anisotropy: self.microswim_anisotropy,
+            microswim_max_frame_vel: self.microswim_max_frame_vel,
+            microswim_torque_strength: self.microswim_torque_strength,
+            microswim_min_seg_displacement: self.microswim_min_seg_displacement,
+            microswim_min_total_deformation_sq: self.microswim_min_total_deformation_sq,
+            microswim_min_length_ratio: self.microswim_min_length_ratio,
+            microswim_max_length_ratio: self.microswim_max_length_ratio,
             repulsion_strength: self.repulsion_strength,
             agent_repulsion_strength: self.agent_repulsion_strength,
             limit_fps: self.limit_fps,
@@ -8608,6 +8814,39 @@ impl GpuState {
         self.sim_params_cpu = params;
         self.queue
             .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
+
+        // Update microswim params (flat float list; packed as vec4s in the shader).
+        {
+            let microswim_params_f32: [f32; MICROSWIM_PARAM_FLOATS] = [
+                // vec4 0
+                if self.microswim_enabled { 1.0 } else { 0.0 },
+                self.microswim_coupling,
+                self.microswim_base_drag,
+                self.microswim_anisotropy,
+                // vec4 1
+                self.microswim_max_frame_vel,
+                self.microswim_torque_strength,
+                self.microswim_min_seg_displacement,
+                self.microswim_min_total_deformation_sq,
+                // vec4 2
+                self.microswim_min_length_ratio,
+                self.microswim_max_length_ratio,
+                0.0,
+                0.0,
+                // vec4 3 (reserved)
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ];
+            self.microswim_params_cpu = microswim_params_f32;
+            let microswim_params_bytes = pack_f32_uniform(&microswim_params_f32);
+            self.queue.write_buffer(
+                &self.microswim_params_buffer,
+                0,
+                &microswim_params_bytes,
+            );
+        }
 
         // Update fluid params (dt is the user-controlled fluid solver dt)
         {
@@ -10532,6 +10771,10 @@ impl GpuState {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: self.microswim_params_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -10615,6 +10858,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: self.microswim_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -11904,6 +12151,7 @@ fn main() {
                                                     ("Evolution", egui::Color32::from_rgb(60, 55, 50)),
                                                     ("Difficulty", egui::Color32::from_rgb(60, 50, 50)),
                                                     ("Visualization", egui::Color32::from_rgb(55, 55, 55)),
+                                                    ("Microswimming", egui::Color32::from_rgb(50, 55, 60)),
                                                     ("Fluid", egui::Color32::from_rgb(50, 55, 60)),
                                                     ("Overrides", egui::Color32::from_rgb(55, 55, 55)),
                                                 ];
@@ -11929,8 +12177,9 @@ fn main() {
                                                 3 => egui::Color32::from_rgb(60, 55, 50),  // Evolution - orange-gray
                                                 4 => egui::Color32::from_rgb(60, 50, 50),  // Difficulty - red-gray
                                                 5 => egui::Color32::from_rgb(55, 55, 55),  // Visualization - neutral gray
-                                                6 => egui::Color32::from_rgb(50, 55, 60),  // Fluid - blue-gray
-                                                7 => egui::Color32::from_rgb(55, 55, 55),  // Overrides - neutral gray
+                                                6 => egui::Color32::from_rgb(50, 55, 60),  // Microswimming
+                                                7 => egui::Color32::from_rgb(50, 55, 60),  // Fluid - blue-gray
+                                                8 => egui::Color32::from_rgb(55, 55, 55),  // Overrides - neutral gray
                                                 _ => egui::Color32::from_rgb(50, 50, 50),
                                             };
 
@@ -11942,7 +12191,7 @@ fn main() {
                                             ui_part_properties_editor_popup(ui, state);
 
                                             match state.ui_tab {
-                                                7 => {
+                                                8 => {
                                                     // Overrides tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Overrides");
@@ -13148,6 +13397,86 @@ fn main() {
                                                     });
                                                 }
                                                 6 => {
+                                                    // Microswimming tab
+                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                                        ui.heading("Microswimming");
+
+                                                        ui.checkbox(&mut state.microswim_enabled, "Enable microswimming");
+
+                                                        ui.separator();
+                                                        ui.heading("Strength");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.prop_wash_strength, 0.0..=5.0)
+                                                                .text("Swim Strength (Direct)")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.prop_wash_strength_fluid, 0.0..=5.0)
+                                                                .text("Swim Strength (Fluid)")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Model");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.microswim_coupling, 0.0..=10.0)
+                                                                .text("Coupling")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.microswim_base_drag, 0.0..=5.0)
+                                                                .text("Base Drag")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.microswim_anisotropy, 0.0..=50.0)
+                                                                .text("Anisotropy")
+                                                                .logarithmic(true)
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.microswim_max_frame_vel, 0.0..=20.0)
+                                                                .text("Max Frame Velocity")
+                                                                .logarithmic(true)
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Turning");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.microswim_torque_strength, 0.0..=5.0)
+                                                                .text("Torque Strength")
+                                                                .logarithmic(true)
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Stability Filters");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.microswim_min_seg_displacement, 0.0..=0.5)
+                                                                .text("Min Segment Displacement")
+                                                                .logarithmic(true)
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.microswim_min_total_deformation_sq, 0.0..=10.0)
+                                                                .text("Min Total Deformation (sq)")
+                                                                .logarithmic(true)
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.microswim_min_length_ratio, 0.0..=5.0)
+                                                                .text("Min Length Ratio")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.microswim_max_length_ratio, 0.0..=5.0)
+                                                                .text("Max Length Ratio")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        );
+                                                    });
+                                                }
+                                                7 => {
                                                     // Fluid tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Fluid Configuration");
@@ -13189,32 +13518,6 @@ fn main() {
                                                             egui::Slider::new(&mut state.fluid_viscosity, 0.0..=5.0)
                                                                 .text("Viscosity")
                                                                 .clamping(egui::SliderClamping::Always),
-                                                        );
-
-                                                        ui.separator();
-                                                        ui.heading("Propellers");
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.prop_wash_strength,
-                                                                0.0..=5.0,
-                                                            )
-                                                            .text("Prop Wash Strength (Direct)")
-                                                            .clamping(egui::SliderClamping::Always),
-                                                        )
-                                                        .on_hover_text(
-                                                            "Global multiplier for the *direct* propeller/displacer wash (chem/gamma displacement), independent of the fluid solver.",
-                                                        );
-
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.prop_wash_strength_fluid,
-                                                                0.0..=5.0,
-                                                            )
-                                                            .text("Prop Wash Strength (Fluid)")
-                                                            .clamping(egui::SliderClamping::Always),
-                                                        )
-                                                        .on_hover_text(
-                                                            "Global multiplier for how strongly propellers/displacers inject forces into the fluid solver. Only has effect when fluids are enabled.",
                                                         );
 
                                                         ui.separator();

@@ -105,13 +105,13 @@ const MORPHOLOGY_SWIM_ENABLED: bool = true;
 // This keeps `process_agents` easier to debug and prevents double-applying swim forces.
 const MORPHOLOGY_SWIM_SEPARATE_PASS: bool = true;
 // Overall strength multiplier (driven by UI prop-wash knobs; this scales the resulting thrust velocity).
-const MORPHOLOGY_SWIM_COUPLING: f32 = 15.0;
+const MORPHOLOGY_SWIM_COUPLING: f32 = 1.0;
 // Parallel drag coefficient (low = slippery along body).
-const MORPHOLOGY_SWIM_BASE_DRAG: f32 = 0.5;
+const MORPHOLOGY_SWIM_BASE_DRAG: f32 = 0.2;
 // Perpendicular drag multiplier (high = strong side resistance). Typical flagella: ~3-6.
 const MORPHOLOGY_SWIM_ANISOTROPY: f32 = 5.0;
 // Clamp per-tick contribution to avoid instability.
-const MORPHOLOGY_SWIM_MAX_FRAME_VEL: f32 = 8.0;
+const MORPHOLOGY_SWIM_MAX_FRAME_VEL: f32 = 2;
 
 // Simple anisotropic fluid coupling (penalty method).
 // Anisotropic drag allows undulation to generate net thrust by damping
