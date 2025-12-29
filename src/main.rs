@@ -34,12 +34,11 @@ fn pack_f32_uniform(values: &[f32]) -> Vec<u8> {
 }
 
 // World size (must match shader SIM_SIZE).
-// NOTE: World was doubled without changing grid resolutions (cell counts).
-const SIM_SIZE: f32 = 61440.0;
+const SIM_SIZE: f32 = 15360.0;
 // Fluid simulation resolution (N x N). Keep this in sync with GPU buffer allocations and shader constants.
 const FLUID_GRID_SIZE: u32 = 512;
 // Environment grid resolution (alpha/beta/gamma). Keep this in sync with shaders/shared.wgsl ENV_GRID_SIZE.
-const GRID_DIM: usize = 2048;
+const GRID_DIM: usize = 512;
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
 // Spatial hash grid resolution. Keep this in sync with shaders/shared.wgsl SPATIAL_GRID_SIZE.

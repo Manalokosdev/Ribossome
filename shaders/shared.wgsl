@@ -8,10 +8,10 @@
 // CONSTANTS
 // ============================================================================
 
-const ENV_GRID_SIZE: u32 = 2048u;      // Environment grid resolution (alpha/beta/gamma)
+const ENV_GRID_SIZE: u32 = 512u;      // Environment grid resolution (alpha/beta/gamma)
 const GRID_SIZE: u32 = ENV_GRID_SIZE;  // Alias for backward compatibility
 const SPATIAL_GRID_SIZE: u32 = 1024u;   // Spatial hash grid for agent collision detection
-const SIM_SIZE: u32 = 61440u;          // Simulation world size
+const SIM_SIZE: u32 = 15360u;          // Simulation world size (4x smaller)
 const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 256u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
@@ -21,7 +21,8 @@ const GENOME_ASCII_WORDS: u32 = GENOME_BYTES / 4u;
 const GENOME_PACKED_WORDS: u32 = GENOME_BYTES / 16u;
 const GENOME_BASES_PER_PACKED_WORD: u32 = 16u;
 const MIN_GENE_LENGTH: u32 = 6u;
-const PROPELLERS_ENABLED: bool = true;
+// Experiment: disable propeller/displacer thrust (no direct thrust, no fluid force injection).
+const PROPELLERS_ENABLED: bool = false;
 // Experimental: disable global agent orientation; body geometry defines facing.
 const DISABLE_GLOBAL_ROTATION: bool = false;
 // Smoothing factor for per-part signal-induced angle (0..1). Higher = faster response.

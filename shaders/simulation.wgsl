@@ -87,6 +87,29 @@ fn sanitize_f32(x: f32) -> f32 {
 // and instead only influence motion indirectly through the fluid.
 const PROPELLERS_APPLY_DIRECT_FORCE: bool = true;
 
+// Experiment toggle:
+// Inject forces into the fluid based on body-part motion caused by morphology updates.
+// This enables propulsion-by-undulation once fluids are enabled, even with propellers disabled.
+const MORPHOLOGY_INJECT_FLUID_FORCE: bool = true;
+// Strength of morphology-induced fluid coupling (keep small; morphology updates can move parts a lot per frame).
+const MORPHOLOGY_FLUID_COUPLING: f32 = 1.0;
+// Clamp to avoid huge impulses when morphology jumps between frames.
+const MORPHOLOGY_MAX_WORLD_DELTA: f32 = 2.0;
+const MORPHOLOGY_MAX_WORLD_VEL: f32 = 20.0;
+
+// Option B experiment:
+// Apply a direct reaction force/torque to the agent from morphology-driven part motion.
+// This is a coarse "resistive force" swimmer model (anisotropic drag) that remains stable
+// even when the fluid grid is low-res.
+const MORPHOLOGY_SWIM_ENABLED: bool = true;
+// Overall strength multiplier. Uses the existing UI knob `prop_wash_strength_fluid` as a temporary control.
+const MORPHOLOGY_SWIM_COUPLING: f32 = 1.0;
+// Drag anisotropy: perpendicular drag > tangential drag.
+const MORPHOLOGY_SWIM_C_PAR: f32 = 0.15;
+const MORPHOLOGY_SWIM_C_PERP: f32 = 0.6;
+// Clamp per-tick contribution to avoid explosive drift.
+const MORPHOLOGY_SWIM_MAX_FRAME_VEL: f32 = 3.0;
+
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
@@ -465,6 +488,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var agent_energy_cur = agent_energy;
     var pairing_counter = agent_pairing_counter;
 
+    // Morphology-driven swim uses per-part drag inside the physics loop.
+
     // Initialize output scalars explicitly (avoid full Agent megacopy).
     agents_out[agent_id].position = agent_position;
     agents_out[agent_id].velocity = agent_velocity;
@@ -516,6 +541,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var body_count_val = agent_body_count;
     var first_build = (agent_body_count == 0u);
     var start_byte = 0u;
+
+    // Cache previous-frame body geometry so we can estimate morphology-driven motion.
+    // Only meaningful after the first build.
+    var prev_body_pos: array<vec2<f32>, MAX_BODY_PARTS>;
+    if (!first_build) {
+        for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+            prev_body_pos[i] = agents_in[agent_id].body[i].pos;
+        }
+    }
 
     if (first_build) {
         // FIRST BUILD: Scan genome and populate body[].part_type
@@ -710,6 +744,50 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             );
         }
     }
+
+    // NOTE: morphology recentering may update agents_out.rotation (avg_angle compensation).
+    // We intentionally do NOT sync `agent_rot` here: `agent_rot` is the agent's physical rotation
+    // integrated from torque, while the recentering rotation is a morphology gauge correction.
+
+    // Inject morphology-driven motion into the fluid.
+    // This is intentionally simple: estimate per-part velocity from (new_world - old_world) / dt,
+    // then splat a matching force into the fluid solver.
+    if (MORPHOLOGY_INJECT_FLUID_FORCE && !first_build) {
+        let strength = max(params.prop_wash_strength_fluid, 0.0) * MORPHOLOGY_FLUID_COUPLING;
+        if (strength > 0.0) {
+            let dt_safe = max(params.dt, 1e-3);
+            let old_rot = agent_rotation;
+            let new_rot = agents_out[agent_id].rotation;
+
+            for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+                let old_local = prev_body_pos[i];
+                let new_local = agents_out[agent_id].body[i].pos;
+
+                let old_world = agent_position + apply_agent_rotation(old_local, old_rot);
+                let new_world = agent_position + apply_agent_rotation(new_local, new_rot);
+
+                var delta_world = new_world - old_world;
+                let dlen = length(delta_world);
+                if (dlen > MORPHOLOGY_MAX_WORLD_DELTA) {
+                    delta_world = delta_world * (MORPHOLOGY_MAX_WORLD_DELTA / max(dlen, 1e-6));
+                }
+                let delta_len2 = dot(delta_world, delta_world);
+                if (delta_len2 > 1e-6) {
+                    // Convert displacement to a velocity-like vector.
+                    var v = delta_world / dt_safe;
+                    let vlen = length(v);
+                    if (vlen > MORPHOLOGY_MAX_WORLD_VEL) {
+                        v = v * (MORPHOLOGY_MAX_WORLD_VEL / max(vlen, 1e-6));
+                    }
+
+                    let scaled_force = -v * FLUID_FORCE_SCALE * 0.1 * strength;
+                    add_fluid_force_splat(new_world, scaled_force);
+                }
+            }
+        }
+    }
+
+    // Morphology-driven swimming is handled as per-part drag inside the physics pass.
 
     // Calculate agent color from color_sum accumulated during morphology rebuild
     let agent_color = vec3<f32>(
@@ -1342,9 +1420,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let drag_coefficient = total_mass * 0.5;
 
+    // Morphology swim strength (reuses the existing prop-wash UI knobs as a convenient control).
+    // This is applied as per-part drag later (no direct angular-velocity injection).
+    let morph_swim_strength = select(
+        0.0,
+        max(max(params.prop_wash_strength, 0.0), max(params.prop_wash_strength_fluid, 0.0)) * MORPHOLOGY_SWIM_COUPLING,
+        (MORPHOLOGY_SWIM_ENABLED && !first_build)
+    );
+
     // Accumulate forces and torques (relative to CoM)
     var force = vec2<f32>(0.0);
     var torque = 0.0;
+
+    // (No global morphology-swim impulse here; handled per-part.)
 
     // Agent-to-agent repulsion (simplified: once per agent pair, using total masses)
     for (var n = 0u; n < neighbor_count; n++) {
@@ -1423,6 +1511,79 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let world_pos = agent_pos + rotated_midpoint;
 
         let part_weight = part_mass / total_mass;
+
+        // Morphology-driven swimming via per-part resistive drag.
+        // Apply a drag force opposing the part's relative motion vs (agent movement + local fluid flow).
+        // Internal deformation (old_local -> new_local) creates relative motion that can generate thrust.
+        if (morph_swim_strength > 0.0 && !anchor_active_prev) {
+            // Segment tangent (local -> world). Use neighbor to define axis.
+            var seg_local = vec2<f32>(1.0, 0.0);
+            if (i > 0u) {
+                seg_local = part.pos - agents_out[agent_id].body[i - 1u].pos;
+            } else if (body_count > 1u) {
+                seg_local = agents_out[agent_id].body[1u].pos - part.pos;
+            }
+            let seg_len = length(seg_local);
+            let t_local = select(seg_local / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-6);
+            let t_world = normalize(apply_agent_rotation(t_local, agent_rot));
+
+            // Fluid velocity at this part (world units per tick).
+            // IMPORTANT: when fluids are disabled, the velocity buffer can hold stale values.
+            // Gate sampling behind the same switch used elsewhere (fluid_wind_push_strength).
+            var v_fluid_frame = vec2<f32>(0.0);
+            if (params.fluid_wind_push_strength != 0.0) {
+                if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
+                    let v = sample_fluid_velocity_bilinear(world_pos);
+                    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+                    v_fluid_frame = v * (cell_to_world * params.dt);
+                }
+            }
+
+            // Per-tick deformation displacement.
+            // IMPORTANT: use local delta rotated by the *current* agent rotation so that rigid-body
+            // rotation between frames does NOT create fake deformation (this was making compact
+            // "ball" agents drift even when they aren't waving).
+            let old_local = prev_body_pos[i];
+            let new_local = part.pos;
+            let delta_local = new_local - old_local;
+
+            // Deadzone: ignore tiny geometry jitter.
+            let delta_len = length(delta_local);
+            if (delta_len < 1e-4) {
+                continue;
+            }
+
+            var v_def = apply_agent_rotation(delta_local, agent_rot);
+            let vdef_len = length(v_def);
+            if (vdef_len > MORPHOLOGY_MAX_WORLD_DELTA) {
+                v_def = v_def * (MORPHOLOGY_MAX_WORLD_DELTA / max(vdef_len, 1e-6));
+            }
+
+            // Relative motion of this part vs the fluid.
+            // NOTE: use only internal deformation here so agents don't "swim" from rigid translation
+            // (they are already overdamped at the agent level).
+            let v_rel = v_def - v_fluid_frame;
+
+            // Anisotropic resistive drag: C = c_perp*I + (c_par-c_perp)*t*t^T
+            let tx = t_world.x;
+            let ty = t_world.y;
+            let d = (MORPHOLOGY_SWIM_C_PAR - MORPHOLOGY_SWIM_C_PERP);
+            let C_xx = MORPHOLOGY_SWIM_C_PERP + d * (tx * tx);
+            let C_xy = d * (tx * ty);
+            let C_yy = MORPHOLOGY_SWIM_C_PERP + d * (ty * ty);
+
+            var Cv = vec2<f32>(C_xx * v_rel.x + C_xy * v_rel.y, C_xy * v_rel.x + C_yy * v_rel.y);
+            let cv_len = length(Cv);
+            if (cv_len > MORPHOLOGY_SWIM_MAX_FRAME_VEL) {
+                Cv = Cv * (MORPHOLOGY_SWIM_MAX_FRAME_VEL / max(cv_len, 1e-6));
+            }
+
+            // Convert velocity-like drag into force consistent with overdamped integrator.
+            // part_weight * drag_coefficient == ~part_mass*0.5.
+            let swim_force = (-Cv) * (morph_swim_strength * part_weight) * drag_coefficient;
+            force += swim_force;
+            torque += (r_com.x * swim_force.y - r_com.y * swim_force.x);
+        }
 
         // Slope force per amino acid
         // Anchor (type 42): when active, ignore slope/global-vector contribution so
@@ -2182,7 +2343,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ====== RNA PAIRING ADVANCEMENT ======
     // Pairing counter probabilistically increments based on energy and chemical signals.
     // When it reaches gene_length, reproduction.wgsl will spawn offspring.
-    
+
     // CRITICAL: Handle reproduction completion BEFORE pairing advancement.
     // Reproduction shader writes offspring when pairing_counter >= gene_length,
     // but it doesn't update the parent (different buffer). We must reset here.
@@ -2191,7 +2352,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         agent_energy_cur *= 0.5;
         pairing_counter = 0u;
     }
-    
+
     if (agent_gene_length > 0u && pairing_counter < agent_gene_length) {
         // If the agent has no energy capacity (no storage), it cannot sustain pairing.
         if (agent_energy_capacity > 0.0) {
