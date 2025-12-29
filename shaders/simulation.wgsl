@@ -808,7 +808,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Inject morphology-driven motion into the fluid.
     // IMPORTANT: use *internal deformation only* (local deltas), not rigid-body rotation/translation.
     // Otherwise, agents can "propel" just by rotating (or via recentering gauge), even when not waving.
-    if (MORPHOLOGY_INJECT_FLUID_FORCE && !first_build) {
+    if (MORPHOLOGY_INJECT_FLUID_FORCE && !first_build && params.fluid_wind_push_strength != 0.0) {
         let strength = max(params.prop_wash_strength_fluid, 0.0) * MORPHOLOGY_FLUID_COUPLING;
         if (strength > 0.0) {
             let dt_safe = max(params.dt, 1e-3);

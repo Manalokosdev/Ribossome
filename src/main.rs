@@ -8497,12 +8497,10 @@ impl GpuState {
             // NOTE: prop wash also drives direct chem/gamma displacement in the simulation shader,
             // so keep it active even when fluids are disabled.
             prop_wash_strength: self.prop_wash_strength,
-            // Fluid wash only affects injection into the fluid solver.
-            prop_wash_strength_fluid: if self.fluid_enabled {
-                self.prop_wash_strength_fluid
-            } else {
-                0.0
-            },
+            // Used as a general "wash/propulsion" strength knob in shaders.
+            // Even when fluids are disabled, virtual-medium propulsion can still use this value;
+            // actual fluid coupling remains disabled via fluid_wind_push_strength=0.
+            prop_wash_strength_fluid: self.prop_wash_strength_fluid,
             gamma_vis_min,
             gamma_vis_max,
             // Allow drawing even when paused so camera movement & inspection are visible.
