@@ -97,21 +97,30 @@ const MORPHOLOGY_FLUID_COUPLING: f32 = 1.0;
 const MORPHOLOGY_MAX_WORLD_DELTA: f32 = 2.0;
 const MORPHOLOGY_MAX_WORLD_VEL: f32 = 20.0;
 
-// Option B experiment:
-// Apply a direct reaction force/torque to the agent from morphology-driven part motion.
-// This is a coarse "resistive force" swimmer model (anisotropic drag) that remains stable
-// even when the fluid grid is low-res.
+// Virtual fluid propulsion: simplified resistive-force model.
+// Agents propel by pushing against a homogeneous, gridless medium.
 const MORPHOLOGY_SWIM_ENABLED: bool = true;
-// Overall strength multiplier. Uses the existing UI knob `prop_wash_strength_fluid` as a temporary control.
+// Overall strength multiplier (tuned via UI prop_wash_strength_fluid).
 const MORPHOLOGY_SWIM_COUPLING: f32 = 1.0;
-// Drag anisotropy: perpendicular drag > tangential drag.
-const MORPHOLOGY_SWIM_C_PAR: f32 = 0.15;
-const MORPHOLOGY_SWIM_C_PERP: f32 = 0.6;
+// Base drag coefficient for the virtual medium.
+const MORPHOLOGY_SWIM_BASE_DRAG: f32 = 0.5;
+// Anisotropy factor: how much more drag perpendicular to motion vs parallel.
+// Lower values = less side-to-side amplification. Range: 1.0 (isotropic) to ~3.0.
+const MORPHOLOGY_SWIM_ANISOTROPY: f32 = 1.8;
 // If false, morphology propulsion is computed against a gridless, uniform medium (fluid-at-rest).
 // Real fluid forces can still be applied elsewhere (see wind/fluid coupling below).
 const MORPHOLOGY_SWIM_USE_REAL_FLUID: bool = false;
 // Clamp per-tick contribution to avoid explosive drift.
 const MORPHOLOGY_SWIM_MAX_FRAME_VEL: f32 = 3.0;
+
+// Heading correction for morphology swimming:
+// Keep the agent's rotation roughly aligned with its actual velocity direction.
+// This prevents "crabbing" cases where an agent travels sideways with its body rotated ~90°.
+const MORPHOLOGY_SWIM_HEADING_ALIGN_ENABLED: bool = true;
+const MORPHOLOGY_SWIM_HEADING_ALIGN_STRENGTH: f32 = 0.5; // converts angle error -> angular velocity
+const MORPHOLOGY_SWIM_HEADING_ALIGN_MAX_ANGVEL: f32 = 0.08;
+const MORPHOLOGY_SWIM_HEADING_ALIGN_MIN_SPEED: f32 = 0.02; // per-tick speed
+const MORPHOLOGY_SWIM_HEADING_ALIGN_FULL_SPEED: f32 = 0.25;
 
 // Option 2: morphology determines a target orientation, physics follows.
 // We estimate how the morphology rotated between frames (best-fit 2D rotation between
@@ -1590,21 +1599,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let part_weight = part_mass / total_mass;
 
-        // Morphology-driven swimming via per-part resistive drag.
-        // Apply a drag force opposing the part's relative motion vs (agent movement + local fluid flow).
-        // Internal deformation (old_local -> new_local) creates relative motion that can generate thrust.
+        // Virtual fluid propulsion: simplified resistive-force model.
+        // Each body part experiences drag proportional to its velocity through a virtual medium.
         if (morph_swim_strength > 0.0 && !anchor_active_prev) {
-            // Segment tangent (local -> world). Use neighbor to define axis.
-            var seg_local = vec2<f32>(1.0, 0.0);
-            if (i > 0u) {
-                seg_local = part.pos - agents_out[agent_id].body[i - 1u].pos;
-            } else if (body_count > 1u) {
-                seg_local = agents_out[agent_id].body[1u].pos - part.pos;
-            }
-            let seg_len = length(seg_local);
-            let t_local = select(seg_local / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-6);
-            let t_world = normalize(apply_agent_rotation(t_local, agent_rot));
-
             var v_medium_frame = vec2<f32>(0.0);
             if (MORPHOLOGY_SWIM_USE_REAL_FLUID && params.fluid_wind_push_strength != 0.0) {
                 if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
@@ -1614,22 +1611,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
 
-            // Deformation displacement.
-            // IMPORTANT: use local delta rotated by the *current* agent rotation so that rigid-body
-            // rotation between frames does NOT create fake deformation (this was making compact
-            // "ball" agents drift even when they aren't waving).
+            // Compute part's deformation velocity (internal motion, not rigid-body translation).
             let old_local = prev_body_pos[i];
             let new_local = part.pos;
             let delta_local = new_local - old_local;
 
-            // Deadzone: ignore tiny geometry jitter.
+            // Deadzone: ignore tiny jitter.
             let delta_len = length(delta_local);
             if (delta_len < 1e-4) {
                 continue;
             }
 
-            // Convert to a deformation *velocity* so propulsion strength is stable across dt.
-            // (Using per-tick displacement makes thrust shrink when dt is reduced.)
+            // Convert local delta to world-space velocity.
             var delta_world = apply_agent_rotation(delta_local, agent_rot);
             let dlen = length(delta_world);
             if (dlen > MORPHOLOGY_MAX_WORLD_DELTA) {
@@ -1642,33 +1635,33 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 v_def = v_def * (MORPHOLOGY_MAX_WORLD_VEL / max(vdef_len, 1e-6));
             }
 
-            // Relative motion of this part vs the surrounding medium.
-            // NOTE: use only internal deformation here so agents don't "swim" from rigid translation
-            // (they are already overdamped at the agent level).
+            // Relative velocity: deformation minus medium flow.
             let v_rel = v_def - (v_medium_frame / dt_safe);
-
-            // Anisotropic resistive drag: C = c_perp*I + (c_par-c_perp)*t*t^T
-            let tx = t_world.x;
-            let ty = t_world.y;
-            let d = (MORPHOLOGY_SWIM_C_PAR - MORPHOLOGY_SWIM_C_PERP);
-            let C_xx = MORPHOLOGY_SWIM_C_PERP + d * (tx * tx);
-            let C_xy = d * (tx * ty);
-            let C_yy = MORPHOLOGY_SWIM_C_PERP + d * (ty * ty);
-
-            var Cv = vec2<f32>(C_xx * v_rel.x + C_xy * v_rel.y, C_xy * v_rel.x + C_yy * v_rel.y);
-            let cv_len = length(Cv);
-            if (cv_len > MORPHOLOGY_SWIM_MAX_FRAME_VEL) {
-                Cv = Cv * (MORPHOLOGY_SWIM_MAX_FRAME_VEL / max(cv_len, 1e-6));
+            let v_rel_len = length(v_rel);
+            if (v_rel_len < 1e-6) {
+                continue;
             }
 
-            // Convert velocity-like drag into force consistent with overdamped integrator.
-            // Scale by segment length (RFT-style) so long tails contribute proportionally.
-            // part_weight * drag_coefficient == ~part_mass*0.5.
-            let seg_weight = max(seg_len, 0.0);
-            // NOTE: if propulsion feels inverted, the sign convention here is the first suspect.
-            // Cv == C * v_rel. The force applied to the agent is what the medium exerts on the body.
-            // Empirically, using +Cv here matches the expected thrust direction in this simulation.
-            let swim_force = (Cv) * (morph_swim_strength * part_weight * seg_weight) * drag_coefficient;
+            // Motion direction (normalized velocity).
+            let motion_dir = v_rel / v_rel_len;
+
+            // Simple anisotropic drag:
+            // Drag perpendicular to motion is stronger than drag parallel to motion.
+            // This creates thrust when the body undulates.
+            let drag_parallel = MORPHOLOGY_SWIM_BASE_DRAG;
+            let drag_perp = MORPHOLOGY_SWIM_BASE_DRAG * MORPHOLOGY_SWIM_ANISOTROPY;
+
+            // Project velocity onto parallel and perpendicular components.
+            // For a body segment, we approximate the "long axis" as the velocity direction itself.
+            // This avoids the neighbor-difference tangent calculation that can amplify side-to-side motion.
+            let v_parallel = dot(v_rel, motion_dir) * motion_dir;
+            let v_perp = v_rel - v_parallel;
+
+            // Apply drag forces (opposing motion).
+            let drag_force = -(drag_parallel * v_parallel + drag_perp * v_perp);
+
+            // Scale by part mass and coupling strength.
+            let swim_force = drag_force * (morph_swim_strength * part_weight) * drag_coefficient;
             force += swim_force;
             torque += (r_com.x * swim_force.y - r_com.y * swim_force.x);
         }
@@ -2049,6 +2042,22 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (MORPHOLOGY_ORIENT_FOLLOW_ENABLED) {
         let w_morph = clamp(morph_orient_delta * MORPHOLOGY_ORIENT_FOLLOW_STRENGTH, -MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL, MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL);
         angular_velocity += w_morph;
+    }
+
+    // Align heading to actual motion direction (helps when morphology-follow heading is ambiguous
+    // or when propulsion produces sideways motion).
+    if (MORPHOLOGY_SWIM_ENABLED && MORPHOLOGY_SWIM_HEADING_ALIGN_ENABLED && morph_swim_strength > 0.0) {
+        let spd = length(agent_vel);
+        if (spd > MORPHOLOGY_SWIM_HEADING_ALIGN_MIN_SPEED) {
+            let vel_dir = agent_vel / spd;
+            let forward = vec2<f32>(cos(agent_rot), sin(agent_rot));
+            let c = forward.x * vel_dir.y - forward.y * vel_dir.x;
+            let d = forward.x * vel_dir.x + forward.y * vel_dir.y;
+            let angle_err = atan2(c, d);
+            let speed_scale = clamp(spd / MORPHOLOGY_SWIM_HEADING_ALIGN_FULL_SPEED, 0.0, 1.0);
+            let w_align = clamp(angle_err * MORPHOLOGY_SWIM_HEADING_ALIGN_STRENGTH, -MORPHOLOGY_SWIM_HEADING_ALIGN_MAX_ANGVEL, MORPHOLOGY_SWIM_HEADING_ALIGN_MAX_ANGVEL);
+            angular_velocity += w_align * speed_scale;
+        }
     }
 
     // Add spin from local fluid vorticity (curl). This makes vortices visibly rotate agents.
