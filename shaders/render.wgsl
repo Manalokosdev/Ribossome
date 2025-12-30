@@ -507,7 +507,8 @@ fn render_body_part_ctx(
 
         // Pulsate size based on signal output
         // Base size is larger (3x part size), then pulsate ±30%
-        let base_size = get_part_visual_size(part.part_type) * 3.0;
+        // Note: clocks were visually overwhelming; keep the same pulsation but render 2x smaller.
+        let base_size = get_part_visual_size(part.part_type) * 1.5;
         let size_multiplier = 1.0 + clock_signal * 0.3;
         let pulsating_size = base_size * size_multiplier;
 
