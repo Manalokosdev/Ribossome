@@ -115,6 +115,22 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let beta_normalized = clamp(beta_concentration, 0.0, 1.0);
                 let mutation_multiplier = 1.0 + pow(beta_normalized, 3.0) * 4.0;
                 var effective_mutation_rate = params.mutation_rate * mutation_multiplier;
+
+                // Mutation Protection organ (type 43): each organ reduces mutation rate by 30%.
+                // Implemented as a multiplicative stack: rate *= 0.7^count.
+                {
+                    var mp_count = 0u;
+                    let bc = min(agent.body_count, MAX_BODY_PARTS);
+                    for (var i = 0u; i < bc; i++) {
+                        let base_type = get_base_part_type(agent.body[i].part_type);
+                        if (base_type == 43u) {
+                            mp_count += 1u;
+                        }
+                    }
+                    if (mp_count > 0u) {
+                        effective_mutation_rate *= pow(0.7, f32(mp_count));
+                    }
+                }
                 effective_mutation_rate = min(effective_mutation_rate, 1.0);
 
                 // Determine active gene region (non-'X' bytes) in offspring after reverse complement
