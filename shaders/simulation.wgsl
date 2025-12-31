@@ -1788,9 +1788,20 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 );
                 slope_gradient += gravity_vector;
             }
-            let slope_force = -slope_gradient * params.gamma_strength * part_mass;
-            force += slope_force;
-            torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
+            
+            // Slope acts as a modifier to existing motion, not as a direct force
+            // Only affects agents that are already moving
+            let agent_speed = length(agent_velocity);
+            if (agent_speed > 0.01) {
+                // Direction of movement
+                let velocity_dir = agent_velocity / agent_speed;
+                // Project slope onto movement direction: negative = uphill, positive = downhill
+                let slope_alignment = dot(-slope_gradient, velocity_dir);
+                // Apply force along velocity direction: slows when uphill, speeds when downhill
+                let slope_force = velocity_dir * slope_alignment * params.gamma_strength * part_mass;
+                force += slope_force;
+                torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
+            }
         }
 
         // One-way fluid->agent wind push is replaced by FLUID_COUPLING_SIMPLE_ENABLED above.
