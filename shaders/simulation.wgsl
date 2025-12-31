@@ -100,7 +100,7 @@ const MORPHOLOGY_MAX_WORLD_VEL: f32 = 20.0;
 // Virtual anisotropic drag swimming (gridless, low-Reynolds RFT-like).
 // Uses ONLY internal morphology deformation (pre vs post morphology positions).
 // Converts lateral undulation into forward thrust via drag anisotropy.
-const MORPHOLOGY_SWIM_ENABLED: bool = true;
+// MORPHOLOGY_SWIM_ENABLED is now a runtime parameter accessed via ms_enabled()
 // When true, microswimming is handled by a dedicated compute pass (`microswim_agents`).
 // This keeps `process_agents` easier to debug and prevents double-applying swim forces.
 const MORPHOLOGY_SWIM_SEPARATE_PASS: bool = true;
@@ -426,11 +426,23 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let normalized_rel_speed = min(rel_speed / VEL_MAX, 1.0);
                             let speed_multiplier = clamp(1.0 - normalized_rel_speed, 0.0, 1.0);
 
-                            // Absorb up to 50% of victim's energy (reduced by mouth speed and disabler).
+                            // Vampire drain inversely proportional to victim body part count:
+                            // body_count=3 → 100%, body_count=10 → 50%
+                            // Formula: 7.0 / (body_count + 4.0)
+                            let victim_body_count = f32(agents_out[closest_victim_id].body_count);
+                            let size_vulnerability = 7.0 / (victim_body_count + 4.0);
+
+                            // Absorb up to 50% of victim's energy (reduced by size, mouth speed, and disabler).
                             // Poison Resistance (type 29) also protects against vampire drain, using the
                             // same per-organ 50% multiplier as poison damage.
                             let vampire_protection = pow(0.5, f32(agents_out[closest_victim_id].poison_resistant_count));
-                            let absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier * vampire_protection;
+                            var absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier * vampire_protection * size_vulnerability;
+
+                            // Cap drain by vampire's available storage capacity
+                            let vampire_capacity = agents_out[agent_id].energy_capacity;
+                            let vampire_current_energy = agents_out[agent_id].energy;
+                            let available_storage = max(0.0, vampire_capacity - vampire_current_energy);
+                            absorbed_energy = min(absorbed_energy, available_storage);
 
                             // Victim loses 2x the absorbed energy.
                             let energy_damage = absorbed_energy * 2.0;
@@ -922,6 +934,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Morphology-driven swimming is handled as per-part drag inside the physics pass.
+    let MORPHOLOGY_SWIM_ENABLED = ms_enabled();
+    let PROPELLERS_ENABLED = propellers_enabled();
 
     // Calculate agent color from color_sum accumulated during morphology rebuild
     let agent_color = vec3<f32>(
@@ -2407,8 +2421,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (agent_gene_length > 0u && pairing_counter < agent_gene_length) {
-        // If the agent has no energy capacity (no storage), it cannot sustain pairing.
-        if (agent_energy_capacity > 0.0) {
+        // Pairing requires energy capacity (storage) and sufficient energy (> 1.0)
+        if (agent_energy_capacity > 0.0 && agent_energy_cur > 1.0) {
             // Average local chemical signals across all body parts
             let local_alpha_avg = select(0.0, local_alpha / f32(body_count), body_count > 0u);
             let local_beta_avg = select(0.0, local_beta / f32(body_count), body_count > 0u);

@@ -278,7 +278,7 @@ fn render_body_part_ctx(
     }
 
     // 6. ORGAN: Propeller jet particles
-    if (PROPELLERS_ENABLED && amino_props.is_propeller && agent_energy > 0.0 && params.camera_zoom > 2.0) {
+    if (propellers_enabled() && amino_props.is_propeller && agent_energy > 0.0 && params.camera_zoom > 2.0) {
         var segment_dir = vec2<f32>(0.0);
         if (part_index > 0u) {
             var prev: vec2<f32>;
@@ -312,10 +312,28 @@ fn render_body_part_ctx(
         draw_particle_jet_ctx(world_pos, exhaust_dir, jet_length, jet_seed, particle_count, ctx);
     }
 
-    // 6b. ORGAN: Displacer (A/B) - blue radial-spikes marker
+    // 6b. ORGAN: Signal Emitters (types 25=Alpha, 27=Beta) - colored radial-spikes by emission type
     if (amino_props.is_displacer) {
         let star_radius = max(get_part_visual_size(part.part_type) * 2.5, 7.0);
-        let star_color = vec4<f32>(vec3<f32>(0.0, 0.39, 1.0), 0.9);
+        let organ_param = get_organ_param(part.part_type);
+        let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
+        
+        var star_color: vec4<f32>;
+        if (base_type == 25u) {
+            // Alpha emitter: green for positive (+alpha), red for negative (-alpha)
+            if (modifier_index < 12u) {
+                star_color = vec4<f32>(0.0, 1.0, 0.0, 0.9); // Green: +alpha (M/N)
+            } else {
+                star_color = vec4<f32>(1.0, 0.0, 0.0, 0.9); // Red: -alpha (P/Q/R)
+            }
+        } else { // type 27 - Beta emitter
+            // Beta emitter: cyan for positive (+beta), magenta for negative (-beta)
+            if (modifier_index < 16u) {
+                star_color = vec4<f32>(0.0, 1.0, 1.0, 0.9); // Cyan: +beta (S)
+            } else {
+                star_color = vec4<f32>(1.0, 0.0, 1.0, 0.9); // Magenta: -beta (T/V)
+            }
+        }
         draw_star_5_ctx(world_pos, star_radius, star_color, ctx);
     }
 

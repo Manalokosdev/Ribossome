@@ -114,7 +114,7 @@ const NO_FLUID_DEFAULT_CHEM_OOZE_FRAC_PER_EPOCH: f32 = 0.001;
 
 // No-fluid mode is updated once per simulation epoch.
 // User request: stronger fade (0.9 per epoch).
-const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.9;
+const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.97;
 
 // ============================================================================
 // BINDINGS

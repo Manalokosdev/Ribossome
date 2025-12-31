@@ -8,10 +8,12 @@
 // CONSTANTS
 // ============================================================================
 
-const ENV_GRID_SIZE: u32 = 2048u;      // Environment grid resolution (alpha/beta/gamma)
-const GRID_SIZE: u32 = ENV_GRID_SIZE;  // Alias for backward compatibility
-const SPATIAL_GRID_SIZE: u32 = 1024u;   // Spatial hash grid for agent collision detection
-const SIM_SIZE: u32 = 61440u;          // Simulation world size
+// IMPORTANT: These core constants are injected by Rust at shader compile time.
+// (See src/main.rs shader_source prefix.) Do not hard-code them here.
+// const ENV_GRID_SIZE: u32
+// const GRID_SIZE: u32
+// const SPATIAL_GRID_SIZE: u32
+// const SIM_SIZE: u32
 const MAX_BODY_PARTS: u32 = 64u;
 const GENOME_BYTES: u32 = 256u;
 const GENOME_LENGTH: u32 = GENOME_BYTES; // Legacy alias used throughout shader
@@ -21,8 +23,6 @@ const GENOME_ASCII_WORDS: u32 = GENOME_BYTES / 4u;
 const GENOME_PACKED_WORDS: u32 = GENOME_BYTES / 16u;
 const GENOME_BASES_PER_PACKED_WORD: u32 = 16u;
 const MIN_GENE_LENGTH: u32 = 6u;
-// Experiment: disable propeller/displacer thrust (no direct thrust, no fluid force injection).
-const PROPELLERS_ENABLED: bool = false;
 // Experimental: disable global agent orientation; body geometry defines facing.
 const DISABLE_GLOBAL_ROTATION: bool = false;
 // Smoothing factor for per-part signal-induced angle (0..1). Higher = faster response.
@@ -103,14 +103,14 @@ fn unpack_position_from_f32(packed: f32, world_size: f32) -> vec2<f32> {
 // ============================================================================
 
 fn pack_prev_pos(prev_pos: vec2<f32>) -> u32 {
-    let scale = 65535.0 / max(params.grid_size, 1e-6);
+    let scale = 65535.0 / f32(SIM_SIZE);
     let x16 = u32(clamp(prev_pos.x * scale, 0.0, 65535.0));
     let y16 = u32(clamp(prev_pos.y * scale, 0.0, 65535.0));
     return (x16 & 0xFFFFu) | ((y16 & 0xFFFFu) << 16u);
 }
 
 fn unpack_prev_pos(packed: u32) -> vec2<f32> {
-    let scale = max(params.grid_size, 0.0) / 65535.0;
+    let scale = f32(SIM_SIZE) / 65535.0;
     let x16 = f32(packed & 0xFFFFu);
     let y16 = f32((packed >> 16u) & 0xFFFFu);
     return vec2<f32>(x16 * scale, y16 * scale);
@@ -413,6 +413,11 @@ fn ms_enabled() -> bool {
     return ms_f32(MSP_ENABLED) > 0.5;
 }
 
+// Propellers are enabled when microswim is disabled (inverse relationship)
+fn propellers_enabled() -> bool {
+    return !ms_enabled();
+}
+
 // Agent trail dye injection buffer (prepared each frame from trail_grid, then written by agents).
 @group(0) @binding(7)
 var<storage, read_write> trail_grid_inject: array<vec4<f32>>;
@@ -703,12 +708,12 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
 // ============================================================================
 
 fn is_in_bounds(pos: vec2<f32>) -> bool {
-    let ws = params.grid_size;
+    let ws = f32(SIM_SIZE);
     return pos.x >= 0.0 && pos.x <= ws && pos.y >= 0.0 && pos.y <= ws;
 }
 
 fn clamp_position(pos: vec2<f32>) -> vec2<f32> {
-    let ws = params.grid_size;
+    let ws = f32(SIM_SIZE);
     return vec2<f32>(
         clamp(pos.x, 0.0, ws),
         clamp(pos.y, 0.0, ws)
@@ -717,7 +722,7 @@ fn clamp_position(pos: vec2<f32>) -> vec2<f32> {
 
 fn grid_index(pos: vec2<f32>) -> u32 {
     let clamped = clamp_position(pos);
-    let scale = max(params.grid_size, 1e-6) / f32(ENV_GRID_SIZE);
+    let scale = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
     var x: i32 = i32(clamped.x / scale);
     var y: i32 = i32(clamped.y / scale);
     x = clamp(x, 0, i32(ENV_GRID_SIZE) - 1);
@@ -727,7 +732,7 @@ fn grid_index(pos: vec2<f32>) -> u32 {
 
 fn fluid_grid_index(pos: vec2<f32>) -> u32 {
     let clamped = clamp_position(pos);
-    let scale = max(params.grid_size, 1e-6) / f32(FLUID_GRID_SIZE);
+    let scale = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
     var x: i32 = i32(clamped.x / scale);
     var y: i32 = i32(clamped.y / scale);
     x = clamp(x, 0, i32(FLUID_GRID_SIZE) - 1);
@@ -736,7 +741,7 @@ fn fluid_grid_index(pos: vec2<f32>) -> u32 {
 }
 
 fn sample_fluid_velocity_bilinear(pos_world: vec2<f32>) -> vec2<f32> {
-    let ws = max(params.grid_size, 1e-6);
+    let ws = f32(SIM_SIZE);
     let grid_f = f32(FLUID_GRID_SIZE);
 
     // Map world position to fluid-grid continuous coordinates.
@@ -779,7 +784,7 @@ fn sample_fluid_velocity_bilinear(pos_world: vec2<f32>) -> vec2<f32> {
 // Signed 2D curl (vorticity) of the fluid velocity field at pos_world.
 // Units: 1/tick (velocity is in cells/tick; derivatives are per-cell).
 fn sample_fluid_curl(pos_world: vec2<f32>) -> f32 {
-    let cell_to_world = max(params.grid_size, 1e-6) / f32(FLUID_GRID_SIZE);
+    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
 
     // Central differences in cell space by sampling one cell away in world space.
     let v_r = sample_fluid_velocity_bilinear(pos_world + vec2<f32>( cell_to_world, 0.0));
@@ -857,7 +862,7 @@ fn get_part_name(part_type: u32) -> PartName {
 
 fn sample_grid_bilinear(pos: vec2<f32>, grid_type: u32) -> f32 {
     let clamped = clamp_position(pos);
-    let scale = max(params.grid_size, 1e-6) / f32(GRID_SIZE);
+    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
     let grid_x = (clamped.x / scale) - 0.5;
     let grid_y = (clamped.y / scale) - 0.5;
 
@@ -898,7 +903,7 @@ fn sample_grid_bilinear(pos: vec2<f32>, grid_type: u32) -> f32 {
 // which makes the response more isotropic.
 fn sample_env_gradient_sobel(center: vec2<f32>, grid_type: u32) -> vec2<f32> {
     let clamped = clamp_position(center);
-    let scale = max(params.grid_size, 1e-6) / f32(ENV_GRID_SIZE);
+    let scale = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
 
     // Match grid_index(): integer cell coords by truncation.
     let cx = clamp(i32(clamped.x / scale), 0, i32(ENV_GRID_SIZE) - 1);
@@ -963,7 +968,7 @@ fn cubic_hermite(t: f32) -> vec4<f32> {
 
 fn sample_grid_bicubic(pos: vec2<f32>, grid_type: u32) -> f32 {
     let clamped = clamp_position(pos);
-    let scale = max(params.grid_size, 1e-6) / f32(GRID_SIZE);
+    let scale = f32(SIM_SIZE) / f32(GRID_SIZE);
     let grid_x = (clamped.x / scale) - 0.5;
     let grid_y = (clamped.y / scale) - 0.5;
 
@@ -1069,7 +1074,7 @@ fn sample_stochastic_gaussian(center: vec2<f32>, signal_gain: f32, seed: u32, gr
 
     // One environment cell in world units.
     // NOTE: fluid_dye is stored at ENV_GRID_SIZE resolution, so sampling must use env indexing.
-    let cell = max(params.grid_size, 1e-6) / f32(ENV_GRID_SIZE);
+    let cell = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
     // Chirality flips left/right by reversing the perpendicular direction.
     let chir = select(1.0, -1.0, chirality_flip < 0.0);
     let dir = select(vec2<f32>(1.0, 0.0), normalize(sensor_perpendicular), length(sensor_perpendicular) > 1e-5) * chir;
@@ -1305,7 +1310,7 @@ fn world_to_screen(world_pos: vec2<f32>) -> vec2<i32> {
 }
 
 fn get_visible_position(world_pos: vec2<f32>) -> vec2<f32> {
-    let ws = params.grid_size;
+    let ws = f32(SIM_SIZE);
     let safe_zoom = max(params.camera_zoom, 0.0001);
     let safe_width = max(params.window_width, 1.0);
     let safe_height = max(params.window_height, 1.0);

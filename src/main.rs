@@ -70,7 +70,7 @@ const FUMAROLE_BUFFER_BYTES: usize = FUMAROLE_BUFFER_FLOATS * 4;
 
 // Part base-angle override slots.
 // NOTE: Shader currently defines 43 part types, but we reserve 128 slots for future expansion.
-const PART_TYPE_COUNT: usize = 43;
+const PART_TYPE_COUNT: usize = 44;
 const PART_OVERRIDE_SLOTS: usize = 128;
 const PART_OVERRIDE_VEC4S: usize = (PART_OVERRIDE_SLOTS + 3) / 4; // 32
 const PART_OVERRIDES_CSV_PATH: &str = "config/part_base_angle_overrides.csv";
@@ -91,11 +91,11 @@ const PART_PROPERTIES_JSON_PATH: &str = "config/part_properties.json";
 const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     // 0–19 amino acids
     "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y",
-    // 20–42 organs / specials (keep in sync with shaders/shared.wgsl table comments)
-    "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "DISPLACER_A", "ENABLER", "DISPLACER_B",
+    // 20–43 organs / specials (keep in sync with shaders/shared.wgsl table comments)
+    "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "ALPHA_EMITTER", "ENABLER", "BETA_EMITTER",
     "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "VAMPIRE_MOUTH", "AGENT_ALPHA_SENSOR",
     "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
-    "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2", "ANCHOR",
+    "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2", "ANCHOR", "MUTATION_PROTECTION",
 ];
 
 const APP_NAME: &str = "Ribossome";
@@ -3931,6 +3931,10 @@ struct GpuState {
     inspector_zoom: f32, // Zoom level for inspector preview (1.0 = default)
     agent_trail_decay: f32, // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
 
+    // Spawn mode state
+    spawn_mode_active: bool, // Toggle for click-to-spawn mode
+    spawn_template_genome: Option<[u32; GENOME_WORDS]>, // Loaded template genome for spawning
+
     // RNG state for per-frame randomness
     rng_state: u64,
 
@@ -5123,7 +5127,11 @@ impl GpuState {
         // Load main shader (concatenate shared + render + simulation modules, composite is separate)
         // Inject compile-time constants here so resolution changes are centralized in Rust.
         let shader_source = format!(
-            "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}\n{}",
+            "const SIM_SIZE: u32 = {}u;\nconst ENV_GRID_SIZE: u32 = {}u;\nconst GRID_SIZE: u32 = {}u;\nconst SPATIAL_GRID_SIZE: u32 = {}u;\nconst FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}\n{}",
+            SIM_SIZE as u32,
+            GRID_DIM_U32,
+            GRID_DIM_U32,
+            SPATIAL_GRID_DIM as u32,
             FLUID_GRID_SIZE,
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
@@ -7215,6 +7223,8 @@ impl GpuState {
             camera_velocity: [0.0, 0.0], // Initialize velocity to zero
             inspector_zoom: 1.0,
             agent_trail_decay: settings.agent_trail_decay,
+            spawn_mode_active: false,
+            spawn_template_genome: None,
             rng_state: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -10792,6 +10802,65 @@ impl GpuState {
         }
     }
 
+    fn spawn_agent_at_cursor(&mut self, screen_pos: [f32; 2]) {
+        // Convert screen coordinates to world coordinates (same logic as select_agent_at_screen_pos)
+        let norm_x = screen_pos[0] / self.surface_config.width as f32;
+        let norm_y = screen_pos[1] / self.surface_config.height as f32;
+
+        let aspect = if self.surface_config.width > 0 {
+            self.surface_config.height as f32 / self.surface_config.width as f32
+        } else {
+            1.0
+        };
+        let half_view_x = SIM_SIZE / (2.0 * self.camera_zoom);
+        let half_view_y = half_view_x * aspect;
+
+        let mut world_x = self.camera_pan[0] + (norm_x - 0.5) * 2.0 * half_view_x;
+        let mut world_y = self.camera_pan[1] - (norm_y - 0.5) * 2.0 * half_view_y; // Y inverted
+
+        // Wrap to world bounds
+        world_x = world_x.rem_euclid(SIM_SIZE);
+        world_y = world_y.rem_euclid(SIM_SIZE);
+
+        if let Some(template_genome) = self.spawn_template_genome {
+            // Generate random seeds
+            self.rng_state = self.rng_state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            let seed = (self.rng_state >> 32) as u32;
+
+            self.rng_state = self.rng_state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            let genome_seed = (self.rng_state >> 32) as u32;
+
+            self.rng_state = self.rng_state
+                .wrapping_mul(6364136223846793005u64)
+                .wrapping_add(1442695040888963407u64);
+            let rotation = ((self.rng_state >> 32) as f32 / u32::MAX as f32) * std::f32::consts::TAU;
+
+            let (genome_override_len, genome_override_offset, genome_override_packed) =
+                genome_pack_ascii_words(&template_genome);
+
+            let request = SpawnRequest {
+                seed,
+                genome_seed,
+                flags: 1, // genome override
+                _pad_seed: 0,
+                position: [world_x, world_y],
+                energy: 10.0,
+                rotation,
+                genome_override_len,
+                genome_override_offset,
+                genome_override_packed,
+                _pad_genome: [0u32; 2],
+            };
+
+            self.cpu_spawn_queue.push(request);
+            println!("✓ Spawned agent at ({:.1}, {:.1})", world_x, world_y);
+        }
+    }
+
     fn save_snapshot_to_file(&mut self, path: &Path) -> anyhow::Result<()> {
         // Copy grids and agents from GPU to readback buffers
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -12252,9 +12321,14 @@ fn main() {
                                 } else if button == winit::event::MouseButton::Left
                                     && button_state == ElementState::Pressed
                                 {
-                                    // Left click - select agent for debug panel
                                     if let Some(mouse_pos) = state.last_mouse_pos {
-                                        state.select_agent_at_screen_pos(mouse_pos);
+                                        if state.spawn_mode_active && state.spawn_template_genome.is_some() {
+                                            // Spawn mode - create agent at cursor position
+                                            state.spawn_agent_at_cursor(mouse_pos);
+                                        } else {
+                                            // Normal mode - select agent for debug panel
+                                            state.select_agent_at_screen_pos(mouse_pos);
+                                        }
                                     }
                                 }
                             }
@@ -12556,6 +12630,53 @@ fn main() {
                                                             }
                                                         }
                                                     });
+
+                                                    ui.separator();
+
+                                                    // Spawn mode controls
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        if ui.button("Load Template for Spawning...").clicked() {
+                                                            match load_agent_via_dialog() {
+                                                                Ok(genome) => {
+                                                                    state.spawn_template_genome = Some(genome);
+                                                                    println!("✓ Template loaded for spawn mode");
+                                                                }
+                                                                Err(err) => eprintln!("Load canceled or failed: {err:?}"),
+                                                            }
+                                                        }
+
+                                                        let has_template = state.spawn_template_genome.is_some();
+                                                        ui.add_enabled_ui(has_template, |ui| {
+                                                            let spawn_mode_text = if state.spawn_mode_active {
+                                                                "🖱 Spawn Mode ON"
+                                                            } else {
+                                                                "Enable Spawn Mode"
+                                                            };
+                                                            
+                                                            if ui.button(spawn_mode_text).clicked() {
+                                                                state.spawn_mode_active = !state.spawn_mode_active;
+                                                                if state.spawn_mode_active {
+                                                                    println!("✓ Spawn mode enabled - click to spawn agents");
+                                                                } else {
+                                                                    println!("✗ Spawn mode disabled");
+                                                                }
+                                                            }
+                                                        });
+
+                                                        if has_template && ui.button("Clear Template").clicked() {
+                                                            state.spawn_template_genome = None;
+                                                            state.spawn_mode_active = false;
+                                                            println!("✗ Template cleared");
+                                                        }
+                                                    });
+
+                                                    if state.spawn_mode_active {
+                                                        ui.colored_label(egui::Color32::from_rgb(100, 255, 100), 
+                                                            "🖱 Click anywhere to spawn agent");
+                                                    } else if state.spawn_template_genome.is_some() {
+                                                        ui.colored_label(egui::Color32::from_rgb(200, 200, 100), 
+                                                            "Template loaded - enable spawn mode to use");
+                                                    }
                                                 });
 
                                             ui.add_space(4.0);
