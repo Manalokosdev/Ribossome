@@ -8369,14 +8369,14 @@ impl GpuState {
 
         // When paused, we still clear `spawn_debug_counters` to keep other counters tidy,
         // but we intentionally skip compaction/merge. That means the alive counter (slot [2])
-        // is not rewritten and can read back as 0 even though agents still exist in the
-        // current agent buffer. If we apply that 0, rendering dispatches 0 workgroups and
-        // everything appears to disappear.
-        //
-        // Keep the last known nonzero count while paused; still accept nonzero values so
-        // paused spawn/snapshot-load paths (which do run compaction) update immediately.
-        if self.is_paused && new_count == 0 && self.agent_count > 0 {
-            return;
+        // is not rewritten and can read back stale/zero values even though agents still exist.
+        // Ignore ALL readbacks while paused to prevent the UI showing 0 agents.
+        // Exception: allow nonzero counts through so snapshot-load/spawns update immediately.
+        if self.is_paused {
+            if new_count == 0 {
+                return;
+            }
+            // Accept nonzero updates even when paused (e.g., from snapshot load or manual spawn).
         }
 
         // Avoid UI/sim flicker: a single 0 readback can happen if we sample the alive counter
