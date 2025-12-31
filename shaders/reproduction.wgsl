@@ -35,17 +35,84 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Check if pairing is complete and ready to spawn
     if (pairing_counter >= gene_length && gene_length > 0u) {
+        // Gene splitting logic: when using start/end codons, check if there's a second AUG after a stop codon
+        var split_reproduction = false;
+        var first_gene_end: u32 = 0xFFFFFFFFu;  // End of first gene (after stop codon)
+        var second_gene_start: u32 = 0xFFFFFFFFu;  // Start of second gene (second AUG)
+        
+        if (params.require_start_codon == 1u) {
+            // Find the first start codon
+            let first_start = genome_find_start_codon(agent_genome_packed, genome_offset, gene_length);
+            if (first_start != 0xFFFFFFFFu) {
+                // Scan from after the first AUG until we find a stop codon
+                var scan_pos = first_start + 3u;  // Skip the AUG itself
+                var found_stop = false;
+                
+                for (var i = 0u; i < MAX_BODY_PARTS && scan_pos + 2u < GENOME_LENGTH; i++) {
+                    if (genome_is_stop_codon_at(agent_genome_packed, scan_pos, genome_offset, gene_length)) {
+                        found_stop = true;
+                        first_gene_end = scan_pos;
+                        break;
+                    }
+                    // Continue scanning with nucleotide stride (3 bases per codon)
+                    scan_pos += 3u;
+                }
+                
+                // If we found a stop codon, continue scanning for a second AUG
+                if (found_stop) {
+                    scan_pos = first_gene_end + 3u;  // Start after the stop codon
+                    for (var j = scan_pos; j + 2u < GENOME_LENGTH; j += 1u) {
+                        let b0 = genome_get_base_ascii(agent_genome_packed, j, genome_offset, gene_length);
+                        let b1 = genome_get_base_ascii(agent_genome_packed, j + 1u, genome_offset, gene_length);
+                        let b2 = genome_get_base_ascii(agent_genome_packed, j + 2u, genome_offset, gene_length);
+                        if (b0 == 65u && b1 == 85u && b2 == 71u) {  // AUG
+                            second_gene_start = j;
+                            split_reproduction = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Calculate how many offspring to create (1 or 2)
+        let num_offspring = select(1u, 2u, split_reproduction);
+        
         // Attempt reproduction: create complementary genome offspring with mutations
         let inherited_energy = agent_energy_cur * 0.5;
         if (inherited_energy > 0.0) {
-            // Atomically reserve a spawn slot
+            // Atomically reserve spawn slots (1 or 2)
             // spawn_debug_counters[0] is reset to 0 at frame start and tracks total spawns
-            let spawn_index = atomicAdd(&spawn_debug_counters[0], 1u);
+            let spawn_index = atomicAdd(&spawn_debug_counters[0], num_offspring);
+
+            // Create each offspring (loop 1 or 2 times)
+            for (var offspring_idx = 0u; offspring_idx < num_offspring; offspring_idx++) {
+                let current_spawn_index = spawn_index + offspring_idx;
+                
+                // Only proceed if we have room in the spawn request buffer
+                if (current_spawn_index >= MAX_SPAWN_REQUESTS) {
+                    break;
+                }
+                
+                // Determine genome range for this offspring
+                var offspring_gene_offset = genome_offset;
+                var offspring_gene_length = gene_length;
+                
+                if (split_reproduction) {
+                    if (offspring_idx == 0u) {
+                        // First offspring: from original start to stop codon
+                        offspring_gene_length = first_gene_end - genome_offset;
+                    } else {
+                        // Second offspring: from second AUG to end of gene
+                        offspring_gene_offset = second_gene_start;
+                        offspring_gene_length = (genome_offset + gene_length) - second_gene_start;
+                    }
+                }
 
             // Only proceed if we have room in the spawn request buffer
             if (spawn_index < MAX_SPAWN_REQUESTS) {
-                // Generate hash for offspring randomization
-                let offspring_hash = (hash3 ^ (spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu)) * 1664525u + 1013904223u;
+                // Generate hash for offspring randomization (include offspring_idx for uniqueness)
+                let offspring_hash = (hash3 ^ (current_spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu) ^ (offspring_idx * 0x7f4a7c13u)) * 1664525u + 1013904223u;
 
                 // Create brand new offspring agent (don't copy parent)
                 var offspring: Agent;
@@ -90,22 +157,22 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Child genome: materialize to a temporary ASCII buffer
                 var offspring_ascii: array<u32, GENOME_ASCII_WORDS>;
                 if (params.asexual_reproduction == 1u) {
-                    // Asexual reproduction: direct copy of bases.
+                    // Asexual reproduction: direct copy of bases from the split range
                     for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
                         let bi0 = w * 4u + 0u;
                         let bi1 = w * 4u + 1u;
                         let bi2 = w * 4u + 2u;
                         let bi3 = w * 4u + 3u;
-                        let b0 = genome_get_base_ascii(agent_genome_packed, bi0, genome_offset, gene_length) & 0xFFu;
-                        let b1 = genome_get_base_ascii(agent_genome_packed, bi1, genome_offset, gene_length) & 0xFFu;
-                        let b2 = genome_get_base_ascii(agent_genome_packed, bi2, genome_offset, gene_length) & 0xFFu;
-                        let b3 = genome_get_base_ascii(agent_genome_packed, bi3, genome_offset, gene_length) & 0xFFu;
+                        let b0 = genome_get_base_ascii(agent_genome_packed, bi0, offspring_gene_offset, offspring_gene_length) & 0xFFu;
+                        let b1 = genome_get_base_ascii(agent_genome_packed, bi1, offspring_gene_offset, offspring_gene_length) & 0xFFu;
+                        let b2 = genome_get_base_ascii(agent_genome_packed, bi2, offspring_gene_offset, offspring_gene_length) & 0xFFu;
+                        let b3 = genome_get_base_ascii(agent_genome_packed, bi3, offspring_gene_offset, offspring_gene_length) & 0xFFu;
                         offspring_ascii[w] = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
                     }
                 } else {
-                    // Sexual reproduction: reverse complement of parent
+                    // Sexual reproduction: reverse complement of parent (from split range)
                     for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
-                        offspring_ascii[w] = genome_revcomp_ascii_word(agent_genome_packed, genome_offset, gene_length, w);
+                        offspring_ascii[w] = genome_revcomp_ascii_word(agent_genome_packed, offspring_gene_offset, offspring_gene_length, w);
                     }
                 }
 
@@ -310,9 +377,11 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
 
-                // Offspring receives 50% of parent's current energy.
-                offspring.energy = inherited_energy;
-                agent_energy_cur -= inherited_energy;
+                // Offspring receives energy split evenly among all offspring
+                // If 1 offspring: gets 50% of parent energy
+                // If 2 offspring: each gets 25% of parent energy (50% total)
+                let energy_per_offspring = inherited_energy / f32(num_offspring);
+                offspring.energy = energy_per_offspring;
 
                 // Initialize body array to zeros
                 for (var bi = 0u; bi < MAX_BODY_PARTS; bi++) {
@@ -325,12 +394,15 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     offspring.body[bi]._pad = vec2<f32>(0.0);
                 }
 
-                new_agents[spawn_index] = offspring;
+                new_agents[current_spawn_index] = offspring;
+            } // End offspring loop
+            
+            // Parent loses energy for all offspring created
+            agent_energy_cur -= inherited_energy;
 
-                // NOTE: Do NOT update parent here! Reproduction writes to a different buffer
-                // than process_agents, so these updates would be lost.
-                // Instead, process_agents detects spawn completion and handles energy/counter reset.
-            }
+            // NOTE: Do NOT update parent here! Reproduction writes to a different buffer
+            // than process_agents, so these updates would be lost.
+            // Instead, process_agents detects spawn completion and handles energy/counter reset.
         }
     }
 }
