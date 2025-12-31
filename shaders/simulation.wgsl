@@ -1503,6 +1503,32 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
+        // INTERNAL SIGNAL EMITTERS (repurposed displacers)
+        // Emits a constant internal signal scaled by enabler proximity (amplification).
+        // 25 (former Displacer A): +alpha for modifiers M/N, -alpha for P/Q/R
+        // 27 (former Displacer B): +beta for modifier S, -beta for T/V
+        if (amino_props.is_displacer) {
+            let amp_emit = amplification_per_part[i];
+            if (amp_emit > 0.0 && agent_energy >= amino_props.energy_consumption) {
+                let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+                let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
+
+                let emit_base = amp_emit * 0.6;
+
+                if (base_type == 25u) {
+                    let emit = select(emit_base, -emit_base, modifier_index >= 12u);
+                    new_alpha += emit;
+                } else if (base_type == 27u) {
+                    let emit = select(emit_base, -emit_base, modifier_index >= 16u);
+                    new_beta += emit;
+                }
+
+                // Track emitter activity so displacer energy cost remains meaningful.
+                let base_strength = amino_props.thrust_force * 3.0 * 4.0;
+                propeller_thrust_magnitude[i] = base_strength * amp_emit;
+            }
+        }
+
         // Apply signal decay (requested): global decay for all parts (amino acids + organs).
         new_alpha *= 0.997;
         new_beta *= 0.997;
@@ -1904,164 +1930,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
 
-        // Displacer force: symmetric fluid displacement (net agent thrust ~0)
-        // - Displacer A (base_type 25): aligned with propeller direction (perpendicular to segment axis)
-        // - Displacer B (base_type 27): aligned with segment axis (90° relative)
-        if (amino_props.is_displacer && agent_energy_cur >= amino_props.energy_consumption) {
-            var segment_dir = vec2<f32>(0.0);
-            if (i > 0u) {
-                let prev = agents_out[agent_id].body[i-1u].pos;
-                segment_dir = part.pos - prev;
-            } else if (agents_out[agent_id].body_count > 1u) {
-                let next = agents_out[agent_id].body[1u].pos;
-                segment_dir = next - part.pos;
-            } else {
-                segment_dir = vec2<f32>(1.0, 0.0);
-            }
-            let seg_len = length(segment_dir);
-            let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
-
-            // Choose displacement direction in local space
-            var disp_local = vec2<f32>(-axis_local.y, axis_local.x) * chirality_flip_physics;
-            if (base_type == 27u) {
-                disp_local = axis_local * chirality_flip_physics;
-            }
-
-            let disp_dir_world = normalize(apply_agent_rotation(disp_local, agent_rot));
-            let dir_len = length(disp_dir_world);
-            if (dir_len > 1e-5) {
-                let dir = disp_dir_world / dir_len;
-
-                // Displacer "chem sweep": move a fraction of local chem (alpha/beta)
-                // along the bipolar axis.
-                    // This provides a *direct* displacer effect even when fluids are disabled.
-                {
-                    let clamped_pos = clamp_position(world_pos);
-                    let grid_scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-                    var gx = i32(clamped_pos.x / grid_scale);
-                    var gy = i32(clamped_pos.y / grid_scale);
-                    gx = clamp(gx, 0, i32(GRID_SIZE) - 1);
-                    gy = clamp(gy, 0, i32(GRID_SIZE) - 1);
-
-                    let center_idx = u32(gy) * GRID_SIZE + u32(gx);
-                    var center = chem_grid[center_idx];
-                    var center_gamma = max(read_gamma_height(center_idx), 0.0);
-
-                    let base_seed = hash(agent_id * 747796405u + i * 2891336453u + params.random_seed * 196613u);
-                    // Throw distance in cells for the direct (fluidless) displacer sweep.
-                    // Increased range to make displacers move material farther.
-                    let dist_plus = 1 + (hash(base_seed ^ 0xA3C59ACBu) % 6u);  // 1..6
-                    let dist_minus = 1 + (hash(base_seed ^ 0x1B56C4E9u) % 6u); // 1..6
-
-                    // When fluids are enabled, keep the previous strong sweep (25% total).
-                    // When fluids are disabled, use a smaller sweep that still depends on
-                    // enabler amplification so it doesn't become a free always-on teleporter.
-                    let wash = max(params.prop_wash_strength, 0.0);
-                    let transfer_frac_each = select(
-                        0.04 * (amplification * amplification),
-                        0.125,
-                        wash > 0.0
-                    );
-                    var moved_any_gamma = false;
-
-                    // +dir transfer
-                    {
-                        let target_world = clamped_pos + dir * (f32(dist_plus) * grid_scale);
-                        let target_gx = clamp(i32(target_world.x / grid_scale), 0, i32(GRID_SIZE) - 1);
-                        let target_gy = clamp(i32(target_world.y / grid_scale), 0, i32(GRID_SIZE) - 1);
-                        let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
-
-                        if (target_idx != center_idx) {
-                            var dst = chem_grid[target_idx];
-                            var dst_gamma = max(read_gamma_height(target_idx), 0.0);
-
-                            let a_move = min(center.x * transfer_frac_each, max(0.0, 1.0 - dst.x));
-                            let b_move = min(center.y * transfer_frac_each, max(0.0, 1.0 - dst.y));
-                            let g_move = center_gamma * transfer_frac_each;
-
-                            if (a_move > 0.0) {
-                                center.x = clamp(center.x - a_move, 0.0, 1.0);
-                                dst.x = clamp(dst.x + a_move, 0.0, 1.0);
-                            }
-                            if (b_move > 0.0) {
-                                center.y = clamp(center.y - b_move, 0.0, 1.0);
-                                dst.y = clamp(dst.y + b_move, 0.0, 1.0);
-                            }
-
-                            if (g_move > 0.0) {
-                                center_gamma = max(center_gamma - g_move, 0.0);
-                                dst_gamma = dst_gamma + g_move;
-                                write_gamma_height(target_idx, dst_gamma);
-                                moved_any_gamma = true;
-                            }
-
-                            chem_grid[target_idx] = dst;
-                        }
-                    }
-
-                    // -dir transfer
-                    {
-                        let target_world = clamped_pos - dir * (f32(dist_minus) * grid_scale);
-                        let target_gx = clamp(i32(target_world.x / grid_scale), 0, i32(GRID_SIZE) - 1);
-                        let target_gy = clamp(i32(target_world.y / grid_scale), 0, i32(GRID_SIZE) - 1);
-                        let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
-
-                        if (target_idx != center_idx) {
-                            var dst = chem_grid[target_idx];
-                            var dst_gamma = max(read_gamma_height(target_idx), 0.0);
-
-                            let a_move = min(center.x * transfer_frac_each, max(0.0, 1.0 - dst.x));
-                            let b_move = min(center.y * transfer_frac_each, max(0.0, 1.0 - dst.y));
-                            let g_move = center_gamma * transfer_frac_each;
-
-                            if (a_move > 0.0) {
-                                center.x = clamp(center.x - a_move, 0.0, 1.0);
-                                dst.x = clamp(dst.x + a_move, 0.0, 1.0);
-                            }
-                            if (b_move > 0.0) {
-                                center.y = clamp(center.y - b_move, 0.0, 1.0);
-                                dst.y = clamp(dst.y + b_move, 0.0, 1.0);
-                            }
-
-                            if (g_move > 0.0) {
-                                center_gamma = max(center_gamma - g_move, 0.0);
-                                dst_gamma = dst_gamma + g_move;
-                                write_gamma_height(target_idx, dst_gamma);
-                                moved_any_gamma = true;
-                            }
-
-                            chem_grid[target_idx] = dst;
-                        }
-                    }
-
-                    chem_grid[center_idx] = center;
-
-                    if (moved_any_gamma) {
-                        write_gamma_height(center_idx, center_gamma);
-                    }
-                }
-
-                if (PROPELLERS_ENABLED) {
-                    let quadratic_amp = amplification * amplification;
-                    let displacer_strength = amino_props.thrust_force * 3.0 * quadratic_amp * 4.0;
-                    // Reuse propeller_thrust_magnitude storage for displacer activity (mutually exclusive).
-                    propeller_thrust_magnitude[i] = displacer_strength;
-
-                    // Offset along the displacement axis so the force pair does not cancel trivially.
-                    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
-                    let offset_world = cell_to_world * 2.0;
-                    let p_plus = world_pos + dir * offset_world;
-                    let p_minus = world_pos - dir * offset_world;
-
-                    let f = dir * displacer_strength;
-                    let force_scale = FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength_fluid, 0.0);
-
-                    // Inject +f at +offset and -f at -offset -> net force = 0.
-                    add_fluid_force_splat(p_plus, (-f * force_scale));
-                    add_fluid_force_splat(p_minus, (f * force_scale));
-                }
-            }
-        }
+        // Displacer slots are repurposed as internal signal emitters.
+        // (No external chem sweep / fluid force injection here.)
 
     }
 

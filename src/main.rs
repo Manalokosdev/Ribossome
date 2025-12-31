@@ -34,11 +34,11 @@ fn pack_f32_uniform(values: &[f32]) -> Vec<u8> {
 }
 
 // World size (must match shader SIM_SIZE).
-const SIM_SIZE: f32 = 15360.0;
+const SIM_SIZE: f32 = 61440.0;
 // Fluid simulation resolution (N x N). Keep this in sync with GPU buffer allocations and shader constants.
 const FLUID_GRID_SIZE: u32 = 512;
 // Environment grid resolution (alpha/beta/gamma). Keep this in sync with shaders/shared.wgsl ENV_GRID_SIZE.
-const GRID_DIM: usize = 512;
+const GRID_DIM: usize = 2048;
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
 // Spatial hash grid resolution. Keep this in sync with shaders/shared.wgsl SPATIAL_GRID_SIZE.
@@ -835,8 +835,10 @@ const TS_EGUI_ENC_END: u32 = 57;
 const TS_NOFLUID_AFTER_DYE_DIFFUSE: u32 = 58;
 const TS_NOFLUID_AFTER_DYE_COPYBACK: u32 = 59;
 const TS_NOFLUID_AFTER_TRAIL_COMMIT: u32 = 60;
+// Microswim timing (separates agent processing vs microswim cost).
+const TS_SIM_AFTER_MICROSWIM: u32 = 61;
 
-const GPU_TS_COUNT: u32 = 61;
+const GPU_TS_COUNT: u32 = 62;
 
 const FRAME_PROFILER_READBACK_SLOTS: usize = 2;
 
@@ -977,6 +979,9 @@ struct FrameProfiler {
     last_cpu_update_ms: f64,
     last_cpu_render_ms: f64,
     last_cpu_egui_ms: f64,
+    dispatch_timing_enabled: bool,
+    dispatch_timing_detail: bool,
+    dispatch_timings: DispatchTimings,
     last_inspector_requested: bool,
 
     bench: Option<BenchCollector>,
@@ -986,6 +991,46 @@ struct FrameProfiler {
     // Optional: auto-exit after printing N GPU timestamp captures.
     profile_max_captures: Option<u64>,
     profile_captures_done: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DispatchTimings {
+    sim_pre_ms: Option<f64>,
+    sim_pre_diffuse_ms: Option<f64>,
+    sim_pre_diffuse_commit_ms: Option<f64>,
+    sim_pre_trails_ms: Option<f64>,
+    sim_pre_slope_ms: Option<f64>,
+    sim_pre_draw_ms: Option<f64>,
+    sim_pre_repro_ms: Option<f64>,
+    sim_main_ms: Option<f64>,
+    microswim_ms: Option<f64>,
+    drain_ms: Option<f64>,
+    fluid_ms: Option<f64>,
+    post_ms: Option<f64>,
+    composite_copy_ms: Option<f64>,
+    update_tail_ms: Option<f64>,
+    render_ms: Option<f64>,
+    egui_ms: Option<f64>,
+}
+
+#[derive(Clone, Copy)]
+enum DispatchSegment {
+    SimPre,
+    SimPreDiffuse,
+    SimPreDiffuseCommit,
+    SimPreTrails,
+    SimPreSlope,
+    SimPreDraw,
+    SimPreRepro,
+    SimMain,
+    Microswim,
+    Drain,
+    Fluid,
+    Post,
+    CompositeCopy,
+    UpdateTail,
+    Render,
+    Egui,
 }
 
 impl FrameProfiler {
@@ -1037,6 +1082,18 @@ impl FrameProfiler {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|&n| n > 0);
 
+        // CPU-side submit+wait timing for command-buffer segments.
+        // This does NOT use timestamp queries, so it should be stable on drivers
+        // that crash with TIMESTAMP_QUERY.
+        // Enable with: ALSIM_PROFILE_DISPATCH_TIMING=1
+        let dispatch_timing_enabled = std::env::var("ALSIM_PROFILE_DISPATCH_TIMING")
+            .map(|value| value != "0")
+            .unwrap_or(false);
+
+        let dispatch_timing_detail = std::env::var("ALSIM_PROFILE_DISPATCH_TIMING_DETAIL")
+            .map(|value| value != "0")
+            .unwrap_or(false);
+
         // We use both:
         // - CommandEncoder::write_timestamp (requires TIMESTAMP_QUERY_INSIDE_ENCODERS)
         // - (Compute/Render)Pass::write_timestamp (requires TIMESTAMP_QUERY_INSIDE_PASSES)
@@ -1051,6 +1108,24 @@ impl FrameProfiler {
         let gpu_active = enabled
             && gpu_supported
             && (profile_enabled || (bench_enabled && bench_gpu));
+
+        if enabled {
+            if gpu_active {
+                eprintln!(
+                    "[perf] Profiling enabled: GPU timestamps ACTIVE (ALSIM_GPU_TIMESTAMPS=1). \
+This can cause device-loss on some drivers; unset Env:ALSIM_GPU_TIMESTAMPS to use CPU-only profiling."
+                );
+            } else if profile_enabled {
+                if allow_gpu_timestamps && !gpu_supported {
+                    eprintln!(
+                        "[perf] Profiling enabled: CPU-only. Note: ALSIM_GPU_TIMESTAMPS was set, \
+but required timestamp-query features are unavailable on this device."
+                    );
+                } else {
+                    eprintln!("[perf] Profiling enabled: CPU-only.");
+                }
+            }
+        }
 
         let timestamp_period_ns = queue.get_timestamp_period() as f64;
         let now = std::time::Instant::now();
@@ -1112,6 +1187,9 @@ impl FrameProfiler {
             last_cpu_update_ms: 0.0,
             last_cpu_render_ms: 0.0,
             last_cpu_egui_ms: 0.0,
+            dispatch_timing_enabled,
+            dispatch_timing_detail,
+            dispatch_timings: DispatchTimings::default(),
             last_inspector_requested: false,
 
             bench,
@@ -1121,6 +1199,89 @@ impl FrameProfiler {
             profile_max_captures,
             profile_captures_done: 0,
         }
+    }
+
+    fn should_time_dispatches(&self) -> bool {
+        self.enabled && self.dispatch_timing_enabled && self.capture_this_frame
+    }
+
+    fn reset_dispatch_timings_if_needed(&mut self) {
+        if self.should_time_dispatches() {
+            self.dispatch_timings = DispatchTimings::default();
+        }
+    }
+
+    fn record_dispatch_ms(&mut self, segment: DispatchSegment, ms: f64) {
+        let ms = ms.max(0.0);
+        match segment {
+            DispatchSegment::SimPre => self.dispatch_timings.sim_pre_ms = Some(ms),
+            DispatchSegment::SimPreDiffuse => self.dispatch_timings.sim_pre_diffuse_ms = Some(ms),
+            DispatchSegment::SimPreDiffuseCommit => {
+                self.dispatch_timings.sim_pre_diffuse_commit_ms = Some(ms)
+            }
+            DispatchSegment::SimPreTrails => self.dispatch_timings.sim_pre_trails_ms = Some(ms),
+            DispatchSegment::SimPreSlope => self.dispatch_timings.sim_pre_slope_ms = Some(ms),
+            DispatchSegment::SimPreDraw => self.dispatch_timings.sim_pre_draw_ms = Some(ms),
+            DispatchSegment::SimPreRepro => self.dispatch_timings.sim_pre_repro_ms = Some(ms),
+            DispatchSegment::SimMain => self.dispatch_timings.sim_main_ms = Some(ms),
+            DispatchSegment::Microswim => self.dispatch_timings.microswim_ms = Some(ms),
+            DispatchSegment::Drain => self.dispatch_timings.drain_ms = Some(ms),
+            DispatchSegment::Fluid => self.dispatch_timings.fluid_ms = Some(ms),
+            DispatchSegment::Post => self.dispatch_timings.post_ms = Some(ms),
+            DispatchSegment::CompositeCopy => self.dispatch_timings.composite_copy_ms = Some(ms),
+            DispatchSegment::UpdateTail => self.dispatch_timings.update_tail_ms = Some(ms),
+            DispatchSegment::Render => self.dispatch_timings.render_ms = Some(ms),
+            DispatchSegment::Egui => self.dispatch_timings.egui_ms = Some(ms),
+        }
+    }
+
+    fn sim_pre_effective_ms(&self) -> Option<f64> {
+        if self.dispatch_timings.sim_pre_ms.is_some() {
+            return self.dispatch_timings.sim_pre_ms;
+        }
+        let parts = [
+            self.dispatch_timings.sim_pre_diffuse_ms,
+            self.dispatch_timings.sim_pre_diffuse_commit_ms,
+            self.dispatch_timings.sim_pre_trails_ms,
+            self.dispatch_timings.sim_pre_slope_ms,
+            self.dispatch_timings.sim_pre_draw_ms,
+            self.dispatch_timings.sim_pre_repro_ms,
+        ];
+        if parts.iter().all(|p| p.is_none()) {
+            return None;
+        }
+        Some(parts.iter().map(|p| p.unwrap_or(0.0)).sum())
+    }
+
+    fn submit_cmd_buffer(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, cmd: wgpu::CommandBuffer, segment: DispatchSegment) {
+        if self.should_time_dispatches() {
+            let start = std::time::Instant::now();
+            queue.submit(Some(cmd));
+            device.poll(wgpu::Maintain::Wait);
+            let ms = start.elapsed().as_secs_f64() * 1000.0;
+            self.record_dispatch_ms(segment, ms);
+        } else {
+            queue.submit(Some(cmd));
+        }
+    }
+
+    fn maybe_submit_encoder_segment(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        segment: DispatchSegment,
+        next_label: &'static str,
+    ) {
+        if !self.should_time_dispatches() {
+            return;
+        }
+
+        let new_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some(next_label),
+        });
+        let old_encoder = std::mem::replace(encoder, new_encoder);
+        self.submit_cmd_buffer(device, queue, old_encoder.finish(), segment);
     }
 
     fn bench_exit_requested(&self) -> bool {
@@ -1137,6 +1298,7 @@ impl FrameProfiler {
             return;
         }
         self.capture_this_frame = std::time::Instant::now() >= self.next_sample_time;
+        self.reset_dispatch_timings_if_needed();
     }
 
     fn write_ts_encoder(&self, encoder: &mut wgpu::CommandEncoder, index: u32) {
@@ -1225,6 +1387,37 @@ impl FrameProfiler {
                 self.last_cpu_render_ms,
                 self.last_cpu_egui_ms
             );
+
+            if self.dispatch_timing_enabled {
+                let fmt = |v: Option<f64>| -> String {
+                    v.map(|ms| format!("{ms:7.2}")).unwrap_or_else(|| "   -   ".to_string())
+                };
+                println!(
+                    "[perf] submit_wait(ms): simPre={} sim={} micro={} drain={} fluid={} post={} comp={} tail={} render={} egui={}",
+                    fmt(self.sim_pre_effective_ms()),
+                    fmt(self.dispatch_timings.sim_main_ms),
+                    fmt(self.dispatch_timings.microswim_ms),
+                    fmt(self.dispatch_timings.drain_ms),
+                    fmt(self.dispatch_timings.fluid_ms),
+                    fmt(self.dispatch_timings.post_ms),
+                    fmt(self.dispatch_timings.composite_copy_ms),
+                    fmt(self.dispatch_timings.update_tail_ms),
+                    fmt(self.dispatch_timings.render_ms),
+                    fmt(self.dispatch_timings.egui_ms),
+                );
+
+                if self.dispatch_timing_detail {
+                    println!(
+                        "[perf] simPre_parts(ms): diffuse={} commit={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
+                        fmt(self.dispatch_timings.sim_pre_diffuse_ms),
+                        fmt(self.dispatch_timings.sim_pre_diffuse_commit_ms),
+                        fmt(self.dispatch_timings.sim_pre_trails_ms),
+                        fmt(self.dispatch_timings.sim_pre_slope_ms),
+                        fmt(self.dispatch_timings.sim_pre_draw_ms),
+                        fmt(self.dispatch_timings.sim_pre_repro_ms),
+                    );
+                }
+            }
             self.capture_this_frame = false;
             self.next_sample_time = std::time::Instant::now() + self.sample_interval;
             return;
@@ -1344,11 +1537,14 @@ impl FrameProfiler {
         let gpu_sim_clear_visual = dt_ms(TS_SIM_AFTER_SLOPE, TS_SIM_AFTER_CLEAR_VISUAL);
         let gpu_sim_motion_blur = dt_ms(TS_SIM_AFTER_CLEAR_VISUAL, TS_SIM_AFTER_MOTION_BLUR);
         let gpu_sim_clear_agent_grid = dt_ms(TS_SIM_AFTER_MOTION_BLUR, TS_SIM_AFTER_CLEAR_AGENT_GRID);
-        let gpu_sim_clear_spatial = dt_ms(TS_SIM_AFTER_CLEAR_AGENT_GRID, TS_SIM_AFTER_CLEAR_SPATIAL);
+        // NOTE: Spatial grid clear was removed (epoch-stamped grid). This segment now includes
+        // the reproduction compute work (and any other pre-sim work in Pass 1).
+        let gpu_sim_repro_and_pre = dt_ms(TS_SIM_AFTER_CLEAR_AGENT_GRID, TS_SIM_AFTER_CLEAR_SPATIAL);
         let gpu_sim_populate_spatial = dt_ms(TS_SIM_AFTER_CLEAR_SPATIAL, TS_SIM_AFTER_POPULATE_SPATIAL);
         let gpu_sim_clear_force_vectors = dt_ms(TS_SIM_AFTER_POPULATE_SPATIAL, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
         let gpu_sim_process = dt_ms(TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS, TS_SIM_AFTER_PROCESS_AGENTS);
-        let gpu_sim_drain = dt_ms(TS_SIM_AFTER_PROCESS_AGENTS, TS_SIM_AFTER_DRAIN_ENERGY);
+        let gpu_sim_microswim = dt_ms(TS_SIM_AFTER_PROCESS_AGENTS, TS_SIM_AFTER_MICROSWIM);
+        let gpu_sim_drain = dt_ms(TS_SIM_AFTER_MICROSWIM, TS_SIM_AFTER_DRAIN_ENERGY);
 
         let gpu_fluid = dt_ms(TS_FLUID_PASS_START, TS_UPDATE_AFTER_FLUID);
         let gpu_fluid_fumarole_force = dt_ms(TS_FLUID_PASS_START, TS_FLUID_AFTER_FUMAROLE_FORCE);
@@ -1428,7 +1624,7 @@ impl FrameProfiler {
         );
 
         println!(
-            "[perf] sim-kernels(ms): diffuse={:>6.2} commit={:>6.2} trails={:>6.2} slope={:>6.2} clearVis={:>6.2} blur={:>6.2} clrGrid={:>6.2} clrSpat={:>6.2} popSpat={:>6.2} clrForce={:>6.2} process={:>6.2} drain={:>6.2}",
+            "[perf] sim-kernels(ms): diffuse={:>6.2} commit={:>6.2} trails={:>6.2} slope={:>6.2} clearVis={:>6.2} blur={:>6.2} clrGrid={:>6.2} reproPre={:>6.2} popSpat={:>6.2} clrForce={:>6.2} process={:>6.2} microswim={:>6.2} drain={:>6.2}",
             gpu_sim_diffuse.unwrap_or(-1.0),
             gpu_sim_diffuse_commit.unwrap_or(-1.0),
             gpu_sim_trails.unwrap_or(-1.0),
@@ -1436,10 +1632,11 @@ impl FrameProfiler {
             gpu_sim_clear_visual.unwrap_or(-1.0),
             gpu_sim_motion_blur.unwrap_or(-1.0),
             gpu_sim_clear_agent_grid.unwrap_or(-1.0),
-            gpu_sim_clear_spatial.unwrap_or(-1.0),
+            gpu_sim_repro_and_pre.unwrap_or(-1.0),
             gpu_sim_populate_spatial.unwrap_or(-1.0),
             gpu_sim_clear_force_vectors.unwrap_or(-1.0),
             gpu_sim_process.unwrap_or(-1.0),
+            gpu_sim_microswim.unwrap_or(-1.0),
             gpu_sim_drain.unwrap_or(-1.0),
         );
 
@@ -1866,9 +2063,9 @@ fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
         22 => [0.0, 1.0, 0.0],   // alpha sensor
         23 => [1.0, 0.0, 0.0],   // beta sensor
         24 => [0.6, 0.0, 0.8],   // energy sensor
-        25 => [0.0, 0.39, 1.0],  // displacer A
+        25 => [0.0, 0.39, 1.0],  // alpha emitter (repurposed displacer)
         26 => [1.0, 1.0, 1.0],   // enabler
-        27 => [0.0, 0.39, 1.0],  // displacer B
+        27 => [0.0, 0.39, 1.0],  // beta emitter (repurposed displacer)
         28 => [1.0, 0.5, 0.0],   // storage
         29 => [1.0, 0.4, 0.7],   // poison resistance
         30 => [1.0, 0.0, 1.0],   // chiral flipper
@@ -1921,9 +2118,9 @@ fn part_base_name(base_type: u32) -> &'static str {
         22 => "Alpha Sensor",
         23 => "Beta Sensor",
         24 => "Energy Sensor",
-        25 => "Displacer A",
+        25 => "Alpha Emitter",
         26 => "Enabler",
-        27 => "Displacer B",
+        27 => "Beta Emitter",
         28 => "Storage",
         29 => "Poison Resistance",
         30 => "Chiral Flipper",
@@ -8170,6 +8367,18 @@ impl GpuState {
             return;
         }
 
+        // When paused, we still clear `spawn_debug_counters` to keep other counters tidy,
+        // but we intentionally skip compaction/merge. That means the alive counter (slot [2])
+        // is not rewritten and can read back as 0 even though agents still exist in the
+        // current agent buffer. If we apply that 0, rendering dispatches 0 workgroups and
+        // everything appears to disappear.
+        //
+        // Keep the last known nonzero count while paused; still accept nonzero values so
+        // paused spawn/snapshot-load paths (which do run compaction) update immediately.
+        if self.is_paused && new_count == 0 && self.agent_count > 0 {
+            return;
+        }
+
         // Avoid UI/sim flicker: a single 0 readback can happen if we sample the alive counter
         // right after it was cleared (e.g. on a step where sim kernels were gated). Require two
         // consecutive 0s before accepting a transition from nonzero -> 0.
@@ -8945,6 +9154,9 @@ impl GpuState {
                 label: Some("Update Encoder"),
             });
 
+        let time_dispatches = self.frame_profiler.should_time_dispatches();
+        let time_dispatches_detail = time_dispatches && self.frame_profiler.dispatch_timing_detail;
+
         self.frame_profiler.write_ts_encoder(&mut encoder, TS_UPDATE_START);
 
         // Clear counters (spawn_counter is reset in-shader at end of previous frame)
@@ -8964,135 +9176,329 @@ impl GpuState {
         // Pass 1: environment prep + optional reproduction.
         // We intentionally end this pass before running the main agent simulation so that any
         // reproduction writes to the agent buffer are guaranteed visible.
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Compute Pass"),
-                timestamp_writes: None,
-            });
+        if !time_dispatches_detail {
+            // Normal (or coarse-timed) path: keep as a single pass.
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Pass"),
+                    timestamp_writes: None,
+                });
 
-            self.frame_profiler
-                .write_ts_compute_pass(&mut cpass, TS_SIM_PASS_START);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_PASS_START);
 
-            if run_diffusion {
-                cpass.set_pipeline(&self.diffuse_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
-                let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
-                cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                if run_diffusion {
+                    cpass.set_pipeline(&self.diffuse_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
+                    let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
+
+                    // Commit staged alpha/beta back into the environment grids.
+                    cpass.set_pipeline(&self.diffuse_commit_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
+                }
+
+                if !run_diffusion {
+                    // Keep timestamp progression stable even when skipping.
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
+                }
+
+                // Prepare trails every simulation frame (copy/decay + optional blur into trail_grid_inject).
+                // The actual advection runs in the fluid pass.
+                if should_run_simulation && !self.perf_skip_trail_prep {
+                    let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
+                    let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
+                    cpass.set_pipeline(&self.diffuse_trails_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_TRAILS_PREP);
+
+                if run_slope {
+                    cpass.set_pipeline(&self.gamma_slope_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    let groups_x = (GRID_DIM_U32 + SLOPE_WG_SIZE_X - 1) / SLOPE_WG_SIZE_X;
+                    let groups_y = (GRID_DIM_U32 + SLOPE_WG_SIZE_Y - 1) / SLOPE_WG_SIZE_Y;
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_SLOPE);
+
+                // Clear visual grid only when drawing this step
+                if should_draw {
+                    cpass.set_pipeline(&self.clear_visual_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    let width_workgroups =
+                        (self.surface_config.width + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
+                    let height_workgroups =
+                        (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
+                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
+
+                    // Apply motion blur if following an agent
+                    cpass.set_pipeline(&self.motion_blur_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
+
+                    // Clear agent grid for agent rendering
+                    cpass.set_pipeline(&self.clear_agent_grid_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
+                }
+
+                if !should_draw {
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
+                }
+
+                // Run simulation compute passes, but skip everything when paused or no living agents
+                if should_run_simulation {
+                    // REPRODUCTION FIRST: Update pairing_counter and energy in agents_in
+                    // Uses reproduction bind groups where binding 1 = agents_in (read-write)
+                    let reproduction_bg = if self.ping_pong {
+                        &self.reproduction_bind_group_b
+                    } else {
+                        &self.reproduction_bind_group_a
+                    };
+                    cpass.set_pipeline(&self.reproduction_pipeline);
+                    cpass.set_bind_group(0, reproduction_bg, &[]);
+                    cpass.dispatch_workgroups(
+                        ((self.agent_buffer_capacity as u32) + 255) / 256,
+                        1,
+                        1,
+                    );
+
+                    // Spatial grid clear disabled: we use an epoch-stamped spatial grid.
+                    // populate_agent_spatial_grid writes the epoch stamp for touched cells;
+                    // all readers ignore cells whose stamp != current epoch.
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
+                }
+
+                if !should_run_simulation {
+                    // Keep timestamp progression stable when paused.
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
+                }
+            }
+
+            // Optional per-segment submit+wait timing (CPU wall time).
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::SimPre,
+                "Update Encoder (Timed Segment)",
+            );
+        } else {
+            // Detailed timing path: split Pass 1 into sub-passes and submit+wait after each.
+            // This is only active on sampled frames.
+
+            // (a) Diffuse
+            let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
+            let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Pass (SimPre Diffuse)"),
+                    timestamp_writes: None,
+                });
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_PASS_START);
+
+                if run_diffusion {
+                    cpass.set_pipeline(&self.diffuse_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
+            }
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::SimPreDiffuse,
+                "Update Encoder (Timed Segment)",
+            );
 
-                // Commit staged alpha/beta back into the environment grids.
-                cpass.set_pipeline(&self.diffuse_commit_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(groups_x, groups_y, 1);
+            // (a2) Commit
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Pass (SimPre Diffuse Commit)"),
+                    timestamp_writes: None,
+                });
+
+                if run_diffusion {
+                    cpass.set_pipeline(&self.diffuse_commit_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
             }
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::SimPreDiffuseCommit,
+                "Update Encoder (Timed Segment)",
+            );
 
-            if !run_diffusion {
-                // Keep timestamp progression stable even when skipping.
+            // (b) Trails prep
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Pass (SimPre Trails)"),
+                    timestamp_writes: None,
+                });
+                if should_run_simulation && !self.perf_skip_trail_prep {
+                    let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
+                    let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
+                    cpass.set_pipeline(&self.diffuse_trails_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
                 self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_TRAILS_PREP);
             }
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::SimPreTrails,
+                "Update Encoder (Timed Segment)",
+            );
 
-            // Prepare trails every simulation frame (copy/decay + optional blur into trail_grid_inject).
-            // The actual advection runs in the fluid pass.
-            if should_run_simulation && !self.perf_skip_trail_prep {
-                let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
-                let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
-                cpass.set_pipeline(&self.diffuse_trails_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(groups_x, groups_y, 1);
+            // (c) Slope
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Pass (SimPre Slope)"),
+                    timestamp_writes: None,
+                });
+                if run_slope {
+                    cpass.set_pipeline(&self.gamma_slope_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    let groups_x = (GRID_DIM_U32 + SLOPE_WG_SIZE_X - 1) / SLOPE_WG_SIZE_X;
+                    let groups_y = (GRID_DIM_U32 + SLOPE_WG_SIZE_Y - 1) / SLOPE_WG_SIZE_Y;
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_SLOPE);
             }
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::SimPreSlope,
+                "Update Encoder (Timed Segment)",
+            );
 
-            self.frame_profiler
-                .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_TRAILS_PREP);
+            // (d) Draw prep
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Pass (SimPre Draw Prep)"),
+                    timestamp_writes: None,
+                });
+                if should_draw {
+                    cpass.set_pipeline(&self.clear_visual_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    let width_workgroups =
+                        (self.surface_config.width + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
+                    let height_workgroups =
+                        (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
+                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
 
-            if run_slope {
-                cpass.set_pipeline(&self.gamma_slope_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                let groups_x = (GRID_DIM_U32 + SLOPE_WG_SIZE_X - 1) / SLOPE_WG_SIZE_X;
-                let groups_y = (GRID_DIM_U32 + SLOPE_WG_SIZE_Y - 1) / SLOPE_WG_SIZE_Y;
-                cpass.dispatch_workgroups(groups_x, groups_y, 1);
-            }
+                    cpass.set_pipeline(&self.motion_blur_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
 
-            self.frame_profiler
-                .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_SLOPE);
-
-            // Clear visual grid only when drawing this step
-            if should_draw {
-                cpass.set_pipeline(&self.clear_visual_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                let width_workgroups =
-                    (self.surface_config.width + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
-                let height_workgroups =
-                    (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
-                cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
-
-                // Apply motion blur if following an agent
-                cpass.set_pipeline(&self.motion_blur_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
-
-                // Clear agent grid for agent rendering
-                cpass.set_pipeline(&self.clear_agent_grid_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
-            }
-
-            if !should_draw {
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
-            }
-
-            // Run simulation compute passes, but skip everything when paused or no living agents
-            if should_run_simulation {
-                // REPRODUCTION FIRST: Update pairing_counter and energy in agents_in
-                // Uses reproduction bind groups where binding 1 = agents_in (read-write)
-                let reproduction_bg = if self.ping_pong {
-                    &self.reproduction_bind_group_b
+                    cpass.set_pipeline(&self.clear_agent_grid_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
                 } else {
-                    &self.reproduction_bind_group_a
-                };
-                cpass.set_pipeline(&self.reproduction_pipeline);
-                cpass.set_bind_group(0, reproduction_bg, &[]);
-                cpass.dispatch_workgroups(
-                    ((self.agent_buffer_capacity as u32) + 255) / 256,
-                    1,
-                    1,
-                );
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
+                }
+            }
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::SimPreDraw,
+                "Update Encoder (Timed Segment)",
+            );
 
-                // Spatial grid clear disabled: we use an epoch-stamped spatial grid.
-                // populate_agent_spatial_grid writes the epoch stamp for touched cells;
-                // all readers ignore cells whose stamp != current epoch.
+            // (e) Reproduction
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Pass (SimPre Reproduction)"),
+                    timestamp_writes: None,
+                });
+
+                if should_run_simulation {
+                    let reproduction_bg = if self.ping_pong {
+                        &self.reproduction_bind_group_b
+                    } else {
+                        &self.reproduction_bind_group_a
+                    };
+                    cpass.set_pipeline(&self.reproduction_pipeline);
+                    cpass.set_bind_group(0, reproduction_bg, &[]);
+                    cpass.dispatch_workgroups(
+                        ((self.agent_buffer_capacity as u32) + 255) / 256,
+                        1,
+                        1,
+                    );
+                }
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
             }
-
-            if !should_run_simulation {
-                // Keep timestamp progression stable when paused.
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
-            }
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::SimPreRepro,
+                "Update Encoder (Timed Segment)",
+            );
         }
 
         // Pass 2: main agent simulation.
@@ -9136,6 +9542,10 @@ impl GpuState {
                     1,
                     1,
                 );
+
+                // Marker represents "after process_agents" only (microswim is timed separately).
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
             }
 
             if !should_run_simulation {
@@ -9144,8 +9554,19 @@ impl GpuState {
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_POPULATE_SPATIAL);
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_FLUID_FORCE_VECTORS);
+
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
             }
         }
+
+        self.frame_profiler.maybe_submit_encoder_segment(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            DispatchSegment::SimMain,
+            "Update Encoder (Timed Segment)",
+        );
 
         // Start a new compute pass for microswimming to ensure a memory barrier for agents_out.
         // process_agents writes to agents_out, and microswim_agents reads/writes it.
@@ -9156,19 +9577,31 @@ impl GpuState {
             });
 
             if should_run_simulation {
-                cpass.set_pipeline(&self.microswim_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(
-                    ((self.agent_buffer_capacity as u32) + 255) / 256,
-                    1,
-                    1,
-                );
+                // Skip dispatch entirely when disabled (saves a full-screen pass that otherwise
+                // early-returns per-invocation in the shader).
+                if self.microswim_enabled {
+                    cpass.set_pipeline(&self.microswim_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(
+                        ((self.agent_buffer_capacity as u32) + 255) / 256,
+                        1,
+                        1,
+                    );
+                }
             }
 
-            // This marker now represents "after process + microswim".
+            // Marker represents "after microswim".
             self.frame_profiler
-                .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_PROCESS_AGENTS);
+                .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MICROSWIM);
         }
+
+        self.frame_profiler.maybe_submit_encoder_segment(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            DispatchSegment::Microswim,
+            "Update Encoder (Timed Segment)",
+        );
 
         // Start a new compute pass for drain_energy to ensure a memory barrier for agents_out.
         // process_agents writes to agents_out, and drain_energy reads from it.
@@ -9201,21 +9634,30 @@ impl GpuState {
             }
         }
 
+        self.frame_profiler.maybe_submit_encoder_segment(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            DispatchSegment::Drain,
+            "Update Encoder (Timed Segment)",
+        );
+
         self.frame_profiler
             .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_SIM);
 
         // End the first compute pass to ensure agent writes to fluid_force_vectors are visible
         // Start a new compute pass for fluid simulation
         {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Fluid Compute Pass"),
-                timestamp_writes: None,
-            });
+            if self.fluid_enabled {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Fluid Compute Pass"),
+                    timestamp_writes: None,
+                });
 
-            self.frame_profiler
-                .write_ts_compute_pass(&mut cpass, TS_FLUID_PASS_START);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_FLUID_PASS_START);
 
-            if should_run_simulation && self.fluid_enabled {
+                if should_run_simulation {
                 // Run fluid solver - forces already written by agents to force_vectors
                 // Stable Fluids order: inject_test_force (combines) → add_forces → diffuse → advect → project
                 {
@@ -9363,51 +9805,61 @@ impl GpuState {
                         .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_ADVECT_TRAIL);
                 }
             }
+                // End fluid compute pass, start new pass for remaining simulation work
+                drop(cpass);
+            } else {
+                // No-fluid fallback: keep dye + trail layers alive as simple diffusion fields.
+                // This preserves signaling/visualization even when the full fluid solver is off.
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("No-Fluid Dye/Trails Pass"),
+                    timestamp_writes: None,
+                });
 
-            // Non-fluid fallback: keep dye + trail layers alive as simple diffusion fields.
-            // This preserves signaling/visualization even when the full fluid solver is off.
-            if should_run_simulation && !self.fluid_enabled {
-                let dye_workgroups = (GRID_DIM_U32 + 15) / 16;
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_FLUID_PASS_START);
 
-                // Diffuse dye once (A->B) then copy back (B->A) so the final stays in dye_a.
-                if !self.perf_skip_nofluid_dye {
-                    cpass.set_pipeline(&self.fluid_diffuse_dye_no_fluid_pipeline);
-                    cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
-                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+                if should_run_simulation {
+                    let dye_workgroups = (GRID_DIM_U32 + 15) / 16;
 
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_DIFFUSE);
+                    // Diffuse dye once (A->B) then copy back (B->A) so the final stays in dye_a.
+                    if !self.perf_skip_nofluid_dye {
+                        cpass.set_pipeline(&self.fluid_diffuse_dye_no_fluid_pipeline);
+                        cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+                        cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
 
-                    cpass.set_pipeline(&self.fluid_inject_dye_pipeline);
-                    cpass.set_bind_group(0, &self.fluid_bind_group_ba, &[]);
-                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+                        self.frame_profiler
+                            .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_DIFFUSE);
 
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_COPYBACK);
-                } else {
-                    // Keep marker progression stable when skipping.
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_DIFFUSE);
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_COPYBACK);
+                        cpass.set_pipeline(&self.fluid_inject_dye_pipeline);
+                        cpass.set_bind_group(0, &self.fluid_bind_group_ba, &[]);
+                        cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                        self.frame_profiler
+                            .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_COPYBACK);
+                    } else {
+                        // Keep marker progression stable when skipping.
+                        self.frame_profiler
+                            .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_DIFFUSE);
+                        self.frame_profiler
+                            .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_DYE_COPYBACK);
+                    }
+
+                    // Commit prepared trails (trail_grid_inject -> trail_grid) without advection.
+                    if !self.perf_skip_nofluid_trail {
+                        cpass.set_pipeline(&self.fluid_copy_trail_no_fluid_pipeline);
+                        cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
+                        cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+
+                        self.frame_profiler
+                            .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_TRAIL_COMMIT);
+                    } else {
+                        self.frame_profiler
+                            .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_TRAIL_COMMIT);
+                    }
                 }
 
-                // Commit prepared trails (trail_grid_inject -> trail_grid) without advection.
-                if !self.perf_skip_nofluid_trail {
-                    cpass.set_pipeline(&self.fluid_copy_trail_no_fluid_pipeline);
-                    cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
-                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
-
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_TRAIL_COMMIT);
-                } else {
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_NOFLUID_AFTER_TRAIL_COMMIT);
-                }
+                drop(cpass);
             }
-
-            // End fluid compute pass, start new pass for remaining simulation work
-            drop(cpass);
 
             // Cheap tail-safety: clear the compaction destination buffer so any unwritten slots
             // remain fully zeroed (prevents stale/ghost agents from reappearing).
@@ -9424,6 +9876,14 @@ impl GpuState {
 
             self.frame_profiler
                 .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_FLUID);
+
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::Fluid,
+                "Update Encoder (Timed Segment)",
+            );
 
             // Post-fluid Pass 1: compact/merge (and optional paused render-only process).
             {
@@ -9569,6 +10029,14 @@ impl GpuState {
         self.frame_profiler
             .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_POST);
 
+        self.frame_profiler.maybe_submit_encoder_segment(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            DispatchSegment::Post,
+            "Update Encoder (Timed Segment)",
+        );
+
         // End compute pass to ensure agent_grid writes are visible before composite reads
         // Start new compute pass for compositing
         {
@@ -9625,6 +10093,14 @@ impl GpuState {
                 .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_COPY);
         }
 
+        self.frame_profiler.maybe_submit_encoder_segment(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            DispatchSegment::CompositeCopy,
+            "Update Encoder (Timed Segment)",
+        );
+
         // Debug: when viewing energy trails, occasionally read back trail_grid.w stats.
         // This confirms whether the energy channel is actually accumulating (vs. visualization issues).
         let mut did_trail_energy_readback = false;
@@ -9654,7 +10130,12 @@ impl GpuState {
             self.frame_profiler.resolve_and_copy(&mut encoder);
         }
 
-        self.queue.submit(Some(encoder.finish()));
+        self.frame_profiler.submit_cmd_buffer(
+            &self.device,
+            &self.queue,
+            encoder.finish(),
+            DispatchSegment::UpdateTail,
+        );
 
         if !should_draw {
             self.frame_profiler
@@ -9887,7 +10368,12 @@ impl GpuState {
             self.frame_profiler.resolve_and_copy(&mut encoder);
 
             // Submit simulation rendering and present.
-            self.queue.submit(Some(encoder.finish()));
+            self.frame_profiler.submit_cmd_buffer(
+                &self.device,
+                &self.queue,
+                encoder.finish(),
+                DispatchSegment::Render,
+            );
             output.present();
 
             let cpu_render_ms = cpu_render_start.elapsed().as_secs_f64() * 1000.0;
@@ -9902,7 +10388,12 @@ impl GpuState {
         }
 
         // Submit simulation rendering
-        self.queue.submit(Some(encoder.finish()));
+        self.frame_profiler.submit_cmd_buffer(
+            &self.device,
+            &self.queue,
+            encoder.finish(),
+            DispatchSegment::Render,
+        );
 
         let cpu_render_ms = cpu_render_start.elapsed().as_secs_f64() * 1000.0;
         self.frame_profiler.set_cpu_render_ms(cpu_render_ms);
@@ -9978,7 +10469,12 @@ impl GpuState {
             self.egui_renderer.free_texture(id);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.frame_profiler.submit_cmd_buffer(
+            &self.device,
+            &self.queue,
+            encoder.finish(),
+            DispatchSegment::Egui,
+        );
         output.present();
 
         let cpu_egui_ms = cpu_egui_start.elapsed().as_secs_f64() * 1000.0;
@@ -10091,7 +10587,12 @@ impl GpuState {
             self.egui_renderer.free_texture(id);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.frame_profiler.submit_cmd_buffer(
+            &self.device,
+            &self.queue,
+            encoder.finish(),
+            DispatchSegment::Egui,
+        );
         output.present();
 
         let cpu_egui_ms = cpu_egui_start.elapsed().as_secs_f64() * 1000.0;
@@ -13406,23 +13907,16 @@ fn main() {
                                                         ui.separator();
                                                         ui.heading("Strength");
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.prop_wash_strength, 0.0..=5.0)
-                                                                .text("Swim Strength (Direct)")
+                                                            egui::Slider::new(&mut state.microswim_coupling, 0.0..=10.0)
+                                                                .text("Swim Strength")
                                                                 .clamping(egui::SliderClamping::Always),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.prop_wash_strength_fluid, 0.0..=5.0)
-                                                                .text("Swim Strength (Fluid)")
-                                                                .clamping(egui::SliderClamping::Always),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Overall multiplier for the microswim compute pass (independent of propellers).",
                                                         );
 
                                                         ui.separator();
                                                         ui.heading("Model");
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.microswim_coupling, 0.0..=10.0)
-                                                                .text("Coupling")
-                                                                .clamping(egui::SliderClamping::Always),
-                                                        );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.microswim_base_drag, 0.0..=5.0)
                                                                 .text("Base Drag")
@@ -13484,6 +13978,25 @@ fn main() {
                                                         ui.horizontal(|ui| {
                                                             ui.checkbox(&mut state.fluid_enabled, "Enable Fluids");
                                                         });
+
+                                                        ui.separator();
+                                                        ui.heading("Propeller Wash");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.prop_wash_strength, 0.0..=5.0)
+                                                                .text("Direct Wash Strength")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Scales direct (non-fluid) propeller/displacer wash effects (e.g. chemical transport).",
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.prop_wash_strength_fluid, 0.0..=5.0)
+                                                                .text("Fluid Wash Strength")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Scales how strongly propellers/displacers inject forces into the fluid.",
+                                                        );
 
                                                         ui.separator();
                                                         ui.add(

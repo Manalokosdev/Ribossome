@@ -25,3 +25,6 @@ Thumbs.db
 shader_dump_runtime.wgsl
 combined_shaders.wgsl
 shader_source_dump.wgsl
+
+# Auto-snapshots (runtime output)
+autosave_snapshot*.png

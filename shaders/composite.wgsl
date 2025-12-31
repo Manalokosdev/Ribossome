@@ -198,7 +198,7 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
 
         // Respect hard simulation bounds (no torus wrap). Outside the world: no dye overlay.
-        let ws = f32(SIM_SIZE);
+        let ws = max(params.grid_size, 1e-6);
         if (world_pos.x >= 0.0 && world_pos.x < ws && world_pos.y >= 0.0 && world_pos.y < ws) {
             // Map to dye grid coordinates (GAMMA_GRID_DIM x GAMMA_GRID_DIM).
             let grid_f = f32(GAMMA_GRID_DIM);
