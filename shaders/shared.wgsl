@@ -581,12 +581,12 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     array<vec4<f32>,6>( vec4<f32>(10.0, 2.5, 0.3523599, 0.05), vec4<f32>(0.0, 0.1349066, 0.0, 0.00005), vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 0.3, 0.42, 0.42), vec4<f32>(0.997, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
     // 24 ENERGY SENSOR
     array<vec4<f32>,6>( vec4<f32>(10.5, 3.5, 0.4570796, 0.05), vec4<f32>(0.1, -0.15, 0.0, 0.00005), vec4<f32>(0.6, 0.0, 0.8, 0.0), vec4<f32>(0.0, 0.2, -0.66, -0.66), vec4<f32>(0.997, 0.9, 0.1, 0.85), vec4<f32>(0.15, 0.0, 0.0, 0.0) ),
-    // 25 DISPLACER A
-    array<vec4<f32>,6>( vec4<f32>(12.0, 8.0, 0.08151, 0.02), vec4<f32>(-0.13, 0.173, 2.5, 0.007), vec4<f32>(0.0, 0.39, 1.0, 0.0), vec4<f32>(0.0, 0.3, 0.36, 0.36), vec4<f32>(0.997, -0.3, 1.3, 1.2), vec4<f32>(-0.2, 0.0, 0.0, 0.0) ),
+    // 25 ALPHA_EMITTER
+    array<vec4<f32>,6>( vec4<f32>(12.0, 8.0, 0.08151, 0.02), vec4<f32>(-0.13, 0.173, 0.0, 0.001), vec4<f32>(0.0, 1.0, 1.0, 0.0), vec4<f32>(0.0, 0.3, 0.36, 0.36), vec4<f32>(0.997, -0.3, 1.3, 1.2), vec4<f32>(-0.2, 0.0, 0.0, 0.0) ),
     // 26 ENABLER
     array<vec4<f32>,6>( vec4<f32>(6.0, 6.0, 0.6785398, 0.05), vec4<f32>(0.2, 0.3, 0.0, 0.001), vec4<f32>(1.0, 1.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.24, 0.24), vec4<f32>(0.997, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
-    // 27 DISPLACER B
-    array<vec4<f32>,6>( vec4<f32>(12.0, 8.0, 0.08151, 0.02), vec4<f32>(-0.13, 0.173, 2.5, 0.007), vec4<f32>(0.0, 0.39, 1.0, 0.0), vec4<f32>(0.0, 0.3, 0.36, 0.36), vec4<f32>(0.997, -0.3, 1.3, 1.2), vec4<f32>(-0.2, 0.0, 0.0, 0.0) ),
+    // 27 BETA_EMITTER
+    array<vec4<f32>,6>( vec4<f32>(8.0, 3.0, 0.0, 0.2), vec4<f32>(0.0, 0.0, 0.0, 0.0), vec4<f32>(0.5, 0.5, 0.5, 0.0), vec4<f32>(0.0, 0.0, 0.0, 0.0), vec4<f32>(0.997, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
     // 28 STORAGE
     array<vec4<f32>,6>( vec4<f32>(16.0, 22.0, 0.1349066, 1.3), vec4<f32>(0.31, -0.1, 0.0, 0.001), vec4<f32>(1.0, 0.5, 0.0, 100.0), vec4<f32>(0.0, 0.4, -0.84, -0.84), vec4<f32>(0.997, 0.55, 0.45, 0.6), vec4<f32>(0.4, 0.0, 0.0, 0.0) ),
     // 29 POISON RESISTANCE
@@ -1547,7 +1547,7 @@ struct TranslationStep {
     is_valid: bool,
 }
 
-fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, offset: u32, len: u32, ignore_stop_codons: bool) -> TranslationStep {
+fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, offset: u32, len: u32, ignore_stop_codons: bool, microswim_mode: bool) -> TranslationStep {
     var result: TranslationStep;
     result.part_type = 0u; result.bases_consumed = 3u; result.is_stop = false; result.is_valid = false;
 
@@ -1633,22 +1633,30 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
             }
 
             if (organ_base_type >= 20u) {
-                var param_value = u32((f32(modifier) / 19.0) * 255.0);
-                if (organ_base_type == 31u || organ_base_type == 32u || organ_base_type == 36u || organ_base_type == 37u || organ_base_type == 42u) {
-                    param_value = param_value & 127u;
-                    // For some organs we encode promoter kind (alpha/beta) into the top bit of param.
-                    // - Clock/Slope/Pairing/TrailEnergy: beta promoter is C/Q
-                    // - Anchor: beta promoter is P (vs alpha promoter L)
-                    let is_beta_promoter = (organ_base_type == 42u && amino_type == 12u) || (organ_base_type != 42u && (amino_type == 1u || amino_type == 13u));
-                    if (is_beta_promoter) { param_value = param_value | 128u; }
-                }
+                // In microswim mode, suppress propellers (organ 21) - they become two separate amino acids
+                if (microswim_mode && organ_base_type == 21u) {
+                    // Don't create propeller organ - return just the promoter amino acid
+                    final_part_type = amino_type;
+                    bases_consumed = 3u;
+                } else {
+                    var param_value = u32((f32(modifier) / 19.0) * 255.0);
+                    if (organ_base_type == 31u || organ_base_type == 32u || organ_base_type == 36u || organ_base_type == 37u || organ_base_type == 42u) {
+                        param_value = param_value & 127u;
+                        // For some organs we encode promoter kind (alpha/beta) into the top bit of param.
+                        // - Clock/Slope/Pairing/TrailEnergy: beta promoter is C/Q
+                        // - Anchor: beta promoter is P (vs alpha promoter L)
+                        let is_beta_promoter = (organ_base_type == 42u && amino_type == 12u) || (organ_base_type != 42u && (amino_type == 1u || amino_type == 13u));
+                        if (is_beta_promoter) { param_value = param_value | 128u; }
+                    }
 
-                final_part_type = encode_part_type(organ_base_type, param_value);
-                bases_consumed = 6u;
+                    final_part_type = encode_part_type(organ_base_type, param_value);
+                    bases_consumed = 6u;
+                }
             } else {
-                // No organ mapping: materialize as the amino acid following the promoter.
-                final_part_type = modifier;
-                bases_consumed = 6u;
+                // No organ mapping: return the promoter amino acid (3 bases), so modifier is read separately next step
+                // This applies in ALL modes - free slots always produce two separate amino acids
+                final_part_type = amino_type;
+                bases_consumed = 3u;
             }
             }
         }

@@ -1964,7 +1964,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             for (var i = 0u; i < MAX_BODY_PARTS; i++) {
                 // Use centralized translation function
-                let step = translate_codon_step(genome_packed, pos_b, genome_offset, gene_length, params.ignore_stop_codons == 1u);
+                let step = translate_codon_step(genome_packed, pos_b, genome_offset, gene_length, params.ignore_stop_codons == 1u, ms_enabled());
 
                 if (!step.is_valid) {
                     if (step.is_stop && part_count >= body_count) {
@@ -2054,7 +2054,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             for (var i = 0u; i < MAX_BODY_PARTS; i++) {
                 // Use centralized translation function
-                let step = translate_codon_step(genome_packed, pos_b, genome_offset, gene_length, params.ignore_stop_codons == 1u);
+                let step = translate_codon_step(genome_packed, pos_b, genome_offset, gene_length, params.ignore_stop_codons == 1u, ms_enabled());
 
                 // Handle invalid translation or stop
                 if (!step.is_valid) {
@@ -2270,7 +2270,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             for (var i = 0u; i < MAX_BODY_PARTS; i++) {
                 // Use centralized translation function
-                let step = translate_codon_step(genome_packed, pos_b, genome_offset, gene_length, params.ignore_stop_codons == 1u);
+                let step = translate_codon_step(genome_packed, pos_b, genome_offset, gene_length, params.ignore_stop_codons == 1u, ms_enabled());
 
                 if (!step.is_valid) {
                     break;

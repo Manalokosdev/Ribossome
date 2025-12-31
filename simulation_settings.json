@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.1297334,
+  "camera_zoom": 1.1391909,
   "spawn_probability": 0.3,
   "death_probability": 0.001,
   "mutation_rate": 0.01,
@@ -35,7 +35,7 @@
   "microswim_base_drag": 0.5,
   "microswim_anisotropy": 2.0,
   "microswim_max_frame_vel": 1.0,
-  "microswim_torque_strength": 0.02,
+  "microswim_torque_strength": 0.2,
   "microswim_min_seg_displacement": 0.0,
   "microswim_min_total_deformation_sq": 0.1,
   "microswim_min_length_ratio": 0.25,
