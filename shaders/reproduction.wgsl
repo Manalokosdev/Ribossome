@@ -109,8 +109,6 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
 
-            // Only proceed if we have room in the spawn request buffer
-            if (spawn_index < MAX_SPAWN_REQUESTS) {
                 // Generate hash for offspring randomization (include offspring_idx for uniqueness)
                 let offspring_hash = (hash3 ^ (current_spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu) ^ (offspring_idx * 0x7f4a7c13u)) * 1664525u + 1013904223u;
 
