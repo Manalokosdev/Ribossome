@@ -7382,7 +7382,10 @@ impl GpuState {
             agent_color_blend: settings.agent_color_blend,
             settings_path: settings_path.clone(),
             last_saved_settings: settings.clone(),
-            sim_params_cpu: SimParams::zeroed(),
+            // NOTE: spawn-only paths (snapshot load / paused spawns) can run before the first
+            // `update()` call. They use `sim_params_cpu` as the template for the GPU params
+            // buffer; if it's zeroed, `grid_size` becomes 0 and world->grid mapping collapses.
+            sim_params_cpu: params,
             microswim_params_cpu: microswim_params_f32,
             environment_init_cpu: environment_init,
             part_base_angle_overrides: [f32::NAN; PART_OVERRIDE_SLOTS],
@@ -8541,6 +8544,8 @@ impl GpuState {
         // `update()` has written a fresh params buffer, which would result in 0 spawns.
         {
             let mut params = self.sim_params_cpu;
+            // Ensure world/grid mapping is valid even before the first `update()`.
+            params.grid_size = SIM_SIZE;
             params.max_agents = self.agent_buffer_capacity as u32;
             params.cpu_spawn_count = cpu_spawn_count;
             params.agent_count = self.agent_count;
@@ -11044,6 +11049,19 @@ impl GpuState {
         // Update epoch from snapshot
         self.epoch = snapshot.epoch;
 
+        // DEFENSIVE: Ensure spawn queue and counters are completely clear after batch spawning.
+        // This prevents phantom re-spawning on subsequent update() frames.
+        self.cpu_spawn_queue.clear();
+        self.spawn_request_count = 0;
+        self.pending_spawn_upload = false;
+
+        println!(
+            "After spawn loop: queue.len()={}, spawn_request_count={}, pending_spawn_upload={}",
+            self.cpu_spawn_queue.len(),
+            self.spawn_request_count,
+            self.pending_spawn_upload
+        );
+
         // Clear spatial grid so we don't treat stale cells as valid for the new epoch.
         {
             let mut encoder = self
@@ -11053,16 +11071,6 @@ impl GpuState {
                 });
             encoder.clear_buffer(&self.agent_spatial_grid_buffer, 0, None);
             self.queue.submit(Some(encoder.finish()));
-        }
-
-        // Immediately update autosave to ensure continuity.
-        // Use the same GPU readback path as manual snapshots so the autosave reflects the
-        // fully-materialized simulation state (after spawn-only batching).
-        // `save_snapshot_to_file()` also has a guard to avoid overwriting autosave with a
-        // transient 0-living capture.
-        let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
-        if let Err(e) = self.save_snapshot_to_file(autosave_path) {
-            eprintln!("ΓÜá Failed to update autosave after loading snapshot: {:?}", e);
         }
 
         println!(
@@ -12115,6 +12123,7 @@ fn main() {
         if state.is_none() {
             if let Ok(mut loaded_state) = rx.try_recv() {
                 // Try to auto-load previous session from autosave snapshot
+                // Don't call reset_simulation_state() - state is already fresh from creation
                 let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
                 if autosave_path.exists() {
                     match loaded_state.load_snapshot_from_file(autosave_path) {
