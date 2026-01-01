@@ -433,9 +433,9 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let size_vulnerability = 7.0 / (victim_body_count + 4.0);
 
                             // Absorb up to 50% of victim's energy (reduced by size, mouth speed, and disabler).
-                            // Poison Resistance (type 29) also protects against vampire drain, using the
-                            // same per-organ 50% multiplier as poison damage.
-                            let vampire_protection = pow(0.5, f32(agents_out[closest_victim_id].poison_resistant_count));
+                            // Poison Resistance (type 29) also protects against vampire drain, using
+                            // 10% protection per organ (0.9 multiplier).
+                            let vampire_protection = pow(0.9, f32(agents_out[closest_victim_id].poison_resistant_count));
                             var absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier * vampire_protection * size_vulnerability;
 
                             // Cap drain by vampire's available storage capacity
