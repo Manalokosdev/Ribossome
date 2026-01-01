@@ -1002,6 +1002,7 @@ struct DispatchTimings {
     sim_pre_slope_ms: Option<f64>,
     sim_pre_draw_ms: Option<f64>,
     sim_pre_repro_ms: Option<f64>,
+    sim_pre_rain_ms: Option<f64>,
     sim_main_ms: Option<f64>,
     microswim_ms: Option<f64>,
     drain_ms: Option<f64>,
@@ -1022,6 +1023,7 @@ enum DispatchSegment {
     SimPreSlope,
     SimPreDraw,
     SimPreRepro,
+    SimPreRain,
     SimMain,
     Microswim,
     Drain,
@@ -1202,7 +1204,7 @@ but required timestamp-query features are unavailable on this device."
     }
 
     fn should_time_dispatches(&self) -> bool {
-        self.enabled && self.dispatch_timing_enabled && self.capture_this_frame
+        self.dispatch_timing_enabled && self.capture_this_frame
     }
 
     fn reset_dispatch_timings_if_needed(&mut self) {
@@ -1223,6 +1225,7 @@ but required timestamp-query features are unavailable on this device."
             DispatchSegment::SimPreSlope => self.dispatch_timings.sim_pre_slope_ms = Some(ms),
             DispatchSegment::SimPreDraw => self.dispatch_timings.sim_pre_draw_ms = Some(ms),
             DispatchSegment::SimPreRepro => self.dispatch_timings.sim_pre_repro_ms = Some(ms),
+            DispatchSegment::SimPreRain => self.dispatch_timings.sim_pre_rain_ms = Some(ms),
             DispatchSegment::SimMain => self.dispatch_timings.sim_main_ms = Some(ms),
             DispatchSegment::Microswim => self.dispatch_timings.microswim_ms = Some(ms),
             DispatchSegment::Drain => self.dispatch_timings.drain_ms = Some(ms),
@@ -1242,6 +1245,7 @@ but required timestamp-query features are unavailable on this device."
         let parts = [
             self.dispatch_timings.sim_pre_diffuse_ms,
             self.dispatch_timings.sim_pre_diffuse_commit_ms,
+            self.dispatch_timings.sim_pre_rain_ms,
             self.dispatch_timings.sim_pre_trails_ms,
             self.dispatch_timings.sim_pre_slope_ms,
             self.dispatch_timings.sim_pre_draw_ms,
@@ -1293,7 +1297,7 @@ but required timestamp-query features are unavailable on this device."
     }
 
     fn begin_frame(&mut self) {
-        if !self.enabled {
+        if !self.enabled && !self.dispatch_timing_enabled {
             self.capture_this_frame = false;
             return;
         }
@@ -1372,6 +1376,45 @@ but required timestamp-query features are unavailable on this device."
     }
 
     fn readback_and_print(&mut self, device: &wgpu::Device) {
+        // Special case: dispatch timing can work independently of full profiler
+        if !self.enabled && self.dispatch_timing_enabled {
+            if !self.capture_this_frame {
+                return;
+            }
+            let fmt = |v: Option<f64>| -> String {
+                v.map(|ms| format!("{ms:7.2}")).unwrap_or_else(|| "   -   ".to_string())
+            };
+            println!(
+                "[perf] submit_wait(ms): simPre={} sim={} micro={} drain={} fluid={} post={} comp={} tail={} render={} egui={}",
+                fmt(self.sim_pre_effective_ms()),
+                fmt(self.dispatch_timings.sim_main_ms),
+                fmt(self.dispatch_timings.microswim_ms),
+                fmt(self.dispatch_timings.drain_ms),
+                fmt(self.dispatch_timings.fluid_ms),
+                fmt(self.dispatch_timings.post_ms),
+                fmt(self.dispatch_timings.composite_copy_ms),
+                fmt(self.dispatch_timings.update_tail_ms),
+                fmt(self.dispatch_timings.render_ms),
+                fmt(self.dispatch_timings.egui_ms),
+            );
+
+            if self.dispatch_timing_detail {
+                println!(
+                    "[perf] simPre_parts(ms): diffuse={} commit={} rain={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
+                    fmt(self.dispatch_timings.sim_pre_diffuse_ms),
+                    fmt(self.dispatch_timings.sim_pre_diffuse_commit_ms),
+                    fmt(self.dispatch_timings.sim_pre_rain_ms),
+                    fmt(self.dispatch_timings.sim_pre_trails_ms),
+                    fmt(self.dispatch_timings.sim_pre_slope_ms),
+                    fmt(self.dispatch_timings.sim_pre_draw_ms),
+                    fmt(self.dispatch_timings.sim_pre_repro_ms),
+                );
+            }
+            self.capture_this_frame = false;
+            self.next_sample_time = std::time::Instant::now() + self.sample_interval;
+            return;
+        }
+
         if !self.enabled {
             return;
         }
@@ -1408,9 +1451,10 @@ but required timestamp-query features are unavailable on this device."
 
                 if self.dispatch_timing_detail {
                     println!(
-                        "[perf] simPre_parts(ms): diffuse={} commit={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
+                        "[perf] simPre_parts(ms): diffuse={} commit={} rain={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
                         fmt(self.dispatch_timings.sim_pre_diffuse_ms),
                         fmt(self.dispatch_timings.sim_pre_diffuse_commit_ms),
+                        fmt(self.dispatch_timings.sim_pre_rain_ms),
                         fmt(self.dispatch_timings.sim_pre_trails_ms),
                         fmt(self.dispatch_timings.sim_pre_slope_ms),
                         fmt(self.dispatch_timings.sim_pre_draw_ms),
@@ -3903,6 +3947,14 @@ struct GpuState {
     perf_skip_trail_prep: bool,
     perf_skip_nofluid_dye: bool,
     perf_skip_nofluid_trail: bool,
+
+    // Perf toggles (UI controlled)
+    perf_skip_diffusion: bool,
+    perf_skip_rain: bool,
+    perf_skip_slope: bool,
+    perf_skip_draw: bool,
+    perf_skip_repro: bool,
+    perf_force_gpu_sync: bool,
 
     // Simulation speed control
     render_interval: u32, // Draw every N steps in fast mode
@@ -7234,6 +7286,13 @@ impl GpuState {
             perf_skip_nofluid_dye,
             perf_skip_nofluid_trail,
 
+            perf_skip_diffusion: false,
+            perf_skip_rain: false,
+            perf_skip_slope: false,
+            perf_skip_draw: false,
+            perf_skip_repro: false,
+            perf_force_gpu_sync: false,
+
             render_interval: settings.render_interval,
             current_mode: if settings.limit_fps {
                 if settings.limit_fps_25 { 3 } else { 0 }
@@ -9261,7 +9320,7 @@ impl GpuState {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_PASS_START);
 
-                if run_diffusion {
+                if run_diffusion && !self.perf_skip_diffusion {
                     cpass.set_pipeline(&self.diffuse_pipeline);
                     cpass.set_bind_group(0, bg_process, &[]);
                     let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
@@ -9281,16 +9340,18 @@ impl GpuState {
 
                     // Apply targeted rain drops AFTER diffusion commit
                     // This adds fresh saturated drops to specific cells after diffusion has spread existing values
-                    let rain_drop_count = params.rain_drop_count;
-                    if rain_drop_count > 0 {
-                        cpass.set_pipeline(&self.rain_pipeline);
-                        cpass.set_bind_group(0, bg_process, &[]);
-                        let rain_workgroups = (rain_drop_count + 255) / 256;
-                        cpass.dispatch_workgroups(rain_workgroups, 1, 1);
+                    if !self.perf_skip_rain {
+                        let rain_drop_count = params.rain_drop_count;
+                        if rain_drop_count > 0 {
+                            cpass.set_pipeline(&self.rain_pipeline);
+                            cpass.set_bind_group(0, bg_process, &[]);
+                            let rain_workgroups = (rain_drop_count + 255) / 256;
+                            cpass.dispatch_workgroups(rain_workgroups, 1, 1);
+                        }
                     }
                 }
 
-                if !run_diffusion {
+                if !run_diffusion || self.perf_skip_diffusion {
                     // Keep timestamp progression stable even when skipping.
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
@@ -9312,7 +9373,7 @@ impl GpuState {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_TRAILS_PREP);
 
-                if run_slope {
+                if run_slope && !self.perf_skip_slope {
                     cpass.set_pipeline(&self.gamma_slope_pipeline);
                     cpass.set_bind_group(0, bg_process, &[]);
                     let groups_x = (GRID_DIM_U32 + SLOPE_WG_SIZE_X - 1) / SLOPE_WG_SIZE_X;
@@ -9324,7 +9385,7 @@ impl GpuState {
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_SLOPE);
 
                 // Clear visual grid only when drawing this step
-                if should_draw {
+                if should_draw && !self.perf_skip_draw {
                     cpass.set_pipeline(&self.clear_visual_pipeline);
                     cpass.set_bind_group(0, bg_process, &[]);
                     let width_workgroups =
@@ -9356,7 +9417,7 @@ impl GpuState {
                 }
 
                 // Run simulation compute passes, but skip everything when paused or no living agents
-                if should_run_simulation {
+                if should_run_simulation && !self.perf_skip_repro {
                     // REPRODUCTION FIRST: Update pairing_counter and energy in agents_in
                     // Uses reproduction bind groups where binding 1 = agents_in (read-write)
                     let reproduction_bg = if self.ping_pong {
@@ -9367,7 +9428,7 @@ impl GpuState {
                     cpass.set_pipeline(&self.reproduction_pipeline);
                     cpass.set_bind_group(0, reproduction_bg, &[]);
                     cpass.dispatch_workgroups(
-                        ((self.agent_buffer_capacity as u32) + 255) / 256,
+                        ((self.agent_count) + 255) / 256,
                         1,
                         1,
                     );
@@ -9402,7 +9463,7 @@ impl GpuState {
             // (a) Diffuse
             let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
             let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
-            {
+            if run_diffusion && !self.perf_skip_diffusion {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Compute Pass (SimPre Diffuse)"),
                     timestamp_writes: None,
@@ -9411,189 +9472,193 @@ impl GpuState {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_PASS_START);
 
-                if run_diffusion {
-                    cpass.set_pipeline(&self.diffuse_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                }
+                cpass.set_pipeline(&self.diffuse_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(groups_x, groups_y, 1);
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
             }
-            self.frame_profiler.maybe_submit_encoder_segment(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                DispatchSegment::SimPreDiffuse,
-                "Update Encoder (Timed Segment)",
-            );
+            // Only time diffusion when it's actually dispatched
+            if run_diffusion && !self.perf_skip_diffusion {
+                self.frame_profiler.maybe_submit_encoder_segment(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    DispatchSegment::SimPreDiffuse,
+                    "Update Encoder (Timed Segment)",
+                );
+            }
 
             // (a2) Commit
-            {
+            if run_diffusion && !self.perf_skip_diffusion {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Compute Pass (SimPre Diffuse Commit)"),
                     timestamp_writes: None,
                 });
 
-                if run_diffusion {
-                    cpass.set_pipeline(&self.diffuse_commit_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                }
+                cpass.set_pipeline(&self.diffuse_commit_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(groups_x, groups_y, 1);
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
             }
-            self.frame_profiler.maybe_submit_encoder_segment(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                DispatchSegment::SimPreDiffuseCommit,
-                "Update Encoder (Timed Segment)",
-            );
+            // Only time commit when it's actually dispatched
+            if run_diffusion && !self.perf_skip_diffusion {
+                self.frame_profiler.maybe_submit_encoder_segment(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    DispatchSegment::SimPreDiffuseCommit,
+                    "Update Encoder (Timed Segment)",
+                );
+            }
 
-            // (a3) Rain - apply after diffusion commit
-            {
+            // (a3) Rain - apply after diffusion commit (only when diffusion actually ran)
+            if run_diffusion && !self.perf_skip_diffusion && !self.perf_skip_rain {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Compute Pass (SimPre Rain)"),
                     timestamp_writes: None,
                 });
 
-                if run_diffusion {
-                    let rain_drop_count = params.rain_drop_count;
-                    if rain_drop_count > 0 {
-                        cpass.set_pipeline(&self.rain_pipeline);
-                        cpass.set_bind_group(0, bg_process, &[]);
-                        let rain_workgroups = (rain_drop_count + 255) / 256;
-                        cpass.dispatch_workgroups(rain_workgroups, 1, 1);
-                    }
+                let rain_drop_count = params.rain_drop_count;
+                if rain_drop_count > 0 {
+                    cpass.set_pipeline(&self.rain_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    let rain_workgroups = (rain_drop_count + 255) / 256;
+                    cpass.dispatch_workgroups(rain_workgroups, 1, 1);
                 }
             }
-            // No separate timing segment for rain - it's negligible
+            // Only time rain when it's actually dispatched
+            if run_diffusion && !self.perf_skip_diffusion && !self.perf_skip_rain {
+                self.frame_profiler.maybe_submit_encoder_segment(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    DispatchSegment::SimPreRain,
+                    "Update Encoder (Timed Segment)",
+                );
+            }
 
             // (b) Trails prep
-            {
+            if should_run_simulation && !self.perf_skip_trail_prep && self.trail_opacity > 0.0 {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Compute Pass (SimPre Trails)"),
                     timestamp_writes: None,
                 });
-                if should_run_simulation && !self.perf_skip_trail_prep && self.trail_opacity > 0.0 {
-                    let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
-                    let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
-                    cpass.set_pipeline(&self.diffuse_trails_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                }
+                let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
+                let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
+                cpass.set_pipeline(&self.diffuse_trails_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(groups_x, groups_y, 1);
+
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_TRAILS_PREP);
             }
-            self.frame_profiler.maybe_submit_encoder_segment(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                DispatchSegment::SimPreTrails,
-                "Update Encoder (Timed Segment)",
-            );
+            // Only time trails when actually dispatched
+            if should_run_simulation && !self.perf_skip_trail_prep && self.trail_opacity > 0.0 {
+                self.frame_profiler.maybe_submit_encoder_segment(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    DispatchSegment::SimPreTrails,
+                    "Update Encoder (Timed Segment)",
+                );
+            }
 
             // (c) Slope
-            {
+            if run_slope && !self.perf_skip_slope {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Compute Pass (SimPre Slope)"),
                     timestamp_writes: None,
                 });
-                if run_slope {
-                    cpass.set_pipeline(&self.gamma_slope_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    let groups_x = (GRID_DIM_U32 + SLOPE_WG_SIZE_X - 1) / SLOPE_WG_SIZE_X;
-                    let groups_y = (GRID_DIM_U32 + SLOPE_WG_SIZE_Y - 1) / SLOPE_WG_SIZE_Y;
-                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                }
+                cpass.set_pipeline(&self.gamma_slope_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                let groups_x = (GRID_DIM_U32 + SLOPE_WG_SIZE_X - 1) / SLOPE_WG_SIZE_X;
+                let groups_y = (GRID_DIM_U32 + SLOPE_WG_SIZE_Y - 1) / SLOPE_WG_SIZE_Y;
+                cpass.dispatch_workgroups(groups_x, groups_y, 1);
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_SLOPE);
             }
-            self.frame_profiler.maybe_submit_encoder_segment(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                DispatchSegment::SimPreSlope,
-                "Update Encoder (Timed Segment)",
-            );
+            if run_slope && !self.perf_skip_slope {
+                self.frame_profiler.maybe_submit_encoder_segment(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    DispatchSegment::SimPreSlope,
+                    "Update Encoder (Timed Segment)",
+                );
+            }
 
             // (d) Draw prep
-            {
+            if should_draw && !self.perf_skip_draw {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Compute Pass (SimPre Draw Prep)"),
                     timestamp_writes: None,
                 });
-                if should_draw {
-                    cpass.set_pipeline(&self.clear_visual_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    let width_workgroups =
-                        (self.surface_config.width + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
-                    let height_workgroups =
-                        (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
-                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
+                cpass.set_pipeline(&self.clear_visual_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                let width_workgroups =
+                    (self.surface_config.width + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
+                let height_workgroups =
+                    (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
+                cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
 
-                    // Motion blur moved to Composite pass
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
+                // Motion blur moved to Composite pass
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
 
-                    cpass.set_pipeline(&self.clear_agent_grid_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
-                } else {
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
-                }
+                cpass.set_pipeline(&self.clear_agent_grid_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+                self.frame_profiler
+                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_AGENT_GRID);
             }
-            self.frame_profiler.maybe_submit_encoder_segment(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                DispatchSegment::SimPreDraw,
-                "Update Encoder (Timed Segment)",
-            );
+            if should_draw && !self.perf_skip_draw {
+                self.frame_profiler.maybe_submit_encoder_segment(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    DispatchSegment::SimPreDraw,
+                    "Update Encoder (Timed Segment)",
+                );
+            }
 
             // (e) Reproduction
-            {
+            if should_run_simulation && !self.perf_skip_repro {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Compute Pass (SimPre Reproduction)"),
                     timestamp_writes: None,
                 });
 
-                if should_run_simulation {
-                    let reproduction_bg = if self.ping_pong {
-                        &self.reproduction_bind_group_b
-                    } else {
-                        &self.reproduction_bind_group_a
-                    };
-                    cpass.set_pipeline(&self.reproduction_pipeline);
-                    cpass.set_bind_group(0, reproduction_bg, &[]);
-                    cpass.dispatch_workgroups(
-                        ((self.agent_buffer_capacity as u32) + 255) / 256,
-                        1,
-                        1,
-                    );
-                }
+                let reproduction_bg = if self.ping_pong {
+                    &self.reproduction_bind_group_b
+                } else {
+                    &self.reproduction_bind_group_a
+                };
+                cpass.set_pipeline(&self.reproduction_pipeline);
+                cpass.set_bind_group(0, reproduction_bg, &[]);
+                cpass.dispatch_workgroups(
+                    ((self.agent_count) + 255) / 256,
+                    1,
+                    1,
+                );
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_SPATIAL);
             }
-            self.frame_profiler.maybe_submit_encoder_segment(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                DispatchSegment::SimPreRepro,
-                "Update Encoder (Timed Segment)",
-            );
+            if should_run_simulation && !self.perf_skip_repro {
+                self.frame_profiler.maybe_submit_encoder_segment(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    DispatchSegment::SimPreRepro,
+                    "Update Encoder (Timed Segment)",
+                );
+            }
         }
 
         // Pass 2: main agent simulation.
@@ -10479,6 +10544,10 @@ impl GpuState {
             );
             output.present();
 
+            if self.perf_force_gpu_sync {
+                self.device.poll(wgpu::Maintain::Wait);
+            }
+
             let cpu_render_ms = cpu_render_start.elapsed().as_secs_f64() * 1000.0;
             self.frame_profiler.set_cpu_render_ms(cpu_render_ms);
             self.frame_profiler.set_cpu_egui_ms(0.0);
@@ -10579,6 +10648,10 @@ impl GpuState {
             DispatchSegment::Egui,
         );
         output.present();
+
+        if self.perf_force_gpu_sync {
+            self.device.poll(wgpu::Maintain::Wait);
+        }
 
         let cpu_egui_ms = cpu_egui_start.elapsed().as_secs_f64() * 1000.0;
         self.frame_profiler.set_cpu_egui_ms(cpu_egui_ms);
@@ -10697,6 +10770,10 @@ impl GpuState {
             DispatchSegment::Egui,
         );
         output.present();
+
+        if self.perf_force_gpu_sync {
+            self.device.poll(wgpu::Maintain::Wait);
+        }
 
         let cpu_egui_ms = cpu_egui_start.elapsed().as_secs_f64() * 1000.0;
         self.frame_profiler.set_cpu_render_ms(0.0);
@@ -13716,6 +13793,24 @@ fn main() {
                                                         }
                                                         ui.checkbox(&mut state.gamma_hidden, "Hide Gamma in Composite");
                                                         ui.checkbox(&mut state.slope_debug_visual, "Show Raw Slopes");
+
+                                                        ui.separator();
+                                                        ui.label("Performance Toggles:");
+                                                        ui.checkbox(&mut state.perf_skip_diffusion, "⚡ Skip Diffusion (Debug)");
+                                                        ui.checkbox(&mut state.perf_skip_rain, "🌧️ Skip Rain Drops (Debug)");
+                                                        ui.checkbox(&mut state.perf_skip_trail_prep, "🎨 Skip Trail Prep (Debug)");
+                                                        ui.checkbox(&mut state.perf_skip_slope, "🏔️ Skip Slope Calc (Debug)");
+                                                        ui.checkbox(&mut state.perf_skip_draw, "🖼️ Skip Visual Clear (Debug)");
+                                                        ui.checkbox(&mut state.perf_skip_repro, "🧬 Skip Reproduction (Debug)");
+                                                        ui.checkbox(&mut state.frame_profiler.dispatch_timing_enabled, "📊 Show Dispatch Timing");
+                                                        if state.frame_profiler.dispatch_timing_enabled {
+                                                            ui.checkbox(&mut state.frame_profiler.dispatch_timing_detail, "  └─ Detailed SimPre Breakdown");
+                                                        }
+                                                        ui.checkbox(
+                                                            &mut state.perf_force_gpu_sync,
+                                                            "⏱️ Force GPU Sync (Accurate FPS)",
+                                                        );
+
                                                         let min_changed = ui
                                                             .add(
                                                                 egui::Slider::new(

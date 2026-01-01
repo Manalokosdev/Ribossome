@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.481763,
+  "camera_zoom": 0.63331544,
   "spawn_probability": 0.1,
   "death_probability": 0.001,
   "mutation_rate": 0.005,
@@ -31,16 +31,16 @@
   "prop_wash_strength": 1.0,
   "prop_wash_strength_fluid": 0.1,
   "microswim_enabled": true,
-  "microswim_coupling": 2.0,
+  "microswim_coupling": 0.5,
   "microswim_base_drag": 0.5,
   "microswim_anisotropy": 1.0,
   "microswim_max_frame_vel": 1.0,
-  "microswim_torque_strength": 0.03,
+  "microswim_torque_strength": 0.1,
   "microswim_min_seg_displacement": 0.0,
   "microswim_min_total_deformation_sq": 0.1,
   "microswim_min_length_ratio": 0.25,
   "microswim_max_length_ratio": 1.1,
-  "repulsion_strength": 5.0,
+  "repulsion_strength": 10.0,
   "agent_repulsion_strength": 0.1,
   "limit_fps": false,
   "limit_fps_25": false,
@@ -81,11 +81,11 @@
   "trail_decay": 1.0,
   "trail_opacity": 0.0,
   "trail_show": false,
-  "trail_show_energy": true,
+  "trail_show_energy": false,
   "interior_isotropic": false,
   "ignore_stop_codons": false,
   "require_start_codon": true,
-  "asexual_reproduction": false,
+  "asexual_reproduction": true,
   "alpha_rain_variation": 0.0,
   "beta_rain_variation": 0.0,
   "alpha_rain_phase": 0.0,
@@ -168,9 +168,9 @@
     0.0
   ],
   "gamma_color": [
-    0.07058824,
-    0.07058824,
-    0.07058824
+    0.0,
+    0.0,
+    0.0
   ],
   "dye_alpha_color": [
     0.24313726,
