@@ -1365,6 +1365,26 @@ fn screen_to_grid_index(screen_pos: vec2<i32>) -> u32 {
     return y * params.visual_stride + x;
 }
 
+// Helper: draw line in screen space using Bresenham algorithm
+fn draw_line_pixels(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
+    let dx = p1.x - p0.x;
+    let dy = p1.y - p0.y;
+    let steps = max(abs(dx), abs(dy));
+
+    for (var s = 0; s <= steps; s++) {
+        let t = f32(s) / f32(max(steps, 1));
+        let screen_x = i32(mix(f32(p0.x), f32(p1.x), t));
+        let screen_y = i32(mix(f32(p0.y), f32(p1.y), t));
+
+        // Check if in visible window bounds
+        if (screen_x >= 0 && screen_x < i32(params.window_width) &&
+            screen_y >= 0 && screen_y < i32(params.window_height)) {
+            let idx = screen_to_grid_index(vec2<i32>(screen_x, screen_y));
+            agent_grid[idx] = color;
+        }
+    }
+}
+
 fn rna_complement(base: u32) -> u32 {
     if (base == 88u) { return 88u; }
     if (base == 65u) { return 85u; }
