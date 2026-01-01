@@ -1,4 +1,4 @@
-﻿// Ribossome - GPU-Accelerated Artificial Life Simulator
+// Ribossome - GPU-Accelerated Artificial Life Simulator
 // Copyright (c) 2025 Filipe da Veiga Ventura Alves
 // Licensed under MIT License
 
@@ -89,9 +89,9 @@ const PART_FLAGS_OVERRIDE_VEC4S: usize = (PART_TYPE_COUNT + 3) / 4; // 11
 const PART_PROPERTIES_JSON_PATH: &str = "config/part_properties.json";
 
 const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
-    // 0–19 amino acids
+    // 0�19 amino acids
     "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y",
-    // 20–43 organs / specials (keep in sync with shaders/shared.wgsl table comments)
+    // 20�43 organs / specials (keep in sync with shaders/shared.wgsl table comments)
     "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "ALPHA_EMITTER", "ENABLER", "BETA_EMITTER",
     "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "VAMPIRE_MOUTH", "AGENT_ALPHA_SENSOR",
     "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
@@ -141,7 +141,7 @@ fn ui_part_base_angle_overrides(ui: &mut egui::Ui, state: &mut GpuState) {
                 if enabled {
                     let mut v = state.part_base_angle_overrides[i];
                     let changed = ui.add(egui::DragValue::new(&mut v).speed(0.01)).changed();
-                    ui.label(format!("({:.1}°)", v.to_degrees()));
+                    ui.label(format!("({:.1}�)", v.to_degrees()));
                     if changed {
                         state.part_base_angle_overrides[i] = v;
                         state.part_base_angle_overrides_dirty = true;
@@ -2052,7 +2052,7 @@ fn genome_base_color(base: u8) -> egui::Color32 {
 
 #[inline]
 fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
-    // 0–19: amino acids; 20–42: organs (colors mirror shaders/shared.wgsl AMINO_DATA[*][2].xyz)
+    // 0�19: amino acids; 20�42: organs (colors mirror shaders/shared.wgsl AMINO_DATA[*][2].xyz)
     if (base_type as usize) < AMINO_COLORS.len() {
         return AMINO_COLORS[base_type as usize];
     }
@@ -2737,6 +2737,11 @@ struct SimParams {
     beta_slope_bias: f32,
     alpha_multiplier: f32,
     beta_multiplier: f32,
+    _pad_rain0: u32,
+    _pad_rain1: u32,
+    // Targeted rain dispatch: number of rain drops to spawn this frame
+    rain_drop_count: u32,
+    alpha_rain_drop_count: u32,
     // Global scalar for rain/precipitation injection into chem grids.
     // 0 disables precipitation entirely.
     dye_precipitation: f32,
@@ -2869,7 +2874,7 @@ struct EnvironmentInitParams {
     // 128 slots reserved.
     part_angle_override: [[f32; 4]; PART_OVERRIDE_VEC4S],
 
-    // Part property overrides: 42 parts × 6 vec4 blocks.
+    // Part property overrides: 42 parts � 6 vec4 blocks.
     // NaN sentinel per component means "use shader default".
     part_props_override: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
 
@@ -3121,7 +3126,7 @@ struct SimulationSettings {
     #[serde(default = "default_fluid_ooze_fade_rate_gamma_unset")]
     fluid_ooze_fade_rate_gamma: f32, // (unused / legacy)
     #[serde(default = "default_fluid_ooze_still_rate")]
-    fluid_ooze_still_rate: f32, // Chem→dye baseline ooze in still water (per-second fraction)
+    fluid_ooze_still_rate: f32, // Chem?dye baseline ooze in still water (per-second fraction)
     #[serde(default = "default_fluid_dye_escape_rate")]
     fluid_dye_escape_rate: f32, // Dye decay (ALPHA): removes dye without depositing back into chem (1/sec)
     #[serde(default = "default_fluid_dye_escape_rate_beta_unset")]
@@ -3257,7 +3262,7 @@ impl Default for SimulationSettings {
             // Gamma uses alpha defaults unless overridden.
             fluid_ooze_rate_gamma: default_fluid_ooze_rate_gamma_unset(),
             fluid_ooze_fade_rate_gamma: default_fluid_ooze_fade_rate_gamma_unset(),
-            // Baseline chem→dye seepage in still water so sensors can read signals without flow.
+            // Baseline chem?dye seepage in still water so sensors can read signals without flow.
             fluid_ooze_still_rate: default_fluid_ooze_still_rate(),
             // Dye escape: removes dye without precipitation (independent sink).
             fluid_dye_escape_rate: default_fluid_dye_escape_rate(),
@@ -3481,10 +3486,19 @@ struct SimulationSnapshot {
     settings: Option<SimulationSettings>,
     #[serde(default)]
     agents: Vec<AgentSnapshot>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rain_map_blob: Option<String>,
 }
 
 impl SimulationSnapshot {
-    fn new(epoch: u64, agents: &[Agent], settings: SimulationSettings, run_name: String) -> Self {
+    fn new(
+        epoch: u64,
+        agents: &[Agent],
+        settings: SimulationSettings,
+        run_name: String,
+        rain_map_blob: Option<String>,
+    ) -> Self {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         // agents should already be filtered for alive != 0 by caller
@@ -3519,6 +3533,7 @@ impl SimulationSnapshot {
             epoch,
             settings: Some(settings),
             agents: agent_snapshots,
+            rain_map_blob,
         }
     }
 }
@@ -3813,6 +3828,7 @@ struct GpuState {
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_commit_pipeline: wgpu::ComputePipeline,
     diffuse_trails_pipeline: wgpu::ComputePipeline,
+    rain_pipeline: wgpu::ComputePipeline,
     clear_visual_pipeline: wgpu::ComputePipeline,
     motion_blur_pipeline: wgpu::ComputePipeline,
     clear_agent_grid_pipeline: wgpu::ComputePipeline,
@@ -4613,8 +4629,8 @@ impl GpuState {
         // Skip expensive Perlin noise generation at startup for faster launch (GPU kernels will write defaults)
         // Alpha grid previously initialized to 0.5 everywhere; this value is now written via an initialization compute pass.
 
-        // Packed environment chemistry grid (vec2 per cell): x=alpha, y=beta
-        let chem_buffer_size = (grid_size * std::mem::size_of::<[f32; 2]>()) as u64;
+        // Packed environment chemistry grid (vec4 per cell): x=alpha, y=beta, z=alpha_rain_map, w=beta_rain_map
+        let chem_buffer_size = (grid_size * std::mem::size_of::<[f32; 4]>()) as u64;
         let chem_grid = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Chem Grid"),
             size: chem_buffer_size,
@@ -4650,7 +4666,18 @@ impl GpuState {
         });
         let rain_map_texture_view = rain_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Initialize with uniform rain (1.0 for both alpha and beta)
+        // Initialize chem_grid with zeros for alpha/beta and uniform 1.0 for rain maps
+        // vec4: [alpha=0.0, beta=0.0, alpha_rain_map=1.0, beta_rain_map=1.0]
+        let initial_chem_data: Vec<f32> = (0..GRID_CELL_COUNT)
+            .flat_map(|_| [0.0f32, 0.0f32, 1.0f32, 1.0f32])
+            .collect();
+        queue.write_buffer(
+            &chem_grid,
+            0,
+            bytemuck::cast_slice(&initial_chem_data),
+        );
+
+        // Initialize rain_map_buffer with uniform rain (1.0 for both alpha and beta) - kept for compatibility
         let uniform_rain: Vec<f32> = (0..GRID_CELL_COUNT).flat_map(|_| [1.0f32, 1.0f32]).collect();
         queue.write_buffer(
             &rain_map_buffer,
@@ -4658,7 +4685,7 @@ impl GpuState {
             bytemuck::cast_slice(&uniform_rain),
         );
 
-        // Seed the texture with uniform rain too (RGBA32F: r=alpha, g=beta).
+        // Seed the texture with uniform rain too (RGBA32F: r=alpha, g=beta) - kept for compatibility.
         let uniform_rain_rgba: Vec<f32> = (0..GRID_CELL_COUNT)
             .flat_map(|_| [1.0f32, 1.0f32, 0.0f32, 0.0f32])
             .collect();
@@ -4828,6 +4855,10 @@ impl GpuState {
             beta_slope_bias: 5.0,
             alpha_multiplier: 0.0001, // Rain probability: 0.01% per cell per frame
             beta_multiplier: 0.0,     // Poison rain disabled
+            _pad_rain0: 0,
+            _pad_rain1: 0,
+            rain_drop_count: 0,
+            alpha_rain_drop_count: 0,
             dye_precipitation: 1.0,
             chemical_slope_scale_alpha: 0.1,
             chemical_slope_scale_beta: 0.1,
@@ -5073,7 +5104,7 @@ impl GpuState {
         profiler.mark("Counters and readbacks");
 
         // Grid readback buffers for snapshot save
-        let chem_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 2]>()) as u64;
+        let chem_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 4]>()) as u64;
 
         let chem_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Chem Grid Readback"),
@@ -5127,7 +5158,7 @@ impl GpuState {
         // Load main shader (concatenate shared + render + simulation modules, composite is separate)
         // Inject compile-time constants here so resolution changes are centralized in Rust.
         let shader_source = format!(
-            "const SIM_SIZE: u32 = {}u;\nconst ENV_GRID_SIZE: u32 = {}u;\nconst GRID_SIZE: u32 = {}u;\nconst SPATIAL_GRID_SIZE: u32 = {}u;\nconst FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}\n{}",
+            "const SIM_SIZE: u32 = {}u;\nconst ENV_GRID_SIZE: u32 = {}u;\nconst GRID_SIZE: u32 = {}u;\nconst SPATIAL_GRID_SIZE: u32 = {}u;\nconst FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}\n{}\n{}",
             SIM_SIZE as u32,
             GRID_DIM_U32,
             GRID_DIM_U32,
@@ -5136,6 +5167,7 @@ impl GpuState {
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
             include_str!("../shaders/simulation.wgsl"),
+            include_str!("../shaders/rain.wgsl"),
             include_str!("../shaders/microswim.wgsl"),
             include_str!("../shaders/reproduction.wgsl")
         );
@@ -6022,6 +6054,17 @@ impl GpuState {
                 cache: None,
             });
         profiler.mark("diffuse trails pipeline");
+
+        let rain_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Rain Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "apply_rain_drops",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("rain pipeline");
 
         let gamma_slope_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -7126,6 +7169,7 @@ impl GpuState {
             diffuse_pipeline,
             diffuse_commit_pipeline,
             diffuse_trails_pipeline,
+            rain_pipeline,
             clear_visual_pipeline,
             motion_blur_pipeline,
             clear_agent_grid_pipeline,
@@ -8734,7 +8778,7 @@ impl GpuState {
 
             // Frame-rate independent integration factor using exponential decay
             let clamped_dt = frame_dt.clamp(0.001, 0.1);
-            let damping_rate = 8.0; // Much faster follow (~12% step at 60fps: 1 - exp(-8.0*0.016) ≈ 0.12)
+            let damping_rate = 8.0; // Much faster follow (~12% step at 60fps: 1 - exp(-8.0*0.016) � 0.12)
             let integration_factor = 1.0 - (-damping_rate * clamped_dt).exp();
 
             // Smoothly integrate target position into camera position
@@ -8903,6 +8947,21 @@ impl GpuState {
             beta_slope_bias: self.beta_slope_bias,
             alpha_multiplier: current_alpha,
             beta_multiplier: current_beta,
+            _pad_rain0: 0,
+            _pad_rain1: 0,
+            // Calculate expected rain drops for targeted dispatch
+            // Expected drops = grid_cells * multiplier * 0.05 * avg_rain_map
+            // For simplicity, assume avg_rain_map ~= 1.0 (can refine later)
+            rain_drop_count: {
+                let grid_cells = (GRID_DIM * GRID_DIM) as f32;
+                let alpha_drops = (grid_cells * current_alpha * 0.05).ceil() as u32;
+                let beta_drops = (grid_cells * current_beta * 0.05).ceil() as u32;
+                alpha_drops + beta_drops
+            },
+            alpha_rain_drop_count: {
+                let grid_cells = (GRID_DIM * GRID_DIM) as f32;
+                (grid_cells * current_alpha * 0.05).ceil() as u32
+            },
             dye_precipitation: self.dye_precipitation,
             chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
             chemical_slope_scale_beta: self.chemical_slope_scale_beta,
@@ -9219,6 +9278,16 @@ impl GpuState {
 
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
+
+                    // Apply targeted rain drops AFTER diffusion commit
+                    // This adds fresh saturated drops to specific cells after diffusion has spread existing values
+                    let rain_drop_count = params.rain_drop_count;
+                    if rain_drop_count > 0 {
+                        cpass.set_pipeline(&self.rain_pipeline);
+                        cpass.set_bind_group(0, bg_process, &[]);
+                        let rain_workgroups = (rain_drop_count + 255) / 256;
+                        cpass.dispatch_workgroups(rain_workgroups, 1, 1);
+                    }
                 }
 
                 if !run_diffusion {
@@ -9231,7 +9300,8 @@ impl GpuState {
 
                 // Prepare trails every simulation frame (copy/decay + optional blur into trail_grid_inject).
                 // The actual advection runs in the fluid pass.
-                if should_run_simulation && !self.perf_skip_trail_prep {
+                // Skip entirely when trails are fully invisible.
+                if should_run_simulation && !self.perf_skip_trail_prep && self.trail_opacity > 0.0 {
                     let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
                     let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
                     cpass.set_pipeline(&self.diffuse_trails_pipeline);
@@ -9266,14 +9336,7 @@ impl GpuState {
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
 
-                    // Apply motion blur if following an agent
-                    cpass.set_pipeline(&self.motion_blur_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-
-                    self.frame_profiler
-                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
-
+                // Motion blur moved to Composite pass (runs after agent rendering)
                     // Clear agent grid for agent rendering
                     cpass.set_pipeline(&self.clear_agent_grid_pipeline);
                     cpass.set_bind_group(0, bg_process, &[]);
@@ -9389,13 +9452,32 @@ impl GpuState {
                 "Update Encoder (Timed Segment)",
             );
 
+            // (a3) Rain - apply after diffusion commit
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Pass (SimPre Rain)"),
+                    timestamp_writes: None,
+                });
+
+                if run_diffusion {
+                    let rain_drop_count = params.rain_drop_count;
+                    if rain_drop_count > 0 {
+                        cpass.set_pipeline(&self.rain_pipeline);
+                        cpass.set_bind_group(0, bg_process, &[]);
+                        let rain_workgroups = (rain_drop_count + 255) / 256;
+                        cpass.dispatch_workgroups(rain_workgroups, 1, 1);
+                    }
+                }
+            }
+            // No separate timing segment for rain - it's negligible
+
             // (b) Trails prep
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Compute Pass (SimPre Trails)"),
                     timestamp_writes: None,
                 });
-                if should_run_simulation && !self.perf_skip_trail_prep {
+                if should_run_simulation && !self.perf_skip_trail_prep && self.trail_opacity > 0.0 {
                     let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
                     let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
                     cpass.set_pipeline(&self.diffuse_trails_pipeline);
@@ -9454,9 +9536,7 @@ impl GpuState {
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
 
-                    cpass.set_pipeline(&self.motion_blur_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+                    // Motion blur moved to Composite pass
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
 
@@ -9674,7 +9754,7 @@ impl GpuState {
 
                 if should_run_simulation {
                 // Run fluid solver - forces already written by agents to force_vectors
-                // Stable Fluids order: inject_test_force (combines) → add_forces → diffuse → advect → project
+                // Stable Fluids order: inject_test_force (combines) ? add_forces ? diffuse ? advect ? project
                 {
                     let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
                     let dye_workgroups = (GRID_DIM_U32 + 15) / 16;
@@ -10072,6 +10152,14 @@ impl GpuState {
                 let height_workgroups =
                     (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+
+                // Apply motion blur only when following a selected agent
+                // This runs after agents are composited onto the visual grid
+                if self.follow_selected_agent {
+                    cpass.set_pipeline(&self.motion_blur_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+                }
             }
         }
 
@@ -10857,7 +10945,7 @@ impl GpuState {
             };
 
             self.cpu_spawn_queue.push(request);
-            println!("✓ Spawned agent at ({:.1}, {:.1})", world_x, world_y);
+            println!("? Spawned agent at ({:.1}, {:.1})", world_x, world_y);
         }
     }
 
@@ -10867,7 +10955,7 @@ impl GpuState {
             label: Some("Snapshot Readback Encoder"),
         });
 
-        let chem_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 2]>()) as u64;
+        let chem_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 4]>()) as u64;
         let gamma_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
 
         encoder.copy_buffer_to_buffer(&self.chem_grid, 0, &self.chem_grid_readback, 0, chem_grid_size_bytes);
@@ -10903,12 +10991,13 @@ impl GpuState {
             let gamma_data = gamma_slice.get_mapped_range();
             let agents_data = agents_slice.get_mapped_range();
 
-            let chem: Vec<[f32; 2]> = bytemuck::cast_slice(&chem_data).to_vec();
+            let chem: Vec<[f32; 4]> = bytemuck::cast_slice(&chem_data).to_vec();
             let mut alpha: Vec<f32> = Vec::with_capacity(chem.len());
             let mut beta: Vec<f32> = Vec::with_capacity(chem.len());
             for v in &chem {
                 alpha.push(v[0]);
                 beta.push(v[1]);
+                // v[2] and v[3] are rain_alpha and rain_beta, not saved in snapshot
             }
             let gamma: Vec<f32> = bytemuck::cast_slice(&gamma_data).to_vec();
             let agents: Vec<Agent> = bytemuck::cast_slice(&agents_data).to_vec();
@@ -10939,7 +11028,7 @@ impl GpuState {
                 .unwrap_or(false)
             {
                 println!(
-                    "ΓÜá Skipping autosave overwrite: captured 0 living agents (keeping previous autosave)"
+                    "G�� Skipping autosave overwrite: captured 0 living agents (keeping previous autosave)"
                 );
                 return Ok(());
             }
@@ -10947,7 +11036,7 @@ impl GpuState {
 
         // Create snapshot from living agents with current settings
         let current_settings = self.current_settings();
-        let snapshot = SimulationSnapshot::new(self.epoch, &living_agents, current_settings, self.run_name.clone());
+        let snapshot = SimulationSnapshot::new(self.epoch, &living_agents, current_settings, self.run_name.clone(), None);
 
         // Save to PNG
         save_simulation_snapshot(path, &alpha_grid, &beta_grid, &gamma_grid, &snapshot)?;
@@ -11036,7 +11125,7 @@ impl GpuState {
         if let Some(settings) = &snapshot.settings {
             self.apply_settings(settings);
         } else {
-            println!("ΓÜá Loaded snapshot without settings (old format) - using current settings");
+            println!("G�� Loaded snapshot without settings (old format) - using current settings");
         }
 
         // Restore run name if present; otherwise generate one for this session.
@@ -11050,10 +11139,18 @@ impl GpuState {
             );
         }
 
-        // Upload grids to GPU
-        let mut chem_grid: Vec<[f32; 2]> = Vec::with_capacity(alpha_grid.len());
+        // Upload grids to GPU (alpha/beta plus current rain maps stored in chem_grid.zw)
+        let mut chem_grid: Vec<[f32; 4]> = Vec::with_capacity(alpha_grid.len());
         for i in 0..alpha_grid.len() {
-            chem_grid.push([alpha_grid[i], beta_grid[i]]);
+            let rain_idx = i * 2;
+            // Fallback to uniform rain if CPU cache is unexpectedly missing values.
+            let rain_alpha = self.rain_map_data.get(rain_idx).copied().unwrap_or(1.0);
+            let rain_beta = self
+                .rain_map_data
+                .get(rain_idx + 1)
+                .copied()
+                .unwrap_or(1.0);
+            chem_grid.push([alpha_grid[i], beta_grid[i], rain_alpha, rain_beta]);
         }
         self.queue.write_buffer(&self.chem_grid, 0, bytemuck::cast_slice(&chem_grid));
         self.queue.write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_grid));
@@ -11143,7 +11240,7 @@ impl GpuState {
         }
 
         println!(
-            "Γ£ô Loaded settings and restored snapshot agents (alive_count: {}, agent_count: {})",
+            "G�� Loaded settings and restored snapshot agents (alive_count: {}, agent_count: {})",
             self.alive_count,
             self.agent_count
         );
@@ -11991,10 +12088,10 @@ fn save_simulation_snapshot(
     std::fs::rename(&tmp_path, path)?;
 
     if snapshot.run_name.is_empty() {
-        println!("Γ£ô Saved snapshot: {} agents, epoch {}", snapshot.agents.len(), snapshot.epoch);
+        println!("G�� Saved snapshot: {} agents, epoch {}", snapshot.agents.len(), snapshot.epoch);
     } else {
         println!(
-            "Γ£ô Saved snapshot: {} agents, epoch {}, run '{}'",
+            "G�� Saved snapshot: {} agents, epoch {}, run '{}'",
             snapshot.agents.len(),
             snapshot.epoch,
             snapshot.run_name
@@ -12045,14 +12142,14 @@ fn load_simulation_snapshot(
 
             if snapshot.run_name.is_empty() {
                 println!(
-                    "Γ£ô Loaded snapshot: {} agents, epoch {}, saved {}",
+                    "G�� Loaded snapshot: {} agents, epoch {}, saved {}",
                     snapshot.agents.len(),
                     snapshot.epoch,
                     snapshot.timestamp
                 );
             } else {
                 println!(
-                    "Γ£ô Loaded snapshot: {} agents, epoch {}, saved {}, run '{}'",
+                    "G�� Loaded snapshot: {} agents, epoch {}, saved {}, run '{}'",
                     snapshot.agents.len(),
                     snapshot.epoch,
                     snapshot.timestamp,
@@ -12067,6 +12164,47 @@ fn load_simulation_snapshot(
     anyhow::bail!("No RibossomeSnapshot metadata found in PNG")
 }
 
+
+fn encode_rain_map_blob(rain_map: &[f32]) -> anyhow::Result<Option<String>> {
+    const DEFAULT_EPS: f32 = 1e-5;
+    if rain_map.iter().all(|&value| (value - 1.0).abs() <= DEFAULT_EPS) {
+        return Ok(None);
+    }
+
+    let mut quantized = Vec::with_capacity(rain_map.len() * 2);
+    for &value in rain_map {
+        let clamped = value.clamp(0.0, 1.0);
+        let scaled = (clamped * u16::MAX as f32).round().clamp(0.0, u16::MAX as f32) as u16;
+        quantized.extend_from_slice(&scaled.to_le_bytes());
+    }
+
+    let compressed = zstd::encode_all(&quantized[..], 3)?;
+    use base64::Engine;
+    Ok(Some(base64::engine::general_purpose::STANDARD.encode(&compressed)))
+}
+
+fn decode_rain_map_blob(blob: &str) -> anyhow::Result<Vec<f32>> {
+    use anyhow::bail;
+    use base64::Engine;
+
+    let decoded = base64::engine::general_purpose::STANDARD.decode(blob)?;
+    let decompressed = zstd::decode_all(&decoded[..])?;
+    let expected_len = GRID_CELL_COUNT * 2 * 2;
+    if decompressed.len() != expected_len {
+        bail!(
+            "Rain map blob has {} bytes, expected {}",
+            decompressed.len(),
+            expected_len
+        );
+    }
+
+    let mut result = vec![0.0f32; GRID_CELL_COUNT * 2];
+    for (idx, chunk) in decompressed.chunks_exact(2).enumerate() {
+        let quantized = u16::from_le_bytes([chunk[0], chunk[1]]);
+        result[idx] = quantized as f32 / u16::MAX as f32;
+    }
+    Ok(result)
+}
 fn main() {
     use env_logger::Env;
     env_logger::Builder::from_env(Env::default().default_filter_or("error"))
@@ -12136,10 +12274,9 @@ fn main() {
 
     // Animation state for loading screen
     let loading_start = std::time::Instant::now();
-    let mut last_message_update = std::time::Instant::now();
-    let mut current_message_index = 0;
+    let last_message_update = std::time::Instant::now();
 
-    let loading_messages = [
+    const LOADING_MESSAGES: &[&str] = &[
         "Synthesizing nucleotides",
         "Assembling ribosomes",
         "Transcribing genetic code",
@@ -12160,28 +12297,49 @@ fn main() {
         "Loading biochemical simulation",
     ];
 
-    let mut state: Option<GpuState> = None;
+    struct App {
+        state: Option<GpuState>,
+        egui_state: egui_winit::State,
+        window: Arc<winit::window::Window>,
+        rx: std::sync::mpsc::Receiver<GpuState>,
+        loading_start: std::time::Instant,
+        last_message_update: std::time::Instant,
+        current_message_index: usize,
+        loading_messages: &'static [&'static str],
+    }
 
-    // Create egui context and winit state
-    let mut egui_state = egui_winit::State::new(
-        egui::Context::default(),
-        egui::ViewportId::ROOT,
-        &window,
-        None,
-        None,
-        None,
-    );
+    impl winit::application::ApplicationHandler for App {
+        fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {}
 
-    let _ = event_loop.run(move |event, target| {
+        fn window_event(
+            &mut self,
+            event_loop: &winit::event_loop::ActiveEventLoop,
+            _window_id: winit::window::WindowId,
+            event: winit::event::WindowEvent,
+        ) {
+            self.handle_event(winit::event::Event::WindowEvent {
+                window_id: self.window.id(),
+                event,
+            }, event_loop);
+        }
+
+        fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+            self.handle_event(winit::event::Event::AboutToWait, event_loop);
+        }
+    }
+
+    impl App {
+        fn handle_event(&mut self, event: winit::event::Event<()>, target: &winit::event_loop::ActiveEventLoop) {
+            let window = &self.window;
         // Animate loading messages in window title while waiting for GPU state
-        if state.is_none() {
+        if self.state.is_none() {
             let now = std::time::Instant::now();
-            if now.duration_since(last_message_update).as_millis() > 1000 {
-                current_message_index = (current_message_index + 1) % loading_messages.len();
-                last_message_update = now;
-                let elapsed = now.duration_since(loading_start).as_secs_f32();
+            if now.duration_since(self.last_message_update).as_millis() > 1000 {
+                self.current_message_index = (self.current_message_index + 1) % self.loading_messages.len();
+                self.last_message_update = now;
+                let elapsed = now.duration_since(self.loading_start).as_secs_f32();
                 let dots = ".".repeat((elapsed * 2.0) as usize % 4);
-                let message = format!("{}{}", loading_messages[current_message_index], dots);
+                let message = format!("{}{}", self.loading_messages[self.current_message_index], dots);
                 window.set_title(&format!("{} v{} - {}", APP_NAME, APP_VERSION, &message));
                 // Also print to console so messages are visible
                 println!("Loading: {}", &message);
@@ -12189,23 +12347,23 @@ fn main() {
         }
 
         // Check if loading finished
-        if state.is_none() {
-            if let Ok(mut loaded_state) = rx.try_recv() {
+        if self.state.is_none() {
+            if let Ok(mut loaded_state) = self.rx.try_recv() {
                 // Try to auto-load previous session from autosave snapshot
                 // Don't call reset_simulation_state() - state is already fresh from creation
                 let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
                 if autosave_path.exists() {
                     match loaded_state.load_snapshot_from_file(autosave_path) {
                         Ok(_) => {
-                            println!("✓ Auto-loaded previous session from epoch {}", loaded_state.epoch);
+                            println!("? Auto-loaded previous session from epoch {}", loaded_state.epoch);
                         }
                         Err(e) => {
-                            eprintln!("❌ Failed to auto-load snapshot: {:?}", e);
+                            eprintln!("? Failed to auto-load snapshot: {:?}", e);
                         }
                     }
                 }
 
-                state = Some(loaded_state);
+                self.state = Some(loaded_state);
                 window.set_title(&format!("{} v{}", APP_NAME, APP_VERSION));
                 let _ = window.request_inner_size(winit::dpi::LogicalSize::new(1600, 800));
             }
@@ -12214,19 +12372,19 @@ fn main() {
         match event {
             Event::WindowEvent { event, window_id } if window_id == window.id() => {
                 // Let egui handle the event first
-                let response = egui_state.on_window_event(&window, &event);
+                let response = self.egui_state.on_window_event(&window, &event);
 
                 // Only handle simulation controls if egui didn't consume the event
                 if !response.consumed {
                     match event {
                         WindowEvent::CloseRequested => {
-                            if let Some(mut existing) = state.take() {
+                            if let Some(mut existing) = self.state.take() {
                                 existing.destroy_resources();
                             }
                             target.exit();
                         }
                         WindowEvent::Resized(physical_size) => {
-                            if let Some(state) = state.as_mut() {
+                            if let Some(state) = self.state.as_mut() {
                                 state.resize(physical_size);
                             }
                         }
@@ -12239,7 +12397,7 @@ fn main() {
                                 },
                             ..
                         } => {
-                            if let Some(state) = state.as_mut() {
+                            if let Some(state) = self.state.as_mut() {
                                 if key_state == ElementState::Pressed {
                                     let mut camera_changed = false;
                                     match physical_key {
@@ -12312,7 +12470,7 @@ fn main() {
                             button,
                             ..
                         } => {
-                            if let Some(state) = state.as_mut() {
+                            if let Some(state) = self.state.as_mut() {
                                 if button == winit::event::MouseButton::Right {
                                     state.is_dragging = button_state == ElementState::Pressed;
                                     if !state.is_dragging {
@@ -12334,7 +12492,7 @@ fn main() {
                             }
                         }
                         WindowEvent::CursorMoved { position, .. } => {
-                            if let Some(state) = state.as_mut() {
+                            if let Some(state) = self.state.as_mut() {
                                 let current_pos = [position.x as f32, position.y as f32];
 
                                 if state.is_dragging {
@@ -12362,7 +12520,7 @@ fn main() {
                             }
                         }
                         WindowEvent::MouseWheel { delta, .. } => {
-                            if let Some(state) = state.as_mut() {
+                            if let Some(state) = self.state.as_mut() {
                                 let zoom_delta = match delta {
                                     MouseScrollDelta::LineDelta(_, y) => y * 0.1,
                                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
@@ -12394,11 +12552,11 @@ fn main() {
                             if let Some(ext) = path.extension() {
                                 if ext == "png" {
                                     // Reset simulation state before loading
-                                    reset_simulation_state(&mut state, &window, &mut egui_state);
-                                    if let Some(gpu_state) = state.as_mut() {
+                                    reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
+                                    if let Some(gpu_state) = self.state.as_mut() {
                                         match gpu_state.load_snapshot_from_file(&path) {
-                                            Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
-                                            Err(e) => eprintln!("❌ Failed to load snapshot: {}", e),
+                                            Ok(_) => println!("? Snapshot loaded from: {}", path.display()),
+                                            Err(e) => eprintln!("? Failed to load snapshot: {}", e),
                                         }
                                     }
                                 }
@@ -12408,12 +12566,12 @@ fn main() {
                             let mut reset_requested = false;
 
                             // Render loading screen while state is being initialized
-                            if state.is_none() {
+                            if self.state.is_none() {
                                 window.request_redraw();
                                 return; // Don't process further until state is ready
                             }
 
-                            if let Some(state) = state.as_mut() {
+                            if let Some(state) = self.state.as_mut() {
                                 // Frame rate limiting
                                 if let Some(target_frame_time) = state.frame_time_cap() {
                                     let elapsed = state.last_frame_time.elapsed();
@@ -12535,14 +12693,14 @@ fn main() {
                                         }
                                     } else {
                                         // Drain input every present, but only rebuild egui at ~30Hz (or immediately on interaction).
-                                        let raw_input = egui_state.take_egui_input(&window);
+                                        let raw_input = self.egui_state.take_egui_input(&window);
                                         let input_active = !raw_input.events.is_empty();
                                         let do_egui_update = input_active
                                             || state.last_egui_update_time.elapsed()
                                                 >= std::time::Duration::from_micros(EGUI_UPDATE_INTERVAL_MICROS);
 
                                         if do_egui_update {
-                                        let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
+                                        let full_output = self.egui_state.egui_ctx().run(raw_input, |ctx| {
                                         // Left side panel for simulation controls (only show if ui_visible)
                                         if state.ui_visible {
                                         egui::SidePanel::left("simulation_controls")
@@ -12639,7 +12797,7 @@ fn main() {
                                                             match load_agent_via_dialog() {
                                                                 Ok(genome) => {
                                                                     state.spawn_template_genome = Some(genome);
-                                                                    println!("✓ Template loaded for spawn mode");
+                                                                    println!("? Template loaded for spawn mode");
                                                                 }
                                                                 Err(err) => eprintln!("Load canceled or failed: {err:?}"),
                                                             }
@@ -12648,17 +12806,17 @@ fn main() {
                                                         let has_template = state.spawn_template_genome.is_some();
                                                         ui.add_enabled_ui(has_template, |ui| {
                                                             let spawn_mode_text = if state.spawn_mode_active {
-                                                                "🖱 Spawn Mode ON"
+                                                                "?? Spawn Mode ON"
                                                             } else {
                                                                 "Enable Spawn Mode"
                                                             };
-                                                            
+
                                                             if ui.button(spawn_mode_text).clicked() {
                                                                 state.spawn_mode_active = !state.spawn_mode_active;
                                                                 if state.spawn_mode_active {
-                                                                    println!("✓ Spawn mode enabled - click to spawn agents");
+                                                                    println!("? Spawn mode enabled - click to spawn agents");
                                                                 } else {
-                                                                    println!("✗ Spawn mode disabled");
+                                                                    println!("? Spawn mode disabled");
                                                                 }
                                                             }
                                                         });
@@ -12666,15 +12824,15 @@ fn main() {
                                                         if has_template && ui.button("Clear Template").clicked() {
                                                             state.spawn_template_genome = None;
                                                             state.spawn_mode_active = false;
-                                                            println!("✗ Template cleared");
+                                                            println!("? Template cleared");
                                                         }
                                                     });
 
                                                     if state.spawn_mode_active {
-                                                        ui.colored_label(egui::Color32::from_rgb(100, 255, 100), 
-                                                            "🖱 Click anywhere to spawn agent");
+                                                        ui.colored_label(egui::Color32::from_rgb(100, 255, 100),
+                                                            "?? Click anywhere to spawn agent");
                                                     } else if state.spawn_template_genome.is_some() {
-                                                        ui.colored_label(egui::Color32::from_rgb(200, 200, 100), 
+                                                        ui.colored_label(egui::Color32::from_rgb(200, 200, 100),
                                                             "Template loaded - enable spawn mode to use");
                                                     }
                                                 });
@@ -12699,10 +12857,10 @@ fn main() {
                                                 }
 
                                                 ui.separator();
-                                                if ui.button("≡ƒÆ╛ Save Snapshot").clicked() {
+                                                if ui.button("=��+ Save Snapshot").clicked() {
                                                     state.snapshot_save_requested = true;
                                                 }
-                                                if ui.button("≡ƒôé Load Snapshot").clicked() {
+                                                if ui.button("=��� Load Snapshot").clicked() {
                                                     state.snapshot_load_requested = true;
                                                 }
                                             });
@@ -13272,20 +13430,20 @@ fn main() {
                                                                 .text("Alpha Diffuse")
                                                                 .custom_formatter(|n, _| format!("{:.3}", n)),
                                                         );
-                                                        ui.label("(controls 3×3 blur strength per update)");
+                                                        ui.label("(controls 3�3 blur strength per update)");
                                                         ui.add(
                                                             egui::Slider::new(&mut state.beta_blur, 0.0..=1.0)
                                                                 .text("Beta Diffuse")
                                                                 .custom_formatter(|n, _| format!("{:.3}", n)),
                                                         );
-                                                        ui.label("(controls 3×3 blur strength per update)");
+                                                        ui.label("(controls 3�3 blur strength per update)");
 
                                                         ui.add(
                                                             egui::Slider::new(&mut state.gamma_diffuse, 0.0..=1.0)
                                                                 .text("Gamma Diffuse")
                                                                 .custom_formatter(|n, _| format!("{:.3}", n)),
                                                         );
-                                                        ui.label("(controls 3×3 blur strength per update)");
+                                                        ui.label("(controls 3�3 blur strength per update)");
 
                                                         ui.add(
                                                             egui::Slider::new(&mut state.gamma_shift, 0.0..=1.0)
@@ -13411,9 +13569,9 @@ fn main() {
                                                                 .text("Dye Precipitation"),
                                                         )
                                                         .on_hover_text("Scales rain/precipitation injection into the chem grids. 0 disables precipitation entirely.");
-                                                        ui.checkbox(&mut state.rain_debug_visual, "≡ƒÄ¿ Show Rain Pattern");
+                                                        ui.checkbox(&mut state.rain_debug_visual, "=�Ŀ Show Rain Pattern");
                                                         if state.rain_debug_visual {
-                                                            ui.label("≡ƒƒó Green = Alpha (food) | ≡ƒö┤ Red = Beta (poison)");
+                                                            ui.label("=��� Green = Alpha (food) | =��� Red = Beta (poison)");
                                                         }
                                                         ui.horizontal(|ui| {
                                                             if ui.button("Load Alpha Rain Map").clicked() {
@@ -14585,11 +14743,11 @@ fn main() {
                                     });
 
                                         // Handle platform output
-                                        egui_state.handle_platform_output(&window, full_output.platform_output);
+                                        self.egui_state.handle_platform_output(&window, full_output.platform_output);
                                         state.persist_settings_if_changed();
 
                                         // Tessellate and cache render data
-                                        state.cached_egui_primitives = egui_state
+                                        state.cached_egui_primitives = self.egui_state
                                             .egui_ctx()
                                             .tessellate(full_output.shapes, full_output.pixels_per_point);
                                         state.last_egui_update_time = now;
@@ -14633,11 +14791,11 @@ fn main() {
                             }
 
                             if reset_requested {
-                                reset_simulation_state(&mut state, &window, &mut egui_state);
+                                reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
                                 window.request_redraw();
                             }
 
-                            if let Some(gpu_state) = &mut state {
+                            if let Some(gpu_state) = &mut self.state {
                                 // Auto-snapshot every AUTO_SNAPSHOT_INTERVAL epochs.
                                 // NOTE: this runs after egui has updated state from sliders, so the
                                 // autosave snapshot captures the latest control-panel values.
@@ -14650,9 +14808,9 @@ fn main() {
                                     gpu_state.last_autosave_epoch = gpu_state.epoch;
                                     let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
                                     if let Err(e) = gpu_state.save_snapshot_to_file(autosave_path) {
-                                        eprintln!("ΓÜá Auto-snapshot failed at epoch {}: {:?}", gpu_state.epoch, e);
+                                        eprintln!("G�� Auto-snapshot failed at epoch {}: {:?}", gpu_state.epoch, e);
                                     } else {
-                                        println!("Γ£ô Auto-snapshot saved at epoch {}", gpu_state.epoch);
+                                        println!("G�� Auto-snapshot saved at epoch {}", gpu_state.epoch);
                                     }
                                 }
 
@@ -14666,8 +14824,8 @@ fn main() {
                                         .save_file()
                                     {
                                         match gpu_state.save_snapshot_to_file(&path) {
-                                            Ok(_) => println!("✓ Snapshot saved to: {}", path.display()),
-                                            Err(e) => eprintln!("❌ Failed to save snapshot: {}", e),
+                                            Ok(_) => println!("? Snapshot saved to: {}", path.display()),
+                                            Err(e) => eprintln!("? Failed to save snapshot: {}", e),
                                         }
                                     }
                                 }
@@ -14681,11 +14839,11 @@ fn main() {
                                         .pick_file()
                                     {
                                         // Reset simulation state before loading
-                                        reset_simulation_state(&mut state, &window, &mut egui_state);
-                                        if let Some(gpu_state) = state.as_mut() {
+                                        reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
+                                        if let Some(gpu_state) = self.state.as_mut() {
                                             match gpu_state.load_snapshot_from_file(&path) {
-                                                Ok(_) => println!("✓ Snapshot loaded from: {}", path.display()),
-                                                Err(e) => eprintln!("❌ Failed to load snapshot: {}", e),
+                                                Ok(_) => println!("? Snapshot loaded from: {}", path.display()),
+                                                Err(e) => eprintln!("? Failed to load snapshot: {}", e),
                                             }
                                         }
                                     }
@@ -14698,13 +14856,13 @@ fn main() {
                     // egui consumed the event, but we still need to handle some
                     match event {
                         WindowEvent::CloseRequested => {
-                            if let Some(mut existing) = state.take() {
+                            if let Some(mut existing) = self.state.take() {
                                 existing.destroy_resources();
                             }
                             target.exit();
                         }
                         WindowEvent::Resized(physical_size) => {
-                            if let Some(state) = state.as_mut() {
+                            if let Some(state) = self.state.as_mut() {
                                 state.resize(physical_size);
                             }
                         }
@@ -14712,10 +14870,10 @@ fn main() {
                             // Handle drag-and-drop file loading
                             if let Some(ext) = path.extension() {
                                 if ext == "png" {
-                                    if let Some(gpu_state) = state.as_mut() {
+                                    if let Some(gpu_state) = self.state.as_mut() {
                                         match gpu_state.load_snapshot_from_file(&path) {
-                                            Ok(_) => println!("Γ£ô Snapshot loaded from dropped file: {}", path.display()),
-                                            Err(e) => eprintln!("Γ£ù Failed to load dropped snapshot: {}", e),
+                                            Ok(_) => println!("G�� Snapshot loaded from dropped file: {}", path.display()),
+                                            Err(e) => eprintln!("G�� Failed to load dropped snapshot: {}", e),
                                         }
                                     }
                                 }
@@ -14724,7 +14882,7 @@ fn main() {
                         WindowEvent::RedrawRequested => {
                             let mut reset_requested = false;
 
-                            if let Some(state) = state.as_mut() {
+                            if let Some(state) = self.state.as_mut() {
                                 // Frame rate limiting
                                 if let Some(target_frame_time) = state.frame_time_cap() {
                                     let elapsed = state.last_frame_time.elapsed();
@@ -14784,14 +14942,14 @@ fn main() {
                                 }
 
                                 // Drain input every present, but only rebuild egui at ~30Hz (or immediately on interaction).
-                                let raw_input = egui_state.take_egui_input(&window);
+                                let raw_input = self.egui_state.take_egui_input(&window);
                                 let input_active = !raw_input.events.is_empty();
                                 let do_egui_update = input_active
                                     || state.last_egui_update_time.elapsed()
                                         >= std::time::Duration::from_micros(EGUI_UPDATE_INTERVAL_MICROS);
 
                                 if do_egui_update {
-                                let full_output = egui_state.egui_ctx().run(raw_input, |ctx| {
+                                let full_output = self.egui_state.egui_ctx().run(raw_input, |ctx| {
                                     egui::Window::new("Simulation Controls")
                                         .default_pos([10.0, 10.0])
                                         .default_size([300.0, 400.0])
@@ -14819,7 +14977,7 @@ fn main() {
 
                                             ui.separator();
                                             ui.heading("Snapshot");
-                                            if ui.button("💾 Save Snapshot (PNG)").clicked() {
+                                            if ui.button("?? Save Snapshot (PNG)").clicked() {
                                                 state.snapshot_save_requested = true;
                                             }
                                             ui.label("Saves environment + up to 5000 agents (random sample)");
@@ -15028,11 +15186,11 @@ fn main() {
                                 });
 
                                 // Handle platform output
-                                egui_state.handle_platform_output(&window, full_output.platform_output);
+                                self.egui_state.handle_platform_output(&window, full_output.platform_output);
                                 state.persist_settings_if_changed();
 
                                 // Tessellate and cache render data
-                                state.cached_egui_primitives = egui_state
+                                state.cached_egui_primitives = self.egui_state
                                     .egui_ctx()
                                     .tessellate(full_output.shapes, full_output.pixels_per_point);
                                 state.last_egui_update_time = now;
@@ -15074,7 +15232,7 @@ fn main() {
                             }
 
                             if reset_requested {
-                                reset_simulation_state(&mut state, &window, &mut egui_state);
+                                reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
                                 window.request_redraw();
                             }
                         }
@@ -15089,5 +15247,26 @@ fn main() {
             }
             _ => {}
         }
-    });
+        }
+    }
+
+    let mut app = App {
+        state: None,
+        egui_state: egui_winit::State::new(
+            egui::Context::default(),
+            egui::ViewportId::ROOT,
+            &window,
+            None,
+            None,
+            None,
+        ),
+        window: window.clone(),
+        rx,
+        loading_start,
+        last_message_update,
+        current_message_index: 0,
+        loading_messages: LOADING_MESSAGES,
+    };
+
+    let _ = event_loop.run_app(&mut app);
 }

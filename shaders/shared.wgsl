@@ -201,6 +201,10 @@ struct SimParams {
     beta_slope_bias: f32,
     alpha_multiplier: f32,
     beta_multiplier: f32,
+    _pad_rain0: u32,
+    _pad_rain1: u32,
+    rain_drop_count: u32,
+    alpha_rain_drop_count: u32,
     dye_precipitation: f32,
     chemical_slope_scale_alpha: f32,
     chemical_slope_scale_beta: f32,
@@ -344,7 +348,9 @@ var<storage, read_write> agents_out: array<Agent>;
 // Environment chemistry grid:
 // - chem_grid[idx].x = alpha (food)
 // - chem_grid[idx].y = beta  (poison)
-var<storage, read_write> chem_grid: array<vec2<f32>>;
+// - chem_grid[idx].z = alpha_rain_map (food rain multiplier)
+// - chem_grid[idx].w = beta_rain_map (poison rain multiplier)
+var<storage, read_write> chem_grid: array<vec4<f32>>;
 
 @group(0) @binding(3)
 // Fluid dye (advected):
@@ -1045,6 +1051,26 @@ fn read_combined_height(ix: i32, iy: i32) -> f32 {
     if (params.chemical_slope_scale_alpha != 0.0) { height += chem_grid[idx].x * params.chemical_slope_scale_alpha; }
     if (params.chemical_slope_scale_beta != 0.0) { height += chem_grid[idx].y * params.chemical_slope_scale_beta; }
     return height;
+}
+
+// Helper functions for chem_grid to preserve rain map data (.zw components)
+fn write_chem_alpha(idx: u32, alpha: f32) {
+    let prev = chem_grid[idx];
+    chem_grid[idx] = vec4<f32>(alpha, prev.y, prev.z, prev.w);
+}
+
+fn write_chem_beta(idx: u32, beta: f32) {
+    let prev = chem_grid[idx];
+    chem_grid[idx] = vec4<f32>(prev.x, beta, prev.z, prev.w);
+}
+
+fn write_chem_alpha_beta(idx: u32, alpha: f32, beta: f32) {
+    let prev = chem_grid[idx];
+    chem_grid[idx] = vec4<f32>(alpha, beta, prev.z, prev.w);
+}
+
+fn read_rain_maps(idx: u32) -> vec2<f32> {
+    return chem_grid[idx].zw;
 }
 
 fn hash(v: u32) -> u32 {

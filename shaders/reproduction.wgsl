@@ -39,7 +39,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         var split_reproduction = false;
         var first_gene_end: u32 = 0xFFFFFFFFu;  // End of first gene (after stop codon)
         var second_gene_start: u32 = 0xFFFFFFFFu;  // Start of second gene (second AUG)
-        
+
         if (params.require_start_codon == 1u) {
             // Find the first start codon
             let first_start = genome_find_start_codon(agent_genome_packed, genome_offset, gene_length);
@@ -47,7 +47,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Scan from after the first AUG until we find a stop codon
                 var scan_pos = first_start + 3u;  // Skip the AUG itself
                 var found_stop = false;
-                
+
                 for (var i = 0u; i < MAX_BODY_PARTS && scan_pos + 2u < GENOME_LENGTH; i++) {
                     if (genome_is_stop_codon_at(agent_genome_packed, scan_pos, genome_offset, gene_length)) {
                         found_stop = true;
@@ -57,11 +57,14 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Continue scanning with nucleotide stride (3 bases per codon)
                     scan_pos += 3u;
                 }
-                
+
                 // If we found a stop codon, continue scanning for a second AUG
                 if (found_stop) {
                     scan_pos = first_gene_end + 3u;  // Start after the stop codon
-                    for (var j = scan_pos; j + 2u < GENOME_LENGTH; j += 1u) {
+                    let gene_end = genome_offset + gene_length;
+                    // Scan codon-aligned within the active gene range.
+                    // This avoids out-of-frame hits and reduces work significantly.
+                    for (var j = scan_pos; j + 2u < gene_end; j += 3u) {
                         let b0 = genome_get_base_ascii(agent_genome_packed, j, genome_offset, gene_length);
                         let b1 = genome_get_base_ascii(agent_genome_packed, j + 1u, genome_offset, gene_length);
                         let b2 = genome_get_base_ascii(agent_genome_packed, j + 2u, genome_offset, gene_length);
@@ -74,10 +77,10 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
         }
-        
+
         // Calculate how many offspring to create (1 or 2)
         let num_offspring = select(1u, 2u, split_reproduction);
-        
+
         // Attempt reproduction: create complementary genome offspring with mutations
         let inherited_energy = agent_energy_cur * 0.5;
         if (inherited_energy > 0.0) {
@@ -88,16 +91,16 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Create each offspring (loop 1 or 2 times)
             for (var offspring_idx = 0u; offspring_idx < num_offspring; offspring_idx++) {
                 let current_spawn_index = spawn_index + offspring_idx;
-                
+
                 // Only proceed if we have room in the spawn request buffer
                 if (current_spawn_index >= MAX_SPAWN_REQUESTS) {
                     break;
                 }
-                
+
                 // Determine genome range for this offspring
                 var offspring_gene_offset = genome_offset;
                 var offspring_gene_length = gene_length;
-                
+
                 if (split_reproduction) {
                     if (offspring_idx == 0u) {
                         // First offspring: from original start to stop codon
@@ -394,7 +397,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 new_agents[current_spawn_index] = offspring;
             } // End offspring loop
-            
+
             // Parent loses energy for all offspring created
             agent_energy_cur -= inherited_energy;
 

@@ -1788,7 +1788,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 );
                 slope_gradient += gravity_vector;
             }
-            
+
             // Slope acts as a modifier to existing motion, not as a direct force
             // Only affects agents that are already moving
             let agent_speed = length(agent_velocity);
@@ -1914,19 +1914,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             if (alpha_transfer > 0.0) {
                                 center_alpha = clamp(center_alpha - alpha_transfer, 0.0, 1.0);
                                 target_alpha = clamp(target_alpha + alpha_transfer, 0.0, 1.0);
-                                let prev_c = chem_grid[center_idx];
-                                chem_grid[center_idx] = vec2<f32>(center_alpha, prev_c.y);
-                                let prev_t = chem_grid[target_idx];
-                                chem_grid[target_idx] = vec2<f32>(target_alpha, prev_t.y);
+                                write_chem_alpha(center_idx, center_alpha);
+                                write_chem_alpha(target_idx, target_alpha);
                             }
 
                             if (beta_transfer > 0.0) {
                                 center_beta = clamp(center_beta - beta_transfer, 0.0, 1.0);
                                 target_beta = clamp(target_beta + beta_transfer, 0.0, 1.0);
-                                let prev_c = chem_grid[center_idx];
-                                chem_grid[center_idx] = vec2<f32>(prev_c.x, center_beta);
-                                let prev_t = chem_grid[target_idx];
-                                chem_grid[target_idx] = vec2<f32>(prev_t.x, target_beta);
+                                write_chem_beta(center_idx, center_beta);
+                                write_chem_beta(target_idx, target_beta);
                             }
                         }
                     }
@@ -2141,17 +2137,20 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // 1) Trail deposition: blend agent color + deposit energy trail
         // NOTE: write into trail_grid_inject; the displayed trail_grid is produced by fluid-pass advection.
-        let current_trail = trail_grid_inject[idx].xyz;
-        let blended = mix(current_trail, agent_color, trail_deposit_strength);
+        // Skip when trails are fully invisible.
+        if (params.trail_opacity > 0.0) {
+            let current_trail = trail_grid_inject[idx].xyz;
+            let blended = mix(current_trail, agent_color, trail_deposit_strength);
 
-        // Deposit energy trail (unclamped) - scale by agent energy
-        let current_energy_trail = sanitize_f32(trail_grid_inject[idx].w);
-        let agent_energy_nonneg = max(sanitize_f32(agent_energy_cur), 0.0);
-        // Typical agent energy ~20; scale down contribution so trails don't saturate.
-        let energy_deposit = agent_energy_nonneg * trail_deposit_strength * (0.1 / 20.0); // 20x weaker than before
-        let blended_energy = sanitize_f32(current_energy_trail + energy_deposit);
+            // Deposit energy trail (unclamped) - scale by agent energy
+            let current_energy_trail = sanitize_f32(trail_grid_inject[idx].w);
+            let agent_energy_nonneg = max(sanitize_f32(agent_energy_cur), 0.0);
+            // Typical agent energy ~20; scale down contribution so trails don't saturate.
+            let energy_deposit = agent_energy_nonneg * trail_deposit_strength * (0.1 / 20.0); // 20x weaker than before
+            let blended_energy = sanitize_f32(current_energy_trail + energy_deposit);
 
-        trail_grid_inject[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), blended_energy);
+            trail_grid_inject[idx] = vec4<f32>(clamp(blended, vec3<f32>(0.0), vec3<f32>(1.0)), blended_energy);
+        }
 
         // 2) Energy consumption: calculate costs per organ type
         // DISABLED: Vampire mouths always active, no need to calculate enabler sum
@@ -2264,10 +2263,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let da01 = consumed_alpha * w01;
                     let da11 = consumed_alpha * w11;
 
-                    if (da00 > 0.0) { let prev = chem_grid[idx00]; chem_grid[idx00] = vec2<f32>(clamp(prev.x - da00, 0.0, prev.x), prev.y); }
-                    if (da10 > 0.0) { let prev = chem_grid[idx10]; chem_grid[idx10] = vec2<f32>(clamp(prev.x - da10, 0.0, prev.x), prev.y); }
-                    if (da01 > 0.0) { let prev = chem_grid[idx01]; chem_grid[idx01] = vec2<f32>(clamp(prev.x - da01, 0.0, prev.x), prev.y); }
-                    if (da11 > 0.0) { let prev = chem_grid[idx11]; chem_grid[idx11] = vec2<f32>(clamp(prev.x - da11, 0.0, prev.x), prev.y); }
+                    if (da00 > 0.0) { let prev = chem_grid[idx00]; write_chem_alpha(idx00, clamp(prev.x - da00, 0.0, prev.x)); }
+                    if (da10 > 0.0) { let prev = chem_grid[idx10]; write_chem_alpha(idx10, clamp(prev.x - da10, 0.0, prev.x)); }
+                    if (da01 > 0.0) { let prev = chem_grid[idx01]; write_chem_alpha(idx01, clamp(prev.x - da01, 0.0, prev.x)); }
+                    if (da11 > 0.0) { let prev = chem_grid[idx11]; write_chem_alpha(idx11, clamp(prev.x - da11, 0.0, prev.x)); }
 
                     agent_energy_cur += consumed_alpha * params.food_power;
                     total_consumed_alpha += consumed_alpha;
@@ -2282,10 +2281,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let db01 = consumed_beta * w01;
                     let db11 = consumed_beta * w11;
 
-                    if (db00 > 0.0) { let prev = chem_grid[idx00]; chem_grid[idx00] = vec2<f32>(prev.x, clamp(prev.y - db00, 0.0, prev.y)); }
-                    if (db10 > 0.0) { let prev = chem_grid[idx10]; chem_grid[idx10] = vec2<f32>(prev.x, clamp(prev.y - db10, 0.0, prev.y)); }
-                    if (db01 > 0.0) { let prev = chem_grid[idx01]; chem_grid[idx01] = vec2<f32>(prev.x, clamp(prev.y - db01, 0.0, prev.y)); }
-                    if (db11 > 0.0) { let prev = chem_grid[idx11]; chem_grid[idx11] = vec2<f32>(prev.x, clamp(prev.y - db11, 0.0, prev.y)); }
+                    if (db00 > 0.0) { let prev = chem_grid[idx00]; write_chem_beta(idx00, clamp(prev.y - db00, 0.0, prev.y)); }
+                    if (db10 > 0.0) { let prev = chem_grid[idx10]; write_chem_beta(idx10, clamp(prev.y - db10, 0.0, prev.y)); }
+                    if (db01 > 0.0) { let prev = chem_grid[idx01]; write_chem_beta(idx01, clamp(prev.y - db01, 0.0, prev.y)); }
+                    if (db11 > 0.0) { let prev = chem_grid[idx11]; write_chem_beta(idx11, clamp(prev.y - db11, 0.0, prev.y)); }
 
                     agent_energy_cur -= consumed_beta * params.poison_power * poison_multiplier;
                     total_consumed_beta += consumed_beta;
@@ -2353,10 +2352,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 if (part_rnd < 0.5) {
                     let prev = chem_grid[idx];
-                    chem_grid[idx] = vec2<f32>(min(prev.x + deposit_per_part, 1.0), prev.y);
+                    write_chem_alpha(idx, min(prev.x + deposit_per_part, 1.0));
                 } else {
                     let prev = chem_grid[idx];
-                    chem_grid[idx] = vec2<f32>(prev.x, min(prev.y + deposit_per_part, 1.0));
+                    write_chem_beta(idx, min(prev.y + deposit_per_part, 1.0));
                 }
             }
         }
@@ -2607,149 +2606,115 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     let gamma_iso = mix(current_gamma, gamma_avg, gamma_diffuse_strength);
 
     // Slope-based flux shift (mass-conserving advection along slopes).
-    let slope_here = read_gamma_slope(idx);
-    let xi = i32(x);
-    let yi = i32(y);
-    let max_index = i32(GRID_SIZE) - 1;
-    let left_x = max(xi - 1, 0);
-    let right_x = min(xi + 1, max_index);
-    let up_y = max(yi - 1, 0);
-    let down_y = min(yi + 1, max_index);
-
-    let left_idx = u32(yi) * GRID_SIZE + u32(left_x);
-    let right_idx = u32(yi) * GRID_SIZE + u32(right_x);
-    let up_idx = u32(up_y) * GRID_SIZE + x;
-    let down_idx = u32(down_y) * GRID_SIZE + x;
-
-    let alpha_left = chem_grid[left_idx].x;
-    let alpha_right = chem_grid[right_idx].x;
-    let alpha_up = chem_grid[up_idx].x;
-    let alpha_down = chem_grid[down_idx].x;
-    let beta_left = chem_grid[left_idx].y;
-    let beta_right = chem_grid[right_idx].y;
-    let beta_up = chem_grid[up_idx].y;
-    let beta_down = chem_grid[down_idx].y;
-
-    let slope_left = read_gamma_slope(left_idx);
-    let slope_right = read_gamma_slope(right_idx);
-    let slope_up = read_gamma_slope(up_idx);
-    let slope_down = read_gamma_slope(down_idx);
-
-    let kernel_scale = 1.0 / 8.0;
-
-    // Alpha flux
-    let slope_here_alpha = slope_here * params.alpha_slope_bias;
-    let slope_left_alpha = slope_left * params.alpha_slope_bias;
-    let slope_right_alpha = slope_right * params.alpha_slope_bias;
-    let slope_up_alpha = slope_up * params.alpha_slope_bias;
-    let slope_down_alpha = slope_down * params.alpha_slope_bias;
+    // Skip when both bias parameters are negligible to avoid expensive neighbor reads + branches.
+    let slope_flux_enabled = (abs(params.alpha_slope_bias) > 0.01) || (abs(params.beta_slope_bias) > 0.01);
 
     var alpha_flux = 0.0;
-    if (right_x != xi) {
-        let flow_out = max(slope_here_alpha.x, 0.0) * current_alpha;
-        let flow_in = max(-slope_right_alpha.x, 0.0) * alpha_right;
-        alpha_flux += flow_out - flow_in;
-    }
-    if (left_x != xi) {
-        let flow_out = max(-slope_here_alpha.x, 0.0) * current_alpha;
-        let flow_in = max(slope_left_alpha.x, 0.0) * alpha_left;
-        alpha_flux += flow_out - flow_in;
-    }
-    if (down_y != yi) {
-        let flow_out = max(slope_here_alpha.y, 0.0) * current_alpha;
-        let flow_in = max(-slope_down_alpha.y, 0.0) * alpha_down;
-        alpha_flux += flow_out - flow_in;
-    }
-    if (up_y != yi) {
-        let flow_out = max(-slope_here_alpha.y, 0.0) * current_alpha;
-        let flow_in = max(slope_up_alpha.y, 0.0) * alpha_up;
-        alpha_flux += flow_out - flow_in;
-    }
-
-    // Beta flux
-    let slope_here_beta = slope_here * params.beta_slope_bias;
-    let slope_left_beta = slope_left * params.beta_slope_bias;
-    let slope_right_beta = slope_right * params.beta_slope_bias;
-    let slope_up_beta = slope_up * params.beta_slope_bias;
-    let slope_down_beta = slope_down * params.beta_slope_bias;
-
     var beta_flux = 0.0;
-    if (right_x != xi) {
-        let flow_out = max(slope_here_beta.x, 0.0) * current_beta;
-        let flow_in = max(-slope_right_beta.x, 0.0) * beta_right;
-        beta_flux += flow_out - flow_in;
-    }
-    if (left_x != xi) {
-        let flow_out = max(-slope_here_beta.x, 0.0) * current_beta;
-        let flow_in = max(slope_left_beta.x, 0.0) * beta_left;
-        beta_flux += flow_out - flow_in;
-    }
-    if (down_y != yi) {
-        let flow_out = max(slope_here_beta.y, 0.0) * current_beta;
-        let flow_in = max(-slope_down_beta.y, 0.0) * beta_down;
-        beta_flux += flow_out - flow_in;
-    }
-    if (up_y != yi) {
-        let flow_out = max(-slope_here_beta.y, 0.0) * current_beta;
-        let flow_in = max(slope_up_beta.y, 0.0) * beta_up;
-        beta_flux += flow_out - flow_in;
+
+    if (slope_flux_enabled) {
+        let slope_here = read_gamma_slope(idx);
+        let xi = i32(x);
+        let yi = i32(y);
+        let max_index = i32(GRID_SIZE) - 1;
+        let left_x = max(xi - 1, 0);
+        let right_x = min(xi + 1, max_index);
+        let up_y = max(yi - 1, 0);
+        let down_y = min(yi + 1, max_index);
+
+        let left_idx = u32(yi) * GRID_SIZE + u32(left_x);
+        let right_idx = u32(yi) * GRID_SIZE + u32(right_x);
+        let up_idx = u32(up_y) * GRID_SIZE + x;
+        let down_idx = u32(down_y) * GRID_SIZE + x;
+
+        let alpha_left = chem_grid[left_idx].x;
+        let alpha_right = chem_grid[right_idx].x;
+        let alpha_up = chem_grid[up_idx].x;
+        let alpha_down = chem_grid[down_idx].x;
+        let beta_left = chem_grid[left_idx].y;
+        let beta_right = chem_grid[right_idx].y;
+        let beta_up = chem_grid[up_idx].y;
+        let beta_down = chem_grid[down_idx].y;
+
+        let slope_left = read_gamma_slope(left_idx);
+        let slope_right = read_gamma_slope(right_idx);
+        let slope_up = read_gamma_slope(up_idx);
+        let slope_down = read_gamma_slope(down_idx);
+
+        let kernel_scale = 1.0 / 8.0;
+
+        // Alpha flux
+        let slope_here_alpha = slope_here * params.alpha_slope_bias;
+        let slope_left_alpha = slope_left * params.alpha_slope_bias;
+        let slope_right_alpha = slope_right * params.alpha_slope_bias;
+        let slope_up_alpha = slope_up * params.alpha_slope_bias;
+        let slope_down_alpha = slope_down * params.alpha_slope_bias;
+
+        if (right_x != xi) {
+            let flow_out = max(slope_here_alpha.x, 0.0) * current_alpha;
+            let flow_in = max(-slope_right_alpha.x, 0.0) * alpha_right;
+            alpha_flux += flow_out - flow_in;
+        }
+        if (left_x != xi) {
+            let flow_out = max(-slope_here_alpha.x, 0.0) * current_alpha;
+            let flow_in = max(slope_left_alpha.x, 0.0) * alpha_left;
+            alpha_flux += flow_out - flow_in;
+        }
+        if (down_y != yi) {
+            let flow_out = max(slope_here_alpha.y, 0.0) * current_alpha;
+            let flow_in = max(-slope_down_alpha.y, 0.0) * alpha_down;
+            alpha_flux += flow_out - flow_in;
+        }
+        if (up_y != yi) {
+            let flow_out = max(-slope_here_alpha.y, 0.0) * current_alpha;
+            let flow_in = max(slope_up_alpha.y, 0.0) * alpha_up;
+            alpha_flux += flow_out - flow_in;
+        }
+
+        // Beta flux
+        let slope_here_beta = slope_here * params.beta_slope_bias;
+        let slope_left_beta = slope_left * params.beta_slope_bias;
+        let slope_right_beta = slope_right * params.beta_slope_bias;
+        let slope_up_beta = slope_up * params.beta_slope_bias;
+        let slope_down_beta = slope_down * params.beta_slope_bias;
+
+        if (right_x != xi) {
+            let flow_out = max(slope_here_beta.x, 0.0) * current_beta;
+            let flow_in = max(-slope_right_beta.x, 0.0) * beta_right;
+            beta_flux += flow_out - flow_in;
+        }
+        if (left_x != xi) {
+            let flow_out = max(-slope_here_beta.x, 0.0) * current_beta;
+            let flow_in = max(slope_left_beta.x, 0.0) * beta_left;
+            beta_flux += flow_out - flow_in;
+        }
+        if (down_y != yi) {
+            let flow_out = max(slope_here_beta.y, 0.0) * current_beta;
+            let flow_in = max(-slope_down_beta.y, 0.0) * beta_down;
+            beta_flux += flow_out - flow_in;
+        }
+        if (up_y != yi) {
+            let flow_out = max(-slope_here_beta.y, 0.0) * current_beta;
+            let flow_in = max(slope_up_beta.y, 0.0) * beta_up;
+            beta_flux += flow_out - flow_in;
+        }
+
+        alpha_flux *= kernel_scale;
+        beta_flux *= kernel_scale;
     }
 
     // Base result after classic blur + slope shift.
-    let alpha_base = clamp(alpha_iso - alpha_flux * kernel_scale, 0.0, 1.0);
-    let beta_base = clamp(beta_iso - beta_flux * kernel_scale, 0.0, 1.0);
-
-    // NOTE: sample_grid_bilinear expects world-space in [0, SIM_SIZE).
-    // Fluid-directed convolution has been removed; keep classic blur+slope behavior.
-    // We still compute a single local fluid speed sample for the rain logic below.
-    let pos_cell = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
-    let cell_to_world = f32(SIM_SIZE) / f32(GRID_SIZE);
-    let pos_world = pos_cell * cell_to_world;
-
-    let raw_v = sample_fluid_velocity_bilinear(pos_world);
-    let raw_vlen = length(raw_v);
+    let alpha_base = clamp(alpha_iso - alpha_flux, 0.0, 1.0);
+    let beta_base = clamp(beta_iso - beta_flux, 0.0, 1.0);
 
     // Persistence applies as decay to alpha/beta.
-    var final_alpha = clamp(alpha_base * persistence, 0.0, 1.0);
-    var final_beta = clamp(beta_base * persistence, 0.0, 1.0);
+    let final_alpha = clamp(alpha_base * persistence, 0.0, 1.0);
+    let final_beta = clamp(beta_base * persistence, 0.0, 1.0);
     // Gamma: classic diffusion only (separate from Env Persistence).
-    var final_gamma = max(gamma_iso, 0.0);
+    let final_gamma = max(gamma_iso, 0.0);
 
-    // Stochastic rain - randomly add food/poison droplets (saturated drops)
-    // Use position and random seed to generate unique random values per cell
-    let cell_seed = idx * 2654435761u + params.random_seed;
-    let rain_chance = f32(hash(cell_seed)) / 4294967295.0;
-
-    // Uniform alpha rain (food): remove spatial and beta-dependent gradients.
-    // Each cell independently receives a saturated rain event with probability alpha_multiplier * 0.05.
-    // (Scaling by 0.05 preserves prior expected value semantics.)
-    // Rain factor is read from the dedicated rain map texture (independent of fluid dyes).
-    // IMPORTANT: rain_map_tex is stored at environment resolution (GRID_SIZE^2).
-    // RG channels: x=alpha, y=beta.
-    let rain_packed = textureLoad(rain_map_tex, vec2<i32>(i32(x), i32(y)), 0).xy;
-    let alpha_rain_map = clamp(rain_packed.x, 0.0, 1.0);
-
-    // Make it rain more when local velocity magnitude is low (stagnant areas).
-    // This is intentionally dt-free and uses a smooth threshold to avoid banding.
-    let local_mag = raw_vlen;
-    let low_mag = 1.0 - smoothstep(0.02, 0.15, local_mag);
-    // Stronger precipitation in slow-flow regions.
-    // Shape: quadratic for a gentler mid-range and stronger near-still boost.
-    let precip_boost = mix(1.0, 8.0, low_mag * low_mag);
-
-    let alpha_probability_sat = clamp(params.alpha_multiplier * 0.05 * alpha_rain_map * precip_boost, 0.0, 1.0);
-    if (rain_chance < alpha_probability_sat) {
-        final_alpha = 1.0;  // Saturated drop
-    }
-
-    // Uniform beta rain (poison): also no vertical gradient. Probability = beta_multiplier * 0.05.
-    let beta_seed = cell_seed * 1103515245u;
-    let beta_rain_chance = f32(hash(beta_seed)) / 4294967295.0;
-    let beta_rain_map = clamp(rain_packed.y, 0.0, 1.0);
-    let beta_probability_sat = clamp(params.beta_multiplier * 0.05 * beta_rain_map * precip_boost, 0.0, 1.0);
-    if (beta_rain_chance < beta_probability_sat) {
-        final_beta = 1.0;  // Saturated drop
-    }
+    // NOTE: Rain is now applied via a separate targeted dispatch (apply_rain_drops)
+    // that only processes the expected number of rain drops instead of checking every cell.
 
     // IMPORTANT: Do NOT write alpha/beta in-place.
     // This kernel samples neighboring cells (via sample_grid_bilinear), so doing an in-place
@@ -2770,7 +2735,7 @@ fn diffuse_grids_stage2(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * GRID_SIZE + x;
     let staged = trail_grid_inject[idx];
-    chem_grid[idx] = vec2<f32>(staged.x, staged.y);
+    write_chem_alpha_beta(idx, staged.x, staged.y);
     write_gamma_height(idx, staged.z);
 }
 
@@ -3419,7 +3384,8 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = y * GRID_SIZE + x;
 
     // Use constant values for fast startup (can be overridden by loading terrain images)
-    chem_grid[idx] = vec2<f32>(environment_init.alpha_range.x, environment_init.beta_range.x);
+    // Initialize with chemistry values and uniform rain maps
+    chem_grid[idx] = vec4<f32>(environment_init.alpha_range.x, environment_init.beta_range.x, 1.0, 1.0);
     gamma_grid[idx] = 0.0;
 
     gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = environment_init.slope_pair.x;
@@ -3664,11 +3630,9 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (mode == 1u) {
-        let prev = chem_grid[idx];
-        chem_grid[idx] = vec2<f32>(output_value, prev.y);
+        write_chem_alpha(idx, output_value);
     } else if (mode == 2u) {
-        let prev = chem_grid[idx];
-        chem_grid[idx] = vec2<f32>(prev.x, output_value);
+        write_chem_beta(idx, output_value);
     } else if (mode == 3u) {
         write_gamma_height(idx, output_value);
     }

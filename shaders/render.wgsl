@@ -317,7 +317,7 @@ fn render_body_part_ctx(
         let star_radius = max(get_part_visual_size(part.part_type) * 2.5, 7.0);
         let organ_param = get_organ_param(part.part_type);
         let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
-        
+
         var star_color: vec4<f32>;
         if (base_type == 25u) {
             // Alpha emitter: green for positive (+alpha), red for negative (-alpha)
