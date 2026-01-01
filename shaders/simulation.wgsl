@@ -119,7 +119,7 @@ const MORPHOLOGY_SWIM_MAX_FRAME_VEL: f32 = 2;
 const FLUID_TWO_WAY_COUPLING_ENABLED: bool = false;
 
 // Simple isotropic fluid coupling (penalty method).
-const FLUID_COUPLING_SIMPLE_ENABLED: bool = true;
+const FLUID_COUPLING_SIMPLE_ENABLED: bool = false;
 // Anisotropic coupling: perpendicular drag > parallel drag along segment tangent.
 // This allows undulation to generate net thrust.
 const FLUID_COUPLING_ANISOTROPY: f32 = 1.0;
