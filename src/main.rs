@@ -42,7 +42,7 @@ const GRID_DIM: usize = 2048;
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
 // Spatial hash grid resolution. Keep this in sync with shaders/shared.wgsl SPATIAL_GRID_SIZE.
-const SPATIAL_GRID_DIM: usize = 1024;
+const SPATIAL_GRID_DIM: usize = 512;
 const SPATIAL_GRID_CELL_COUNT: usize = SPATIAL_GRID_DIM * SPATIAL_GRID_DIM;
 const DIFFUSE_WG_SIZE_X: u32 = 16;
 const DIFFUSE_WG_SIZE_Y: u32 = 16;
