@@ -11363,39 +11363,15 @@ impl GpuState {
             }
         };
 
-        let (alpha_grid, beta_grid, gamma_grid) = if snapshot_env_res != 0
-            && snapshot_env_res != self.env_grid_resolution
-        {
-            fn resample_grid_nearest(src: &[f32], src_res: u32, dst_res: u32) -> Vec<f32> {
-                let src_res = src_res as usize;
-                let dst_res = dst_res as usize;
-                let mut out = vec![0.0f32; dst_res * dst_res];
-                for y in 0..dst_res {
-                    let sy = (y * src_res) / dst_res;
-                    let src_row = sy * src_res;
-                    let dst_row = y * dst_res;
-                    for x in 0..dst_res {
-                        let sx = (x * src_res) / dst_res;
-                        out[dst_row + x] = src[src_row + sx];
-                    }
-                }
-                out
-            }
-
-            println!(
-                "G⚠️  Snapshot env grid res {} differs from current {}; resampling grids.",
+        if snapshot_env_res != 0 && snapshot_env_res != self.env_grid_resolution {
+            anyhow::bail!(
+                "Snapshot env grid res {} differs from current {}. The app must reset to the snapshot resolution before loading.",
                 snapshot_env_res,
                 self.env_grid_resolution
             );
+        }
 
-            (
-                resample_grid_nearest(&alpha_grid, snapshot_env_res, self.env_grid_resolution),
-                resample_grid_nearest(&beta_grid, snapshot_env_res, self.env_grid_resolution),
-                resample_grid_nearest(&gamma_grid, snapshot_env_res, self.env_grid_resolution),
-            )
-        } else {
-            (alpha_grid, beta_grid, gamma_grid)
-        };
+        let (alpha_grid, beta_grid, gamma_grid) = (alpha_grid, beta_grid, gamma_grid);
 
         if alpha_grid.len() != self.env_grid_cell_count {
             anyhow::bail!(
@@ -12742,7 +12718,11 @@ fn main() {
         current_message_index: usize,
         loading_messages: &'static [&'static str],
         skip_auto_load: bool, // Set to true when resolution changes to prevent loading old-resolution snapshot
+        preserve_autosave_on_next_reset: bool,
         reset_in_progress: bool,
+        pending_snapshot_load_path: Option<std::path::PathBuf>,
+        pending_resolution_change_override: Option<(u32, u32, u32)>,
+        force_reset_requested: bool,
     }
 
     impl winit::application::ApplicationHandler for App {
@@ -12768,6 +12748,23 @@ fn main() {
     impl App {
         fn handle_event(&mut self, event: winit::event::Event<()>, target: &winit::event_loop::ActiveEventLoop) {
             let window = &self.window;
+
+            fn snapshot_target_resolutions(path: &std::path::Path) -> anyhow::Result<(u32, u32, u32)> {
+                let (_a, _b, _g, snapshot) = load_simulation_snapshot(path)?;
+                let env = snapshot.env_grid_resolution;
+                let fluid = if snapshot.fluid_grid_resolution != 0 {
+                    snapshot.fluid_grid_resolution
+                } else {
+                    env / 4
+                };
+                let spatial = if snapshot.spatial_grid_resolution != 0 {
+                    snapshot.spatial_grid_resolution
+                } else {
+                    env / 4
+                };
+                Ok((env, fluid, spatial))
+            }
+
         // Animate loading messages in window title while waiting for GPU state
         if self.state.is_none() {
             let now = std::time::Instant::now();
@@ -12786,22 +12783,52 @@ fn main() {
         // Check if loading finished
         if self.state.is_none() {
             if let Ok(mut loaded_state) = self.rx.try_recv() {
-                // Try to auto-load previous session from autosave snapshot
-                // Skip auto-load if we're resetting due to resolution change (prevents loading old-resolution data)
-                // Don't call reset_simulation_state() - state is already fresh from creation
-                let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
-                if autosave_path.exists() && !self.skip_auto_load {
-                    match loaded_state.load_snapshot_from_file(autosave_path) {
-                        Ok(_) => {
-                            println!("? Auto-loaded previous session from epoch {}", loaded_state.epoch);
-                        }
-                        Err(e) => {
-                            eprintln!("? Failed to auto-load snapshot: {:?}", e);
-                        }
+                // If we have a pending snapshot path (e.g. manual load requested a resolution reset),
+                // load it immediately into this freshly-created GPU state.
+                if let Some(path) = self.pending_snapshot_load_path.take() {
+                    match loaded_state.load_snapshot_from_file(&path) {
+                        Ok(_) => println!("? Snapshot loaded from: {}", path.display()),
+                        Err(e) => eprintln!("? Failed to load snapshot after reset: {}", e),
                     }
-                } else if self.skip_auto_load {
-                    println!("? Skipping auto-load due to resolution change");
-                    self.skip_auto_load = false; // Reset flag
+                } else {
+                    // Try to auto-load previous session from autosave snapshot.
+                    // If autosave resolution differs, schedule a reset to the autosave resolution first.
+                    // Don't call reset_simulation_state() - state is already fresh from creation.
+                    let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
+                    if autosave_path.exists() && !self.skip_auto_load {
+                        match snapshot_target_resolutions(autosave_path) {
+                            Ok((env_res, fluid_res, spatial_res)) => {
+                                if env_res != loaded_state.env_grid_resolution
+                                    || fluid_res != loaded_state.fluid_grid_resolution
+                                    || spatial_res != loaded_state.spatial_grid_resolution
+                                {
+                                    println!(
+                                        "G⚠️  Autosave resolution {}x{} differs from current {}x{}; resetting to match.",
+                                        env_res,
+                                        env_res,
+                                        loaded_state.env_grid_resolution,
+                                        loaded_state.env_grid_resolution
+                                    );
+                                    self.pending_snapshot_load_path = Some(autosave_path.to_path_buf());
+                                    self.preserve_autosave_on_next_reset = true;
+                                    self.pending_resolution_change_override = Some((env_res, fluid_res, spatial_res));
+                                    self.force_reset_requested = true;
+                                } else {
+                                    match loaded_state.load_snapshot_from_file(autosave_path) {
+                                        Ok(_) => println!(
+                                            "? Auto-loaded previous session from epoch {}",
+                                            loaded_state.epoch
+                                        ),
+                                        Err(e) => eprintln!("? Failed to auto-load snapshot: {:?}", e),
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("? Failed to inspect autosave snapshot: {e:?}"),
+                        }
+                    } else if self.skip_auto_load {
+                        println!("? Skipping auto-load due to resolution change");
+                        self.skip_auto_load = false; // Reset flag
+                    }
                 }
 
                 self.state = Some(loaded_state);
@@ -12997,19 +13024,54 @@ fn main() {
                             // Handle drag-and-drop file loading
                             if let Some(ext) = path.extension() {
                                 if ext == "png" {
-                                    // Reset simulation state before loading
-                                    reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
-                                    if let Some(gpu_state) = self.state.as_mut() {
-                                        match gpu_state.load_snapshot_from_file(&path) {
-                                            Ok(_) => println!("? Snapshot loaded from: {}", path.display()),
-                                            Err(e) => eprintln!("? Failed to load snapshot: {}", e),
+                                    if let Some(gpu_state) = self.state.as_ref() {
+                                        match snapshot_target_resolutions(&path) {
+                                            Ok((env_res, fluid_res, spatial_res)) => {
+                                                if env_res != gpu_state.env_grid_resolution
+                                                    || fluid_res != gpu_state.fluid_grid_resolution
+                                                    || spatial_res != gpu_state.spatial_grid_resolution
+                                                {
+                                                    println!(
+                                                        "🔄 Dropped snapshot resolution {}x{} differs from current {}x{}; resetting to match.",
+                                                        env_res,
+                                                        env_res,
+                                                        gpu_state.env_grid_resolution,
+                                                        gpu_state.env_grid_resolution
+                                                    );
+                                                    self.pending_snapshot_load_path = Some(path.clone());
+                                                    self.pending_resolution_change_override =
+                                                        Some((env_res, fluid_res, spatial_res));
+                                                    self.force_reset_requested = true;
+                                                    window.request_redraw();
+                                                } else {
+                                                    reset_simulation_state(
+                                                        &mut self.state,
+                                                        &window,
+                                                        &mut self.egui_state,
+                                                    );
+                                                    if let Some(gpu_state) = self.state.as_mut() {
+                                                        match gpu_state.load_snapshot_from_file(&path) {
+                                                            Ok(_) => println!(
+                                                                "? Snapshot loaded from: {}",
+                                                                path.display()
+                                                            ),
+                                                            Err(e) => eprintln!(
+                                                                "? Failed to load snapshot: {}",
+                                                                e
+                                                            ),
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => eprintln!("? Failed to inspect dropped snapshot: {e:?}"),
                                         }
                                     }
                                 }
                             }
                         }
                         WindowEvent::RedrawRequested => {
-                            let mut reset_requested = false;
+                            let mut reset_requested = self.force_reset_requested;
+                            self.force_reset_requested = false;
 
                             // Render loading screen while state is being initialized
                             if self.state.is_none() {
@@ -15289,45 +15351,61 @@ fn main() {
                                 self.reset_in_progress = true;
 
                                 // Check if there's a pending resolution change
-                                let new_resolution = if let Some(gpu_state) = &self.state {
-                                    gpu_state.pending_resolution_change
+                                let requested = if let Some(triple) = self.pending_resolution_change_override.take() {
+                                    Some(triple)
+                                } else if let Some(gpu_state) = &self.state {
+                                    gpu_state
+                                        .pending_resolution_change
+                                        .map(|env| (env, env / 4, env / 4))
                                 } else {
                                     None
                                 };
 
-                                if let Some(new_res) = new_resolution {
+                                if let Some((env_res, fluid_res, spatial_res)) = requested {
                                     // Resolution change requested - update settings first
-                                    println!("🔄 Resetting simulation with new resolution: {}×{}", new_res, new_res);
+                                    println!(
+                                        "🔄 Resetting simulation with new resolution: {}×{} (fluid={}, spatial={})",
+                                        env_res,
+                                        env_res,
+                                        fluid_res,
+                                        spatial_res
+                                    );
                                     
                                     // Update simulation_settings.json
                                     let settings_path = std::path::Path::new(SETTINGS_FILE_NAME);
                                     if let Ok(mut settings) = SimulationSettings::load_from_disk(settings_path) {
-                                        settings.env_grid_resolution = new_res;
-                                        settings.fluid_grid_resolution = new_res / 4;
-                                        settings.spatial_grid_resolution = new_res / 4;
+                                        settings.env_grid_resolution = env_res;
+                                        settings.fluid_grid_resolution = fluid_res;
+                                        settings.spatial_grid_resolution = spatial_res;
                                         
                                         if let Ok(json) = serde_json::to_string_pretty(&settings) {
                                             if let Err(e) = fs::write(settings_path, json) {
                                                 eprintln!("Failed to save updated settings: {:?}", e);
                                             } else {
                                                 println!("✅ Settings updated: env={}, fluid={}, spatial={}",
-                                                    new_res, new_res / 4, new_res / 4);
+                                                    env_res, fluid_res, spatial_res);
                                             }
                                         }
                                     }
                                     
-                                    // Delete autosave to prevent loading old-resolution snapshot
-                                    let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
-                                    if autosave_path.exists() {
-                                        if let Err(e) = fs::remove_file(autosave_path) {
-                                            eprintln!("⚠️  Failed to delete old autosave: {:?}", e);
-                                        } else {
-                                            println!("🗑️  Deleted old autosave (different resolution)");
+                                    let preserve_autosave = self.preserve_autosave_on_next_reset;
+                                    self.preserve_autosave_on_next_reset = false;
+
+                                    // Delete autosave only when the user explicitly changes resolution.
+                                    // If we're resetting to load a snapshot, keep autosave intact.
+                                    if !preserve_autosave {
+                                        let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
+                                        if autosave_path.exists() {
+                                            if let Err(e) = fs::remove_file(autosave_path) {
+                                                eprintln!("⚠️  Failed to delete old autosave: {:?}", e);
+                                            } else {
+                                                println!("🗑️  Deleted old autosave (different resolution)");
+                                            }
                                         }
+
+                                        // Skip auto-load as additional safety (though file should be deleted)
+                                        self.skip_auto_load = true;
                                     }
-                                    
-                                    // Skip auto-load as additional safety (though file should be deleted)
-                                    self.skip_auto_load = true;
                                     
                                     // Drop old state to force full recreation
                                     self.state = None;
@@ -15345,9 +15423,9 @@ fn main() {
 
                                     // Kick off GPU recreation in background, but create the Surface on the main thread.
                                     // On Windows, creating a Surface from a Window handle can fail on background threads.
-                                    let env_res = new_res;
-                                    let fluid_res = new_res / 4;
-                                    let spatial_res = new_res / 4;
+                                    let env_res = env_res;
+                                    let fluid_res = fluid_res;
+                                    let spatial_res = spatial_res;
 
                                     let (tx, rx) = std::sync::mpsc::channel();
                                     self.rx = rx;
@@ -15458,13 +15536,51 @@ fn main() {
                                         .add_filter("PNG Image", &["png"])
                                         .pick_file()
                                     {
-                                        // Reset simulation state before loading
-                                        reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
-                                        if let Some(gpu_state) = self.state.as_mut() {
-                                            match gpu_state.load_snapshot_from_file(&path) {
-                                                Ok(_) => println!("? Snapshot loaded from: {}", path.display()),
-                                                Err(e) => eprintln!("? Failed to load snapshot: {}", e),
+                                        let current_env = gpu_state.env_grid_resolution;
+                                        let current_fluid = gpu_state.fluid_grid_resolution;
+                                        let current_spatial = gpu_state.spatial_grid_resolution;
+
+                                        match snapshot_target_resolutions(&path) {
+                                            Ok((env_res, fluid_res, spatial_res)) => {
+                                                if env_res != current_env
+                                                    || fluid_res != current_fluid
+                                                    || spatial_res != current_spatial
+                                                {
+                                                    println!(
+                                                        "🔄 Snapshot resolution {}x{} differs from current {}x{}; resetting to match.",
+                                                        env_res,
+                                                        env_res,
+                                                        current_env,
+                                                        current_env
+                                                    );
+                                                    self.pending_snapshot_load_path = Some(path);
+                                                    self.preserve_autosave_on_next_reset = true;
+                                                    self.pending_resolution_change_override =
+                                                        Some((env_res, fluid_res, spatial_res));
+                                                    self.force_reset_requested = true;
+                                                    window.request_redraw();
+                                                } else {
+                                                    // Resolution matches; load directly.
+                                                    reset_simulation_state(
+                                                        &mut self.state,
+                                                        &window,
+                                                        &mut self.egui_state,
+                                                    );
+                                                    if let Some(gpu_state) = self.state.as_mut() {
+                                                        match gpu_state.load_snapshot_from_file(&path) {
+                                                            Ok(_) => println!(
+                                                                "? Snapshot loaded from: {}",
+                                                                path.display()
+                                                            ),
+                                                            Err(e) => eprintln!(
+                                                                "? Failed to load snapshot: {}",
+                                                                e
+                                                            ),
+                                                        }
+                                                    }
+                                                }
                                             }
+                                            Err(e) => eprintln!("? Failed to inspect snapshot: {e:?}"),
                                         }
                                     }
                                 }
@@ -15490,17 +15606,54 @@ fn main() {
                             // Handle drag-and-drop file loading
                             if let Some(ext) = path.extension() {
                                 if ext == "png" {
-                                    if let Some(gpu_state) = self.state.as_mut() {
-                                        match gpu_state.load_snapshot_from_file(&path) {
-                                            Ok(_) => println!("G�� Snapshot loaded from dropped file: {}", path.display()),
-                                            Err(e) => eprintln!("G�� Failed to load dropped snapshot: {}", e),
+                                    if let Some(gpu_state) = self.state.as_ref() {
+                                        match snapshot_target_resolutions(&path) {
+                                            Ok((env_res, fluid_res, spatial_res)) => {
+                                                if env_res != gpu_state.env_grid_resolution
+                                                    || fluid_res != gpu_state.fluid_grid_resolution
+                                                    || spatial_res != gpu_state.spatial_grid_resolution
+                                                {
+                                                    println!(
+                                                        "🔄 Dropped snapshot resolution {}x{} differs from current {}x{}; resetting to match.",
+                                                        env_res,
+                                                        env_res,
+                                                        gpu_state.env_grid_resolution,
+                                                        gpu_state.env_grid_resolution
+                                                    );
+                                                    self.pending_snapshot_load_path = Some(path.clone());
+                                                    self.pending_resolution_change_override =
+                                                        Some((env_res, fluid_res, spatial_res));
+                                                    self.force_reset_requested = true;
+                                                    window.request_redraw();
+                                                } else {
+                                                    reset_simulation_state(
+                                                        &mut self.state,
+                                                        &window,
+                                                        &mut self.egui_state,
+                                                    );
+                                                    if let Some(gpu_state) = self.state.as_mut() {
+                                                        match gpu_state.load_snapshot_from_file(&path) {
+                                                            Ok(_) => println!(
+                                                                "G�� Snapshot loaded from dropped file: {}",
+                                                                path.display()
+                                                            ),
+                                                            Err(e) => eprintln!(
+                                                                "G�� Failed to load dropped snapshot: {}",
+                                                                e
+                                                            ),
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => eprintln!("? Failed to inspect dropped snapshot: {e:?}"),
                                         }
                                     }
                                 }
                             }
                         }
                         WindowEvent::RedrawRequested => {
-                            let mut reset_requested = false;
+                            let mut reset_requested = self.force_reset_requested;
+                            self.force_reset_requested = false;
 
                             if let Some(state) = self.state.as_mut() {
                                 // Frame rate limiting
@@ -15892,7 +16045,11 @@ fn main() {
         current_message_index: 0,
         loading_messages: LOADING_MESSAGES,
         skip_auto_load: false,
+        preserve_autosave_on_next_reset: false,
         reset_in_progress: false,
+        pending_snapshot_load_path: None,
+        pending_resolution_change_override: None,
+        force_reset_requested: false,
     };
 
     let _ = event_loop.run_app(&mut app);
