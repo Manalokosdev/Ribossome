@@ -15067,7 +15067,7 @@ fn main() {
                                 };
 
                                 if let Some(new_res) = new_resolution {
-                                    // Resolution change requested - update settings and force full recreation
+                                    // Resolution change requested - update settings first
                                     println!("🔄 Resetting simulation with new resolution: {}×{}", new_res, new_res);
                                     
                                     // Update simulation_settings.json
@@ -15080,27 +15080,19 @@ fn main() {
                                         if let Ok(json) = serde_json::to_string_pretty(&settings) {
                                             if let Err(e) = fs::write(settings_path, json) {
                                                 eprintln!("Failed to save updated settings: {:?}", e);
+                                            } else {
+                                                println!("✅ Settings updated: env={}, fluid={}, spatial={}",
+                                                    new_res, new_res / 4, new_res / 4);
                                             }
                                         }
                                     }
                                     
-                                    // Force full recreation by dropping old state
+                                    // Drop old state to force full recreation
                                     self.state = None;
-                                    
-                                    // Recreate with new resolution
-                                    let mut new_state = pollster::block_on(GpuState::new(window.clone()));
-                                    new_state.selected_agent_index = None;
-                                    self.state = Some(new_state);
-                                    
-                                    // Recreate egui state
-                                    let egui_ctx = egui::Context::default();
-                                    self.egui_state = egui_winit::State::new(egui_ctx, egui::ViewportId::ROOT, &window, None, None, None);
-                                    
-                                    println!("✅ Resolution changed successfully to {}×{}", new_res, new_res);
-                                } else {
-                                    // Normal fast reset
-                                    reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
                                 }
+                                
+                                // Use standard reset path - will recreate from settings file
+                                reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
                                 window.request_redraw();
                             }
 
