@@ -2357,6 +2357,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (death_rnd < final_death_prob) {
         // Deposit remains: stochastic decomposition into either alpha or beta
         // Fixed total deposit = 1.0 (in 0..1 grid units), spread across parts
+        // Vampires decompose entirely into alpha (food)
         if (body_count > 0u) {
             let total_deposit = 1.0;
             let deposit_per_part = total_deposit / f32(body_count);
@@ -2366,16 +2367,22 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let world_pos = agent_pos + rotated_pos;
                 let idx = grid_index(world_pos);
 
-                // Stochastic choice: 50% alpha (nutrient), 50% beta (toxin)
-                let part_hash = hash(agent_id * 1000u + i * 100u + params.random_seed);
-                let part_rnd = f32(part_hash % 1000u) / 1000.0;
-
-                if (part_rnd < 0.5) {
+                // Vampires decompose entirely into alpha (nutrient)
+                // Normal agents: stochastic choice 50% alpha (nutrient), 50% beta (toxin)
+                if (has_vampire_mouth) {
                     let prev = chem_grid[idx];
                     write_chem_alpha(idx, min(prev.x + deposit_per_part, 1.0));
                 } else {
-                    let prev = chem_grid[idx];
-                    write_chem_beta(idx, min(prev.y + deposit_per_part, 1.0));
+                    let part_hash = hash(agent_id * 1000u + i * 100u + params.random_seed);
+                    let part_rnd = f32(part_hash % 1000u) / 1000.0;
+
+                    if (part_rnd < 0.5) {
+                        let prev = chem_grid[idx];
+                        write_chem_alpha(idx, min(prev.x + deposit_per_part, 1.0));
+                    } else {
+                        let prev = chem_grid[idx];
+                        write_chem_beta(idx, min(prev.y + deposit_per_part, 1.0));
+                    }
                 }
             }
         }
