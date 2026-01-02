@@ -15169,7 +15169,17 @@ fn main() {
                                         }
                                     }
                                     
-                                    // Skip auto-load to prevent loading old-resolution snapshot
+                                    // Delete autosave to prevent loading old-resolution snapshot
+                                    let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
+                                    if autosave_path.exists() {
+                                        if let Err(e) = fs::remove_file(autosave_path) {
+                                            eprintln!("⚠️  Failed to delete old autosave: {:?}", e);
+                                        } else {
+                                            println!("🗑️  Deleted old autosave (different resolution)");
+                                        }
+                                    }
+                                    
+                                    // Skip auto-load as additional safety (though file should be deleted)
                                     self.skip_auto_load = true;
                                     
                                     // Drop old state to force full recreation
