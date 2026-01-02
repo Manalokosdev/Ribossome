@@ -11367,14 +11367,14 @@ impl GpuState {
             println!("G�� Loaded snapshot without settings (old format) - using current settings");
         }
 
-        // Check resolution compatibility and warn if different
+        // Check resolution compatibility and reject if different
         if snapshot.env_grid_resolution != 0 {
-            // Snapshot has resolution info (version 1.1+)
+            // Snapshot has resolution info (version 1.2+)
             if snapshot.env_grid_resolution != self.env_grid_resolution
                 || snapshot.fluid_grid_resolution != self.fluid_grid_resolution
                 || snapshot.spatial_grid_resolution != self.spatial_grid_resolution
             {
-                println!("\n⚠️  WARNING: Resolution mismatch detected!");
+                println!("\n⚠️  Resolution mismatch detected - cannot load snapshot!");
                 println!("   Snapshot resolution: env={}, fluid={}, spatial={}",
                     snapshot.env_grid_resolution,
                     snapshot.fluid_grid_resolution,
@@ -11385,8 +11385,17 @@ impl GpuState {
                     self.fluid_grid_resolution,
                     self.spatial_grid_resolution
                 );
-                println!("   Agent positions use absolute coordinates (SIM_SIZE={}) and do not scale.", SIM_SIZE);
-                println!("   Chemical grids will be resampled. Some visual differences may occur.\n");
+                println!("   To load this snapshot, change resolution back to {}×{} or save a new snapshot at current resolution.",
+                    snapshot.env_grid_resolution,
+                    snapshot.env_grid_resolution
+                );
+                anyhow::bail!(
+                    "Resolution mismatch: snapshot has {}×{}, current GPU state has {}×{}",
+                    snapshot.env_grid_resolution,
+                    snapshot.env_grid_resolution,
+                    self.env_grid_resolution,
+                    self.env_grid_resolution
+                );
             }
         }
 
