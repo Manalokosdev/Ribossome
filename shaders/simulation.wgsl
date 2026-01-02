@@ -944,6 +944,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         sin(color_sum_morphology * 7.364) * 0.5 + 0.5     // B: multiplier = 7.364
     );
 
+    // Repurpose torque_debug as a packed 24-bit RGB cache for neighbor color sensing.
+    // Packed as 0x00RRGGBB (8 bits per channel). Stored as a numeric f32 so it round-trips exactly.
+    let rgb8 = vec3<u32>(
+        u32(clamp(agent_color.x, 0.0, 1.0) * 255.0 + 0.5),
+        u32(clamp(agent_color.y, 0.0, 1.0) * 255.0 + 0.5),
+        u32(clamp(agent_color.z, 0.0, 1.0) * 255.0 + 0.5)
+    );
+    let packed_rgb = (rgb8.x & 255u) | ((rgb8.y & 255u) << 8u) | ((rgb8.z & 255u) << 16u);
+    agents_out[agent_id].torque_debug = f32(packed_rgb);
+
     let body_count = body_count_val; // Use computed value instead of reading from agent
 
     // ====== UNIFIED SIGNAL PROCESSING LOOP ======
@@ -1517,11 +1527,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        // INTERNAL SIGNAL EMITTERS (repurposed displacers)
+        // INTERNAL SIGNAL EMITTERS
         // Emits a constant internal signal scaled by enabler proximity (amplification).
         // 25 (former Displacer A): +alpha for modifiers M/N, -alpha for P/Q/R
         // 27 (former Displacer B): +beta for modifier S, -beta for T/V
-        if (amino_props.is_displacer) {
+        if (amino_props.is_signal_emitter) {
             let amp_emit = amplification_per_part[i];
             if (amp_emit > 0.0 && agent_energy >= amino_props.energy_consumption) {
                 let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
@@ -1537,9 +1547,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     new_beta += emit;
                 }
 
-                // Track emitter activity so displacer energy cost remains meaningful.
-                let base_strength = amino_props.thrust_force * 3.0 * 4.0;
-                propeller_thrust_magnitude[i] = base_strength * amp_emit;
+                // Track emitter activity so activity-based energy cost remains meaningful.
+                // NOTE: emitters do not have meaningful thrust_force (often 0), so store a normalized
+                // activity ratio directly to avoid 0/0 NaNs in the energy cost path.
+                propeller_thrust_magnitude[i] = clamp(amp_emit, 0.0, 1.0);
             }
         }
 
@@ -1956,8 +1967,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     }
 
-    // Persist torque for inspector debugging
-    agents_out[agent_id].torque_debug = torque;
+    // NOTE: torque_debug is repurposed as packed RGB; do not overwrite it with torque.
 
     // Apply global vector force (wind/gravity)
     if (params.vector_force_power > 0.0) {
@@ -2299,12 +2309,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Reduce operational (thrust) cost by 1/3.
             let activity_cost = props.energy_consumption * thrust_ratio * 1.0;
             organ_extra = props.energy_consumption + activity_cost; // Base + activity
-        } else if (props.is_displacer) {
-            // Displacers: base cost + activity cost (linear with displacement strength)
-            // Displacer strength is intentionally boosted (currently 4x) for visibility.
-            // Normalize against that boost so the activity cost matches propellers at the same amp.
-            let base_strength = props.thrust_force * 3.0 * 4.0; // Max with amp=1 (including strength boost)
-            let strength_ratio = propeller_thrust_magnitude[i] / base_strength;
+        } else if (props.is_signal_emitter) {
+            // Signal emitters: base cost + activity cost (linear with emission strength).
+            // Use the stored normalized activity ratio (0..1) to avoid division by zero.
+            let strength_ratio = clamp(propeller_thrust_magnitude[i], 0.0, 1.0);
             let activity_cost = props.energy_consumption * strength_ratio * 1.0;
             organ_extra = props.energy_consumption + activity_cost;
         } else {
@@ -2322,6 +2330,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // 3) Maintenance: subtract consumption after feeding
     agent_energy_cur -= energy_consumption;
 
+    // Defensive: avoid NaN propagation (can happen if any organ cost math goes unstable).
+    // If energy becomes NaN, clamp it to 0 so the agent will simply starve rather than poisoning the sim state.
+    if (agent_energy_cur != agent_energy_cur) {
+        agent_energy_cur = 0.0;
+    }
+
     // 4) Energy-based death check - death probability inversely proportional to energy
     // High energy = low death chance, low energy = high death chance
     let death_seed = agent_id * 2654435761u + params.random_seed * 1103515245u;
@@ -2334,7 +2348,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let energy_divisor = max(agent_energy_cur, 0.01);
     let energy_adjusted_death_prob = params.death_probability / energy_divisor;
 
-    if (death_rnd < energy_adjusted_death_prob) {
+    // Population pressure: multiply death probability by 2^(floor(agent_count / 20000)).
+    // Examples: 0..19999 => 1x, 20000..39999 => 2x, 40000..59999 => 4x, 60000..79999 => 8x.
+    let pop_steps = params.agent_count / 20000u;
+    let pop_mult = exp2(f32(pop_steps));
+    let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult, 0.0, 1.0);
+
+    if (death_rnd < final_death_prob) {
         // Deposit remains: stochastic decomposition into either alpha or beta
         // Fixed total deposit = 1.0 (in 0..1 grid units), spread across parts
         if (body_count > 0u) {
@@ -2744,6 +2764,12 @@ fn compute_gamma_slope(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(16, 16)
 fn diffuse_trails(@builtin(global_invocation_id) gid: vec3<u32>) {
+    // If trails are fully invisible, skip all trail simulation work.
+    // NOTE: Sensors no longer depend on trail_grid, so this is safe.
+    if (params.trail_opacity <= 0.0) {
+        return;
+    }
+
     let x = gid.x;
     let y = gid.y;
 

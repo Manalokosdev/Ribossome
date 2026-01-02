@@ -501,6 +501,7 @@ struct AminoAcidProperties {
     beta_sensitivity: f32,
     is_propeller: bool,
     is_displacer: bool,
+    is_signal_emitter: bool,
     thrust_force: f32,
     color: vec3<f32>,
     is_mouth: bool,
@@ -629,7 +630,7 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
 
 var<private> AMINO_FLAGS: array<u32, AMINO_COUNT> = array<u32, AMINO_COUNT>(
     0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (1u<<9), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, // 0–19
-    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<8), (1u<<9), (1u<<8), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u, (1u<<12) // 20–43
+    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<13), (1u<<9), (1u<<13), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u, (1u<<12) // 20–43
 );
 
 fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
@@ -694,6 +695,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
 
     p.is_propeller          = (f & (1u<<0))  != 0u;
     p.is_displacer          = (f & (1u<<8))  != 0u;
+    p.is_signal_emitter     = (f & (1u<<13)) != 0u;
     p.is_mouth              = (f & (1u<<1))  != 0u;
     p.is_alpha_sensor       = (f & (1u<<2))  != 0u;
     p.is_beta_sensor        = (f & (1u<<3))  != 0u;
@@ -1152,6 +1154,15 @@ fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_ty
     return v * gain * polarity;
 }
 
+fn unpack_rgb8_from_f32(packed_f32: f32) -> vec3<f32> {
+    // torque_debug stores a numeric f32 that represents an exact u32 in [0, 2^24).
+    let packed = u32(max(packed_f32, 0.0));
+    let r = f32((packed >> 0u) & 255u) / 255.0;
+    let g = f32((packed >> 8u) & 255u) / 255.0;
+    let b = f32((packed >> 16u) & 255u) / 255.0;
+    return vec3<f32>(r, g, b);
+}
+
 fn sample_neighbors_color(center: vec2<f32>, base_radius: f32, debug_mode: bool, sensor_perpendicular: vec2<f32>, agent_color: vec3<f32>, neighbor_ids: ptr<function, array<u32, 64>>, neighbor_count: u32) -> f32 {
     let radius = base_radius;
     var weighted_sum = 0.0;
@@ -1167,13 +1178,12 @@ fn sample_neighbors_color(center: vec2<f32>, base_radius: f32, debug_mode: bool,
             let directional_alignment = dot(sensor_perpendicular, direction);
             let weight = distance_weight * directional_alignment;
 
-            let trail_idx = grid_index(other_agent.position);
-            let trail_color = trail_grid[trail_idx].xyz;
-
-            let trail_color_normalized = normalize(trail_color + vec3<f32>(1e-6));
+            // Direct neighbor color: read packed RGB cache from other_agent.torque_debug.
+            let neighbor_color = unpack_rgb8_from_f32(other_agent.torque_debug);
+            let neighbor_color_normalized = normalize(neighbor_color + vec3<f32>(1e-6));
             let agent_color_normalized = normalize(agent_color + vec3<f32>(1e-6));
 
-            let color_diff_vec = trail_color_normalized - agent_color_normalized;
+            let color_diff_vec = neighbor_color_normalized - agent_color_normalized;
             let color_difference = length(color_diff_vec);
 
             if (debug_mode) {
@@ -1206,8 +1216,8 @@ fn sample_neighbors_energy(center: vec2<f32>, base_radius: f32, debug_mode: bool
             let directional_alignment = dot(sensor_perpendicular, direction);
             let weight = distance_weight * directional_alignment;
 
-            let trail_idx = grid_index(other_agent.position);
-            let energy_value = trail_grid[trail_idx].w;
+            // Direct neighbor energy (not from trail grid).
+            let energy_value = other_agent.energy;
 
             if (debug_mode) {
                 let dot_val = directional_alignment;
@@ -1648,22 +1658,28 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
                 else { organ_base_type = 23u; }
             }
             else if (amino_type == 9u || amino_type == 12u) {
-                if (modifier < 10u) { organ_base_type = 21u; }
-                // Displacer: two variants.
-                // - modifiers 10..14 -> Displacer A (25)
-                // - modifiers 15..19 -> Displacer B (27)
-                else if (modifier < 15u) { organ_base_type = 25u; }
-                else {
-                    // Anchor override (requested):
-                    // - LW/LY (L promoter + W/Y modifier) => Anchor (alpha)
-                    // - PW/PY (P promoter + W/Y modifier) => Anchor (beta)
-                    if (modifier == 18u || modifier == 19u) { organ_base_type = 42u; }
-                    else { organ_base_type = 27u; }
+                // Reduced organ set (see config/ORGAN_TABLE.csv):
+                // - Propellers: LA and PA only.
+                // - Internal signal emitters: 4 slots total:
+                //     LM => +alpha (25), LP => -alpha (25)
+                //     PS => +beta  (27), PT => -beta  (27)
+                // All other promoter+modifier combos in this family are unassigned (promoter emitted as amino).
+                if (modifier == 0u) {
+                    organ_base_type = 21u;
+                } else if (amino_type == 9u && (modifier == 10u || modifier == 12u)) {
+                    organ_base_type = 25u;
+                } else if (amino_type == 12u && (modifier == 15u || modifier == 16u)) {
+                    organ_base_type = 27u;
+                } else {
+                    organ_base_type = 0u;
                 }
             }
             else if (amino_type == 8u || amino_type == 1u) {
                 if (modifier < 4u) { organ_base_type = 20u; }
-                else if (modifier < 7u) { organ_base_type = 33u; }
+                else if (modifier < 7u) {
+                    // Remove vampire mouth from KG/CG specifically (modifier G = 5).
+                    organ_base_type = select(33u, 0u, modifier == 5u);
+                }
                 else if (modifier < 10u) { organ_base_type = 26u; }
                 else if (modifier < 14u) { organ_base_type = 32u; }
                 else if (modifier < 16u) { organ_base_type = 31u; }
@@ -1671,11 +1687,17 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
             }
             else if (amino_type == 6u || amino_type == 13u) {
                 if (modifier == 0u) { organ_base_type = 43u; }
-                else if (modifier < 7u) { organ_base_type = 28u; }
-                else if (modifier < 9u) { organ_base_type = 36u; }
+                // Storage reduced to HC/QC only.
+                else if (modifier == 1u) { organ_base_type = 28u; }
+                // Pairing sensor remains HI/HK and QI/QK (modifiers I/K).
+                else if (modifier == 7u || modifier == 8u) { organ_base_type = 36u; }
+                // Trail energy sensor remains HL/QL (modifier L).
                 else if (modifier == 9u) { organ_base_type = 37u; }
-                else if (modifier < 14u) { organ_base_type = 29u; }
-                else { organ_base_type = 30u; }
+                // Poison resistance: keep only for Q promoter (remove HM/HN/HP/HQ).
+                else if (amino_type == 13u && modifier >= 10u && modifier < 14u) { organ_base_type = 29u; }
+                // Chiral flipper reduced to HR/HS only (H promoter only).
+                else if (amino_type == 6u && (modifier == 14u || modifier == 15u)) { organ_base_type = 30u; }
+                else { organ_base_type = 0u; }
             }
 
             if (organ_base_type >= 20u) {

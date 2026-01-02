@@ -169,5 +169,6 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agents_out[agent_id].rotation += delta_rot;
 
     // Optional debug visualization
-    agents_out[agent_id].torque_debug += torque_world;
+    // NOTE: torque_debug is repurposed as a packed RGB cache in simulation.wgsl.
+    // Do not write torque into it from microswim.
 }

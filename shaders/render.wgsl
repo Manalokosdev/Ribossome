@@ -313,7 +313,7 @@ fn render_body_part_ctx(
     }
 
     // 6b. ORGAN: Signal Emitters (types 25=Alpha, 27=Beta) - colored radial-spikes by emission type
-    if (amino_props.is_displacer) {
+    if (amino_props.is_signal_emitter) {
         let star_radius = max(get_part_visual_size(part.part_type) * 2.5, 7.0);
         let organ_param = get_organ_param(part.part_type);
         let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
@@ -2106,7 +2106,7 @@ fn render_inspector(@builtin(global_invocation_id) gid: vec3<u32>) {
                         }
 
                         // For organs that need amplification (propeller, displacer, mouth, vampire mouth, agent sensors), calculate and apply
-                        let needs_amplification = props.is_propeller || props.is_displacer || props.is_mouth || base_type == 33u || base_type == 34u || base_type == 35u;
+                        let needs_amplification = props.is_propeller || props.is_signal_emitter || props.is_mouth || base_type == 33u || base_type == 34u || base_type == 35u;
                         if (part_count < body_count && needs_amplification) {
                             let part_pos = selected_agent_buffer[0].body[part_count].pos;
 
