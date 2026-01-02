@@ -33,14 +33,20 @@ fn pack_f32_uniform(values: &[f32]) -> Vec<u8> {
     bytes
 }
 
-// World size (must match shader SIM_SIZE).
-const SIM_SIZE: f32 = 61440.0;
-
 // Default resolution values - can be overridden via simulation_settings.json
 // Changes require restart to take effect as they affect shader compilation and buffer allocation
 const DEFAULT_ENV_GRID_RESOLUTION: u32 = 2048;
 const DEFAULT_FLUID_GRID_RESOLUTION: u32 = 512;
 const DEFAULT_SPATIAL_GRID_RESOLUTION: u32 = 512;
+
+// World size calibrated for DEFAULT_ENV_GRID_RESOLUTION.
+// For other env grid resolutions, we scale proportionally so that each env cell keeps the same
+// world-space footprint.
+const SIM_SIZE_AT_DEFAULT_ENV_RES: f32 = 61440.0;
+
+fn sim_size_for_env_res(env_grid_res: u32) -> f32 {
+    SIM_SIZE_AT_DEFAULT_ENV_RES * (env_grid_res as f32 / DEFAULT_ENV_GRID_RESOLUTION as f32)
+}
 
 // DEPRECATED: These constants are kept for backward compatibility during transition.
 // New code should load settings first and use those values.
@@ -3798,6 +3804,9 @@ struct GpuState {
     fluid_grid_cell_count: usize,
     spatial_grid_cell_count: usize,
 
+    // World size in world-space units (scaled proportionally to env_grid_resolution).
+    sim_size: f32,
+
     // Buffers
     agents_buffer_a: wgpu::Buffer,
     agents_buffer_b: wgpu::Buffer,
@@ -4221,8 +4230,9 @@ impl GpuState {
     fn write_rain_map_texture(&self) {
         // Expand interleaved alpha/beta into RGBA32F (alpha->R, beta->G).
         // This is only called on map load/clear, so a temporary allocation is fine.
-        let mut rgba: Vec<f32> = Vec::with_capacity(GRID_CELL_COUNT * 4);
-        for i in 0..GRID_CELL_COUNT {
+        let cell_count = self.env_grid_cell_count as usize;
+        let mut rgba: Vec<f32> = Vec::with_capacity(cell_count * 4);
+        for i in 0..cell_count {
             let a = self.rain_map_data[i * 2];
             let b = self.rain_map_data[i * 2 + 1];
             rgba.extend_from_slice(&[a, b, 0.0, 0.0]);
@@ -4238,12 +4248,12 @@ impl GpuState {
             bytemuck::cast_slice(&rgba),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(GRID_DIM_U32 * 16),
-                rows_per_image: Some(GRID_DIM_U32),
+                bytes_per_row: Some(self.env_grid_resolution * 16),
+                rows_per_image: Some(self.env_grid_resolution),
             },
             wgpu::Extent3d {
-                width: GRID_DIM_U32,
-                height: GRID_DIM_U32,
+                width: self.env_grid_resolution,
+                height: self.env_grid_resolution,
                 depth_or_array_layers: 1,
             },
         );
@@ -4422,7 +4432,7 @@ impl GpuState {
 
     fn generate_map(&mut self, mode: u32, gen_type: u32, value: f32, seed: u32) {
         let params = EnvironmentInitParams {
-            grid_resolution: GRID_DIM_U32,
+            grid_resolution: self.env_grid_resolution,
             seed,
             noise_octaves: 4,
             slope_octaves: 4,
@@ -4473,7 +4483,7 @@ impl GpuState {
                 pass.set_bind_group(0, &self.compute_bind_group_a, &[]);
             }
 
-            let workgroups = (GRID_DIM_U32 + 15) / 16;
+            let workgroups = (self.env_grid_resolution + 15) / 16;
             pass.dispatch_workgroups(workgroups, workgroups, 1);
         }
 
@@ -4889,12 +4899,12 @@ impl GpuState {
             bytemuck::cast_slice(&uniform_rain_rgba),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(GRID_DIM_U32 * 16),
-                rows_per_image: Some(GRID_DIM_U32),
+                bytes_per_row: Some(env_grid_res * 16),
+                rows_per_image: Some(env_grid_res),
             },
             wgpu::Extent3d {
-                width: GRID_DIM_U32,
-                height: GRID_DIM_U32,
+                width: env_grid_res,
+                height: env_grid_res,
                 depth_or_array_layers: 1,
             },
         );
@@ -4961,7 +4971,7 @@ impl GpuState {
 
         let env_seed = (seed ^ (seed >> 32)) as u32;
         let environment_init = EnvironmentInitParams {
-            grid_resolution: GRID_DIM_U32,
+            grid_resolution: env_grid_res,
             seed: env_seed,
             noise_octaves: 5,
             slope_octaves: 3,
@@ -5019,6 +5029,8 @@ impl GpuState {
         });
         profiler.mark("Agent grid buffer");
 
+        let sim_size = sim_size_for_env_res(env_grid_res);
+
         let params = SimParams {
             dt: 0.016,
             frame_dt: 0.016,
@@ -5027,12 +5039,12 @@ impl GpuState {
             amino_maintenance_cost: 0.001,
             spawn_probability: 0.01,
             death_probability: 0.001,
-            grid_size: SIM_SIZE,
+            grid_size: sim_size,
             camera_zoom: 1.0,
-            camera_pan_x: SIM_SIZE / 2.0,
-            camera_pan_y: SIM_SIZE / 2.0,
-            prev_camera_pan_x: SIM_SIZE / 2.0, // Initialize to same as camera_pan
-            prev_camera_pan_y: SIM_SIZE / 2.0, // Initialize to same as camera_pan
+            camera_pan_x: sim_size / 2.0,
+            camera_pan_y: sim_size / 2.0,
+            prev_camera_pan_x: sim_size / 2.0, // Initialize to same as camera_pan
+            prev_camera_pan_y: sim_size / 2.0, // Initialize to same as camera_pan
             follow_mode: 0,
             window_width: surface_config.width as f32,
             window_height: surface_config.height as f32,
@@ -5294,7 +5306,7 @@ impl GpuState {
         profiler.mark("Counters and readbacks");
 
         // Grid readback buffers for snapshot save
-        let chem_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 4]>()) as u64;
+        let chem_grid_size_bytes = (env_grid_cell_count * std::mem::size_of::<[f32; 4]>()) as u64;
 
         let chem_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Chem Grid Readback"),
@@ -5303,7 +5315,7 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
-        let gamma_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
+        let gamma_grid_size_bytes = (env_grid_cell_count * std::mem::size_of::<f32>()) as u64;
         let gamma_grid_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Gamma Grid Readback"),
             size: gamma_grid_size_bytes,
@@ -5349,7 +5361,7 @@ impl GpuState {
         // Inject compile-time constants from runtime resolution settings.
         let shader_source = format!(
             "const SIM_SIZE: u32 = {}u;\nconst ENV_GRID_SIZE: u32 = {}u;\nconst GRID_SIZE: u32 = {}u;\nconst SPATIAL_GRID_SIZE: u32 = {}u;\nconst FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}\n{}\n{}",
-            SIM_SIZE as u32,
+            sim_size.round().max(1.0) as u32,
             env_grid_res,
             env_grid_res,
             spatial_grid_res,
@@ -5405,8 +5417,8 @@ impl GpuState {
         // ============================================================================
         // FLUID SIMULATION BUFFERS (created early so they can be used in bind groups)
         // ============================================================================
-        let fluid_grid_cells: usize = (FLUID_GRID_SIZE * FLUID_GRID_SIZE) as usize;
-        let env_grid_cells: usize = (GRID_DIM_U32 * GRID_DIM_U32) as usize;
+        let fluid_grid_cells: usize = (fluid_grid_res * fluid_grid_res) as usize;
+        let env_grid_cells: usize = (env_grid_res * env_grid_res) as usize;
 
         let fluid_velocity_size = (fluid_grid_cells * std::mem::size_of::<[f32; 2]>()) as u64;
         let fluid_scalar_size = (fluid_grid_cells * std::mem::size_of::<f32>()) as u64;
@@ -7313,6 +7325,8 @@ impl GpuState {
             env_grid_cell_count,
             fluid_grid_cell_count,
             spatial_grid_cell_count,
+
+            sim_size,
             
             agents_buffer_a,
             agents_buffer_b,
@@ -7399,8 +7413,8 @@ impl GpuState {
             agent_count: initial_agents as u32,
             alive_count: initial_agents as u32,
             camera_zoom: settings.camera_zoom,
-            camera_pan: [SIM_SIZE / 2.0, SIM_SIZE / 2.0],
-            prev_camera_pan: [SIM_SIZE / 2.0, SIM_SIZE / 2.0], // Initialize to same as camera_pan
+            camera_pan: [sim_size / 2.0, sim_size / 2.0],
+            prev_camera_pan: [sim_size / 2.0, sim_size / 2.0], // Initialize to same as camera_pan
             agents_cpu: agents,
             agent_buffer_capacity: max_agents,
             cpu_spawn_queue: Vec::new(),
@@ -7409,7 +7423,7 @@ impl GpuState {
             spawn_probability: settings.spawn_probability,
             death_probability: settings.death_probability,
             auto_replenish: settings.auto_replenish,
-            rain_map_data: vec![1.0f32; GRID_CELL_COUNT * 2], // Initialize with uniform rain
+            rain_map_data: vec![1.0f32; env_grid_cell_count * 2], // Initialize with uniform rain
             difficulty: settings.difficulty.clone(),
             frame_count: 0,
             last_fps_update: std::time::Instant::now(),
@@ -7469,7 +7483,7 @@ impl GpuState {
             selected_agent_index: None,
             selected_agent_data: None,
             follow_selected_agent: false, // Initialize to false
-            camera_target: [SIM_SIZE / 2.0, SIM_SIZE / 2.0], // Initialize to center
+            camera_target: [sim_size / 2.0, sim_size / 2.0], // Initialize to center
             camera_velocity: [0.0, 0.0], // Initialize velocity to zero
             inspector_zoom: 1.0,
             agent_trail_decay: settings.agent_trail_decay,
@@ -7799,13 +7813,13 @@ impl GpuState {
     fn load_gamma_image<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let path = path.as_ref();
         let image = image::open(path)?;
-        let resized = image.resize_exact(GRID_DIM as u32, GRID_DIM as u32, FilterType::Lanczos3);
+        let resized = image.resize_exact(self.env_grid_resolution, self.env_grid_resolution, FilterType::Lanczos3);
         let gray = resized.to_luma8();
         let width = gray.width() as usize;
         let height = gray.height() as usize;
         let raw = gray.as_raw();
 
-        let mut gamma_values = Vec::with_capacity(GRID_CELL_COUNT);
+        let mut gamma_values = Vec::with_capacity(self.env_grid_cell_count);
         for row in (0..height).rev() {
             let row_offset = row * width;
             for col in 0..width {
@@ -7814,7 +7828,7 @@ impl GpuState {
             }
         }
 
-        debug_assert_eq!(gamma_values.len(), GRID_CELL_COUNT);
+        debug_assert_eq!(gamma_values.len(), self.env_grid_cell_count);
 
         self.queue
             .write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_values));
@@ -7830,15 +7844,16 @@ impl GpuState {
         Ok(())
     }
 
-    fn read_rain_map(path: &Path) -> anyhow::Result<(Vec<f32>, ColorImage)> {
+    fn read_rain_map(path: &Path, env_grid_res: u32) -> anyhow::Result<(Vec<f32>, ColorImage)> {
         let image = image::open(path)?;
-        let resized = image.resize_exact(GRID_DIM as u32, GRID_DIM as u32, FilterType::Lanczos3);
+        let resized = image.resize_exact(env_grid_res, env_grid_res, FilterType::Lanczos3);
         let gray = resized.to_luma8();
         let width = gray.width() as usize;
         let height = gray.height() as usize;
         let raw = gray.as_raw();
 
-        let mut values = Vec::with_capacity(GRID_CELL_COUNT);
+        let cell_count = (env_grid_res as usize) * (env_grid_res as usize);
+        let mut values = Vec::with_capacity(cell_count);
         for row in (0..height).rev() {
             let row_offset = row * width;
             for col in 0..width {
@@ -7847,7 +7862,7 @@ impl GpuState {
             }
         }
 
-        debug_assert_eq!(values.len(), GRID_CELL_COUNT);
+        debug_assert_eq!(values.len(), cell_count);
         let thumbnail = Self::build_rain_thumbnail(&gray);
         Ok((values, thumbnail))
     }
@@ -7890,10 +7905,10 @@ impl GpuState {
 
     fn load_alpha_rain_map<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let path = path.as_ref();
-        let (alpha_values, thumbnail) = Self::read_rain_map(path)?;
+        let (alpha_values, thumbnail) = Self::read_rain_map(path, self.env_grid_resolution)?;
 
         // Update alpha values in CPU-side data (even indices)
-        for i in 0..GRID_CELL_COUNT {
+        for i in 0..self.env_grid_cell_count {
             self.rain_map_data[i * 2] = alpha_values[i];
         }
 
@@ -7912,10 +7927,10 @@ impl GpuState {
 
     fn load_beta_rain_map<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let path = path.as_ref();
-        let (beta_values, thumbnail) = Self::read_rain_map(path)?;
+        let (beta_values, thumbnail) = Self::read_rain_map(path, self.env_grid_resolution)?;
 
         // Update beta values in CPU-side data (odd indices)
-        for i in 0..GRID_CELL_COUNT {
+        for i in 0..self.env_grid_cell_count {
             self.rain_map_data[i * 2 + 1] = beta_values[i];
         }
 
@@ -7934,7 +7949,7 @@ impl GpuState {
 
     fn clear_alpha_rain_map(&mut self) {
         // Set alpha to uniform 1.0 in CPU-side data (even indices)
-        for i in 0..GRID_CELL_COUNT {
+        for i in 0..self.env_grid_cell_count {
             self.rain_map_data[i * 2] = 1.0;
         }
 
@@ -7952,7 +7967,7 @@ impl GpuState {
 
     fn clear_beta_rain_map(&mut self) {
         // Set beta to uniform 1.0 in CPU-side data (odd indices)
-        for i in 0..GRID_CELL_COUNT {
+        for i in 0..self.env_grid_cell_count {
             self.rain_map_data[i * 2 + 1] = 1.0;
         }
 
@@ -8811,7 +8826,7 @@ impl GpuState {
         {
             let mut params = self.sim_params_cpu;
             // Ensure world/grid mapping is valid even before the first `update()`.
-            params.grid_size = SIM_SIZE;
+            params.grid_size = self.sim_size;
             params.max_agents = self.agent_buffer_capacity as u32;
             params.cpu_spawn_count = cpu_spawn_count;
             params.agent_count = self.agent_count;
@@ -8998,8 +9013,9 @@ impl GpuState {
             self.camera_pan[1] += (self.camera_target[1] - self.camera_pan[1]) * integration_factor;
 
             // Clamp to world bounds
-            self.camera_pan[0] = self.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
-            self.camera_pan[1] = self.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
+            let sim_size = self.sim_size;
+            self.camera_pan[0] = self.camera_pan[0].clamp(-0.25 * sim_size, 1.25 * sim_size);
+            self.camera_pan[1] = self.camera_pan[1].clamp(-0.25 * sim_size, 1.25 * sim_size);
         }
 
         // Auto Difficulty Logic
@@ -9141,7 +9157,7 @@ impl GpuState {
             amino_maintenance_cost: self.amino_maintenance_cost,
             spawn_probability: effective_spawn_p,
             death_probability: effective_death_p,
-            grid_size: SIM_SIZE,
+            grid_size: self.sim_size,
             camera_zoom: self.camera_zoom,
             camera_pan_x: self.camera_pan[0],
             camera_pan_y: self.camera_pan[1],
@@ -10989,15 +11005,16 @@ impl GpuState {
         } else {
             1.0
         };
-        let half_view_x = SIM_SIZE / (2.0 * self.camera_zoom);
+        let sim_size = self.sim_size;
+        let half_view_x = sim_size / (2.0 * self.camera_zoom);
         let half_view_y = half_view_x * aspect;
 
         let mut world_x = self.camera_pan[0] + (norm_x - 0.5) * 2.0 * half_view_x;
         let mut world_y = self.camera_pan[1] - (norm_y - 0.5) * 2.0 * half_view_y; // Y inverted
 
         // Wrap to world bounds
-        world_x = world_x.rem_euclid(SIM_SIZE);
-        world_y = world_y.rem_euclid(SIM_SIZE);
+        world_x = world_x.rem_euclid(sim_size);
+        world_y = world_y.rem_euclid(sim_size);
 
         // Read back agents from GPU
         let current_buffer = if self.ping_pong {
@@ -11036,10 +11053,10 @@ impl GpuState {
 
             let wrap_delta = |delta: f32| {
                 let mut d = delta;
-                if d > SIM_SIZE * 0.5 {
-                    d -= SIM_SIZE;
-                } else if d < -SIM_SIZE * 0.5 {
-                    d += SIM_SIZE;
+                if d > sim_size * 0.5 {
+                    d -= sim_size;
+                } else if d < -sim_size * 0.5 {
+                    d += sim_size;
                 }
                 d
             };
@@ -11130,15 +11147,16 @@ impl GpuState {
         } else {
             1.0
         };
-        let half_view_x = SIM_SIZE / (2.0 * self.camera_zoom);
+        let sim_size = self.sim_size;
+        let half_view_x = sim_size / (2.0 * self.camera_zoom);
         let half_view_y = half_view_x * aspect;
 
         let mut world_x = self.camera_pan[0] + (norm_x - 0.5) * 2.0 * half_view_x;
         let mut world_y = self.camera_pan[1] - (norm_y - 0.5) * 2.0 * half_view_y; // Y inverted
 
         // Wrap to world bounds
-        world_x = world_x.rem_euclid(SIM_SIZE);
-        world_y = world_y.rem_euclid(SIM_SIZE);
+        world_x = world_x.rem_euclid(sim_size);
+        world_y = world_y.rem_euclid(sim_size);
 
         if let Some(template_genome) = self.spawn_template_genome {
             // Generate random seeds
@@ -11185,8 +11203,9 @@ impl GpuState {
             label: Some("Snapshot Readback Encoder"),
         });
 
-        let chem_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 4]>()) as u64;
-        let gamma_grid_size_bytes = (GRID_CELL_COUNT * std::mem::size_of::<f32>()) as u64;
+        let chem_grid_size_bytes =
+            (self.env_grid_cell_count * std::mem::size_of::<[f32; 4]>()) as u64;
+        let gamma_grid_size_bytes = (self.env_grid_cell_count * std::mem::size_of::<f32>()) as u64;
 
         encoder.copy_buffer_to_buffer(&self.chem_grid, 0, &self.chem_grid_readback, 0, chem_grid_size_bytes);
         encoder.copy_buffer_to_buffer(&self.gamma_grid, 0, &self.gamma_grid_readback, 0, gamma_grid_size_bytes);
@@ -11291,6 +11310,91 @@ impl GpuState {
         self.device.poll(wgpu::Maintain::Wait);
         self.process_completed_alive_readbacks();
 
+        // Load snapshot from PNG file early so we can validate compatibility before touching GPU resources.
+        let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
+        let loaded_run_name = snapshot.run_name.clone();
+
+        // Snapshot compatibility gate.
+        // - Empty version strings are treated as legacy "1.0".
+        // - Current builds write SNAPSHOT_VERSION.
+        match snapshot.version.as_str() {
+            "" | "1.0" | "1.1" | "1.2" => {}
+            other => {
+                anyhow::bail!(
+                    "Unsupported snapshot version '{other}'. This build supports snapshot versions 1.0, 1.1, and 1.2."
+                );
+            }
+        }
+
+        // Resolution compatibility / adaptation.
+        // - New snapshots (v1.2+) include explicit resolution fields.
+        // - Older snapshots may have zeros; infer resolution from grid length.
+        // - If snapshot env resolution differs from current GPU env resolution, resample grids
+        //   to prevent buffer/texture overruns.
+        if alpha_grid.len() != beta_grid.len() || alpha_grid.len() != gamma_grid.len() {
+            anyhow::bail!(
+                "Snapshot grid length mismatch: alpha={}, beta={}, gamma={}",
+                alpha_grid.len(),
+                beta_grid.len(),
+                gamma_grid.len()
+            );
+        }
+
+        let snapshot_env_res = if snapshot.env_grid_resolution != 0 {
+            snapshot.env_grid_resolution
+        } else {
+            let len = alpha_grid.len();
+            let inferred = (len as f64).sqrt().round() as usize;
+            if inferred * inferred == len {
+                inferred as u32
+            } else {
+                0
+            }
+        };
+
+        let (alpha_grid, beta_grid, gamma_grid) = if snapshot_env_res != 0
+            && snapshot_env_res != self.env_grid_resolution
+        {
+            fn resample_grid_nearest(src: &[f32], src_res: u32, dst_res: u32) -> Vec<f32> {
+                let src_res = src_res as usize;
+                let dst_res = dst_res as usize;
+                let mut out = vec![0.0f32; dst_res * dst_res];
+                for y in 0..dst_res {
+                    let sy = (y * src_res) / dst_res;
+                    let src_row = sy * src_res;
+                    let dst_row = y * dst_res;
+                    for x in 0..dst_res {
+                        let sx = (x * src_res) / dst_res;
+                        out[dst_row + x] = src[src_row + sx];
+                    }
+                }
+                out
+            }
+
+            println!(
+                "G⚠️  Snapshot env grid res {} differs from current {}; resampling grids.",
+                snapshot_env_res,
+                self.env_grid_resolution
+            );
+
+            (
+                resample_grid_nearest(&alpha_grid, snapshot_env_res, self.env_grid_resolution),
+                resample_grid_nearest(&beta_grid, snapshot_env_res, self.env_grid_resolution),
+                resample_grid_nearest(&gamma_grid, snapshot_env_res, self.env_grid_resolution),
+            )
+        } else {
+            (alpha_grid, beta_grid, gamma_grid)
+        };
+
+        if alpha_grid.len() != self.env_grid_cell_count {
+            anyhow::bail!(
+                "Snapshot env grid length {} does not match current env grid cell count {} (env_res={}).",
+                alpha_grid.len(),
+                self.env_grid_cell_count,
+                self.env_grid_resolution
+            );
+        }
+
         // Reset simulation state before loading to prevent crashes on subsequent loads
         // Clear alive counter
         // Clear [spawn, debug, alive] counters
@@ -11310,7 +11414,7 @@ impl GpuState {
 
         // Extra safety: some backends/drivers can still leave stale data visible until the
         // first frame submits more work. Force a deterministic zero-fill via CPU upload.
-        let trail_bytes = (GRID_CELL_COUNT * std::mem::size_of::<[f32; 4]>()) as usize;
+        let trail_bytes = (self.env_grid_cell_count * std::mem::size_of::<[f32; 4]>()) as usize;
         let zeros = vec![0u8; trail_bytes];
         self.queue.write_buffer(&self.trail_grid, 0, &zeros);
         self.queue.write_buffer(&self.trail_grid_inject, 0, &zeros);
@@ -11344,22 +11448,6 @@ impl GpuState {
         // Canonicalize buffer orientation during load: spawn path materializes into A.
         self.ping_pong = false;
 
-        // Load snapshot from PNG file
-        let (alpha_grid, beta_grid, gamma_grid, snapshot) = load_simulation_snapshot(path)?;
-        let loaded_run_name = snapshot.run_name.clone();
-
-        // Snapshot compatibility gate.
-        // - Empty version strings are treated as legacy "1.0".
-        // - Current builds write SNAPSHOT_VERSION.
-        match snapshot.version.as_str() {
-            "" | "1.0" | "1.1" | "1.2" => {}
-            other => {
-                anyhow::bail!(
-                    "Unsupported snapshot version '{other}'. This build supports snapshot versions 1.0, 1.1, and 1.2."
-                );
-            }
-        }
-
         // Apply loaded settings only if they exist in the snapshot (backwards compatibility)
         if let Some(settings) = &snapshot.settings {
             self.apply_settings(settings);
@@ -11367,37 +11455,7 @@ impl GpuState {
             println!("G�� Loaded snapshot without settings (old format) - using current settings");
         }
 
-        // Check resolution compatibility and reject if different
-        if snapshot.env_grid_resolution != 0 {
-            // Snapshot has resolution info (version 1.2+)
-            if snapshot.env_grid_resolution != self.env_grid_resolution
-                || snapshot.fluid_grid_resolution != self.fluid_grid_resolution
-                || snapshot.spatial_grid_resolution != self.spatial_grid_resolution
-            {
-                println!("\n⚠️  Resolution mismatch detected - cannot load snapshot!");
-                println!("   Snapshot resolution: env={}, fluid={}, spatial={}",
-                    snapshot.env_grid_resolution,
-                    snapshot.fluid_grid_resolution,
-                    snapshot.spatial_grid_resolution
-                );
-                println!("   Current resolution:  env={}, fluid={}, spatial={}",
-                    self.env_grid_resolution,
-                    self.fluid_grid_resolution,
-                    self.spatial_grid_resolution
-                );
-                println!("   To load this snapshot, change resolution back to {}×{} or save a new snapshot at current resolution.",
-                    snapshot.env_grid_resolution,
-                    snapshot.env_grid_resolution
-                );
-                anyhow::bail!(
-                    "Resolution mismatch: snapshot has {}×{}, current GPU state has {}×{}",
-                    snapshot.env_grid_resolution,
-                    snapshot.env_grid_resolution,
-                    self.env_grid_resolution,
-                    self.env_grid_resolution
-                );
-            }
-        }
+        // Resolution compatibility already validated above (before touching GPU resources).
 
         // Restore run name if present; otherwise generate one for this session.
         if !loaded_run_name.is_empty() {
@@ -11558,8 +11616,9 @@ impl GpuState {
         ];
 
         // Wrap to world bounds
-        new_agent.position[0] = new_agent.position[0].rem_euclid(SIM_SIZE);
-        new_agent.position[1] = new_agent.position[1].rem_euclid(SIM_SIZE);
+        let sim_size = self.sim_size;
+        new_agent.position[0] = new_agent.position[0].rem_euclid(sim_size);
+        new_agent.position[1] = new_agent.position[1].rem_euclid(sim_size);
 
         new_agent.velocity = [0.0, 0.0];
         self.rng_state = self
@@ -11873,9 +11932,10 @@ impl GpuState {
 
         // Reset camera
         self.camera_zoom = 1.0;
-        self.camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
-        self.prev_camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
-        self.camera_target = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
+        let sim_size = self.sim_size;
+        self.camera_pan = [sim_size / 2.0, sim_size / 2.0];
+        self.prev_camera_pan = [sim_size / 2.0, sim_size / 2.0];
+        self.camera_target = [sim_size / 2.0, sim_size / 2.0];
         self.camera_velocity = [0.0, 0.0];
 
         // Reset selection
@@ -12331,9 +12391,37 @@ fn save_simulation_snapshot(
     use std::io::BufWriter;
     use anyhow::Context;
 
+    if alpha_grid.len() != beta_grid.len() || alpha_grid.len() != gamma_grid.len() {
+        anyhow::bail!(
+            "Grid length mismatch: alpha={}, beta={}, gamma={}",
+            alpha_grid.len(),
+            beta_grid.len(),
+            gamma_grid.len()
+        );
+    }
+
+    let cell_count = alpha_grid.len();
+    let env_res = if snapshot.env_grid_resolution != 0 {
+        snapshot.env_grid_resolution
+    } else {
+        let inferred = (cell_count as f64).sqrt().round() as usize;
+        if inferred * inferred == cell_count {
+            inferred as u32
+        } else {
+            anyhow::bail!("Cannot infer snapshot resolution from cell_count={cell_count}");
+        }
+    };
+    if (env_res as usize) * (env_res as usize) != cell_count {
+        anyhow::bail!(
+            "Snapshot env resolution {} does not match grid length {}",
+            env_res,
+            cell_count
+        );
+    }
+
     // 1. Create RGB image from grids
-    let mut img_data = vec![0u8; GRID_CELL_COUNT * 3];
-    for i in 0..GRID_CELL_COUNT {
+    let mut img_data = vec![0u8; cell_count * 3];
+    for i in 0..cell_count {
         img_data[i * 3 + 0] = (beta_grid[i].clamp(0.0, 1.0) * 255.0) as u8;   // R = beta (poison)
         img_data[i * 3 + 1] = (alpha_grid[i].clamp(0.0, 1.0) * 255.0) as u8;  // G = alpha (food)
         img_data[i * 3 + 2] = (gamma_grid[i].clamp(0.0, 1.0) * 255.0) as u8;  // B = gamma (terrain)
@@ -12357,7 +12445,7 @@ fn save_simulation_snapshot(
     {
         let file = std::fs::File::create(&tmp_path)?;
         let w = BufWriter::new(file);
-        let mut encoder = png::Encoder::new(w, GRID_DIM_U32, GRID_DIM_U32);
+        let mut encoder = png::Encoder::new(w, env_res, env_res);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
 
@@ -12392,6 +12480,7 @@ fn load_simulation_snapshot(
     path: &Path,
 ) -> anyhow::Result<(Vec<f32>, Vec<f32>, Vec<f32>, SimulationSnapshot)> {
     use std::io::BufReader;
+    use anyhow::Context;
 
     let file = std::fs::File::open(path)?;
     let decoder = png::Decoder::new(BufReader::new(file));
@@ -12401,20 +12490,40 @@ fn load_simulation_snapshot(
     let mut buf = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf)?;
 
-    if info.width != GRID_DIM_U32 || info.height != GRID_DIM_U32 {
-        anyhow::bail!("Invalid snapshot size: {}x{}, expected {}x{}",
-            info.width, info.height, GRID_DIM_U32, GRID_DIM_U32);
+    if info.width == 0 || info.height == 0 || info.width != info.height {
+        anyhow::bail!("Invalid snapshot size: {}x{} (expected square)", info.width, info.height);
+    }
+
+    let bytes_per_pixel = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgb, png::BitDepth::Eight) => 3usize,
+        (png::ColorType::Rgba, png::BitDepth::Eight) => 4usize,
+        other => {
+            anyhow::bail!("Unsupported snapshot pixel format: {:?}", other);
+        }
+    };
+
+    let cell_count = (info.width as usize) * (info.height as usize);
+    let required = cell_count
+        .checked_mul(bytes_per_pixel)
+        .context("Snapshot image too large")?;
+    if buf.len() < required {
+        anyhow::bail!(
+            "Snapshot buffer too small: have {}, need {}",
+            buf.len(),
+            required
+        );
     }
 
     // Extract grids from RGB channels
-    let mut alpha_grid = vec![0.0f32; GRID_CELL_COUNT];
-    let mut beta_grid = vec![0.0f32; GRID_CELL_COUNT];
-    let mut gamma_grid = vec![0.0f32; GRID_CELL_COUNT];
+    let mut alpha_grid = vec![0.0f32; cell_count];
+    let mut beta_grid = vec![0.0f32; cell_count];
+    let mut gamma_grid = vec![0.0f32; cell_count];
 
-    for i in 0..GRID_CELL_COUNT {
-        beta_grid[i] = buf[i * 3 + 0] as f32 / 255.0;  // R = beta (poison)
-        alpha_grid[i] = buf[i * 3 + 1] as f32 / 255.0; // G = alpha (food)
-        gamma_grid[i] = buf[i * 3 + 2] as f32 / 255.0; // B = gamma (terrain)
+    for i in 0..cell_count {
+        let base = i * bytes_per_pixel;
+        beta_grid[i] = buf[base + 0] as f32 / 255.0; // R = beta (poison)
+        alpha_grid[i] = buf[base + 1] as f32 / 255.0; // G = alpha (food)
+        gamma_grid[i] = buf[base + 2] as f32 / 255.0; // B = gamma (terrain)
     }
 
     // Extract metadata from text chunks
@@ -12426,7 +12535,11 @@ fn load_simulation_snapshot(
             let json = zstd::decode_all(&compressed[..])?;
             let mut value: serde_json::Value = serde_json::from_slice(&json)?;
             scrub_json_nulls(&mut value);
-            let snapshot: SimulationSnapshot = serde_json::from_value(value)?;
+            let mut snapshot: SimulationSnapshot = serde_json::from_value(value)?;
+            // Backfill resolution fields for legacy snapshots using the PNG dimensions.
+            if snapshot.env_grid_resolution == 0 {
+                snapshot.env_grid_resolution = info.width;
+            }
 
             if snapshot.run_name.is_empty() {
                 println!(
@@ -12618,6 +12731,7 @@ fn main() {
         current_message_index: usize,
         loading_messages: &'static [&'static str],
         skip_auto_load: bool, // Set to true when resolution changes to prevent loading old-resolution snapshot
+        reset_in_progress: bool,
     }
 
     impl winit::application::ApplicationHandler for App {
@@ -12730,32 +12844,37 @@ fn main() {
                                         }
                                         PhysicalKey::Code(KeyCode::KeyW) => {
                                             state.camera_pan[1] -= 200.0 / state.camera_zoom;
-                                            state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
+                                            let sim_size = state.sim_size;
+                                            state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * sim_size, 1.25 * sim_size);
                                             state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyS) => {
                                             state.camera_pan[1] += 200.0 / state.camera_zoom;
-                                            state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
+                                            let sim_size = state.sim_size;
+                                            state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * sim_size, 1.25 * sim_size);
                                             state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyA) => {
                                             state.camera_pan[0] -= 200.0 / state.camera_zoom;
-                                            state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
+                                            let sim_size = state.sim_size;
+                                            state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * sim_size, 1.25 * sim_size);
                                             state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyD) => {
                                             state.camera_pan[0] += 200.0 / state.camera_zoom;
-                                            state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
+                                            let sim_size = state.sim_size;
+                                            state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * sim_size, 1.25 * sim_size);
                                             state.follow_selected_agent = false;
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyR) => {
                                             // Reset camera
                                             state.camera_zoom = 1.0;
-                                            state.camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
+                                            let sim_size = state.sim_size;
+                                            state.camera_pan = [sim_size / 2.0, sim_size / 2.0];
                                             camera_changed = true;
                                         }
                                         PhysicalKey::Code(KeyCode::Space) => {
@@ -12817,15 +12936,15 @@ fn main() {
                                         let delta_y = current_pos[1] - last_pos[1];
 
                                         // Convert screen space delta to world space delta (Y inverted)
-                                        let world_scale = (state.surface_config.width as f32
-                                            / SIM_SIZE)
+                                        let world_scale = (state.surface_config.width as f32 / state.sim_size)
                                             * state.camera_zoom;
                                         state.camera_pan[0] -= delta_x / world_scale;
                                         state.camera_pan[1] += delta_y / world_scale; // Inverted Y
 
-                                        // Clamp camera position to -0.25 to 1.25 of SIM_SIZE
-                                        state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
-                                        state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * SIM_SIZE, 1.25 * SIM_SIZE);
+                                        // Clamp camera position to -0.25 to 1.25 of world size
+                                        let sim_size = state.sim_size;
+                                        state.camera_pan[0] = state.camera_pan[0].clamp(-0.25 * sim_size, 1.25 * sim_size);
+                                        state.camera_pan[1] = state.camera_pan[1].clamp(-0.25 * sim_size, 1.25 * sim_size);
 
                                         state.follow_selected_agent = false;
                                         window.request_redraw();
@@ -13079,7 +13198,7 @@ fn main() {
                                                                             genome_seed,
                                                                             flags: 1,
                                                                             _pad_seed: 0,
-                                                                            position: [rx * SIM_SIZE, ry * SIM_SIZE],
+                                                                            position: [rx * state.sim_size, ry * state.sim_size],
                                                                             energy: 10.0,
                                                                             rotation,
                                                                             genome_override_len,
@@ -13356,10 +13475,12 @@ fn main() {
                                                                 .text("Zoom")
                                                                 .logarithmic(true),
                                                         );
-                                            if ui.button("Reset Camera (R)").clicked() {
-                                                state.camera_zoom = 1.0;
-                                                state.camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
-                                            }                                                        ui.separator();
+                                                        if ui.button("Reset Camera (R)").clicked() {
+                                                            let sim_size = state.sim_size;
+                                                            state.camera_zoom = 1.0;
+                                                            state.camera_pan = [sim_size / 2.0, sim_size / 2.0];
+                                                        }
+                                                        ui.separator();
                                                         ui.heading("Settings");
                                                         ui.horizontal(|ui| {
                                                             if ui.button("Save Settings").clicked() {
@@ -13592,8 +13713,8 @@ fn main() {
                                                                                 flags: 1, // Bit 0 = use genome_override
                                                                                 _pad_seed: 0,
                                                                                 position: [
-                                                                                    rx * SIM_SIZE,
-                                                                                    ry * SIM_SIZE,
+                                                                                    rx * state.sim_size,
+                                                                                    ry * state.sim_size,
                                                                                 ],
                                                                                 energy: 10.0,
                                                                                 rotation,
@@ -15150,6 +15271,12 @@ fn main() {
                             }
 
                             if reset_requested {
+                                if self.reset_in_progress {
+                                    // Prevent re-entrant resets (can cause stack overflows on some event backends).
+                                    return;
+                                }
+                                self.reset_in_progress = true;
+
                                 // Check if there's a pending resolution change
                                 let new_resolution = if let Some(gpu_state) = &self.state {
                                     gpu_state.pending_resolution_change
@@ -15193,11 +15320,88 @@ fn main() {
                                     
                                     // Drop old state to force full recreation
                                     self.state = None;
+
+                                    // Recreate egui_winit state to clear all internal texture tracking
+                                    let egui_ctx = egui::Context::default();
+                                    self.egui_state = egui_winit::State::new(
+                                        egui_ctx,
+                                        egui::ViewportId::ROOT,
+                                        window,
+                                        None,
+                                        None,
+                                        None,
+                                    );
+
+                                    // Kick off GPU recreation in background, but create the Surface on the main thread.
+                                    // On Windows, creating a Surface from a Window handle can fail on background threads.
+                                    let env_res = new_res;
+                                    let fluid_res = new_res / 4;
+                                    let spatial_res = new_res / 4;
+
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    self.rx = rx;
+                                    self.loading_start = std::time::Instant::now();
+                                    self.last_message_update = std::time::Instant::now();
+                                    self.current_message_index = 0;
+
+                                    let window_clone = window.clone();
+
+                                    // Create instance + surface on main thread.
+                                    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                                        backends: if cfg!(target_os = "windows") {
+                                            wgpu::Backends::VULKAN
+                                        } else {
+                                            wgpu::Backends::PRIMARY
+                                        },
+                                        ..Default::default()
+                                    });
+                                    let surface = instance.create_surface(window_clone.clone()).unwrap();
+
+                                    std::thread::spawn(move || {
+                                        let adapter = pollster::block_on(instance.request_adapter(
+                                            &wgpu::RequestAdapterOptions {
+                                                power_preference: wgpu::PowerPreference::HighPerformance,
+                                                compatible_surface: Some(&surface),
+                                                force_fallback_adapter: false,
+                                            },
+                                        ))
+                                        .unwrap();
+
+                                        let required_features = select_required_features(adapter.features());
+                                        let (device, queue) = pollster::block_on(adapter.request_device(
+                                            &wgpu::DeviceDescriptor {
+                                                label: Some("GPU Device"),
+                                                required_features,
+                                                required_limits: wgpu::Limits {
+                                                    max_storage_buffers_per_shader_stage: 16,
+                                                    ..wgpu::Limits::default()
+                                                },
+                                                memory_hints: Default::default(),
+                                            },
+                                            None,
+                                        ))
+                                        .unwrap();
+
+                                        let state = pollster::block_on(GpuState::new_with_resources(
+                                            window_clone,
+                                            instance,
+                                            surface,
+                                            adapter,
+                                            device,
+                                            queue,
+                                            env_res,
+                                            fluid_res,
+                                            spatial_res,
+                                        ));
+                                        let _ = tx.send(state);
+                                    });
                                 }
-                                
-                                // Use standard reset path - will recreate from settings file
-                                reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
-                                window.request_redraw();
+
+                                // Standard reset path (fast reset) when not recreating GPU
+                                if self.state.is_some() {
+                                    reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
+                                }
+                                self.reset_in_progress = false;
                             }
 
                             if let Some(gpu_state) = &mut self.state {
@@ -15366,7 +15570,8 @@ fn main() {
                                             );
                                             if ui.button("Reset Camera (R)").clicked() {
                                                 state.camera_zoom = 1.0;
-                                                state.camera_pan = [SIM_SIZE / 2.0, SIM_SIZE / 2.0];
+                                                let sim_size = state.sim_size;
+                                                state.camera_pan = [sim_size / 2.0, sim_size / 2.0];
                                             }
 
                                             ui.separator();
@@ -15387,8 +15592,8 @@ fn main() {
                                             }
                                             ui.label("Saves environment + up to 5000 agents (random sample)");
 
-                                            ui.label(format!("World: {}x{}", SIM_SIZE as u32, SIM_SIZE as u32));
-                                            ui.label("Grid: 2048x2048");
+                                            ui.label(format!("World: {}x{}", state.sim_size as u32, state.sim_size as u32));
+                                            ui.label(format!("Grid: {}x{}", state.env_grid_resolution, state.env_grid_resolution));
                                             ui.label(
                                                 "Morphology responds to\nalpha field in environment",
                                             );
@@ -15637,8 +15842,12 @@ fn main() {
                             }
 
                             if reset_requested {
+                                if self.reset_in_progress {
+                                    return;
+                                }
+                                self.reset_in_progress = true;
                                 reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
-                                window.request_redraw();
+                                self.reset_in_progress = false;
                             }
                         }
                         _ => {}
@@ -15672,6 +15881,7 @@ fn main() {
         current_message_index: 0,
         loading_messages: LOADING_MESSAGES,
         skip_auto_load: false,
+        reset_in_progress: false,
     };
 
     let _ = event_loop.run_app(&mut app);
