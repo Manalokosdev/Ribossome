@@ -48,6 +48,16 @@ fn sim_size_for_env_res(env_grid_res: u32) -> f32 {
     SIM_SIZE_AT_DEFAULT_ENV_RES * (env_grid_res as f32 / DEFAULT_ENV_GRID_RESOLUTION as f32)
 }
 
+// Agent buffer capacity calibrated for DEFAULT_ENV_GRID_RESOLUTION.
+// Scale proportionally with resolution to save memory and improve performance at lower resolutions.
+const MAX_AGENTS_AT_DEFAULT_ENV_RES: usize = 60_000;
+
+fn max_agents_for_env_res(env_grid_res: u32) -> usize {
+    let raw = (MAX_AGENTS_AT_DEFAULT_ENV_RES as f32 * (env_grid_res as f32 / DEFAULT_ENV_GRID_RESOLUTION as f32)) as usize;
+    // Round up to nearest multiple of 64 for dispatch alignment
+    (raw + 63) & !63
+}
+
 // DEPRECATED: These constants are kept for backward compatibility during transition.
 // New code should load settings first and use those values.
 // These will be removed once full settings-driven initialization is complete.
@@ -4712,8 +4722,9 @@ impl GpuState {
         // floor(128 MiB / 2192) = 61_230 agents. Keep some headroom.
         // IMPORTANT: keep max_agents a multiple of 64 so compute dispatch can use `max_agents/64`
         // without ceil-dispatch and still cover the full buffer.
-        let max_agents_raw = 60_000usize;
-        let max_agents = (max_agents_raw + 63) & !63usize;
+        // Scale agent capacity proportionally with env resolution for better performance:
+        // 2048→60,032 agents, 1024→30,016 agents, 512→15,008 agents
+        let max_agents = max_agents_for_env_res(env_grid_res);
         let initial_agents = 0usize; // Start with 0, user spawns agents manually
         let agent_buffer_size = (max_agents * std::mem::size_of::<Agent>()) as u64;
 
