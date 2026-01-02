@@ -4562,6 +4562,66 @@ impl GpuState {
         .await
     }
 
+    async fn new_from_settings(
+        window: Arc<Window>,
+        env_grid_res: u32,
+        fluid_grid_res: u32,
+        spatial_grid_res: u32,
+    ) -> Self {
+        let _size = window.inner_size();
+
+        // Create instance and adapter
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: if cfg!(target_os = "windows") {
+                wgpu::Backends::VULKAN // Use Vulkan on Windows to support atomicCompareExchangeWeak
+            } else {
+                wgpu::Backends::PRIMARY
+            },
+            ..Default::default()
+        });
+
+        let surface = instance.create_surface(window.clone()).unwrap();
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .unwrap();
+
+        let required_features = select_required_features(adapter.features());
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("GPU Device"),
+                    required_features,
+                    required_limits: wgpu::Limits {
+                        max_storage_buffers_per_shader_stage: 16,
+                        ..wgpu::Limits::default()
+                    },
+                    memory_hints: Default::default(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        Self::new_with_resources(
+            window,
+            instance,
+            surface,
+            adapter,
+            device,
+            queue,
+            env_grid_res,
+            fluid_grid_res,
+            spatial_grid_res,
+        )
+        .await
+    }
+
     async fn new_with_resources(
         window: Arc<Window>,
         _instance: wgpu::Instance,
@@ -11981,8 +12041,25 @@ fn reset_simulation_state(
         // Fast reset: just clear buffers and reset state, keep GPU device
         gpu_state.fast_reset();
     } else {
-        // First time initialization - create new state
-        let mut new_state = pollster::block_on(GpuState::new(window.clone()));
+        // First time initialization - create new state with settings from file
+        // Load resolution settings from simulation_settings.json
+        let settings_path = std::path::Path::new(SETTINGS_FILE_NAME);
+        let (env_res, fluid_res, spatial_res) = if let Ok(settings) = SimulationSettings::load_from_disk(settings_path) {
+            (
+                settings.env_grid_resolution,
+                settings.fluid_grid_resolution,
+                settings.spatial_grid_resolution,
+            )
+        } else {
+            // Fallback to defaults if settings file doesn't exist
+            (
+                DEFAULT_ENV_GRID_RESOLUTION,
+                DEFAULT_FLUID_GRID_RESOLUTION,
+                DEFAULT_SPATIAL_GRID_RESOLUTION,
+            )
+        };
+        
+        let mut new_state = pollster::block_on(GpuState::new_from_settings(window.clone(), env_res, fluid_res, spatial_res));
         new_state.selected_agent_index = None;
         *state = Some(new_state);
     }
