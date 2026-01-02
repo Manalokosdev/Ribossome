@@ -12531,6 +12531,7 @@ fn main() {
         last_message_update: std::time::Instant,
         current_message_index: usize,
         loading_messages: &'static [&'static str],
+        skip_auto_load: bool, // Set to true when resolution changes to prevent loading old-resolution snapshot
     }
 
     impl winit::application::ApplicationHandler for App {
@@ -12575,9 +12576,10 @@ fn main() {
         if self.state.is_none() {
             if let Ok(mut loaded_state) = self.rx.try_recv() {
                 // Try to auto-load previous session from autosave snapshot
+                // Skip auto-load if we're resetting due to resolution change (prevents loading old-resolution data)
                 // Don't call reset_simulation_state() - state is already fresh from creation
                 let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
-                if autosave_path.exists() {
+                if autosave_path.exists() && !self.skip_auto_load {
                     match loaded_state.load_snapshot_from_file(autosave_path) {
                         Ok(_) => {
                             println!("? Auto-loaded previous session from epoch {}", loaded_state.epoch);
@@ -12586,6 +12588,9 @@ fn main() {
                             eprintln!("? Failed to auto-load snapshot: {:?}", e);
                         }
                     }
+                } else if self.skip_auto_load {
+                    println!("? Skipping auto-load due to resolution change");
+                    self.skip_auto_load = false; // Reset flag
                 }
 
                 self.state = Some(loaded_state);
@@ -15087,6 +15092,9 @@ fn main() {
                                         }
                                     }
                                     
+                                    // Skip auto-load to prevent loading old-resolution snapshot
+                                    self.skip_auto_load = true;
+                                    
                                     // Drop old state to force full recreation
                                     self.state = None;
                                 }
@@ -15567,6 +15575,7 @@ fn main() {
         last_message_update,
         current_message_index: 0,
         loading_messages: LOADING_MESSAGES,
+        skip_auto_load: false,
     };
 
     let _ = event_loop.run_app(&mut app);
