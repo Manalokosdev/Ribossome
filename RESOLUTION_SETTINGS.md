@@ -49,20 +49,23 @@ If you manually set values that violate this ratio (ratio < 2:1 or > 16:1), the 
 
 ## Applying Changes
 
-**IMPORTANT**: Resolution changes require a **full restart** of the application to take effect, as they require:
-1. Recompiling GPU shaders with new constants
-2. Reallocating all GPU buffers
-3. Reinitializing the simulation state
+**Resolution changes now take effect on restart.** The process has been implemented:
 
 ### How to Change Resolution:
 
-1. Close the simulator completely
-2. Edit `simulation_settings.json` manually
+1. Close the simulator (if running)
+2. Edit `simulation_settings.json`
 3. Set your desired `env_grid_resolution` (e.g., 1024, 2048, 4096)
 4. Set `fluid_grid_resolution` to `env_grid_resolution / 4`
 5. Set `spatial_grid_resolution` to the same value as `fluid_grid_resolution`
 6. Save the file
-7. Restart the simulator
+7. **Restart the simulator** - the new resolution will be loaded automatically
+
+The application now:
+- ✅ Loads settings before GPU initialization
+- ✅ Injects resolution values into shaders at compile time
+- ✅ Properly validates and enforces ratio constraints
+- ✅ Uses settings values for all grid allocations
 
 ## Performance Considerations
 
@@ -82,40 +85,38 @@ Higher resolutions provide more detailed simulations but require more VRAM and p
 
 ## Current Implementation Status
 
-✅ **Implemented:**
-- Settings fields added to `SimulationSettings` struct
-- Validation and ratio enforcement in `sanitize()`
-- Backward compatibility with old settings files (uses defaults if missing)
+✅ **Fully Implemented:**
+- Settings fields with validation and ratio enforcement
+- Settings loaded before GPU initialization
+- Resolution values injected into shaders at startup
+- All buffers allocated with correct sizes
+- Backward compatibility with old settings files
+- Changes take effect on application restart
 - Documentation
-
-⚠️ **Requires Restart:**
-- Resolution changes currently require manual restart
-- Changes take effect when shaders are compiled at startup
-- GPU buffers are allocated at initialization
-
-🔄 **Future Enhancement:**
-- Runtime resolution switching with live shader recompilation
-- UI controls with restart prompt
-- Real-time buffer reallocation
 
 ## Technical Details
 
-The resolution values are injected into WGSL shaders at compile time:
+The resolution values are loaded from settings and injected into WGSL shaders at compile time during app startup:
 
 ```rust
-// In main.rs during shader compilation:
+// In main.rs during initialization:
+let loaded_settings = SimulationSettings::load_from_disk(&settings_path)?;
+let env_grid_res = loaded_settings.env_grid_resolution;
+let fluid_grid_res = loaded_settings.fluid_grid_resolution;
+let spatial_grid_res = loaded_settings.spatial_grid_resolution;
+
+// Passed to GpuState creation
+let state = GpuState::new_with_resources(
+    window, instance, surface, adapter, device, queue,
+    env_grid_res, fluid_grid_res, spatial_grid_res
+).await;
+
+// During shader compilation:
 let shader_source = format!(
-    "const SIM_SIZE: u32 = {}u;\n
-     const ENV_GRID_SIZE: u32 = {}u;\n
-     const GRID_SIZE: u32 = {}u;\n
-     const SPATIAL_GRID_SIZE: u32 = {}u;\n
-     const FLUID_GRID_SIZE: u32 = {}u;\n{}",
-    SIM_SIZE,
-    env_grid_resolution,
-    env_grid_resolution,
-    spatial_grid_resolution,
-    fluid_grid_resolution,
-    shader_code
+    "const ENV_GRID_SIZE: u32 = {}u;\n
+     const FLUID_GRID_SIZE: u32 = {}u;\n
+     const SPATIAL_GRID_SIZE: u32 = {}u;\n{}",
+    env_grid_res, fluid_grid_res, spatial_grid_res, shader_code
 );
 ```
 

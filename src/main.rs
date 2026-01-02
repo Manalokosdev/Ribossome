@@ -669,7 +669,7 @@ const MAX_SPAWN_REQUESTS: usize = 2048;
 // Keep this <= MAX_SPAWN_REQUESTS.
 const MAX_CPU_SPAWNS_PER_BATCH: u32 = 2000;
 
-const SNAPSHOT_VERSION: &str = "1.1";
+const SNAPSHOT_VERSION: &str = "1.2";
 
 // Snapshot files embed agent data as JSON inside a PNG.
 // To keep file sizes and save times reasonable, we store a random sample when populations are huge.
@@ -3556,6 +3556,13 @@ struct SimulationSnapshot {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     rain_map_blob: Option<String>,
+    // Resolution information for compatibility checking
+    #[serde(default)]
+    env_grid_resolution: u32,
+    #[serde(default)]
+    fluid_grid_resolution: u32,
+    #[serde(default)]
+    spatial_grid_resolution: u32,
 }
 
 impl SimulationSnapshot {
@@ -3565,6 +3572,9 @@ impl SimulationSnapshot {
         settings: SimulationSettings,
         run_name: String,
         rain_map_blob: Option<String>,
+        env_grid_res: u32,
+        fluid_grid_res: u32,
+        spatial_grid_res: u32,
     ) -> Self {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -3601,6 +3611,9 @@ impl SimulationSnapshot {
             settings: Some(settings),
             agents: agent_snapshots,
             rain_map_blob,
+            env_grid_resolution: env_grid_res,
+            fluid_grid_resolution: fluid_grid_res,
+            spatial_grid_resolution: spatial_grid_res,
         }
     }
 }
@@ -3776,6 +3789,14 @@ struct GpuState {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
+
+    // Resolution settings (immutable after creation, used for buffer allocation and shader constants)
+    env_grid_resolution: u32,
+    fluid_grid_resolution: u32,
+    spatial_grid_resolution: u32,
+    env_grid_cell_count: usize,
+    fluid_grid_cell_count: usize,
+    spatial_grid_cell_count: usize,
 
     // Buffers
     agents_buffer_a: wgpu::Buffer,
@@ -4054,6 +4075,8 @@ struct GpuState {
     // Snapshot save state
     snapshot_save_requested: bool,
     snapshot_load_requested: bool,
+    // Resolution change state
+    pending_resolution_change: Option<u32>, // If Some(res), reset with new resolution
     // Visual buffer stride (pixels per row)
     visual_stride_pixels: u32,
 
@@ -4525,7 +4548,18 @@ impl GpuState {
             .await
             .unwrap();
 
-        Self::new_with_resources(window, instance, surface, adapter, device, queue).await
+        Self::new_with_resources(
+            window,
+            instance,
+            surface,
+            adapter,
+            device,
+            queue,
+            DEFAULT_ENV_GRID_RESOLUTION,
+            DEFAULT_FLUID_GRID_RESOLUTION,
+            DEFAULT_SPATIAL_GRID_RESOLUTION,
+        )
+        .await
     }
 
     async fn new_with_resources(
@@ -4535,10 +4569,18 @@ impl GpuState {
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
+        env_grid_res: u32,
+        fluid_grid_res: u32,
+        spatial_grid_res: u32,
     ) -> Self {
         let size = window.inner_size();
         let mut profiler = StartupProfiler::new();
         profiler.mark("GpuState::new_with_resources begin");
+
+        // Calculate derived values from resolutions
+        let env_grid_cell_count = (env_grid_res * env_grid_res) as usize;
+        let fluid_grid_cell_count = (fluid_grid_res * fluid_grid_res) as usize;
+        let spatial_grid_cell_count = (spatial_grid_res * spatial_grid_res) as usize;
 
         debug_assert_eq!(std::mem::size_of::<BodyPart>(), 32);
         debug_assert_eq!(std::mem::align_of::<BodyPart>(), 16);
@@ -4637,7 +4679,7 @@ impl GpuState {
         });
         profiler.mark("Agent buffers");
 
-        let grid_size = GRID_CELL_COUNT;
+        let grid_size = env_grid_cell_count;
 
         // Proper Perlin noise implementation (kept for potential later use)
         #[allow(dead_code)]
@@ -4741,8 +4783,8 @@ impl GpuState {
         let rain_map_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Rain Map Texture"),
             size: wgpu::Extent3d {
-                width: GRID_DIM_U32,
-                height: GRID_DIM_U32,
+                width: env_grid_res,
+                height: env_grid_res,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -4756,7 +4798,7 @@ impl GpuState {
 
         // Initialize chem_grid with zeros for alpha/beta and uniform 1.0 for rain maps
         // vec4: [alpha=0.0, beta=0.0, alpha_rain_map=1.0, beta_rain_map=1.0]
-        let initial_chem_data: Vec<f32> = (0..GRID_CELL_COUNT)
+        let initial_chem_data: Vec<f32> = (0..grid_size)
             .flat_map(|_| [0.0f32, 0.0f32, 1.0f32, 1.0f32])
             .collect();
         queue.write_buffer(
@@ -4766,7 +4808,7 @@ impl GpuState {
         );
 
         // Initialize rain_map_buffer with uniform rain (1.0 for both alpha and beta) - kept for compatibility
-        let uniform_rain: Vec<f32> = (0..GRID_CELL_COUNT).flat_map(|_| [1.0f32, 1.0f32]).collect();
+        let uniform_rain: Vec<f32> = (0..grid_size).flat_map(|_| [1.0f32, 1.0f32]).collect();
         queue.write_buffer(
             &rain_map_buffer,
             0,
@@ -4774,7 +4816,7 @@ impl GpuState {
         );
 
         // Seed the texture with uniform rain too (RGBA32F: r=alpha, g=beta) - kept for compatibility.
-        let uniform_rain_rgba: Vec<f32> = (0..GRID_CELL_COUNT)
+        let uniform_rain_rgba: Vec<f32> = (0..grid_size)
             .flat_map(|_| [1.0f32, 1.0f32, 0.0f32, 0.0f32])
             .collect();
         queue.write_texture(
@@ -4800,7 +4842,7 @@ impl GpuState {
 
         // Agent spatial grid for neighbor detection.
         // Layout: 2x u32 per cell: [id, epoch_stamp].
-        let agent_spatial_grid_size = (SPATIAL_GRID_CELL_COUNT * 2 * std::mem::size_of::<u32>()) as u64;
+        let agent_spatial_grid_size = (spatial_grid_cell_count * 2 * std::mem::size_of::<u32>()) as u64;
         let agent_spatial_grid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Agent Spatial Grid"),
             size: agent_spatial_grid_size,
@@ -5244,14 +5286,14 @@ impl GpuState {
         profiler.mark("Sampler");
 
         // Load main shader (concatenate shared + render + simulation modules, composite is separate)
-        // Inject compile-time constants here so resolution changes are centralized in Rust.
+        // Inject compile-time constants from runtime resolution settings.
         let shader_source = format!(
             "const SIM_SIZE: u32 = {}u;\nconst ENV_GRID_SIZE: u32 = {}u;\nconst GRID_SIZE: u32 = {}u;\nconst SPATIAL_GRID_SIZE: u32 = {}u;\nconst FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}\n{}\n{}\n{}\n{}",
             SIM_SIZE as u32,
-            GRID_DIM_U32,
-            GRID_DIM_U32,
-            SPATIAL_GRID_DIM as u32,
-            FLUID_GRID_SIZE,
+            env_grid_res,
+            env_grid_res,
+            spatial_grid_res,
+            fluid_grid_res,
             include_str!("../shaders/shared.wgsl"),
             include_str!("../shaders/render.wgsl"),
             include_str!("../shaders/simulation.wgsl"),
@@ -5270,7 +5312,7 @@ impl GpuState {
         // otherwise compaction will misread `alive` and effectively "drop" prior batches.
         let compact_merge_shader_source = format!(
             "const FLUID_GRID_SIZE: u32 = {}u;\n{}\n{}",
-            FLUID_GRID_SIZE,
+            fluid_grid_res,
             include_str!("../shaders/shared_types_only.wgsl"),
             include_str!("../shaders/compact_merge_minimal.wgsl")
         );
@@ -5283,8 +5325,8 @@ impl GpuState {
         // Load composite shader (standalone, minimal dependencies)
         let composite_shader_source = format!(
             "const FLUID_GRID_SIZE: u32 = {}u;\nconst GAMMA_GRID_DIM: u32 = {}u;\n{}",
-            FLUID_GRID_SIZE,
-            GRID_DIM_U32,
+            fluid_grid_res,
+            env_grid_res,
             include_str!("../shaders/composite.wgsl")
         );
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -7203,6 +7245,15 @@ impl GpuState {
             queue,
             surface,
             surface_config,
+            
+            // Resolution settings
+            env_grid_resolution: env_grid_res,
+            fluid_grid_resolution: fluid_grid_res,
+            spatial_grid_resolution: spatial_grid_res,
+            env_grid_cell_count,
+            fluid_grid_cell_count,
+            spatial_grid_cell_count,
+            
             agents_buffer_a,
             agents_buffer_b,
             chem_grid,
@@ -7377,6 +7428,7 @@ impl GpuState {
             is_paused: false,
             snapshot_save_requested: false,
             snapshot_load_requested: false,
+            pending_resolution_change: None,
             visual_stride_pixels,
             alpha_blur: settings.alpha_blur,
             beta_blur: settings.beta_blur,
@@ -11154,7 +11206,16 @@ impl GpuState {
 
         // Create snapshot from living agents with current settings
         let current_settings = self.current_settings();
-        let snapshot = SimulationSnapshot::new(self.epoch, &living_agents, current_settings, self.run_name.clone(), None);
+        let snapshot = SimulationSnapshot::new(
+            self.epoch,
+            &living_agents,
+            current_settings,
+            self.run_name.clone(),
+            None,
+            self.env_grid_resolution,
+            self.fluid_grid_resolution,
+            self.spatial_grid_resolution,
+        );
 
         // Save to PNG
         save_simulation_snapshot(path, &alpha_grid, &beta_grid, &gamma_grid, &snapshot)?;
@@ -11231,10 +11292,10 @@ impl GpuState {
         // - Empty version strings are treated as legacy "1.0".
         // - Current builds write SNAPSHOT_VERSION.
         match snapshot.version.as_str() {
-            "" | "1.0" | "1.1" => {}
+            "" | "1.0" | "1.1" | "1.2" => {}
             other => {
                 anyhow::bail!(
-                    "Unsupported snapshot version '{other}'. This build supports snapshot versions 1.0 and 1.1."
+                    "Unsupported snapshot version '{other}'. This build supports snapshot versions 1.0, 1.1, and 1.2."
                 );
             }
         }
@@ -11244,6 +11305,29 @@ impl GpuState {
             self.apply_settings(settings);
         } else {
             println!("G�� Loaded snapshot without settings (old format) - using current settings");
+        }
+
+        // Check resolution compatibility and warn if different
+        if snapshot.env_grid_resolution != 0 {
+            // Snapshot has resolution info (version 1.1+)
+            if snapshot.env_grid_resolution != self.env_grid_resolution
+                || snapshot.fluid_grid_resolution != self.fluid_grid_resolution
+                || snapshot.spatial_grid_resolution != self.spatial_grid_resolution
+            {
+                println!("\n⚠️  WARNING: Resolution mismatch detected!");
+                println!("   Snapshot resolution: env={}, fluid={}, spatial={}",
+                    snapshot.env_grid_resolution,
+                    snapshot.fluid_grid_resolution,
+                    snapshot.spatial_grid_resolution
+                );
+                println!("   Current resolution:  env={}, fluid={}, spatial={}",
+                    self.env_grid_resolution,
+                    self.fluid_grid_resolution,
+                    self.spatial_grid_resolution
+                );
+                println!("   Agent positions use absolute coordinates (SIM_SIZE={}) and do not scale.", SIM_SIZE);
+                println!("   Chemical grids will be resampled. Some visual differences may occur.\n");
+            }
         }
 
         // Restore run name if present; otherwise generate one for this session.
@@ -12374,6 +12458,26 @@ fn main() {
     // Render splash screen
     render_splash_screen(&window, &instance, &surface, &adapter, &device, &queue);
 
+    // Load settings BEFORE creating GPU state so we can use resolution values
+    let settings_path = SimulationSettings::default_path();
+    let loaded_settings = match SimulationSettings::load_from_disk(&settings_path) {
+        Ok(mut s) => {
+            s.sanitize();
+            s
+        }
+        Err(err) => {
+            eprintln!("Warning: failed to load settings from {:?}: {err:?}", &settings_path);
+            let mut s = SimulationSettings::default();
+            s.sanitize();
+            s
+        }
+    };
+
+    // Extract validated resolutions
+    let env_grid_res = loaded_settings.env_grid_resolution;
+    let fluid_grid_res = loaded_settings.fluid_grid_resolution;
+    let spatial_grid_res = loaded_settings.spatial_grid_resolution;
+
     // Load GPU state in background using channel
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -12386,6 +12490,9 @@ fn main() {
             adapter,
             device,
             queue,
+            env_grid_res,
+            fluid_grid_res,
+            spatial_grid_res,
         ));
         tx.send(state).unwrap();
     });
@@ -12975,13 +13082,38 @@ fn main() {
                                                 }
 
                                                 ui.separator();
-                                                if ui.button("=��+ Save Snapshot").clicked() {
+                                                if ui.button("📷 Save Snapshot").clicked() {
                                                     state.snapshot_save_requested = true;
                                                 }
-                                                if ui.button("=��� Load Snapshot").clicked() {
+                                                if ui.button("📂 Load Snapshot").clicked() {
                                                     state.snapshot_load_requested = true;
                                                 }
                                             });
+
+                                            ui.separator();
+                                            ui.heading("Resolution");
+                                            ui.horizontal(|ui| {
+                                                ui.label(format!("Current: {}×{}", state.env_grid_resolution, state.env_grid_resolution));
+                                                ui.separator();
+                                                if ui.button("2048×2048").clicked() {
+                                                    state.pending_resolution_change = Some(2048);
+                                                }
+                                                if ui.button("1024×1024").clicked() {
+                                                    state.pending_resolution_change = Some(1024);
+                                                }
+                                                if ui.button("512×512").clicked() {
+                                                    state.pending_resolution_change = Some(512);
+                                                }
+                                            });
+                                            if state.pending_resolution_change.is_some() {
+                                                ui.colored_label(
+                                                    egui::Color32::from_rgb(255, 200, 100),
+                                                    format!("⚡ Will reset to {}×{} resolution", 
+                                                        state.pending_resolution_change.unwrap(),
+                                                        state.pending_resolution_change.unwrap()
+                                                    )
+                                                );
+                                            }
 
                                             ui.separator();
                                             ui.heading("Simulation Speed");
@@ -14927,7 +15059,48 @@ fn main() {
                             }
 
                             if reset_requested {
-                                reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
+                                // Check if there's a pending resolution change
+                                let new_resolution = if let Some(gpu_state) = &self.state {
+                                    gpu_state.pending_resolution_change
+                                } else {
+                                    None
+                                };
+
+                                if let Some(new_res) = new_resolution {
+                                    // Resolution change requested - update settings and force full recreation
+                                    println!("🔄 Resetting simulation with new resolution: {}×{}", new_res, new_res);
+                                    
+                                    // Update simulation_settings.json
+                                    let settings_path = std::path::Path::new(SETTINGS_FILE_NAME);
+                                    if let Ok(mut settings) = SimulationSettings::load_from_disk(settings_path) {
+                                        settings.env_grid_resolution = new_res;
+                                        settings.fluid_grid_resolution = new_res / 4;
+                                        settings.spatial_grid_resolution = new_res / 4;
+                                        
+                                        if let Ok(json) = serde_json::to_string_pretty(&settings) {
+                                            if let Err(e) = fs::write(settings_path, json) {
+                                                eprintln!("Failed to save updated settings: {:?}", e);
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Force full recreation by dropping old state
+                                    self.state = None;
+                                    
+                                    // Recreate with new resolution
+                                    let mut new_state = pollster::block_on(GpuState::new(window.clone()));
+                                    new_state.selected_agent_index = None;
+                                    self.state = Some(new_state);
+                                    
+                                    // Recreate egui state
+                                    let egui_ctx = egui::Context::default();
+                                    self.egui_state = egui_winit::State::new(egui_ctx, egui::ViewportId::ROOT, &window, None, None, None);
+                                    
+                                    println!("✅ Resolution changed successfully to {}×{}", new_res, new_res);
+                                } else {
+                                    // Normal fast reset
+                                    reset_simulation_state(&mut self.state, &window, &mut self.egui_state);
+                                }
                                 window.request_redraw();
                             }
 

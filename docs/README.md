@@ -13,7 +13,8 @@ Watch predators emerge, ecosystems balance, and bizarre life forms evolve in rea
 - Evolving predators with vampire mouths and trail-following
 - Dynamic environment with food/poison rain, terrain, prop wash, and chemical slopes
 - Rich visualization options (lighting, trails, interpolation modes)
-- Snapshot save/load (PNG with embedded metadata)
+- **Runtime resolution switching** (2048/1024/512) via UI - no restart needed
+- Snapshot save/load (PNG with embedded metadata) with cross-resolution compatibility
 - Auto-difficulty, rain cycling, and extensive tuning UI
 
 ## Screenshots / Video
