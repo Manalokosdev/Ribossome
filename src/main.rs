@@ -35,14 +35,21 @@ fn pack_f32_uniform(values: &[f32]) -> Vec<u8> {
 
 // World size (must match shader SIM_SIZE).
 const SIM_SIZE: f32 = 61440.0;
-// Fluid simulation resolution (N x N). Keep this in sync with GPU buffer allocations and shader constants.
-const FLUID_GRID_SIZE: u32 = 512;
-// Environment grid resolution (alpha/beta/gamma). Keep this in sync with shaders/shared.wgsl ENV_GRID_SIZE.
-const GRID_DIM: usize = 2048;
+
+// Default resolution values - can be overridden via simulation_settings.json
+// Changes require restart to take effect as they affect shader compilation and buffer allocation
+const DEFAULT_ENV_GRID_RESOLUTION: u32 = 2048;
+const DEFAULT_FLUID_GRID_RESOLUTION: u32 = 512;
+const DEFAULT_SPATIAL_GRID_RESOLUTION: u32 = 512;
+
+// DEPRECATED: These constants are kept for backward compatibility during transition.
+// New code should load settings first and use those values.
+// These will be removed once full settings-driven initialization is complete.
+const FLUID_GRID_SIZE: u32 = DEFAULT_FLUID_GRID_RESOLUTION;
+const GRID_DIM: usize = DEFAULT_ENV_GRID_RESOLUTION as usize;
 const GRID_CELL_COUNT: usize = GRID_DIM * GRID_DIM;
 const GRID_DIM_U32: u32 = GRID_DIM as u32;
-// Spatial hash grid resolution. Keep this in sync with shaders/shared.wgsl SPATIAL_GRID_SIZE.
-const SPATIAL_GRID_DIM: usize = 512;
+const SPATIAL_GRID_DIM: usize = DEFAULT_SPATIAL_GRID_RESOLUTION as usize;
 const SPATIAL_GRID_CELL_COUNT: usize = SPATIAL_GRID_DIM * SPATIAL_GRID_DIM;
 const DIFFUSE_WG_SIZE_X: u32 = 16;
 const DIFFUSE_WG_SIZE_Y: u32 = 16;
@@ -3001,6 +3008,9 @@ fn default_fluid_ooze_rate_beta_unset() -> f32 { -1.0 }
 fn default_fluid_ooze_fade_rate_beta_unset() -> f32 { -1.0 }
 fn default_fluid_ooze_rate_gamma_unset() -> f32 { -1.0 }
 fn default_fluid_ooze_fade_rate_gamma_unset() -> f32 { -1.0 }
+fn default_env_grid_resolution() -> u32 { DEFAULT_ENV_GRID_RESOLUTION }
+fn default_fluid_grid_resolution() -> u32 { DEFAULT_FLUID_GRID_RESOLUTION }
+fn default_spatial_grid_resolution() -> u32 { DEFAULT_SPATIAL_GRID_RESOLUTION }
 fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
 fn default_prop_wash_strength_fluid_unset() -> f32 { -1.0 }
@@ -3235,6 +3245,14 @@ struct SimulationSettings {
     gamma_noise_scale: f32,
     noise_power: f32,
     agent_trail_decay: f32,  // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
+    
+    // Resolution settings (requires restart to take effect)
+    #[serde(default = "default_env_grid_resolution")]
+    env_grid_resolution: u32,  // Environment grid (alpha/beta/gamma) resolution
+    #[serde(default = "default_fluid_grid_resolution")]
+    fluid_grid_resolution: u32,  // Fluid simulation grid resolution
+    #[serde(default = "default_spatial_grid_resolution")]
+    spatial_grid_resolution: u32,  // Spatial hash grid resolution
 }
 
 impl Default for SimulationSettings {
@@ -3370,6 +3388,11 @@ impl Default for SimulationSettings {
             agent_trail_decay: 1.0,  // Default to instant clear (original behavior)
 
             fumaroles: Vec::new(),
+            
+            // Resolution settings
+            env_grid_resolution: DEFAULT_ENV_GRID_RESOLUTION,
+            fluid_grid_resolution: DEFAULT_FLUID_GRID_RESOLUTION,
+            spatial_grid_resolution: DEFAULT_SPATIAL_GRID_RESOLUTION,
         }
     }
 }
@@ -3679,6 +3702,19 @@ impl SimulationSettings {
         self.fluid_jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
         self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 50.0);
         self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 5.0);
+        
+        // Validate and enforce resolution constraints
+        self.env_grid_resolution = self.env_grid_resolution.clamp(256, 8192);
+        self.fluid_grid_resolution = self.fluid_grid_resolution.clamp(64, 2048);
+        self.spatial_grid_resolution = self.spatial_grid_resolution.clamp(64, 2048);
+        
+        // Enforce ratio: fluid and spatial should be env_res / 4 (or maintain user's ratio if reasonable)
+        let ratio = self.env_grid_resolution / self.fluid_grid_resolution.max(1);
+        if ratio < 2 || ratio > 16 {
+            // Force 4:1 ratio if current ratio is unreasonable
+            self.fluid_grid_resolution = self.env_grid_resolution / 4;
+            self.spatial_grid_resolution = self.env_grid_resolution / 4;
+        }
 
         // Back-compat: older settings files won't have beta thresholds.
         // Use -1 sentinel defaults to mean "inherit alpha".
@@ -8336,6 +8372,11 @@ impl GpuState {
             agent_trail_decay: self.agent_trail_decay,
 
             fumaroles: self.fumaroles.clone(),
+            
+            // Resolution settings are read-only at runtime (require restart to change)
+            env_grid_resolution: GRID_DIM_U32,
+            fluid_grid_resolution: FLUID_GRID_SIZE,
+            spatial_grid_resolution: SPATIAL_GRID_DIM as u32,
         }
     }
 
