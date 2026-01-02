@@ -179,10 +179,13 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // Sample beta concentration at parent's location to calculate radiation-induced mutation rate
                 let parent_idx = grid_index(agent_pos);
-                let beta_concentration = chem_grid[parent_idx].y;
+                let beta_concentration = sanitize_f32(chem_grid[parent_idx].y);
                 let beta_normalized = clamp(beta_concentration, 0.0, 1.0);
-                let mutation_multiplier = 1.0 + pow(beta_normalized, 3.0) * 4.0;
-                var effective_mutation_rate = params.mutation_rate * mutation_multiplier;
+                let mutation_multiplier = sanitize_f32(1.0 + pow(beta_normalized, 3.0) * 4.0);
+
+                // Keep mutation math NaN-safe. In particular, avoid 0 * INF => NaN.
+                let base_mut_rate = sanitize_f32(params.mutation_rate);
+                var effective_mutation_rate = select(base_mut_rate * mutation_multiplier, 0.0, base_mut_rate == 0.0);
 
                 // Mutation Protection organ (type 43): each organ reduces mutation rate by 30%.
                 // Implemented as a multiplicative stack: rate *= 0.7^count.
@@ -199,7 +202,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         effective_mutation_rate *= pow(0.7, f32(mp_count));
                     }
                 }
-                effective_mutation_rate = min(effective_mutation_rate, 1.0);
+                effective_mutation_rate = clamp(sanitize_f32(effective_mutation_rate), 0.0, 1.0);
 
                 // Determine active gene region (non-'X' bytes) in offspring after reverse complement
                 var first_non_x: u32 = GENOME_LENGTH;

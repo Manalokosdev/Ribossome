@@ -2203,6 +2203,7 @@ fn part_base_name(base_type: u32) -> &'static str {
         40 => "Beta Magnitude Sensor",
         41 => "Beta Magnitude Sensor (var)",
         42 => "Anchor",
+        43 => "Mutation Protection",
         _ => "Organ",
     }
 }
@@ -3261,7 +3262,7 @@ struct SimulationSettings {
     gamma_noise_scale: f32,
     noise_power: f32,
     agent_trail_decay: f32,  // Agent trail decay rate (0.0 = persistent, 1.0 = instant clear)
-    
+
     // Resolution settings (requires restart to take effect)
     #[serde(default = "default_env_grid_resolution")]
     env_grid_resolution: u32,  // Environment grid (alpha/beta/gamma) resolution
@@ -3404,7 +3405,7 @@ impl Default for SimulationSettings {
             agent_trail_decay: 1.0,  // Default to instant clear (original behavior)
 
             fumaroles: Vec::new(),
-            
+
             // Resolution settings
             env_grid_resolution: DEFAULT_ENV_GRID_RESOLUTION,
             fluid_grid_resolution: DEFAULT_FLUID_GRID_RESOLUTION,
@@ -3731,12 +3732,12 @@ impl SimulationSettings {
         self.fluid_jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
         self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 50.0);
         self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 5.0);
-        
+
         // Validate and enforce resolution constraints
         self.env_grid_resolution = self.env_grid_resolution.clamp(256, 8192);
         self.fluid_grid_resolution = self.fluid_grid_resolution.clamp(64, 2048);
         self.spatial_grid_resolution = self.spatial_grid_resolution.clamp(64, 2048);
-        
+
         // Enforce ratio: fluid and spatial should be env_res / 4 (or maintain user's ratio if reasonable)
         let ratio = self.env_grid_resolution / self.fluid_grid_resolution.max(1);
         if ratio < 2 || ratio > 16 {
@@ -7328,7 +7329,7 @@ impl GpuState {
             queue,
             surface,
             surface_config,
-            
+
             // Resolution settings
             env_grid_resolution: env_grid_res,
             fluid_grid_resolution: fluid_grid_res,
@@ -7338,7 +7339,7 @@ impl GpuState {
             spatial_grid_cell_count,
 
             sim_size,
-            
+
             agents_buffer_a,
             agents_buffer_b,
             chem_grid,
@@ -8510,7 +8511,7 @@ impl GpuState {
             agent_trail_decay: self.agent_trail_decay,
 
             fumaroles: self.fumaroles.clone(),
-            
+
             // Resolution settings are read-only at runtime (require restart to change)
             env_grid_resolution: GRID_DIM_U32,
             fluid_grid_resolution: FLUID_GRID_SIZE,
@@ -8907,7 +8908,7 @@ impl GpuState {
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
                 // Scan ENTIRE buffer to ensure no alive agents are missed
-                cpass.dispatch_workgroups(self.agent_buffer_capacity as u32 / 64, 1, 1);
+                cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 63) / 64, 1, 1);
 
                 cpass.set_pipeline(&self.cpu_spawn_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
@@ -10240,7 +10241,7 @@ impl GpuState {
                     cpass.set_pipeline(&self.compact_pipeline);
                     cpass.set_bind_group(0, bg_swap, &[]);
 
-                    cpass.dispatch_workgroups(self.agent_buffer_capacity as u32 / 64, 1, 1);
+                    cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 63) / 64, 1, 1);
 
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_COMPACT);
@@ -12114,7 +12115,7 @@ fn reset_simulation_state(
                 DEFAULT_SPATIAL_GRID_RESOLUTION,
             )
         };
-        
+
         let mut new_state = pollster::block_on(GpuState::new_from_settings(window.clone(), env_res, fluid_res, spatial_res));
         new_state.selected_agent_index = None;
         *state = Some(new_state);
@@ -13391,7 +13392,7 @@ fn main() {
                                             if state.pending_resolution_change.is_some() {
                                                 ui.colored_label(
                                                     egui::Color32::from_rgb(255, 200, 100),
-                                                    format!("⚡ Will reset to {}×{} resolution", 
+                                                    format!("⚡ Will reset to {}×{} resolution",
                                                         state.pending_resolution_change.unwrap(),
                                                         state.pending_resolution_change.unwrap()
                                                     )
@@ -15370,14 +15371,14 @@ fn main() {
                                         fluid_res,
                                         spatial_res
                                     );
-                                    
+
                                     // Update simulation_settings.json
                                     let settings_path = std::path::Path::new(SETTINGS_FILE_NAME);
                                     if let Ok(mut settings) = SimulationSettings::load_from_disk(settings_path) {
                                         settings.env_grid_resolution = env_res;
                                         settings.fluid_grid_resolution = fluid_res;
                                         settings.spatial_grid_resolution = spatial_res;
-                                        
+
                                         if let Ok(json) = serde_json::to_string_pretty(&settings) {
                                             if let Err(e) = fs::write(settings_path, json) {
                                                 eprintln!("Failed to save updated settings: {:?}", e);
@@ -15387,7 +15388,7 @@ fn main() {
                                             }
                                         }
                                     }
-                                    
+
                                     let preserve_autosave = self.preserve_autosave_on_next_reset;
                                     self.preserve_autosave_on_next_reset = false;
 
@@ -15406,7 +15407,7 @@ fn main() {
                                         // Skip auto-load as additional safety (though file should be deleted)
                                         self.skip_auto_load = true;
                                     }
-                                    
+
                                     // Drop old state to force full recreation
                                     self.state = None;
 
