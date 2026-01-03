@@ -190,8 +190,8 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cell_size = f32(SIM_SIZE) / f32(SPATIAL_GRID_SIZE);
     let grid_radius = clamp(i32(ceil(max_drain_distance / cell_size)), 1, 10);
 
-    // Process each vampire mouth organ (F=4u, G=5u, H=6u)
-    var total_energy_gained = 0.0;
+    // Process each vampire mouth organ
+    // No longer tracks total_energy_gained (vampires now kill, not drain)
 
     for (var mi = 0u; mi < vampire_mouth_count; mi++) {
         let i = vampire_mouth_indices[mi];
@@ -395,46 +395,122 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Only proceed if we can drain this victim AND cooldown is ready
                     if (can_drain && current_cooldown <= 0.0) {
-                        // Vampire drain scales down with disabler suppression AND mouth movement speed
                         let victim_energy = agents_out[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
-                            // Linear speed-based absorption reduction using RELATIVE victim speed.
-                            // IMPORTANT: don't use mouth-tip delta here; rotation can make the tip move far
-                            // faster than VEL_MAX even when the agent is behaving normally, which would
-                            // zero-out vampire drains permanently.
-                            let agent_vel = agent.velocity;
-                            let victim_vel = agents_out[closest_victim_id].velocity;
-                            let rel_speed = length(agent_vel - victim_vel);
-                            let normalized_rel_speed = min(rel_speed / VEL_MAX, 1.0);
-                            let speed_multiplier = clamp(1.0 - normalized_rel_speed, 0.0, 1.0);
+                            // NEW VAMPIRE BEHAVIOR: Kill victim and decompose energy onto chem grids
+                            // around victim's mouth positions, as alpha or beta based on mouth type
+                            
+                            // Kill the victim
+                            agents_out[closest_victim_id].alive = 0u;
+                            
+                            // Get victim's body configuration
+                            let victim_rotation = agents_out[closest_victim_id].rotation;
+                            let victim_position = agents_out[closest_victim_id].position;
+                            let victim_body_count = min(agents_out[closest_victim_id].body_count, MAX_BODY_PARTS);
+                            
+                            // Get the vampire mouth's organ_param to determine deposition type
+                            let vampire_organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+                            let vampire_modifier = vampire_organ_param & 127u;  // Lower 7 bits = modifier (0-19)
+                            
+                            // Determine deposition type: F,G,H (4,5,6) deposit alpha; others deposit beta
+                            let deposit_alpha = (vampire_modifier >= 4u && vampire_modifier <= 6u);
+                            
+                            // Deposition amount per grid cell (spread victim's energy)
+                            let energy_per_cell = victim_energy * 0.01;  // Distribute gradually
+                            
+                            // Find all mouth organs in victim (types 20, 22, 34)
+                            var mouth_found = false;
+                            for (var vi = 0u; vi < victim_body_count; vi++) {
+                                let victim_part = agents_out[closest_victim_id].body[vi];
+                                let victim_part_base_type = get_base_part_type(victim_part.part_type);
+                                
+                                // Check if this is a mouth organ
+                                let is_victim_mouth = (victim_part_base_type == 20u || 
+                                                       victim_part_base_type == 22u || 
+                                                       victim_part_base_type == 34u);
+                                
+                                if (is_victim_mouth) {
+                                    mouth_found = true;
+                                    
+                                    // Get mouth world position
+                                    let victim_mouth_local = victim_part.pos;
+                                    let victim_mouth_rotated = apply_agent_rotation(victim_mouth_local, victim_rotation);
+                                    let victim_mouth_world = victim_position + victim_mouth_rotated;
+                                    
+                                    // Deposit energy in a radius around this mouth
+                                    // Use chem grid scale (not spatial grid scale!)
+                                    let chem_scale = f32(GRID_SIZE) / f32(SIM_SIZE);
+                                    let deposit_radius = 3.0;  // Grid cells
+                                    let mouth_grid_x = i32(clamp(victim_mouth_world.x * chem_scale, 0.0, f32(GRID_SIZE - 1u)));
+                                    let mouth_grid_y = i32(clamp(victim_mouth_world.y * chem_scale, 0.0, f32(GRID_SIZE - 1u)));
+                                    
+                                    // Spread deposition in a circle
+                                    for (var dy = -i32(deposit_radius); dy <= i32(deposit_radius); dy++) {
+                                        for (var dx = -i32(deposit_radius); dx <= i32(deposit_radius); dx++) {
+                                            let dist_sq = f32(dx * dx + dy * dy);
+                                            if (dist_sq <= deposit_radius * deposit_radius) {
+                                                let target_x = mouth_grid_x + dx;
+                                                let target_y = mouth_grid_y + dy;
+                                                
+                                                if (target_x >= 0 && target_x < i32(GRID_SIZE) && 
+                                                    target_y >= 0 && target_y < i32(GRID_SIZE)) {
+                                                    let target_idx = u32(target_y) * GRID_SIZE + u32(target_x);
+                                                    
+                                                    // Falloff: center gets more, edges get less
+                                                    let falloff = 1.0 - (sqrt(dist_sq) / deposit_radius);
+                                                    let deposit_amount = energy_per_cell * falloff;
+                                                    
+                                                    // Deposit to appropriate channel
+                                                    if (deposit_alpha) {
+                                                        let prev = chem_grid[target_idx];
+                                                        write_chem_alpha(target_idx, min(prev.x + deposit_amount, 1.0));
+                                                    } else {
+                                                        let prev = chem_grid[target_idx];
+                                                        write_chem_beta(target_idx, min(prev.y + deposit_amount, 1.0));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // If victim has no mouths, deposit at victim's center position
+                            if (!mouth_found) {
+                                let chem_scale = f32(GRID_SIZE) / f32(SIM_SIZE);
+                                let center_grid_x = i32(clamp(victim_position.x * chem_scale, 0.0, f32(GRID_SIZE - 1u)));
+                                let center_grid_y = i32(clamp(victim_position.y * chem_scale, 0.0, f32(GRID_SIZE - 1u)));
+                                let deposit_radius = 3.0;
+                                
+                                for (var dy = -i32(deposit_radius); dy <= i32(deposit_radius); dy++) {
+                                    for (var dx = -i32(deposit_radius); dx <= i32(deposit_radius); dx++) {
+                                        let dist_sq = f32(dx * dx + dy * dy);
+                                        if (dist_sq <= deposit_radius * deposit_radius) {
+                                            let target_x = center_grid_x + dx;
+                                            let target_y = center_grid_y + dy;
+                                            
+                                            if (target_x >= 0 && target_x < i32(GRID_SIZE) && 
+                                                target_y >= 0 && target_y < i32(GRID_SIZE)) {
+                                                let target_idx = u32(target_y) * GRID_SIZE + u32(target_x);
+                                                let falloff = 1.0 - (sqrt(dist_sq) / deposit_radius);
+                                                let deposit_amount = energy_per_cell * falloff;
+                                                
+                                                if (deposit_alpha) {
+                                                    let prev = chem_grid[target_idx];
+                                                    write_chem_alpha(target_idx, min(prev.x + deposit_amount, 1.0));
+                                                } else {
+                                                    let prev = chem_grid[target_idx];
+                                                    write_chem_beta(target_idx, min(prev.y + deposit_amount, 1.0));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
-                            // Vampire drain inversely proportional to victim body part count:
-                            // body_count=3 → 100%, body_count=10 → 50%
-                            // Formula: 7.0 / (body_count + 4.0)
-                            let victim_body_count = f32(agents_out[closest_victim_id].body_count);
-                            let size_vulnerability = 7.0 / (victim_body_count + 4.0);
-
-                            // Absorb up to 50% of victim's energy (reduced by size, mouth speed, and disabler).
-                            // Poison Resistance (type 29) also protects against vampire drain, using
-                            // 10% protection per organ (0.9 multiplier).
-                            let vampire_protection = pow(0.9, f32(agents_out[closest_victim_id].poison_resistant_count));
-                            var absorbed_energy = victim_energy * 0.5 * mouth_activity * speed_multiplier * vampire_protection * size_vulnerability;
-
-                            // Cap drain by vampire's available storage capacity
-                            let vampire_capacity = agents_out[agent_id].energy_capacity;
-                            let vampire_current_energy = agents_out[agent_id].energy;
-                            let available_storage = max(0.0, vampire_capacity - vampire_current_energy);
-                            absorbed_energy = min(absorbed_energy, available_storage);
-
-                            // Victim loses 2x the absorbed energy.
-                            let energy_damage = absorbed_energy * 2.0;
-                            agents_out[closest_victim_id].energy = max(0.0, victim_energy - energy_damage);
-
-                            total_energy_gained += absorbed_energy;
-
-                            // Store absorbed amount in _pad.y for visualization
-                            agents_out[agent_id].body[i]._pad.y = absorbed_energy;
+                            // Store kill event for visualization
+                            agents_out[agent_id].body[i]._pad.y = victim_energy;
 
                             // Set cooldown timer
                             agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
@@ -455,10 +531,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
             agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
     }
 
-    // Add gained energy to this agent
-    if (total_energy_gained > 0.0) {
-        agents_out[agent_id].energy += total_energy_gained;
-    }
+    // Note: Vampires no longer gain energy directly; they trigger decomposition
 }
 
 // ============================================================================

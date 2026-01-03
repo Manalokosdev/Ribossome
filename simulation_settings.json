@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.73611605,
+  "camera_zoom": 0.71449286,
   "spawn_probability": 0.5,
   "death_probability": 0.001,
   "mutation_rate": 0.003,
@@ -31,7 +31,7 @@
   "prop_wash_strength": 1.0,
   "prop_wash_strength_fluid": 0.0,
   "propellers_enabled": true,
-  "microswim_enabled": true,
+  "microswim_enabled": false,
   "microswim_coupling": 1.2,
   "microswim_base_drag": 0.1,
   "microswim_anisotropy": 50.0,
@@ -42,7 +42,7 @@
   "microswim_min_length_ratio": 0.75,
   "microswim_max_length_ratio": 1.4,
   "repulsion_strength": 3.0,
-  "agent_repulsion_strength": 0.0,
+  "agent_repulsion_strength": 0.1,
   "limit_fps": false,
   "limit_fps_25": false,
   "render_interval": 100,
@@ -223,7 +223,7 @@
     0.49803922,
     0.49803922
   ],
-  "agent_color_blend": 0.0,
+  "agent_color_blend": 1.0,
   "alpha_noise_scale": 10.0,
   "beta_noise_scale": 1.0,
   "gamma_noise_scale": 10.0,
