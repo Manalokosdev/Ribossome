@@ -2137,6 +2137,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // poison_resistant_count stored in agent struct during morphology
     // Each poison-resistant organ reduces poison/radiation damage by 50%
     let poison_multiplier = pow(0.5, f32(agents_out[agent_id].poison_resistant_count));
+    // Each poison-resistant organ also reduces food power by 25% (0.75^count)
+    let food_power_multiplier = pow(0.75, f32(agents_out[agent_id].poison_resistant_count));
 
     // Initialize accumulators
     let trail_deposit_strength = 0.08; // Strength of trail deposition (0-1)
@@ -2432,7 +2434,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         agent_energy_cur -= consumed_alpha * params.poison_power * poison_multiplier;
                     } else {
                         // Normal mouth: alpha is energy
-                        agent_energy_cur += consumed_alpha * params.food_power;
+                        agent_energy_cur += consumed_alpha * params.food_power * food_power_multiplier;
                     }
                     total_consumed_alpha += consumed_alpha;
                 }
@@ -2455,7 +2457,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     if (is_beta_mouth) {
                         // Beta mouth: beta is energy
-                        agent_energy_cur += consumed_beta * params.food_power;
+                        agent_energy_cur += consumed_beta * params.food_power * food_power_multiplier;
                     } else {
                         // Normal mouth: beta is poison
                         agent_energy_cur -= consumed_beta * params.poison_power * poison_multiplier;
