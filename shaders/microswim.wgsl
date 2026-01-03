@@ -1,6 +1,8 @@
-// Dedicated microswimming compute pass.
-// Stable forward thrust (parallel-only) + realistic torque from asymmetric/sideways deformation.
-// Anisotropy now meaningfully controls turning strength from loops or one-sided waving.
+// microswim_agents.wgsl
+// Microswimming pass: deformation-based thrust + morphology asymmetry-based torque
+// Thrust: Parallel drag from segment motion (stable forward propulsion)
+// Torque: Drag imbalance from body asymmetry relative to current velocity direction
+// Fixes excessive spinning; natural alignment and turning from loops/asymmetry
 
 @compute @workgroup_size(256)
 fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -49,12 +51,24 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dt_safe = max(params.dt, 1e-3);
 
     var thrust_world = vec2<f32>(0.0);
-    var torque_world = 0.0;           // Positive = counterclockwise
     var total_weight = 0.0;
     var total_deformation_sq = 0.0;
 
+    // Asymmetry torque variables
+    var torque_asymmetry = 0.0;
+    var inertia_estimate = 0.0;
+
     let c_par  = ms_f32(MSP_BASE_DRAG);
-    let c_perp = ms_f32(MSP_BASE_DRAG) * ms_f32(MSP_ANISOTROPY);  // Now affects torque strongly
+    let c_perp = c_par * ms_f32(MSP_ANISOTROPY);  // Recommended: 4.0–6.0
+
+    // Current velocity defines "forward" direction for asymmetry calculation
+    var current_vel = agents_out[agent_id].velocity;
+    let speed = length(current_vel);
+    var forward_dir = vec2<f32>(cos(agent_rot), sin(agent_rot));  // Fallback if stationary
+    if (speed > 0.01) {
+        forward_dir = normalize(current_vel);
+    }
+    let lateral_dir = vec2<f32>(-forward_dir.y, forward_dir.x);
 
     for (var j = 1u; j < body_count_out; j++) {
         let seg_start_prev = agents_in[agent_id].body[j - 1u].pos;
@@ -87,8 +101,8 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         let seg_vec_new = seg_end_new - seg_start_new;
-        let seg_vec_len = length(seg_vec_new);
-        if (seg_vec_len < 0.01) {
+        let seg_len = length(seg_vec_new);
+        if (seg_len < 0.01) {
             continue;
         }
 
@@ -96,53 +110,53 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let seg_vec_prev = seg_end_prev - seg_start_prev;
         let prev_len = length(seg_vec_prev);
         if (prev_len > 0.01) {
-            let len_ratio = seg_vec_len / prev_len;
+            let len_ratio = seg_len / prev_len;
             if (len_ratio < ms_f32(MSP_MIN_LENGTH_RATIO) || len_ratio > ms_f32(MSP_MAX_LENGTH_RATIO)) {
                 continue;
             }
         }
 
-        let seg_len_world = seg_vec_len;
-        let tangent_local = seg_vec_new / seg_vec_len;
+        let tangent_local = seg_vec_new / seg_len;
         let tangent_world = normalize(apply_agent_rotation(tangent_local, agent_rot));
 
         let v_parallel = dot(v_seg_world, tangent_world) * tangent_world;
-        let v_perp     = v_seg_world - v_parallel;
 
-        // === Linear thrust: parallel-only for rock-solid straight swimming ===
-        // Perpendicular components cancel across symmetric/asymmetric noise
-        let thrust_parallel = (-c_par * v_parallel) * seg_len_world;  // reaction force
+        // === Thrust: parallel-only for stable forward swimming ===
+        let thrust_parallel = (-c_par * v_parallel) * seg_len;
         thrust_world += thrust_parallel;
+        total_weight += seg_len;
 
-        // === Torque: use FULL anisotropic drag for realistic turning from side loops ===
-        // Sideways motion (v_perp) generates strong offset force → natural yaw
-        let drag_per_len_full = -c_par * v_parallel - c_perp * v_perp;
-        let segment_force_full = drag_per_len_full * seg_len_world;  // reaction on swimmer
-
-        // Lever arm: midpoint of segment relative to agent center (local origin)
+        // === Asymmetry torque from current morphology ===
         let seg_mid_local = (seg_start_new + seg_end_new) * 0.5;
-        let lever_arm_world = apply_agent_rotation(seg_mid_local, agent_rot);
+        let seg_mid_world = apply_agent_rotation(seg_mid_local, agent_rot);
 
-        // 2D cross product: τ = r_x * F_y - r_y * F_x
-        torque_world += lever_arm_world.x * segment_force_full.y - lever_arm_world.y * segment_force_full.x;
+        let lateral_offset = dot(seg_mid_world, lateral_dir);  // Signed offset from centerline
+        let perp_drag = c_perp * speed * seg_len;             // Drag proportional to speed
 
-        total_weight += seg_len_world;
+        torque_asymmetry += lateral_offset * perp_drag;       // Torque = offset × force
+        inertia_estimate += lateral_offset * lateral_offset * seg_len;
     }
 
     if (total_deformation_sq < ms_f32(MSP_MIN_TOTAL_DEFORMATION_SQ) || total_weight <= 1e-6) {
         return;
     }
 
-    // Average by total length (scale-invariant)
+    // Average thrust
     thrust_world /= total_weight;
-    torque_world /= total_weight;
 
-    // === Apply linear thrust ===
+    // Apply bounded thrust
     var final_thrust_vel = thrust_world * morph_swim_strength;
-    let max_frame_vel = ms_f32(MSP_MAX_FRAME_VEL);
+
+    // IMPORTANT: microswim injects velocity directly, bypassing the main physics force/drag path.
+    // Without a mass normalization, heavier morphologies can gain a disproportionate advantage.
+    // Match the intuition of dv = F / m by scaling down for total_mass > 1.
+    let total_mass = max(agents_out[agent_id].total_mass, 0.05);
+    let mass_scale = 1.0 / max(total_mass, 1.0);
+    final_thrust_vel *= mass_scale;
+
     let tl = length(final_thrust_vel);
-    if (tl > max_frame_vel) {
-        final_thrust_vel *= max_frame_vel / max(tl, 1e-6);
+    if (tl > ms_f32(MSP_MAX_FRAME_VEL)) {
+        final_thrust_vel *= ms_f32(MSP_MAX_FRAME_VEL) / max(tl, 1e-6);
     }
 
     var agent_vel = agents_out[agent_id].velocity + final_thrust_vel;
@@ -152,23 +166,17 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     agents_out[agent_id].velocity = agent_vel;
 
-    // === Apply torque-based rotation ===
-    // Only turn when actually swimming forward — prevents spinning in place
-    let swim_speed = length(final_thrust_vel);
-    let speed_scale = clamp(swim_speed / max(max_frame_vel, 1e-6), 0.0, 1.0);
+    // === Apply morphology asymmetry torque ===
+    if (inertia_estimate > 1e-6 && speed > 0.1) {
+        let normalized_torque = torque_asymmetry / inertia_estimate;
+        let torque_scale = ms_f32(MSP_TORQUE_STRENGTH) * morph_swim_strength * dt_safe;
 
-    var delta_rot = torque_world
-                  * ms_f32(MSP_TORQUE_STRENGTH)
-                  * morph_swim_strength
-                  * dt_safe
-                  * speed_scale;
+        var delta_rot = normalized_torque * torque_scale * min(speed / 3.0, 1.0);
+        delta_rot = clamp(delta_rot, -ANGVEL_MAX, ANGVEL_MAX);
 
-    // Respect global angular velocity limits
-    delta_rot = clamp(delta_rot, -ANGVEL_MAX, ANGVEL_MAX);
+        agents_out[agent_id].rotation += delta_rot;
+    }
 
-    agents_out[agent_id].rotation += delta_rot;
-
-    // Optional debug visualization
-    // NOTE: torque_debug is repurposed as a packed RGB cache in simulation.wgsl.
-    // Do not write torque into it from microswim.
+    // Optional: clear torque_debug if used elsewhere
+    // agents_out[agent_id].torque_debug = 0.0;
 }

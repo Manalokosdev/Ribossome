@@ -391,7 +391,8 @@ var<uniform> params: SimParams;
 //  7 min_total_deformation_sq
 //  8 min_length_ratio
 //  9 max_length_ratio
-//  10..15 reserved
+//  10 propellers_enabled (0/1)  [independent from microswim]
+//  11..15 reserved
 const MSP_ENABLED: u32 = 0u;
 const MSP_COUPLING: u32 = 1u;
 const MSP_BASE_DRAG: u32 = 2u;
@@ -402,6 +403,7 @@ const MSP_MIN_SEG_DISPLACEMENT: u32 = 6u;
 const MSP_MIN_TOTAL_DEFORMATION_SQ: u32 = 7u;
 const MSP_MIN_LENGTH_RATIO: u32 = 8u;
 const MSP_MAX_LENGTH_RATIO: u32 = 9u;
+const MSP_PROPELLERS_ENABLED: u32 = 10u;
 const MSP_VEC4_COUNT: u32 = 4u;
 
 @group(0) @binding(19)
@@ -420,9 +422,9 @@ fn ms_enabled() -> bool {
     return ms_f32(MSP_ENABLED) > 0.5;
 }
 
-// Propellers are enabled when microswim is disabled (inverse relationship)
+// Propellers are controlled by an explicit runtime flag (independent from microswim).
 fn propellers_enabled() -> bool {
-    return !ms_enabled();
+    return ms_f32(MSP_PROPELLERS_ENABLED) > 0.5;
 }
 
 // Agent trail dye injection buffer (prepared each frame from trail_grid, then written by agents).
@@ -1613,7 +1615,7 @@ struct TranslationStep {
     is_valid: bool,
 }
 
-fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, offset: u32, len: u32, ignore_stop_codons: bool, microswim_mode: bool) -> TranslationStep {
+fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, offset: u32, len: u32, ignore_stop_codons: bool) -> TranslationStep {
     var result: TranslationStep;
     result.part_type = 0u; result.bases_consumed = 3u; result.is_stop = false; result.is_valid = false;
 
@@ -1712,12 +1714,6 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
             }
 
             if (organ_base_type >= 20u) {
-                // In microswim mode, suppress propellers (organ 21) - they become two separate amino acids
-                if (microswim_mode && organ_base_type == 21u) {
-                    // Don't create propeller organ - return just the promoter amino acid
-                    final_part_type = amino_type;
-                    bases_consumed = 3u;
-                } else {
                     var param_value = u32((f32(modifier) / 19.0) * 255.0);
                     if (organ_base_type == 31u || organ_base_type == 32u || organ_base_type == 36u || organ_base_type == 37u || organ_base_type == 42u) {
                         param_value = param_value & 127u;
@@ -1730,7 +1726,6 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
 
                     final_part_type = encode_part_type(organ_base_type, param_value);
                     bases_consumed = 6u;
-                }
             } else {
                 // No organ mapping: return the promoter amino acid (3 bases), so modifier is read separately next step
                 // This applies in ALL modes - free slots always produce two separate amino acids

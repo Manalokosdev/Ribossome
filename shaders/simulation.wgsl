@@ -609,7 +609,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         for (var i = 0u; i < MAX_BODY_PARTS; i++) {
             // Use centralized translation function
-            let step = translate_codon_step(agent_genome_packed, pos_b, agent_genome_offset, agent_gene_length, params.ignore_stop_codons == 1u, ms_enabled());
+            let step = translate_codon_step(agent_genome_packed, pos_b, agent_genome_offset, agent_gene_length, params.ignore_stop_codons == 1u);
 
             // Stop if we hit end of genome or stop codon
             if (!step.is_valid) {
