@@ -9609,7 +9609,16 @@ impl GpuState {
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_CLEAR_VISUAL);
 
-                // Motion blur moved to Composite pass (runs after agent rendering)
+                    // Apply motion blur BEFORE agent rendering (blur only the background)
+                    if self.follow_selected_agent {
+                        cpass.set_pipeline(&self.motion_blur_pipeline);
+                        cpass.set_bind_group(0, bg_process, &[]);
+                        cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
+                    }
+
+                    self.frame_profiler
+                        .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_MOTION_BLUR);
+
                     // Clear agent grid for agent rendering
                     cpass.set_pipeline(&self.clear_agent_grid_pipeline);
                     cpass.set_bind_group(0, bg_process, &[]);
@@ -10429,14 +10438,6 @@ impl GpuState {
                 let height_workgroups =
                     (self.surface_config.height + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
                 cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-
-                // Apply motion blur only when following a selected agent
-                // This runs after agents are composited onto the visual grid
-                if self.follow_selected_agent {
-                    cpass.set_pipeline(&self.motion_blur_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(width_workgroups, height_workgroups, 1);
-                }
             }
         }
 

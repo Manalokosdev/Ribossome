@@ -3670,7 +3670,7 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ============================================================================
-// MOTION BLUR (Applied after background render, before agents)
+// MOTION BLUR (Applied BEFORE agents are rendered, blurs only background)
 // ============================================================================
 
 @compute @workgroup_size(16, 16)
