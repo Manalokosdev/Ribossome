@@ -177,11 +177,9 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
 
-                // Sample beta concentration at parent's location to calculate radiation-induced mutation rate
-                let parent_idx = grid_index(agent_pos);
-                let beta_concentration = sanitize_f32(chem_grid[parent_idx].y);
-                let beta_normalized = clamp(beta_concentration, 0.0, 1.0);
-                let mutation_multiplier = sanitize_f32(1.0 + pow(beta_normalized, 3.0) * 4.0);
+                // Beta-driven (radiation) mutation multiplier disabled: mutation rate depends only on
+                // the user slider (params.mutation_rate) and mutation-protection organs.
+                let mutation_multiplier = 1.0;
 
                 // Keep mutation math NaN-safe. In particular, avoid 0 * INF => NaN.
                 let base_mut_rate = sanitize_f32(params.mutation_rate);

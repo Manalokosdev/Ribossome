@@ -138,7 +138,7 @@ const MORPHOLOGY_SWIM_HEADING_ALIGN_FULL_SPEED: f32 = 0.25;
 // WARNING: For flagellar/undulatory swimmers (long sperm-like bodies), this feature can
 // introduce slow cumulative spin drift because tiny floating-point noise in the best-fit
 // rotation estimate accumulates over many frames. Keep it disabled by default.
-const MORPHOLOGY_ORIENT_FOLLOW_ENABLED: bool = false;
+const MORPHOLOGY_ORIENT_FOLLOW_ENABLED: bool = true;
 const MORPHOLOGY_ORIENT_FOLLOW_STRENGTH: f32 = 0.25;
 const MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL: f32 = 0.15;
 
@@ -167,19 +167,16 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Collect vampire mouth organ indices (type 33) and whether this agent has any disablers (type 26).
+    // Collect vampire mouth organ indices (type 33).
     // This lets us iterate only vampire mouths later, instead of scanning every body part.
     let body_count = min(agent.body_count, MAX_BODY_PARTS);
     var vampire_mouth_indices: array<u32, MAX_BODY_PARTS>;
     var vampire_mouth_count = 0u;
-    var has_disabler = false;
     for (var i = 0u; i < body_count; i++) {
         let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
         if (base_type == 33u) {
             vampire_mouth_indices[vampire_mouth_count] = i;
             vampire_mouth_count += 1u;
-        } else if (base_type == 26u) {
-            has_disabler = true;
         }
     }
     if (vampire_mouth_count == 0u) {
@@ -206,29 +203,15 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         let rotated_pos = apply_agent_rotation(mouth_local_pos, agent.rotation);
         let mouth_world_pos = agent.position + rotated_pos;
 
-            // Cooldown timer (stored in _pad.x) should tick regardless of enable state
+            // Cooldown timer (stored in _pad.x)
             var current_cooldown = agents_out[agent_id].body[i]._pad.x;
             if (current_cooldown > 0.0) {
                 current_cooldown -= 1.0;
                 agents_out[agent_id].body[i]._pad.x = current_cooldown;
             }
 
-            // Disabler gating:
-            // Vampire mouths act by default, but are suppressed when "inhibitor/enabler" organs
-            // (type 26) are placed nearby on the same agent body.
+            // No longer disable vampire mouths when enablers are present
             var block = 0.0;
-            if (has_disabler) {
-                for (var j = 0u; j < body_count; j++) {
-                    let check_type = get_base_part_type(agents_out[agent_id].body[j].part_type);
-                    if (check_type == 26u) {  // "Enabler" used as disabler for vampire mouths
-                        let disabler_pos = agents_out[agent_id].body[j].pos;
-                        let d = length(mouth_local_pos - disabler_pos);
-                        if (d < 20.0) {
-                            block += max(0.0, 1.0 - d / 20.0);
-                        }
-                    }
-                }
-            }
             block = min(block, 1.0);
             let quadratic_block = block * block;
             let mouth_activity = 1.0 - quadratic_block;
@@ -1742,10 +1725,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     var chirality_flip_physics = 1.0; // Track cumulative chirality for propeller direction
-    // Accumulate rotational inertia and detect vampire mouths in this same pass
+    // Accumulate rotational inertia and detect vampire/beta mouths in this same pass
     // to avoid extra full body scans.
     var moment_of_inertia = 0.0;
     var has_vampire_mouth = false;
+    var has_beta_mouth = false;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
 
@@ -1755,6 +1739,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         if (base_type == 33u) {
             has_vampire_mouth = true;
+        }
+        if (base_type == 44u) {
+            has_beta_mouth = true;
         }
 
         // Check if this part is Leucine (index 9) and flip chirality
@@ -2103,6 +2090,85 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         local_alpha += chem_grid[idx].x;
         local_beta += chem_grid[idx].y;
 
+        // Organ-part wash: during microswimming, body motion stirs/displaces the chemistry layers.
+        // This is a direct, fluidless transfer similar to prop wash, driven by per-part motion
+        // (rigid translation + rotation) so the whole organism can advect nearby chems.
+        if (MORPHOLOGY_SWIM_ENABLED) {
+            let wash_strength = max(params.prop_wash_strength, 0.0) * MORPHOLOGY_SWIM_COUPLING;
+            if (wash_strength > 0.0) {
+                // Per-tick world-space velocity of this part.
+                let v_part = agent_vel + angular_velocity * vec2<f32>(-rotated_pos.y, rotated_pos.x);
+                let spd = length(v_part);
+                let norm_spd = spd / max(VEL_MAX, 1e-6);
+
+                // Deadzone: avoid constant stirring when nearly stationary.
+                if (norm_spd > 0.02) {
+                    let dir = v_part / max(spd, 1e-6);
+                    let clamped_pos = clamp_position(world_pos);
+                    let grid_scale = f32(SIM_SIZE) / f32(GRID_SIZE);
+
+                    let gx = clamp(i32(clamped_pos.x / grid_scale), 0, i32(GRID_SIZE) - 1);
+                    let gy = clamp(i32(clamped_pos.y / grid_scale), 0, i32(GRID_SIZE) - 1);
+                    let center_idx = u32(gy) * GRID_SIZE + u32(gx);
+
+                    // Throw a small distance (in cells) proportional to motion.
+                    let spd_cells = spd / max(grid_scale, 1e-6);
+                    let distance = clamp(spd_cells * wash_strength * 0.75, 1.0, 6.0);
+                    let target_world = clamped_pos + dir * distance * grid_scale;
+                    let target_gx = clamp(i32(target_world.x / grid_scale), 0, i32(GRID_SIZE) - 1);
+                    let target_gy = clamp(i32(target_world.y / grid_scale), 0, i32(GRID_SIZE) - 1);
+                    let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
+
+                    if (target_idx != center_idx) {
+                        var center_gamma = read_gamma_height(center_idx);
+                        var target_gamma = read_gamma_height(target_idx);
+                        var center_alpha = chem_grid[center_idx].x;
+                        var center_beta = chem_grid[center_idx].y;
+                        var target_alpha = chem_grid[target_idx].x;
+                        var target_beta = chem_grid[target_idx].y;
+
+                        let part_mass = max(props.mass, 0.01);
+                        let part_weight = part_mass / max(total_mass, 1e-6);
+
+                        let transfer_amount = wash_strength * 0.02 * part_weight * clamp(norm_spd, 0.0, 1.0);
+                        if (transfer_amount > 0.0) {
+                            // Capacity adjusted for 0..1 range.
+                            let alpha_capacity = max(0.0, 1.0 - target_alpha);
+                            let beta_capacity = max(0.0, 1.0 - target_beta);
+                            // Gamma is positive-only and effectively unbounded, but we cap piling up per cell
+                            // similarly to prop wash to keep things stable.
+                            let gamma_capacity = max(0.0, 10.0 - target_gamma);
+
+                            let gamma_transfer = min(min(center_gamma, transfer_amount), gamma_capacity);
+                            let alpha_transfer = min(min(center_alpha, transfer_amount), alpha_capacity);
+                            let beta_transfer = min(min(center_beta, transfer_amount), beta_capacity);
+
+                            if (gamma_transfer > 0.0) {
+                                center_gamma = center_gamma - gamma_transfer;
+                                target_gamma = target_gamma + gamma_transfer;
+                                write_gamma_height(center_idx, center_gamma);
+                                write_gamma_height(target_idx, target_gamma);
+                            }
+
+                            if (alpha_transfer > 0.0) {
+                                center_alpha = clamp(center_alpha - alpha_transfer, 0.0, 1.0);
+                                target_alpha = clamp(target_alpha + alpha_transfer, 0.0, 1.0);
+                                write_chem_alpha(center_idx, center_alpha);
+                                write_chem_alpha(target_idx, target_alpha);
+                            }
+
+                            if (beta_transfer > 0.0) {
+                                center_beta = clamp(center_beta - beta_transfer, 0.0, 1.0);
+                                target_beta = clamp(target_beta + beta_transfer, 0.0, 1.0);
+                                write_chem_beta(center_idx, center_beta);
+                                write_chem_beta(target_idx, target_beta);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Anchor organ (type 42): signal-thresholded latch state.
         // - L-promoter anchors (LW/LY): use alpha signal (param bit 7 = 0)
         // - P-promoter anchors (PW/PY): use beta signal (param bit 7 = 1)
@@ -2188,7 +2254,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let base_maintenance = select(props.energy_consumption, props.energy_consumption * 3.0, base_type == 33u);
 
             // Deactivate normal mouths if any vampire mouth is present.
-            let normal_mouth_deactivated = has_vampire_mouth && (base_type != 33u);
+            // Normal mouths are no longer disabled by vampire mouths
+            let normal_mouth_deactivated = false;
             if (normal_mouth_deactivated) {
                 organ_extra = base_maintenance;
             } else {
@@ -2240,14 +2307,21 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Apply speed effects and amplification to the rates themselves
             // Vampire mouths absorb 50% of what a normal mouth would.
             let mouth_absorption_multiplier = select(1.0, 0.5, base_type == 33u);
-            let alpha_rate = max(props.energy_absorption_rate, 0.0)
-                * speed_absorption_multiplier
-                * amplification
-                * mouth_absorption_multiplier;
-            let beta_rate  = max(props.beta_absorption_rate, 0.0)
-                * speed_absorption_multiplier
-                * amplification
-                * mouth_absorption_multiplier;
+
+            // Beta mouths (types 44-45) flip the energy/poison roles:
+            // - beta becomes energy (uses energy_absorption_rate)
+            // - alpha becomes poison (uses beta_absorption_rate)
+            let is_beta_mouth = (base_type >= 44u && base_type <= 45u);
+            let alpha_rate = select(
+                max(props.energy_absorption_rate, 0.0),
+                max(props.beta_absorption_rate, 0.0),
+                is_beta_mouth
+            ) * speed_absorption_multiplier * amplification * mouth_absorption_multiplier;
+            let beta_rate = select(
+                max(props.beta_absorption_rate, 0.0),
+                max(props.energy_absorption_rate, 0.0),
+                is_beta_mouth
+            ) * speed_absorption_multiplier * amplification * mouth_absorption_multiplier;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
@@ -2264,7 +2338,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let consumed_alpha = min(available_alpha, max_total * alpha_weight);
                 let consumed_beta  = min(available_beta,  max_total * beta_weight);
 
-                // Apply alpha consumption - energy gain uses base food_power (speed already in consumption)
+                // Apply alpha consumption
+                // Normal mouths: alpha = energy gain
+                // Beta mouths: alpha = poison damage
                 if (consumed_alpha > 0.0) {
                     // Distribute absorption bilinearly into the 4 neighbor cells.
                     // NOTE: This is intentionally non-atomic and can be racy under contention.
@@ -2278,11 +2354,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (da01 > 0.0) { let prev = chem_grid[idx01]; write_chem_alpha(idx01, clamp(prev.x - da01, 0.0, prev.x)); }
                     if (da11 > 0.0) { let prev = chem_grid[idx11]; write_chem_alpha(idx11, clamp(prev.x - da11, 0.0, prev.x)); }
 
-                    agent_energy_cur += consumed_alpha * params.food_power;
+                    if (is_beta_mouth) {
+                        // Beta mouth: alpha is poison
+                        agent_energy_cur -= consumed_alpha * params.poison_power * poison_multiplier;
+                    } else {
+                        // Normal mouth: alpha is energy
+                        agent_energy_cur += consumed_alpha * params.food_power;
+                    }
                     total_consumed_alpha += consumed_alpha;
                 }
 
-                // Apply beta consumption - damage uses poison_power, reduced by poison protection
+                // Apply beta consumption
+                // Normal mouths: beta = poison damage
+                // Beta mouths: beta = energy gain
                 if (consumed_beta > 0.0) {
                     // Distribute absorption bilinearly into the 4 neighbor cells.
                     // NOTE: This is intentionally non-atomic and can be racy under contention.
@@ -2296,7 +2380,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (db01 > 0.0) { let prev = chem_grid[idx01]; write_chem_beta(idx01, clamp(prev.y - db01, 0.0, prev.y)); }
                     if (db11 > 0.0) { let prev = chem_grid[idx11]; write_chem_beta(idx11, clamp(prev.y - db11, 0.0, prev.y)); }
 
-                    agent_energy_cur -= consumed_beta * params.poison_power * poison_multiplier;
+                    if (is_beta_mouth) {
+                        // Beta mouth: beta is energy
+                        agent_energy_cur += consumed_beta * params.food_power;
+                    } else {
+                        // Normal mouth: beta is poison
+                        agent_energy_cur -= consumed_beta * params.poison_power * poison_multiplier;
+                    }
                     total_consumed_beta += consumed_beta;
                 }
             }
@@ -2348,17 +2438,41 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let energy_divisor = max(agent_energy_cur, 0.01);
     let energy_adjusted_death_prob = params.death_probability / energy_divisor;
 
-    // Population pressure: multiply death probability by 2^(floor(agent_count / 20000)).
-    // Examples: 0..19999 => 1x, 20000..39999 => 2x, 40000..59999 => 4x, 60000..79999 => 8x.
-    let pop_steps = params.agent_count / 20000u;
-    let pop_mult = exp2(f32(pop_steps));
+    // Population pressure modifier (disabled for debugging):
+    // When enabled, this multiplies death probability by 2^(floor(population_count / 20000)).
+    let pop_mult = 1.0;
     let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult, 0.0, 1.0);
 
     if (death_rnd < final_death_prob) {
-        // Deposit remains: stochastic decomposition into either alpha or beta
-        // Fixed total deposit = 1.0 (in 0..1 grid units), spread across parts
-        // Vampires decompose entirely into alpha (food)
+        // Deposit remains: decomposition ratio based on mouth types
+        // Rule (requested): each mouth type decomposes into the opposite chemical.
+        // - Normal mouths (type 20, alpha mouths) => deposit beta
+        // - Beta mouths (type 44)                => deposit alpha
+        // If both exist, deposit ratio follows counts.
         if (body_count > 0u) {
+            // Count mouth types to calculate decomposition ratio
+            var normal_mouth_count = 0u;
+            var vampire_mouth_count = 0u;
+            var beta_mouth_count = 0u;
+            for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+                let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+                if (base_type == 20u) {
+                    normal_mouth_count += 1u;
+                } else if (base_type == 33u) {
+                    vampire_mouth_count += 1u;
+                } else if (base_type == 44u) {
+                    beta_mouth_count += 1u;
+                }
+            }
+            // Calculate alpha/beta decomposition ratio.
+            // We only use normal vs beta mouths for this rule; vampire mouths do not participate.
+            let total_relevant_mouths = normal_mouth_count + beta_mouth_count;
+            var alpha_ratio = 0.5;
+            if (total_relevant_mouths > 0u) {
+                // Beta mouths => alpha deposits; normal mouths => beta deposits.
+                alpha_ratio = f32(beta_mouth_count) / f32(total_relevant_mouths);
+            }
+
             let total_deposit = 1.0;
             let deposit_per_part = total_deposit / f32(body_count);
             for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
@@ -2367,22 +2481,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let world_pos = agent_pos + rotated_pos;
                 let idx = grid_index(world_pos);
 
-                // Vampires decompose entirely into alpha (nutrient)
-                // Normal agents: stochastic choice 50% alpha (nutrient), 50% beta (toxin)
-                if (has_vampire_mouth) {
+                // Stochastic decomposition based on mouth ratio
+                let part_hash = hash(agent_id * 1000u + i * 100u + params.random_seed);
+                let part_rnd = f32(part_hash % 1000u) / 1000.0;
+
+                if (part_rnd < alpha_ratio) {
                     let prev = chem_grid[idx];
                     write_chem_alpha(idx, min(prev.x + deposit_per_part, 1.0));
                 } else {
-                    let part_hash = hash(agent_id * 1000u + i * 100u + params.random_seed);
-                    let part_rnd = f32(part_hash % 1000u) / 1000.0;
-
-                    if (part_rnd < 0.5) {
-                        let prev = chem_grid[idx];
-                        write_chem_alpha(idx, min(prev.x + deposit_per_part, 1.0));
-                    } else {
-                        let prev = chem_grid[idx];
-                        write_chem_beta(idx, min(prev.y + deposit_per_part, 1.0));
-                    }
+                    let prev = chem_grid[idx];
+                    write_chem_beta(idx, min(prev.y + deposit_per_part, 1.0));
                 }
             }
         }
@@ -2474,9 +2582,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let energy_scaled = sqrt(energy_for_pair);
             let alpha_gate = clamp(local_alpha_avg, 0.0, 1.0);
             let beta_gate = clamp(local_beta_avg, 0.0, 1.0);
-            // TEMPORARY: deactivate alpha/beta influence on pairing
-            // let pairing_drive = alpha_gate - beta_gate; // [-1, +1]
-            let pairing_drive = 1.0; // Always max pairing rate (no chemical influence)
+            // Pairing speed depends on local alpha+beta availability.
+            // If both are ~0, pairing is slowed to 1/5 speed (pairing_drive=0.2).
+            // As alpha+beta rises toward 1, pairing_drive rises toward 1.
+            let chem_gate = clamp(alpha_gate + beta_gate, 0.0, 1.0);
+            let pairing_drive = 0.2 + 0.8 * chem_gate;
 
             let base_p = params.spawn_probability * energy_scaled * 0.1;
             let pair_p = clamp(base_p * max(pairing_drive, 0.0), 0.0, 1.0);

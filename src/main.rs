@@ -92,13 +92,13 @@ const FUMAROLE_BUFFER_FLOATS: usize = 1 + MAX_FUMAROLES * FUMAROLE_STRIDE_F32;
 const FUMAROLE_BUFFER_BYTES: usize = FUMAROLE_BUFFER_FLOATS * 4;
 
 // Part base-angle override slots.
-// NOTE: Shader currently defines 43 part types, but we reserve 128 slots for future expansion.
-const PART_TYPE_COUNT: usize = 44;
+// NOTE: Shader currently defines 45 part types, but we reserve 128 slots for future expansion.
+const PART_TYPE_COUNT: usize = 45;
 const PART_OVERRIDE_SLOTS: usize = 128;
 const PART_OVERRIDE_VEC4S: usize = (PART_OVERRIDE_SLOTS + 3) / 4; // 32
 const PART_OVERRIDES_CSV_PATH: &str = "config/part_base_angle_overrides.csv";
 
-// Part (amino + organ) property table: 43 parts, each with 6x vec4<f32> entries.
+// Part (amino + organ) property table: 45 parts, each with 6x vec4<f32> entries.
 // This mirrors the AMINO_DATA layout in shaders/shared.wgsl.
 const PART_PROPS_VEC4S_PER_PART: usize = 6;
 // NOTE: GPU buffer reserves 256 vec4s for part property overrides (matches shaders/shared.wgsl).
@@ -108,7 +108,7 @@ const PART_PROPS_OVERRIDE_VEC4S_USED: usize = 256;
 // NOTE: Padded to keep bytemuck::Pod/Zeroable derives happy for this array length.
 // Only the first PART_PROPS_OVERRIDE_VEC4S_USED entries are used.
 const PART_PROPS_OVERRIDE_VEC4S: usize = 256;
-const PART_FLAGS_OVERRIDE_VEC4S: usize = (PART_TYPE_COUNT + 3) / 4; // 11
+const PART_FLAGS_OVERRIDE_VEC4S: usize = (PART_TYPE_COUNT + 3) / 4; // 12
 const PART_PROPERTIES_JSON_PATH: &str = "config/part_properties.json";
 
 const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
@@ -118,7 +118,7 @@ const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "ALPHA_EMITTER", "ENABLER", "BETA_EMITTER",
     "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "VAMPIRE_MOUTH", "AGENT_ALPHA_SENSOR",
     "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
-    "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2", "ANCHOR", "MUTATION_PROTECTION",
+    "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2", "ANCHOR", "MUTATION_PROTECTION", "BetaMouth",
 ];
 
 const APP_NAME: &str = "Ribossome";
@@ -2148,6 +2148,8 @@ fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
         40 => [0.9, 0.2, 0.3],
         41 => [1.0, 0.3, 0.4],
         42 => [0.6, 0.0, 0.8],
+        44 => [0.78, 0.55, 0.78], // BetaMouth (mauve)
+        45 => [0.78, 0.55, 0.78], // (legacy id; keep consistent)
         _ => DEFAULT_PART_COLOR,
     }
 }
@@ -2204,6 +2206,8 @@ fn part_base_name(base_type: u32) -> &'static str {
         41 => "Beta Magnitude Sensor (var)",
         42 => "Anchor",
         43 => "Mutation Protection",
+        44 => "BetaMouth",
+        45 => "BetaMouth",
         _ => "Organ",
     }
 }
@@ -2821,7 +2825,11 @@ struct SimParams {
     pairing_cost: f32,
     max_agents: u32,
     cpu_spawn_count: u32,
+    // NOTE: `agent_count` is used as the dispatch/scan bound in shaders.
+    // It is typically set to buffer capacity for correctness (no skipped newborns).
     agent_count: u32,
+    // Actual alive population estimate (may lag by a frame); used for population-pressure math.
+    population_count: u32,
     random_seed: u32,
     debug_mode: u32,           // 0 = off, 1 = per-segment debug overlay
     visual_stride: u32,        // pixels per row in visual_grid buffer (padded)
@@ -2957,7 +2965,7 @@ struct EnvironmentInitParams {
 // - base-angle overrides: 32x vec4 (512 bytes)
 // - part props overrides: 256x vec4 (4096 bytes; padded, only first 252 used)
 // - part flags overrides: 11x vec4 (176 bytes)
-const _: [(); 4912] = [(); std::mem::size_of::<EnvironmentInitParams>()];
+const _: [(); 4928] = [(); std::mem::size_of::<EnvironmentInitParams>()];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AutoDifficultyParam {
@@ -5083,6 +5091,7 @@ impl GpuState {
             max_agents: max_agents as u32,
             cpu_spawn_count: 0,
             agent_count: initial_agents as u32,
+            population_count: initial_agents as u32,
             random_seed: seed as u32,
             debug_mode: 0,
             visual_stride: visual_stride_pixels,
@@ -6700,7 +6709,7 @@ impl GpuState {
             0.0,                       // time
             0.016,                     // dt
             0.995,                     // decay
-            FLUID_GRID_SIZE as f32,    // grid_size (as f32)
+            fluid_grid_res as f32,     // grid_size (as f32)
             0.0, 0.0, 0.0, 0.0,        // mouse
             0.0, 0.0, 0.0, 0.0,        // splat
             100.0,                     // fluid_slope_force_scale
@@ -6737,8 +6746,8 @@ impl GpuState {
             .expect("Failed to load shaders/fluid.wgsl");
         let fluid_shader_source = format!(
             "const FLUID_GRID_SIZE: u32 = {}u;\nconst GAMMA_GRID_DIM: u32 = {}u;\n{}",
-            FLUID_GRID_SIZE,
-            GRID_DIM_U32,
+            fluid_grid_res,
+            env_grid_res,
             fluid_shader_source_raw
         );
         let fluid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -7188,8 +7197,8 @@ impl GpuState {
             init_encoder.clear_buffer(buffer, 0, None);
         }
 
-        let env_groups_x = (GRID_DIM_U32 + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
-        let env_groups_y = (GRID_DIM_U32 + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
+        let env_groups_x = (env_grid_res + CLEAR_WG_SIZE_X - 1) / CLEAR_WG_SIZE_X;
+        let env_groups_y = (env_grid_res + CLEAR_WG_SIZE_Y - 1) / CLEAR_WG_SIZE_Y;
         {
             let mut pass = init_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Environment Init Pass"),
@@ -7221,7 +7230,7 @@ impl GpuState {
         }
 
         // Clear fluid buffers
-        let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+        let fluid_workgroups = (fluid_grid_res + 15) / 16;
         for bg in [&fluid_bind_group_ab, &fluid_bind_group_ba] {
             let mut pass = init_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Clear Fluid Velocity"),
@@ -9220,6 +9229,9 @@ impl GpuState {
             // All core kernels already early-return on `alive==0`, so it is safe to
             // dispatch over the full buffer capacity for correctness.
             agent_count: self.agent_buffer_capacity as u32,
+            // Used for population-pressure scaling (death probability multiplier).
+            // This should reflect actual alive population, not dispatch bound.
+            population_count: self.agent_count,
             random_seed: (self.rng_state >> 32) as u32,
             debug_mode: if self.rain_debug_visual {
                 2
@@ -9865,7 +9877,7 @@ impl GpuState {
 
                 // Clear fluid force vectors before agents write to it
                 if self.fluid_enabled {
-                    let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
+                    let fluid_workgroups = (self.fluid_grid_resolution + 15) / 16;
                     cpass.set_pipeline(&self.clear_fluid_force_vectors_pipeline);
                     cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
@@ -10002,8 +10014,8 @@ impl GpuState {
                 // Run fluid solver - forces already written by agents to force_vectors
                 // Stable Fluids order: inject_test_force (combines) ? add_forces ? diffuse ? advect ? project
                 {
-                    let fluid_workgroups = (FLUID_GRID_SIZE + 15) / 16;
-                    let dye_workgroups = (GRID_DIM_U32 + 15) / 16;
+                    let fluid_workgroups = (self.fluid_grid_resolution + 15) / 16;
+                    let dye_workgroups = (self.env_grid_resolution + 15) / 16;
                     let bg_ab = &self.fluid_bind_group_ab;
                     let bg_ba = &self.fluid_bind_group_ba;
 
@@ -10160,7 +10172,7 @@ impl GpuState {
                     .write_ts_compute_pass(&mut cpass, TS_FLUID_PASS_START);
 
                 if should_run_simulation {
-                    let dye_workgroups = (GRID_DIM_U32 + 15) / 16;
+                    let dye_workgroups = (self.env_grid_resolution + 15) / 16;
 
                     // Diffuse dye once (A->B) then copy back (B->A) so the final stays in dye_a.
                     if !self.perf_skip_nofluid_dye {
@@ -12025,8 +12037,8 @@ impl GpuState {
 
         // Clear fluid simulation buffers (velocity/pressure/dye ping-pong + forces).
         // This prevents stale flow/dye from persisting across resets.
-        let fluid_groups = (FLUID_GRID_SIZE + 15) / 16;
-        let dye_groups = (GRID_DIM_U32 + 15) / 16;
+        let fluid_groups = (self.fluid_grid_resolution + 15) / 16;
+        let dye_groups = (self.env_grid_resolution + 15) / 16;
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Fluid Reset Pass"),

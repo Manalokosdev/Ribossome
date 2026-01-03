@@ -215,6 +215,7 @@ struct SimParams {
     max_agents: u32,
     cpu_spawn_count: u32,
     agent_count: u32,
+    population_count: u32,
     random_seed: u32,
     debug_mode: u32,
     visual_stride: u32,
@@ -530,10 +531,10 @@ struct AminoAcidProperties {
 }
 
 // ============================================================================
-// AMINO ACID & ORGAN PROPERTY LOOKUP TABLE (0–19 amino, 20–42 organs)
+// AMINO ACID & ORGAN PROPERTY LOOKUP TABLE (0–19 amino, 20–44 organs)
 // ============================================================================
 
-const AMINO_COUNT: u32 = 44u;
+const AMINO_COUNT: u32 = 45u;
 
 var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<vec4<f32>, 6>, AMINO_COUNT>(
     // 0  A - Alanine
@@ -625,12 +626,14 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     // 42 ANCHOR
     array<vec4<f32>,6>( vec4<f32>(10.0, 4.0, 0.0, 0.05), vec4<f32>(0.0, 0.0, 0.0, 0.00005), vec4<f32>(0.6, 0.0, 0.8, 0.0), vec4<f32>(0.0, 0.0, 0.0, 0.0), vec4<f32>(0.997, 0.5, 0.5, 0.5), vec4<f32>(0.0, 0.0, 0.0, 0.0) ),
     // 43 MUTATION PROTECTION
-    array<vec4<f32>,6>( vec4<f32>(9.0, 4.0, -0.07, 0.02), vec4<f32>(0.2, -0.61, 0.0, 0.001), vec4<f32>(0.6, 0.4, 0.2, 0.0), vec4<f32>(0.0, 0.3, -0.35, -0.35), vec4<f32>(0.997, 1.2, -0.2, -0.3), vec4<f32>(1.3, 0.0, 0.0, 0.0) )
+    array<vec4<f32>,6>( vec4<f32>(9.0, 4.0, -0.07, 0.02), vec4<f32>(0.2, -0.61, 0.0, 0.001), vec4<f32>(0.6, 0.4, 0.2, 0.0), vec4<f32>(0.0, 0.3, -0.35, -0.35), vec4<f32>(0.997, 1.2, -0.2, -0.3), vec4<f32>(1.3, 0.0, 0.0, 0.0) ),
+    // 44 BETA MOUTH (KD/KE/CD/CE) - consumes beta for energy, alpha for poison
+    array<vec4<f32>,6>( vec4<f32>(8.0, 3.5, 0.0872665, 0.05), vec4<f32>(0.6, -0.16, 0.0, 0.0025), vec4<f32>(0.78, 0.55, 0.78, 10.0), vec4<f32>(0.8, 0.8, -0.12, -0.12), vec4<f32>(0.997, 1.4, -0.4, 1.3), vec4<f32>(-0.3, 0.0, 0.0, 0.0) )
 );
 
 var<private> AMINO_FLAGS: array<u32, AMINO_COUNT> = array<u32, AMINO_COUNT>(
     0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (1u<<9), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, // 0–19
-    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<13), (1u<<9), (1u<<13), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u, (1u<<12) // 20–43
+    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<13), (1u<<9), (1u<<13), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u, (1u<<12), (1u<<1) // 20–44
 );
 
 fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
@@ -654,20 +657,27 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
 
     // Apply per-component property overrides (NaN sentinel = use default)
     // NOTE: part_props_override is fixed-size (256 vec4s) and historically covers 0..41.
-    // Any part types beyond that (e.g., new organs) use shader defaults.
-    let t_props = min(t, 41u);
-    let o0 = environment_init.part_props_override[t_props * 6u + 0u];
-    let o1 = environment_init.part_props_override[t_props * 6u + 1u];
-    let o2 = environment_init.part_props_override[t_props * 6u + 2u];
-    let o3 = environment_init.part_props_override[t_props * 6u + 3u];
-    let o4 = environment_init.part_props_override[t_props * 6u + 4u];
-    let o5 = environment_init.part_props_override[t_props * 6u + 5u];
-    let v0 = select(d[0], o0, vec4<bool>(o0.x == o0.x, o0.y == o0.y, o0.z == o0.z, o0.w == o0.w));
-    let v1 = select(d[1], o1, vec4<bool>(o1.x == o1.x, o1.y == o1.y, o1.z == o1.z, o1.w == o1.w));
-    let v2 = select(d[2], o2, vec4<bool>(o2.x == o2.x, o2.y == o2.y, o2.z == o2.z, o2.w == o2.w));
-    let v3 = select(d[3], o3, vec4<bool>(o3.x == o3.x, o3.y == o3.y, o3.z == o3.z, o3.w == o3.w));
-    let v4 = select(d[4], o4, vec4<bool>(o4.x == o4.x, o4.y == o4.y, o4.z == o4.z, o4.w == o4.w));
-    let v5 = select(d[5], o5, vec4<bool>(o5.x == o5.x, o5.y == o5.y, o5.z == o5.z, o5.w == o5.w));
+    // Any part types beyond that (e.g., new organs) must use shader defaults.
+    var v0 = d[0];
+    var v1 = d[1];
+    var v2 = d[2];
+    var v3 = d[3];
+    var v4 = d[4];
+    var v5 = d[5];
+    if (t <= 41u) {
+        let o0 = environment_init.part_props_override[t * 6u + 0u];
+        let o1 = environment_init.part_props_override[t * 6u + 1u];
+        let o2 = environment_init.part_props_override[t * 6u + 2u];
+        let o3 = environment_init.part_props_override[t * 6u + 3u];
+        let o4 = environment_init.part_props_override[t * 6u + 4u];
+        let o5 = environment_init.part_props_override[t * 6u + 5u];
+        v0 = select(d[0], o0, vec4<bool>(o0.x == o0.x, o0.y == o0.y, o0.z == o0.z, o0.w == o0.w));
+        v1 = select(d[1], o1, vec4<bool>(o1.x == o1.x, o1.y == o1.y, o1.z == o1.z, o1.w == o1.w));
+        v2 = select(d[2], o2, vec4<bool>(o2.x == o2.x, o2.y == o2.y, o2.z == o2.z, o2.w == o2.w));
+        v3 = select(d[3], o3, vec4<bool>(o3.x == o3.x, o3.y == o3.y, o3.z == o3.z, o3.w == o3.w));
+        v4 = select(d[4], o4, vec4<bool>(o4.x == o4.x, o4.y == o4.y, o4.z == o4.z, o4.w == o4.w));
+        v5 = select(d[5], o5, vec4<bool>(o5.x == o5.x, o5.y == o5.y, o5.z == o5.z, o5.w == o5.w));
+    }
 
     var p: AminoAcidProperties;
     p.segment_length = v0.x; p.thickness = v0.y; p.base_angle = v0.z; p.mass = v0.w;
@@ -1675,7 +1685,8 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
                 }
             }
             else if (amino_type == 8u || amino_type == 1u) {
-                if (modifier < 4u) { organ_base_type = 20u; }
+                if (modifier < 2u) { organ_base_type = 20u; }       // KA/KB/CA/CB: normal mouth
+                else if (modifier < 4u) { organ_base_type = 44u; }  // KD/KE/CD/CE: beta mouth
                 else if (modifier < 7u) {
                     // Remove vampire mouth from KG/CG specifically (modifier G = 5).
                     organ_base_type = select(33u, 0u, modifier == 5u);

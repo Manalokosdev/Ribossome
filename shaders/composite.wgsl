@@ -59,6 +59,7 @@ struct SimParams {
     max_agents: u32,
     cpu_spawn_count: u32,
     agent_count: u32,
+    population_count: u32,
     random_seed: u32,
     debug_mode: u32,
     visual_stride: u32,

@@ -1,8 +1,8 @@
 Modifier,Modifier_AA,V_Valine,M_Methionine,L_Leucine,P_Proline,K_Lysine,C_Cysteine,H_Histidine,Q_Glutamine
 0,A,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Mouth,Mouth,Mutation Protection,Mutation Protection
 1,C,Alpha Sensor,Alpha Sensor,,,Mouth,Mouth,Storage,Storage
-2,D,Alpha Sensor,Alpha Sensor,,,Mouth,Mouth,,
-3,E,Alpha Sensor,Alpha Sensor,,,Mouth,Mouth,,
+2,D,Alpha Sensor,Alpha Sensor,,,Beta Mouth,Beta Mouth,,
+3,E,Alpha Sensor,Alpha Sensor,,,Beta Mouth,Beta Mouth,,
 4,F,Alpha Sensor,Alpha Sensor,,,Vampire Mouth,Vampire Mouth,,
 5,G,Alpha Sensor,Alpha Sensor,,,,,,
 6,H,Alpha Sensor,Alpha Sensor,,,Vampire Mouth,Vampire Mouth,,
