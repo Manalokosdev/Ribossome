@@ -28,3 +28,6 @@ shader_source_dump.wgsl
 
 # Auto-snapshots (runtime output)
 autosave_snapshot*.png
+
+# Screenshots folder (user-generated captures)
+screenshots/

@@ -11755,11 +11755,26 @@ impl GpuState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let filename = format!("screenshot_4k_{}_{}.png", self.run_name, timestamp);
+        
+        // Create screenshots directory if it doesn't exist
+        std::fs::create_dir_all("screenshots")?;
+        
+        let filename = format!("screenshots/screenshot_4k_{}_{}.jpg", self.run_name, timestamp);
 
         let img = image::RgbaImage::from_raw(SCREENSHOT_SIZE, SCREENSHOT_SIZE, stitched_rgba)
             .ok_or_else(|| anyhow::anyhow!("Failed to create image from stitched buffer"))?;
-        img.save(&filename)?;
+        
+        // Convert to RGB and save as JPEG with 90% quality
+        let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
+        let mut output = std::fs::File::create(&filename)?;
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 90);
+        encoder.encode(
+            rgb_img.as_raw(),
+            rgb_img.width(),
+            rgb_img.height(),
+            image::ColorType::Rgb8,
+        )?;
+        
         println!("Screenshot saved: {}", filename);
         Ok(())
     }
@@ -13095,7 +13110,7 @@ fn main() {
     // Render splash screen
     render_splash_screen(&window, &instance, &surface, &adapter, &device, &queue);
 
-    // Load settings BEFORE creating GPU state so we can use resolution values
+    // Load settings BEFORE creating GPU state so we can use resolution values.
     let settings_path = SimulationSettings::default_path();
     let loaded_settings = match SimulationSettings::load_from_disk(&settings_path) {
         Ok(mut s) => {
@@ -13110,10 +13125,48 @@ fn main() {
         }
     };
 
-    // Extract validated resolutions
-    let env_grid_res = loaded_settings.env_grid_resolution;
-    let fluid_grid_res = loaded_settings.fluid_grid_resolution;
-    let spatial_grid_res = loaded_settings.spatial_grid_resolution;
+    fn snapshot_target_resolutions(path: &std::path::Path) -> anyhow::Result<(u32, u32, u32)> {
+        let (_a, _b, _g, snapshot) = load_simulation_snapshot(path)?;
+        let env = snapshot.env_grid_resolution;
+        let fluid = if snapshot.fluid_grid_resolution != 0 {
+            snapshot.fluid_grid_resolution
+        } else {
+            env / 4
+        };
+        let spatial = if snapshot.spatial_grid_resolution != 0 {
+            snapshot.spatial_grid_resolution
+        } else {
+            env / 4
+        };
+        Ok((env, fluid, spatial))
+    }
+
+    // If an autosave snapshot exists, prefer starting at its resolution.
+    // This avoids a jarring “boot at default 2048 then immediately reset to 1024/512” flow.
+    let (env_grid_res, fluid_grid_res, spatial_grid_res) = {
+        let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
+        if autosave_path.exists() {
+            if let Ok((env_res, fluid_res, spatial_res)) = snapshot_target_resolutions(autosave_path) {
+                println!(
+                    "Gℹ️  Autosave detected at {}x{}; starting with autosave resolution.",
+                    env_res, env_res
+                );
+                (env_res, fluid_res, spatial_res)
+            } else {
+                (
+                    loaded_settings.env_grid_resolution,
+                    loaded_settings.fluid_grid_resolution,
+                    loaded_settings.spatial_grid_resolution,
+                )
+            }
+        } else {
+            (
+                loaded_settings.env_grid_resolution,
+                loaded_settings.fluid_grid_resolution,
+                loaded_settings.spatial_grid_resolution,
+            )
+        }
+    };
 
     // Load GPU state in background using channel
     let (tx, rx) = std::sync::mpsc::channel();
@@ -13199,22 +13252,6 @@ fn main() {
     impl App {
         fn handle_event(&mut self, event: winit::event::Event<()>, target: &winit::event_loop::ActiveEventLoop) {
             let window = &self.window;
-
-            fn snapshot_target_resolutions(path: &std::path::Path) -> anyhow::Result<(u32, u32, u32)> {
-                let (_a, _b, _g, snapshot) = load_simulation_snapshot(path)?;
-                let env = snapshot.env_grid_resolution;
-                let fluid = if snapshot.fluid_grid_resolution != 0 {
-                    snapshot.fluid_grid_resolution
-                } else {
-                    env / 4
-                };
-                let spatial = if snapshot.spatial_grid_resolution != 0 {
-                    snapshot.spatial_grid_resolution
-                } else {
-                    env / 4
-                };
-                Ok((env, fluid, spatial))
-            }
 
         // Animate loading messages in window title while waiting for GPU state
         if self.state.is_none() {

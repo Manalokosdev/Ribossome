@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.71449286,
+  "camera_zoom": 0.99966383,
   "spawn_probability": 0.5,
   "death_probability": 0.001,
   "mutation_rate": 0.003,
@@ -30,8 +30,8 @@
   "pairing_cost": 0.0,
   "prop_wash_strength": 1.0,
   "prop_wash_strength_fluid": 0.0,
-  "propellers_enabled": true,
-  "microswim_enabled": false,
+  "propellers_enabled": false,
+  "microswim_enabled": true,
   "microswim_coupling": 1.2,
   "microswim_base_drag": 0.1,
   "microswim_anisotropy": 50.0,
