@@ -17,9 +17,13 @@ Watch predators emerge, ecosystems balance, and bizarre life forms evolve in rea
 - Snapshot save/load (PNG with embedded metadata) with cross-resolution compatibility
 - Auto-difficulty, rain cycling, and extensive tuning UI
 
-## Screenshots / Video
+## Screenshots
 
-*(Add your own screenshots or a GIF/video link here, e.g., predators evolving!)*
+![Simulation with active vampire predators](../images/screenshot1.jpg)
+*Complex ecosystem with evolved agents competing for resources*
+
+![Dense population with chemical trails](../images/screenshot2.jpg)
+*High-density simulation showing chemical signal propagation and agent interactions*
 
 ## Building & Running
 
