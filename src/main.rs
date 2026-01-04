@@ -101,15 +101,24 @@ const PART_OVERRIDES_CSV_PATH: &str = "config/part_base_angle_overrides.csv";
 // Part (amino + organ) property table: 46 parts, each with 6x vec4<f32> entries.
 // This mirrors the AMINO_DATA layout in shaders/shared.wgsl.
 const PART_PROPS_VEC4S_PER_PART: usize = 6;
-// NOTE: GPU buffer reserves 256 vec4s for part property overrides (matches shaders/shared.wgsl).
-// That fully covers 42 part types * 6 vec4s = 252, plus 4 extra vec4s.
-// Any part/vec4 blocks beyond this fixed-size buffer use shader defaults.
-const PART_PROPS_OVERRIDE_VEC4S_USED: usize = 256;
-// NOTE: Padded to keep bytemuck::Pod/Zeroable derives happy for this array length.
-// Only the first PART_PROPS_OVERRIDE_VEC4S_USED entries are used.
-const PART_PROPS_OVERRIDE_VEC4S: usize = 256;
+// NOTE: GPU buffer reserves enough vec4s for all part property overrides.
+// 46 part types * 6 vec4s = 276 vec4s.
+const PART_PROPS_OVERRIDE_VEC4S_USED: usize = PART_TYPE_COUNT * PART_PROPS_VEC4S_PER_PART; // 276
+const PART_PROPS_OVERRIDE_VEC4S: usize = PART_PROPS_OVERRIDE_VEC4S_USED;
+// bytemuck only implements Pod/Zeroable for certain array lengths. 276 is not one of them.
+// We keep the exact same contiguous memory layout by splitting into two arrays.
+const PART_PROPS_OVERRIDE_VEC4S_HEAD: usize = 256;
+const PART_PROPS_OVERRIDE_VEC4S_TAIL: usize = PART_PROPS_OVERRIDE_VEC4S - PART_PROPS_OVERRIDE_VEC4S_HEAD; // 20
 const PART_FLAGS_OVERRIDE_VEC4S: usize = (PART_TYPE_COUNT + 3) / 4; // 12
 const PART_PROPERTIES_JSON_PATH: &str = "config/part_properties.json";
+
+fn write_part_props_override_into_env_init(
+    dst: &mut EnvironmentInitParams,
+    src: &[[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+) {
+    dst.part_props_override_head[..].copy_from_slice(&src[..PART_PROPS_OVERRIDE_VEC4S_HEAD]);
+    dst.part_props_override_tail[..].copy_from_slice(&src[PART_PROPS_OVERRIDE_VEC4S_HEAD..]);
+}
 
 const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     // 0�19 amino acids
@@ -2950,9 +2959,10 @@ struct EnvironmentInitParams {
     // 128 slots reserved.
     part_angle_override: [[f32; 4]; PART_OVERRIDE_VEC4S],
 
-    // Part property overrides: 42 parts � 6 vec4 blocks.
+    // Part property overrides: 46 parts × 6 vec4 blocks.
     // NaN sentinel per component means "use shader default".
-    part_props_override: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S],
+    part_props_override_head: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S_HEAD],
+    part_props_override_tail: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S_TAIL],
 
     // Optional override of AMINO_FLAGS bitmask.
     // Packed as vec4<f32> lanes with NaN sentinel = "use shader default".
@@ -2961,11 +2971,9 @@ struct EnvironmentInitParams {
 
 // Keep host layout in sync with the WGSL uniform buffer (std140).
 // Keep host layout in sync with the WGSL uniform buffer (std140).
-// Previous EnvironmentInitParams was 128 bytes; we appended:
-// - base-angle overrides: 32x vec4 (512 bytes)
-// - part props overrides: 256x vec4 (4096 bytes; padded, only first 252 used)
-// - part flags overrides: 11x vec4 (176 bytes)
-const _: [(); 4928] = [(); std::mem::size_of::<EnvironmentInitParams>()];
+// Keep this assertion updated if the uniform layout changes.
+// (46 parts × 6 vec4) = 276 vec4 overrides.
+const _: [(); 5248] = [(); std::mem::size_of::<EnvironmentInitParams>()];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AutoDifficultyParam {
@@ -4471,6 +4479,11 @@ impl GpuState {
     }
 
     fn generate_map(&mut self, mode: u32, gen_type: u32, value: f32, seed: u32) {
+        let mut part_props_override_head = [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S_HEAD];
+        let mut part_props_override_tail = [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S_TAIL];
+        part_props_override_head[..].copy_from_slice(&self.part_props_override[..PART_PROPS_OVERRIDE_VEC4S_HEAD]);
+        part_props_override_tail[..].copy_from_slice(&self.part_props_override[PART_PROPS_OVERRIDE_VEC4S_HEAD..]);
+
         let params = EnvironmentInitParams {
             grid_resolution: self.env_grid_resolution,
             seed,
@@ -4493,7 +4506,8 @@ impl GpuState {
             gamma_noise_scale: self.gamma_noise_scale,
             noise_power: self.noise_power,
             part_angle_override: pack_part_base_angle_overrides_vec4(&self.part_base_angle_overrides),
-            part_props_override: self.part_props_override,
+            part_props_override_head,
+            part_props_override_tail,
             part_flags_override: pack_part_flags_override_vec4(&self.part_flags_override),
         };
 
@@ -5033,7 +5047,8 @@ impl GpuState {
             gamma_noise_scale: 1.0,
             noise_power: 1.0,
             part_angle_override: pack_part_base_angle_overrides_vec4(&[f32::NAN; PART_OVERRIDE_SLOTS]),
-            part_props_override: [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S],
+            part_props_override_head: [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S_HEAD],
+            part_props_override_tail: [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S_TAIL],
             part_flags_override: [[f32::NAN; 4]; PART_FLAGS_OVERRIDE_VEC4S],
         };
 
@@ -7788,7 +7803,7 @@ impl GpuState {
 
         // Apply part-properties overrides immediately so simulation/render match from the first frame.
         if state.part_properties_dirty {
-            state.environment_init_cpu.part_props_override = state.part_props_override;
+            write_part_props_override_into_env_init(&mut state.environment_init_cpu, &state.part_props_override);
             state.environment_init_cpu.part_flags_override =
                 pack_part_flags_override_vec4(&state.part_flags_override);
             state.queue.write_buffer(
@@ -9040,7 +9055,7 @@ impl GpuState {
         }
 
         if self.part_properties_dirty {
-            self.environment_init_cpu.part_props_override = self.part_props_override;
+            write_part_props_override_into_env_init(&mut self.environment_init_cpu, &self.part_props_override);
             self.environment_init_cpu.part_flags_override =
                 pack_part_flags_override_vec4(&self.part_flags_override);
             self.queue.write_buffer(
@@ -15747,10 +15762,11 @@ fn main() {
                                                 frame.show(ui, |ui| {
 
                                                 ui.label(format!(
-                                                    "{} (gen {}, {} parts)",
+                                                    "{} (gen {}, {} parts, mass {:.2})",
                                                     naming::agent::generate_agent_name(agent),
                                                     agent.generation,
-                                                    (agent.body_count as usize).min(MAX_BODY_PARTS)
+                                                    (agent.body_count as usize).min(MAX_BODY_PARTS),
+                                                    agent.total_mass
                                                 ));
 
                                                 ui.add_space(6.0);
