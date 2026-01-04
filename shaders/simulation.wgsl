@@ -3489,9 +3489,14 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * GRID_SIZE + x;
 
+    // Sample rain map from texture (RG channels = alpha/beta rain multipliers)
+    let rain_map_sample = textureLoad(rain_map_tex, vec2<u32>(x, y), 0);
+    let alpha_rain_map = rain_map_sample.r;
+    let beta_rain_map = rain_map_sample.g;
+
     // Use constant values for fast startup (can be overridden by loading terrain images)
-    // Initialize with chemistry values and uniform rain maps
-    chem_grid[idx] = vec4<f32>(environment_init.alpha_range.x, environment_init.beta_range.x, 1.0, 1.0);
+    // Initialize with chemistry values and rain maps from texture
+    chem_grid[idx] = vec4<f32>(environment_init.alpha_range.x, environment_init.beta_range.x, alpha_rain_map, beta_rain_map);
     gamma_grid[idx] = 0.0;
 
     gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = environment_init.slope_pair.x;
