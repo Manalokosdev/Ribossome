@@ -409,13 +409,6 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let victim_position = agents_out[closest_victim_id].position;
                             let victim_body_count = min(agents_out[closest_victim_id].body_count, MAX_BODY_PARTS);
 
-                            // Get the vampire mouth's organ_param to determine deposition type
-                            let vampire_organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
-                            let vampire_modifier = vampire_organ_param & 127u;  // Lower 7 bits = modifier (0-19)
-
-                            // Determine deposition type: F,G,H (4,5,6) deposit alpha; others deposit beta
-                            let deposit_alpha = (vampire_modifier >= 4u && vampire_modifier <= 6u);
-
                             // Deposition amount per grid cell (spread victim's energy)
                             let energy_per_cell = victim_energy * 0.01;  // Distribute gradually
 
@@ -432,6 +425,22 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                                 if (is_victim_mouth) {
                                     mouth_found = true;
+
+                                    // Determine deposition type based on victim's mouth type:
+                                    // Type 20 (normal mouth) -> alpha
+                                    // Type 22 (beta mouth) -> beta
+                                    // Type 34 (vampire mouth) -> check modifier (F/G/H=alpha, others=beta)
+                                    var deposit_alpha = false;
+                                    if (victim_part_base_type == 20u) {
+                                        deposit_alpha = true;  // Normal mouth -> alpha
+                                    } else if (victim_part_base_type == 22u) {
+                                        deposit_alpha = false;  // Beta mouth -> beta
+                                    } else if (victim_part_base_type == 34u) {
+                                        // Vampire mouth: check modifier
+                                        let victim_organ_param = get_organ_param(victim_part.part_type);
+                                        let victim_modifier = victim_organ_param & 127u;
+                                        deposit_alpha = (victim_modifier >= 4u && victim_modifier <= 6u);
+                                    }
 
                                     // Get mouth world position
                                     let victim_mouth_local = victim_part.pos;
@@ -477,7 +486,9 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             }
 
                             // If victim has no mouths, deposit at victim's center position
+                            // Default to alpha (most agents are alpha-feeders)
                             if (!mouth_found) {
+                                let deposit_alpha = true;  // Default to alpha for mouthless victims
                                 let chem_scale = f32(GRID_SIZE) / f32(SIM_SIZE);
                                 let center_grid_x = i32(clamp(victim_position.x * chem_scale, 0.0, f32(GRID_SIZE - 1u)));
                                 let center_grid_y = i32(clamp(victim_position.y * chem_scale, 0.0, f32(GRID_SIZE - 1u)));

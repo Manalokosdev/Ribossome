@@ -11350,7 +11350,7 @@ impl GpuState {
 
     fn capture_screenshot(&mut self) -> anyhow::Result<()> {
         // Capture the current visual_grid texture as-is (no tiling, just the current view)
-        let texture_size = self.visual_grid_texture.size();
+        let texture_size = self.visual_texture.size();
         let width = texture_size.width;
         let height = texture_size.height;
 
@@ -11369,7 +11369,7 @@ impl GpuState {
 
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture: &self.visual_grid_texture,
+                texture: &self.visual_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
