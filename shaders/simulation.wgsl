@@ -82,6 +82,14 @@ fn sanitize_f32(x: f32) -> f32 {
     return select(x, 0.0, is_bad_f32(x));
 }
 
+const PI_F32: f32 = 3.141592653589793;
+const TWO_PI_F32: f32 = 6.283185307179586;
+
+fn wrap_angle_pi(x: f32) -> f32 {
+    // Wrap to [-pi, pi).
+    return x - TWO_PI_F32 * floor((x + PI_F32) / TWO_PI_F32);
+}
+
 // Experiment toggle:
 // If false, propellers do NOT apply thrust/torque directly to agent movement,
 // and instead only influence motion indirectly through the fluid.
@@ -142,6 +150,10 @@ const MORPHOLOGY_ORIENT_FOLLOW_ENABLED: bool = true;
 const MORPHOLOGY_ORIENT_FOLLOW_STRENGTH: f32 = 0.25;
 const MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL: f32 = 0.15;
 
+// Vampire mouth and spike organ constants
+const VAMPIRE_REACH: f32 = 50.0; // Fixed 50 unit radius for vampire drain
+const SPIKE_REACH: f32 = 20.0;   // Fixed 20 unit radius for spike kill
+
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
@@ -170,6 +182,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Collect vampire mouth organ indices (type 33).
     // This lets us iterate only vampire mouths later, instead of scanning every body part.
     let body_count = min(agent.body_count, MAX_BODY_PARTS);
+    var total_energy_gained = 0.0;
     var vampire_mouth_indices: array<u32, MAX_BODY_PARTS>;
     var vampire_mouth_count = 0u;
     for (var i = 0u; i < body_count; i++) {
@@ -185,13 +198,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Vampire reach and corresponding grid search radius.
     // NOTE: cap to 10 (previous behavior) to avoid pathological loop sizes.
-    let max_drain_distance = 50.0; // Fixed 50 unit radius
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
     let cell_size = f32(SIM_SIZE) / f32(SPATIAL_GRID_SIZE);
-    let grid_radius = clamp(i32(ceil(max_drain_distance / cell_size)), 1, 10);
+    let grid_radius = clamp(i32(ceil(VAMPIRE_REACH / cell_size)), 1, 10);
 
     // Process each vampire mouth organ
-    // No longer tracks total_energy_gained (vampires now kill, not drain)
 
     for (var mi = 0u; mi < vampire_mouth_count; mi++) {
         let i = vampire_mouth_indices[mi];
@@ -243,7 +254,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 let neighbor = agents_out[neighbor_id];
                                 if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                     let dist = length(mouth_world_pos - neighbor.position);
-                                    if (dist < max_drain_distance) {
+                                    if (dist < VAMPIRE_REACH) {
                                         closest_victim_id = neighbor_id;
                                         found_victim = true;
                                     }
@@ -269,7 +280,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         let neighbor = agents_out[neighbor_id];
                                         if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                             let dist = length(mouth_world_pos - neighbor.position);
-                                            if (dist < max_drain_distance) {
+                                            if (dist < VAMPIRE_REACH) {
                                                 closest_victim_id = neighbor_id;
                                                 found_victim = true;
                                             }
@@ -292,7 +303,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                             let neighbor = agents_out[neighbor_id];
                                             if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                                 let dist = length(mouth_world_pos - neighbor.position);
-                                                if (dist < max_drain_distance) {
+                                                if (dist < VAMPIRE_REACH) {
                                                     closest_victim_id = neighbor_id;
                                                     found_victim = true;
                                                 }
@@ -321,7 +332,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         let neighbor = agents_out[neighbor_id];
                                         if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                             let dist = length(mouth_world_pos - neighbor.position);
-                                            if (dist < max_drain_distance) {
+                                            if (dist < VAMPIRE_REACH) {
                                                 closest_victim_id = neighbor_id;
                                                 found_victim = true;
                                             }
@@ -344,7 +355,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                             let neighbor = agents_out[neighbor_id];
                                             if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                                 let dist = length(mouth_world_pos - neighbor.position);
-                                                if (dist < max_drain_distance) {
+                                                if (dist < VAMPIRE_REACH) {
                                                     closest_victim_id = neighbor_id;
                                                     found_victim = true;
                                                 }
@@ -398,152 +409,39 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let victim_energy = agents_out[closest_victim_id].energy;
 
                         if (victim_energy > 0.0001) {
-                            // NEW VAMPIRE BEHAVIOR: Kill victim and decompose energy onto chem grids
-                            // around victim's mouth positions, as alpha or beta based on mouth type
+                            // VAMPIRE DRAIN: Gradually drain energy from victim
+                            // Distance-based falloff: full power at 0 distance, 0 power at max vampire reach
+                            let victim_pos = agents_out[closest_victim_id].position;
+                            let victim_dist = length(mouth_world_pos - victim_pos);
+                            let distance_factor = max(0.0, 1.0 - (victim_dist / VAMPIRE_REACH));
 
-                            // Poison protection organs reduce vampire kill probability by 50% each
+                            // Poison protection organs reduce vampire drain effectiveness by 50% each
                             let victim_poison_protection = agents_out[closest_victim_id].poison_resistant_count;
-                            var vampire_kill_succeeds = true;
-
+                            var drain_effectiveness = distance_factor;
+                            
                             if (victim_poison_protection > 0u) {
-                                // Each poison protection organ gives 50% chance to survive vampire attack
-                                // Generate random number based on agent ID, vampire ID, and frame
-                                let protection_seed = (closest_victim_id * 747796405u) ^ (agent_id * 2891336453u) ^ params.random_seed;
-                                let protection_hash = (protection_seed * 1664525u + 1013904223u) ^ (protection_seed >> 16u);
-                                let protection_roll = f32(protection_hash) / f32(0xFFFFFFFFu);
-
-                                // Survival probability = 0.5^count (same as poison reduction formula)
-                                let kill_probability = pow(0.5, f32(victim_poison_protection));
-                                vampire_kill_succeeds = (protection_roll < kill_probability);
+                                // Each poison protection organ halves the drain rate
+                                drain_effectiveness *= pow(0.5, f32(victim_poison_protection));
                             }
 
-                            // Only proceed with kill if protection check passed
-                            if (vampire_kill_succeeds) {
-                                // Kill the victim
-                                agents_out[closest_victim_id].alive = 0u;
+                            // Drain rate: 20% of victim's current energy per drain
+                            // This creates exponential decay - victim slowly weakens over multiple drains
+                            let drain_rate = 0.2;
+                            let drain_amount = victim_energy * drain_rate * drain_effectiveness;
 
-                            // Get victim's body configuration
-                            let victim_rotation = agents_out[closest_victim_id].rotation;
-                            let victim_position = agents_out[closest_victim_id].position;
-                            let victim_body_count = min(agents_out[closest_victim_id].body_count, MAX_BODY_PARTS);
+                            // Minimum drain threshold - don't drain if effectiveness is too low
+                            if (drain_amount >= 0.01) {
+                                // Drain energy from victim
+                                agents_out[closest_victim_id].energy = max(0.0, victim_energy - drain_amount);
 
-                            // Deposition amount per grid cell (spread victim's energy)
-                            let energy_per_cell = victim_energy * 0.01;  // Distribute gradually
+                                // Vampire gains the drained energy
+                                total_energy_gained += drain_amount;
 
-                            // Find all mouth organs in victim (types 20, 22, 34)
-                            var mouth_found = false;
-                            for (var vi = 0u; vi < victim_body_count; vi++) {
-                                let victim_part = agents_out[closest_victim_id].body[vi];
-                                let victim_part_base_type = get_base_part_type(victim_part.part_type);
+                                // Store drained amount in _pad.y for visualization
+                                agents_out[agent_id].body[i]._pad.y = drain_amount;
 
-                                // Check if this is a mouth organ
-                                let is_victim_mouth = (victim_part_base_type == 20u ||
-                                                       victim_part_base_type == 22u ||
-                                                       victim_part_base_type == 34u);
-
-                                if (is_victim_mouth) {
-                                    mouth_found = true;
-
-                                    // Determine deposition type based on victim's mouth type:
-                                    // Type 20 (normal mouth) -> alpha
-                                    // Type 22 (beta mouth) -> beta
-                                    // Type 34 (vampire mouth) -> check modifier (F/G/H=alpha, others=beta)
-                                    var deposit_alpha = false;
-                                    if (victim_part_base_type == 20u) {
-                                        deposit_alpha = true;  // Normal mouth -> alpha
-                                    } else if (victim_part_base_type == 22u) {
-                                        deposit_alpha = false;  // Beta mouth -> beta
-                                    } else if (victim_part_base_type == 34u) {
-                                        // Vampire mouth: check modifier
-                                        let victim_organ_param = get_organ_param(victim_part.part_type);
-                                        let victim_modifier = victim_organ_param & 127u;
-                                        deposit_alpha = (victim_modifier >= 4u && victim_modifier <= 6u);
-                                    }
-
-                                    // Get mouth world position
-                                    let victim_mouth_local = victim_part.pos;
-                                    let victim_mouth_rotated = apply_agent_rotation(victim_mouth_local, victim_rotation);
-                                    let victim_mouth_world = victim_position + victim_mouth_rotated;
-
-                                    // Deposit energy in a radius around this mouth
-                                    // Use chem grid scale (not spatial grid scale!)
-                                    let chem_scale = f32(GRID_SIZE) / f32(SIM_SIZE);
-                                    let deposit_radius = 3.0;  // Grid cells
-                                    let mouth_grid_x = i32(clamp(victim_mouth_world.x * chem_scale, 0.0, f32(GRID_SIZE - 1u)));
-                                    let mouth_grid_y = i32(clamp(victim_mouth_world.y * chem_scale, 0.0, f32(GRID_SIZE - 1u)));
-
-                                    // Spread deposition in a circle
-                                    for (var dy = -i32(deposit_radius); dy <= i32(deposit_radius); dy++) {
-                                        for (var dx = -i32(deposit_radius); dx <= i32(deposit_radius); dx++) {
-                                            let dist_sq = f32(dx * dx + dy * dy);
-                                            if (dist_sq <= deposit_radius * deposit_radius) {
-                                                let target_x = mouth_grid_x + dx;
-                                                let target_y = mouth_grid_y + dy;
-
-                                                if (target_x >= 0 && target_x < i32(GRID_SIZE) &&
-                                                    target_y >= 0 && target_y < i32(GRID_SIZE)) {
-                                                    let target_idx = u32(target_y) * GRID_SIZE + u32(target_x);
-
-                                                    // Falloff: center gets more, edges get less
-                                                    let falloff = 1.0 - (sqrt(dist_sq) / deposit_radius);
-                                                    let deposit_amount = energy_per_cell * falloff;
-
-                                                    // Deposit to appropriate channel
-                                                    if (deposit_alpha) {
-                                                        let prev = chem_grid[target_idx];
-                                                        write_chem_alpha(target_idx, min(prev.x + deposit_amount, 1.0));
-                                                    } else {
-                                                        let prev = chem_grid[target_idx];
-                                                        write_chem_beta(target_idx, min(prev.y + deposit_amount, 1.0));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // If victim has no mouths, deposit at victim's center position
-                            // Default to alpha (most agents are alpha-feeders)
-                            if (!mouth_found) {
-                                let deposit_alpha = true;  // Default to alpha for mouthless victims
-                                let chem_scale = f32(GRID_SIZE) / f32(SIM_SIZE);
-                                let center_grid_x = i32(clamp(victim_position.x * chem_scale, 0.0, f32(GRID_SIZE - 1u)));
-                                let center_grid_y = i32(clamp(victim_position.y * chem_scale, 0.0, f32(GRID_SIZE - 1u)));
-                                let deposit_radius = 3.0;
-
-                                for (var dy = -i32(deposit_radius); dy <= i32(deposit_radius); dy++) {
-                                    for (var dx = -i32(deposit_radius); dx <= i32(deposit_radius); dx++) {
-                                        let dist_sq = f32(dx * dx + dy * dy);
-                                        if (dist_sq <= deposit_radius * deposit_radius) {
-                                            let target_x = center_grid_x + dx;
-                                            let target_y = center_grid_y + dy;
-
-                                            if (target_x >= 0 && target_x < i32(GRID_SIZE) &&
-                                                target_y >= 0 && target_y < i32(GRID_SIZE)) {
-                                                let target_idx = u32(target_y) * GRID_SIZE + u32(target_x);
-                                                let falloff = 1.0 - (sqrt(dist_sq) / deposit_radius);
-                                                let deposit_amount = energy_per_cell * falloff;
-
-                                                if (deposit_alpha) {
-                                                    let prev = chem_grid[target_idx];
-                                                    write_chem_alpha(target_idx, min(prev.x + deposit_amount, 1.0));
-                                                } else {
-                                                    let prev = chem_grid[target_idx];
-                                                    write_chem_beta(target_idx, min(prev.y + deposit_amount, 1.0));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Store kill event for visualization
-                            agents_out[agent_id].body[i]._pad.y = victim_energy;
-
-                            // Set cooldown timer
-                            agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
-                            } // End vampire_kill_succeeds check
+                                // Set cooldown timer
+                                agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
                         } else {
                             agents_out[agent_id].body[i]._pad.y = 0.0;
                         }
@@ -559,9 +457,114 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Store current position for next frame's movement calculation
             agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
+        }
     }
 
-    // Note: Vampires no longer gain energy directly; they trigger decomposition
+    // Add gained energy to vampire
+    if (total_energy_gained > 0.0) {
+        agents_out[agent_id].energy += total_energy_gained;
+    }
+}
+
+// ============================================================================
+// SPIKE ORGAN KILL LOGIC - Instant kill on contact
+// ============================================================================
+
+@compute @workgroup_size(256)
+fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let agent_id = gid.x;
+    if (agent_id >= params.agent_count) {
+        return;
+    }
+
+    // Avoid copying full Agent (contains body arrays) into a local variable.
+    let agent_alive = agents_out[agent_id].alive;
+    let agent_energy = agents_out[agent_id].energy;
+    let agent_age = agents_out[agent_id].age;
+    let agent_position = agents_out[agent_id].position;
+    let agent_rotation = agents_out[agent_id].rotation;
+    let body_count = agents_out[agent_id].body_count;
+
+    // Skip dead agents
+    if (agent_alive == 0u || agent_energy <= 0.0) {
+        return;
+    }
+
+    // Newborn grace: don't attack or get attacked in the first few frames after spawning
+    if (agent_age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
+        return;
+    }
+
+    // Spatial grid uses an epoch stamp so we don't have to clear it every frame.
+    // Store stamp = (epoch + 1) so a zero-initialized buffer is always treated as empty.
+    let current_stamp = params.epoch + 1u;
+
+    let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
+    let cell_size = f32(SIM_SIZE) / f32(SPATIAL_GRID_SIZE);
+    let grid_radius = clamp(i32(ceil(SPIKE_REACH / cell_size)), 1, 10);
+
+    // Collect spike organ indices (type 46)
+    var spike_indices: array<u32, MAX_BODY_PARTS>;
+    var spike_count = 0u;
+
+    for (var i = 0u; i < body_count; i++) {
+        let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+        if (base_type == 46u) {
+            spike_indices[spike_count] = i;
+            spike_count += 1u;
+        }
+    }
+
+    // No spikes, nothing to do
+    if (spike_count == 0u) {
+        return;
+    }
+
+    // For each spike organ
+    for (var si = 0u; si < spike_count; si++) {
+        let i = spike_indices[si];
+        let spike_rel_pos = agents_out[agent_id].body[i].pos;
+        let spike_world_pos = agent_position + apply_agent_rotation(spike_rel_pos, agent_rotation);
+
+        let spike_grid_x = u32(clamp(spike_world_pos.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+        let spike_grid_y = u32(clamp(spike_world_pos.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
+
+        // Scan neighborhood cells and kill any nearby living victim.
+        for (var dy: i32 = -grid_radius; dy <= grid_radius; dy++) {
+            for (var dx: i32 = -grid_radius; dx <= grid_radius; dx++) {
+                let check_x = i32(spike_grid_x) + dx;
+                let check_y = i32(spike_grid_y) + dy;
+                if (check_x < 0 || check_x >= i32(SPATIAL_GRID_SIZE) || check_y < 0 || check_y >= i32(SPATIAL_GRID_SIZE)) {
+                    continue;
+                }
+
+                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
+                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                if (stamp != current_stamp) {
+                    continue;
+                }
+
+                let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
+                if (neighbor_id == SPATIAL_GRID_EMPTY || neighbor_id == SPATIAL_GRID_CLAIMED || neighbor_id == agent_id) {
+                    continue;
+                }
+
+                let victim_alive = agents_out[neighbor_id].alive;
+                let victim_energy = agents_out[neighbor_id].energy;
+                let victim_age = agents_out[neighbor_id].age;
+                if (victim_alive == 0u || victim_energy <= 0.0 || victim_age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                    continue;
+                }
+
+                let dist = length(spike_world_pos - agents_out[neighbor_id].position);
+                if (dist < SPIKE_REACH) {
+                    agents_out[neighbor_id].alive = 0u;
+                    agents_out[neighbor_id].energy = 0.0;
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -617,6 +620,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var agent_rot = agent_rotation;
     var agent_energy_cur = agent_energy;
     var pairing_counter = agent_pairing_counter;
+
+    // Per-frame energy cost for morphology (computed after body rebuild).
+    var morphology_change_energy = 0.0;
 
     // Morphology-driven swim uses per-part drag inside the physics loop.
 
@@ -896,6 +902,32 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var i = 0u; i < MAX_BODY_PARTS; i++) {
             prev_body_pos_recentered[i] = agents_out[agent_id].body[i].pos;
         }
+    }
+
+    // Morphology change energy: sum over segments of (mass * |delta_angle|).
+    // Uses recentered + avg-angle-normalized local positions for stable comparison.
+    if (!first_build && body_count_val > 1u && params.morphology_change_cost != 0.0) {
+        var angle_mass_sum = 0.0;
+        for (var i = 1u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+            let old_vec = prev_body_pos_recentered[i] - prev_body_pos_recentered[i - 1u];
+            let new_vec = agents_out[agent_id].body[i].pos - agents_out[agent_id].body[i - 1u].pos;
+
+            // Ignore degenerate segments (shouldn't happen, but keeps atan2 stable).
+            if (length(old_vec) < 1e-6 || length(new_vec) < 1e-6) {
+                continue;
+            }
+
+            let old_ang = atan2(old_vec.y, old_vec.x);
+            let new_ang = atan2(new_vec.y, new_vec.x);
+            let dtheta = abs(wrap_angle_pi(new_ang - old_ang));
+
+            let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+            let props = get_amino_acid_properties(base_type);
+            let m = max(props.mass, 0.01);
+
+            angle_mass_sum += dtheta * m;
+        }
+        morphology_change_energy = angle_mass_sum * max(params.morphology_change_cost, 0.0);
     }
 
     // NOTE: morphology recentering may update agents_out.rotation (avg_angle compensation).
@@ -2216,6 +2248,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Initialize accumulators
     let trail_deposit_strength = 0.08; // Strength of trail deposition (0-1)
     var energy_consumption = params.energy_cost; // base maintenance (can be 0)
+    energy_consumption += morphology_change_energy;
     var total_consumed_alpha = 0.0;
     var total_consumed_beta = 0.0;
     var local_alpha = 0.0;

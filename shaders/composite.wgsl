@@ -25,6 +25,7 @@ struct SimParams {
     drag: f32,
     energy_cost: f32,
     amino_maintenance_cost: f32,
+    morphology_change_cost: f32,
     spawn_probability: f32,
     death_probability: f32,
     grid_size: f32,

@@ -376,6 +376,19 @@ fn render_body_part_ctx(
         }
     }
 
+    // Spike organs (organ 46) - radial thin greenish spikes
+    if (base_type == 46u) {
+        let spike_radius = 20.0;
+        let spike_count = 12u; // 12 spikes around the organ
+        let spike_color = vec3<f32>(0.3, 0.8, 0.4); // Greenish
+        
+        for (var i = 0u; i < spike_count; i++) {
+            let angle = (f32(i) / f32(spike_count)) * 6.28318530718; // 2*PI
+            let spike_end = world_pos + vec2<f32>(cos(angle), sin(angle)) * spike_radius;
+            draw_thick_line_ctx(world_pos, spike_end, 0.5, vec4<f32>(spike_color, 0.9), ctx);
+        }
+    }
+
     // Pairing state sensors (organ 36) get orange asterisks
     if (base_type == 36u) {
         let star_size = max(get_part_visual_size(part.part_type) * 2.0, 6.0);

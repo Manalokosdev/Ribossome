@@ -92,23 +92,23 @@ const FUMAROLE_BUFFER_FLOATS: usize = 1 + MAX_FUMAROLES * FUMAROLE_STRIDE_F32;
 const FUMAROLE_BUFFER_BYTES: usize = FUMAROLE_BUFFER_FLOATS * 4;
 
 // Part base-angle override slots.
-// NOTE: Shader currently defines 46 part types (0..=45), but we reserve 128 slots for future expansion.
-const PART_TYPE_COUNT: usize = 46;
+// NOTE: Shader defines part types 0..=46. We reserve 128 slots for future expansion.
+const PART_TYPE_COUNT: usize = 47;
 const PART_OVERRIDE_SLOTS: usize = 128;
 const PART_OVERRIDE_VEC4S: usize = (PART_OVERRIDE_SLOTS + 3) / 4; // 32
 const PART_OVERRIDES_CSV_PATH: &str = "config/part_base_angle_overrides.csv";
 
-// Part (amino + organ) property table: 46 parts, each with 6x vec4<f32> entries.
+// Part (amino + organ) property table: 47 parts, each with 6x vec4<f32> entries.
 // This mirrors the AMINO_DATA layout in shaders/shared.wgsl.
 const PART_PROPS_VEC4S_PER_PART: usize = 6;
 // NOTE: GPU buffer reserves enough vec4s for all part property overrides.
-// 46 part types * 6 vec4s = 276 vec4s.
-const PART_PROPS_OVERRIDE_VEC4S_USED: usize = PART_TYPE_COUNT * PART_PROPS_VEC4S_PER_PART; // 276
+// 47 part types * 6 vec4s = 282 vec4s.
+const PART_PROPS_OVERRIDE_VEC4S_USED: usize = PART_TYPE_COUNT * PART_PROPS_VEC4S_PER_PART; // 282
 const PART_PROPS_OVERRIDE_VEC4S: usize = PART_PROPS_OVERRIDE_VEC4S_USED;
-// bytemuck only implements Pod/Zeroable for certain array lengths. 276 is not one of them.
+// bytemuck only implements Pod/Zeroable for certain array lengths; the full override table isn't one of them.
 // We keep the exact same contiguous memory layout by splitting into two arrays.
 const PART_PROPS_OVERRIDE_VEC4S_HEAD: usize = 256;
-const PART_PROPS_OVERRIDE_VEC4S_TAIL: usize = PART_PROPS_OVERRIDE_VEC4S - PART_PROPS_OVERRIDE_VEC4S_HEAD; // 20
+const PART_PROPS_OVERRIDE_VEC4S_TAIL: usize = PART_PROPS_OVERRIDE_VEC4S - PART_PROPS_OVERRIDE_VEC4S_HEAD; // 26
 const PART_FLAGS_OVERRIDE_VEC4S: usize = (PART_TYPE_COUNT + 3) / 4; // 12
 const PART_PROPERTIES_JSON_PATH: &str = "config/part_properties.json";
 
@@ -128,6 +128,7 @@ const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "VAMPIRE_MOUTH", "AGENT_ALPHA_SENSOR",
     "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
     "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2", "ANCHOR", "MUTATION_PROTECTION", "BetaMouth", "ATTRACTOR_REPULSOR",
+    "SPIKE",
 ];
 
 const APP_NAME: &str = "Ribossome";
@@ -2159,6 +2160,7 @@ fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
         42 => [0.6, 0.0, 0.8],
         44 => [0.78, 0.55, 0.78], // BetaMouth (mauve)
         45 => [0.6, 0.7, 0.9], // ATTRACTOR_REPULSOR (matches shaders/shared.wgsl)
+        46 => [0.2, 0.9, 0.2], // SPIKE (bright green - matches shaders/shared.wgsl)
         _ => DEFAULT_PART_COLOR,
     }
 }
@@ -2798,6 +2800,7 @@ struct SimParams {
     drag: f32,
     energy_cost: f32,
     amino_maintenance_cost: f32,
+    morphology_change_cost: f32,
     spawn_probability: f32,
     death_probability: f32,
     grid_size: f32,
@@ -2959,7 +2962,7 @@ struct EnvironmentInitParams {
     // 128 slots reserved.
     part_angle_override: [[f32; 4]; PART_OVERRIDE_VEC4S],
 
-    // Part property overrides: 46 parts × 6 vec4 blocks.
+    // Part property overrides: 47 parts × 6 vec4 blocks.
     // NaN sentinel per component means "use shader default".
     part_props_override_head: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S_HEAD],
     part_props_override_tail: [[f32; 4]; PART_PROPS_OVERRIDE_VEC4S_TAIL],
@@ -2970,10 +2973,9 @@ struct EnvironmentInitParams {
 }
 
 // Keep host layout in sync with the WGSL uniform buffer (std140).
-// Keep host layout in sync with the WGSL uniform buffer (std140).
 // Keep this assertion updated if the uniform layout changes.
-// (46 parts × 6 vec4) = 276 vec4 overrides.
-const _: [(); 5248] = [(); std::mem::size_of::<EnvironmentInitParams>()];
+// (47 parts × 6 vec4) = 282 vec4 overrides.
+const _: [(); 5344] = [(); std::mem::size_of::<EnvironmentInitParams>()];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AutoDifficultyParam {
@@ -3053,6 +3055,7 @@ fn default_dye_precipitation() -> f32 { 1.0 }
 
 fn default_microswim_enabled() -> bool { true }
 fn default_propellers_enabled() -> bool { true }
+fn default_morphology_change_cost() -> f32 { 0.0 }
 fn default_microswim_coupling() -> f32 { 1.0 }
 fn default_microswim_base_drag() -> f32 { 0.2 }
 fn default_microswim_anisotropy() -> f32 { 5.0 }
@@ -3159,6 +3162,8 @@ struct SimulationSettings {
     food_power: f32,
     poison_power: f32,
     amino_maintenance_cost: f32,
+    #[serde(default = "default_morphology_change_cost")]
+    morphology_change_cost: f32,
     pairing_cost: f32,
     prop_wash_strength: f32,
     #[serde(default = "default_prop_wash_strength_fluid_unset")]
@@ -3324,6 +3329,7 @@ impl Default for SimulationSettings {
             food_power: 3.0,
             poison_power: 1.0,
             amino_maintenance_cost: 0.001,
+            morphology_change_cost: default_morphology_change_cost(),
             pairing_cost: 0.1,
             prop_wash_strength: 1.0,
             prop_wash_strength_fluid: default_prop_wash_strength_fluid_unset(),
@@ -3709,6 +3715,7 @@ impl SimulationSettings {
         self.food_power = self.food_power.clamp(0.0, 10.0);
         self.poison_power = self.poison_power.clamp(0.0, 10.0);
         self.amino_maintenance_cost = self.amino_maintenance_cost.clamp(0.0, 0.01);
+        self.morphology_change_cost = self.morphology_change_cost.clamp(0.0, 10.0);
         self.pairing_cost = self.pairing_cost.clamp(0.0, 1.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         // Back-compat: older settings files won't have the fluid prop-wash strength.
@@ -3993,6 +4000,7 @@ struct GpuState {
     clear_agent_spatial_grid_pipeline: wgpu::ComputePipeline, // Clear agent spatial grid
     populate_agent_spatial_grid_pipeline: wgpu::ComputePipeline, // Populate agent spatial grid
     drain_energy_pipeline: wgpu::ComputePipeline, // Vampire mouths drain energy from neighbors
+    spike_kill_pipeline: wgpu::ComputePipeline, // Spike organs kill on contact
     render_pipeline: wgpu::RenderPipeline,
     inspector_overlay_pipeline: wgpu::RenderPipeline,
 
@@ -4164,6 +4172,7 @@ struct GpuState {
     food_power: f32,
     poison_power: f32,
     amino_maintenance_cost: f32,
+    morphology_change_cost: f32,
     pairing_cost: f32,
     diffusion_interval: u32,
     diffusion_counter: u32,
@@ -4348,6 +4357,7 @@ impl GpuState {
         self.poison_power = settings.poison_power;
 
         self.amino_maintenance_cost = settings.amino_maintenance_cost;
+        self.morphology_change_cost = settings.morphology_change_cost;
         self.pairing_cost = settings.pairing_cost;
         self.prop_wash_strength = settings.prop_wash_strength;
         self.prop_wash_strength_fluid = settings.prop_wash_strength_fluid;
@@ -5093,6 +5103,7 @@ impl GpuState {
             drag: 0.1,
             energy_cost: 0.0, // Disabled energy depletion for now
             amino_maintenance_cost: 0.001,
+            morphology_change_cost: 0.0,
             spawn_probability: 0.01,
             death_probability: 0.001,
             grid_size: sim_size,
@@ -5395,7 +5406,8 @@ impl GpuState {
             format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         profiler.mark("Visual texture");
@@ -6531,6 +6543,17 @@ impl GpuState {
             });
         profiler.mark("drain energy pipeline");
 
+        let spike_kill_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Spike Kill Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "spike_kill",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("spike kill pipeline");
+
         // Create render bind group layout
         let render_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -7459,6 +7482,7 @@ impl GpuState {
             clear_agent_spatial_grid_pipeline,
             populate_agent_spatial_grid_pipeline,
             drain_energy_pipeline,
+            spike_kill_pipeline,
             render_pipeline,
             inspector_overlay_pipeline,
             compute_bind_group_a,
@@ -7599,6 +7623,7 @@ impl GpuState {
             food_power: settings.food_power,
             poison_power: settings.poison_power,
             amino_maintenance_cost: settings.amino_maintenance_cost,
+            morphology_change_cost: settings.morphology_change_cost,
             pairing_cost: settings.pairing_cost,
             diffusion_interval: settings.diffusion_interval,
             diffusion_counter: 0,
@@ -8014,9 +8039,9 @@ impl GpuState {
     }
 
     fn clear_alpha_rain_map(&mut self) {
-        // Set alpha to uniform 1.0 in CPU-side data (even indices)
+        // Set alpha to 0.0 (no rain) in CPU-side data (even indices)
         for i in 0..self.env_grid_cell_count {
-            self.rain_map_data[i * 2] = 1.0;
+            self.rain_map_data[i * 2] = 0.0;
         }
 
         // Upload to GPU
@@ -8028,13 +8053,13 @@ impl GpuState {
         self.write_rain_map_texture();
         self.alpha_rain_map_path = None;
         self.alpha_rain_thumbnail = None;
-        println!("Cleared alpha rain map (uniform probability)");
+        println!("Cleared alpha rain map (no rain)");
     }
 
     fn clear_beta_rain_map(&mut self) {
-        // Set beta to uniform 1.0 in CPU-side data (odd indices)
+        // Set beta to 0.0 (no rain) in CPU-side data (odd indices)
         for i in 0..self.env_grid_cell_count {
-            self.rain_map_data[i * 2 + 1] = 1.0;
+            self.rain_map_data[i * 2 + 1] = 0.0;
         }
 
         // Upload to GPU
@@ -8046,7 +8071,7 @@ impl GpuState {
         self.write_rain_map_texture();
         self.beta_rain_map_path = None;
         self.beta_rain_thumbnail = None;
-        println!("Cleared beta rain map (uniform probability)");
+        println!("Cleared beta rain map (no rain)");
     }
 
     // Replenish population - spawns random agents when population is low
@@ -8137,7 +8162,8 @@ impl GpuState {
             format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         self.visual_texture_view = self
@@ -8476,6 +8502,7 @@ impl GpuState {
             food_power: self.food_power,
             poison_power: self.poison_power,
             amino_maintenance_cost: self.amino_maintenance_cost,
+            morphology_change_cost: self.morphology_change_cost,
             pairing_cost: self.pairing_cost,
             prop_wash_strength: self.prop_wash_strength,
             prop_wash_strength_fluid: self.prop_wash_strength_fluid,
@@ -9223,6 +9250,7 @@ impl GpuState {
             drag: 0.1,
             energy_cost: 0.0, // Disabled energy depletion for now
             amino_maintenance_cost: self.amino_maintenance_cost,
+            morphology_change_cost: self.morphology_change_cost,
             spawn_probability: effective_spawn_p,
             death_probability: effective_death_p,
             grid_size: self.sim_size,
@@ -10050,6 +10078,24 @@ impl GpuState {
             DispatchSegment::Drain,
             "Update Encoder (Timed Segment)",
         );
+
+        // Spike kill pass - runs right after drain energy
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Pass (Spike Kill)"),
+                timestamp_writes: None,
+            });
+
+            if should_run_simulation {
+                cpass.set_pipeline(&self.spike_kill_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
+            }
+        }
 
         self.frame_profiler
             .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_SIM);
@@ -11441,8 +11487,14 @@ impl GpuState {
         let width = texture_size.width;
         let height = texture_size.height;
 
-        // Create a buffer to read the texture data
-        let buffer_size = (width * height * 4) as u64; // RGBA, 1 byte per channel
+        // Rgba32Float = 16 bytes per pixel
+        let bytes_per_pixel = 16u32;
+        // wgpu requires bytes_per_row to be a multiple of 256
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
+
+        let buffer_size = (padded_bytes_per_row * height) as u64;
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Screenshot Output Buffer"),
             size: buffer_size,
@@ -11465,7 +11517,7 @@ impl GpuState {
                 buffer: &output_buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(width * 4),
+                    bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: Some(height),
                 },
             },
@@ -11485,14 +11537,40 @@ impl GpuState {
         rx.recv()??;
 
         let data = buffer_slice.get_mapped_range();
-        let mut rgba_data: Vec<u8> = data.to_vec();
+        
+        // Convert Rgba32Float to RGBA8 by unpacking padded rows
+        let mut rgba_data: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            let row_start = (y * padded_bytes_per_row) as usize;
+            let row_data = &data[row_start..row_start + (width * bytes_per_pixel) as usize];
+            
+            // Rgba32Float: 4 f32s per pixel (16 bytes)
+            for pixel_bytes in row_data.chunks_exact(16) {
+                let r = f32::from_le_bytes([pixel_bytes[0], pixel_bytes[1], pixel_bytes[2], pixel_bytes[3]]);
+                let g = f32::from_le_bytes([pixel_bytes[4], pixel_bytes[5], pixel_bytes[6], pixel_bytes[7]]);
+                let b = f32::from_le_bytes([pixel_bytes[8], pixel_bytes[9], pixel_bytes[10], pixel_bytes[11]]);
+                let a = f32::from_le_bytes([pixel_bytes[12], pixel_bytes[13], pixel_bytes[14], pixel_bytes[15]]);
+                
+                // Apply sRGB gamma correction (linear → sRGB) to match screen appearance
+                let to_srgb = |linear: f32| -> u8 {
+                    let linear = linear.clamp(0.0, 1.0);
+                    let srgb = if linear <= 0.0031308 {
+                        linear * 12.92
+                    } else {
+                        1.055 * linear.powf(1.0 / 2.4) - 0.055
+                    };
+                    (srgb * 255.0) as u8
+                };
+                
+                rgba_data.push(to_srgb(r));
+                rgba_data.push(to_srgb(g));
+                rgba_data.push(to_srgb(b));
+                rgba_data.push((a.clamp(0.0, 1.0) * 255.0) as u8); // Alpha stays linear
+            }
+        }
+        
         drop(data);
         output_buffer.unmap();
-
-        // Convert BGRA to RGBA if needed (wgpu texture format dependent)
-        for chunk in rgba_data.chunks_exact_mut(4) {
-            chunk.swap(0, 2);
-        }
 
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp = SystemTime::now()
@@ -14606,6 +14684,15 @@ fn main() {
                                                                 0.0..=0.01,
                                                             )
                                                             .text("Amino Maintenance Cost")
+                                                            .logarithmic(true)
+                                                            .step_by(0.0001),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.morphology_change_cost,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Morphology Change Cost")
                                                             .logarithmic(true)
                                                             .step_by(0.0001),
                                                         );

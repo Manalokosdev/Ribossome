@@ -4,7 +4,7 @@ Modifier,Modifier_AA,V_Valine,M_Methionine,L_Leucine,P_Proline,K_Lysine,C_Cystei
 2,D,Alpha Sensor,Alpha Sensor,,,Beta Mouth,Beta Mouth,,Attractor/Repulsor
 3,E,Alpha Sensor,Alpha Sensor,,,Beta Mouth,Beta Mouth,,Attractor/Repulsor
 4,F,Alpha Sensor,Alpha Sensor,,,Vampire Mouth,Vampire Mouth,,
-5,G,Alpha Sensor,Alpha Sensor,,,,,,
+5,G,Alpha Sensor,Alpha Sensor,,,Spike,Spike,,
 6,H,Alpha Sensor,Alpha Sensor,,,Vampire Mouth,Vampire Mouth,,
 7,I,Alpha Magnitude Sensor,Alpha Magnitude Sensor,,,Enabler,Enabler,Pairing Sensor,Pairing Sensor
 8,K,Alpha Magnitude Sensor (var),Alpha Magnitude Sensor (var),,,Enabler,Enabler,Pairing Sensor,Pairing Sensor

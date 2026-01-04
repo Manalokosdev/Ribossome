@@ -181,6 +181,7 @@ struct SimParams {
     drag: f32,
     energy_cost: f32,
     amino_maintenance_cost: f32,
+    morphology_change_cost: f32,
     spawn_probability: f32,
     death_probability: f32,
     grid_size: f32,
@@ -324,9 +325,9 @@ struct EnvironmentInitParams {
     part_angle_override: array<vec4<f32>, 32>,
 
     // Part property override table.
-    // 46 parts × 6 vec4 blocks (matches AMINO_DATA layout).
+    // 47 parts × 6 vec4 blocks (matches AMINO_DATA layout).
     // NaN sentinel per component = "use shader default".
-    part_props_override: array<vec4<f32>, 276>,
+    part_props_override: array<vec4<f32>, 282>,
 
     // Optional override of AMINO_FLAGS bitmask.
     // Packed as vec4<f32> (16-byte stride) with NaN sentinel = "use default".
@@ -535,7 +536,7 @@ struct AminoAcidProperties {
 // AMINO ACID & ORGAN PROPERTY LOOKUP TABLE (0–19 amino, 20–44 organs)
 // ============================================================================
 
-const AMINO_COUNT: u32 = 46u;
+const AMINO_COUNT: u32 = 47u;
 
 var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<vec4<f32>, 6>, AMINO_COUNT>(
     // 0  A - Alanine
@@ -545,7 +546,7 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     // 2  D - Aspartic acid
     array<vec4<f32>,6>( vec4<f32>(13.0, 3.0, 0.05, 0.018), vec4<f32>(-0.2, 0.3, 0.0, 0.001), vec4<f32>(0.1, 0.1, 0.1, 1.0), vec4<f32>(0.0, 0.3, -0.91, -0.91), vec4<f32>(0.2, -0.2, 1.2, -0.3), vec4<f32>(1.3, 0.0, 0.0, 0.0) ),
     // 3  E - Glutamic acid
-    array<vec4<f32>,6>( vec4<f32>(30.0, 10.0, -0.12, 0.02), vec4<f32>(0.1, 0.12, 0.0, 0.003), vec4<f32>(0.3, 0.4, 0.1, 1.0), vec4<f32>(0.0, 0.3, -0.58, -0.058), vec4<f32>(0.2, 0.6, 0.4, 0.55), vec4<f32>(0.45, 0.0, 0.0, 0.0) ),
+    array<vec4<f32>,6>( vec4<f32>(13.0, 3.0, -0.12, 0.02), vec4<f32>(0.1, 0.12, 0.0, 0.003), vec4<f32>(0.4, 0.4, 0.4, 1.0), vec4<f32>(0.0, 0.3, -0.58, -0.058), vec4<f32>(0.2, 0.6, 0.4, 0.55), vec4<f32>(0.45, 0.0, 0.0, 0.0) ),
     // 4  F - Phenylalanine
     array<vec4<f32>,6>( vec4<f32>(13.0, 4.5, 0.03, 0.01), vec4<f32>(0.2, -0.33, 0.0, 0.001), vec4<f32>(0.6, 0.3, 0.0, 1.0), vec4<f32>(0.0, 0.3, 0.17, 0.17), vec4<f32>(0.2, 1.4, -0.4, 1.3), vec4<f32>(-0.3, 0.0, 0.0, 0.0) ),
     // 5  G - Glycine
@@ -631,12 +632,15 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     // 44 BETA MOUTH (KD/KE/CD/CE) - consumes beta for energy, alpha for poison
     array<vec4<f32>,6>( vec4<f32>(8.0, 3.5, 0.0872665, 0.05), vec4<f32>(0.6, -0.16, 0.0, 0.0025), vec4<f32>(0.78, 0.55, 0.78, 10.0), vec4<f32>(0.8, 0.8, -0.12, -0.12), vec4<f32>(0.997, 1.4, -0.4, 1.3), vec4<f32>(-0.3, 0.0, 0.0, 0.0) ),
     // 45 ATTRACTOR_REPULSOR (QD/QE) - fixed polarity: QD=attract, QE=repel
-    array<vec4<f32>,6>( vec4<f32>(12.0, 3.0, 0.0, 0.015), vec4<f32>(0.0, 0.0, 0.0, 0.001), vec4<f32>(0.6, 0.7, 0.9, 0.0), vec4<f32>(0.0, 0.3, 0.53, 0.53), vec4<f32>(0.997, 1.0, 0.0, 0.75), vec4<f32>(0.25, 0.0, 0.0, 0.0) )
+    array<vec4<f32>,6>( vec4<f32>(12.0, 3.0, 0.0, 0.015), vec4<f32>(0.0, 0.0, 0.0, 0.001), vec4<f32>(0.6, 0.7, 0.9, 0.0), vec4<f32>(0.0, 0.3, 0.53, 0.53), vec4<f32>(0.997, 1.0, 0.0, 0.75), vec4<f32>(0.25, 0.0, 0.0, 0.0) ),
+    // 46 SPIKE (KG/CG)
+    array<vec4<f32>,6>( vec4<f32>(8.0, 2.0, 0.0, 0.02), vec4<f32>(0.0, 0.0, 0.0, 0.001), vec4<f32>(0.2, 0.9, 0.2, 0.0), vec4<f32>(0.0, 0.0, 0.0, 0.0), vec4<f32>(0.2, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) )
 );
 
 var<private> AMINO_FLAGS: array<u32, AMINO_COUNT> = array<u32, AMINO_COUNT>(
     0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (1u<<9), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, // 0–19
-    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<13), (1u<<9), (1u<<13), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u, (1u<<12), (1u<<1), 0u // 20–45
+    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<13), (1u<<9), (1u<<13), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u, (1u<<12), (1u<<1), 0u,
+    0u // 46 SPIKE
 );
 
 fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
@@ -659,7 +663,7 @@ fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
     }
 
     // Apply per-component property overrides (NaN sentinel = use default)
-    // NOTE: part_props_override covers all AMINO_COUNT parts (46×6 vec4s = 276).
+    // NOTE: part_props_override covers all AMINO_COUNT parts (47×6 vec4s = 282).
     var v0 = d[0];
     var v1 = d[1];
     var v2 = d[2];
@@ -873,6 +877,7 @@ fn get_part_name(part_type: u32) -> PartName {
         case 43u:{ name = PartName(array<u32,6>(77u,85u,84u,80u,82u,84u), 6u); }
         case 44u:{ name = PartName(array<u32,6>(66u,69u,84u,65u,77u,32u), 5u); }
         case 45u:{ name = PartName(array<u32,6>(65u,84u,84u,82u,65u,67u), 6u); }
+        case 46u:{ name = PartName(array<u32,6>(83u,80u,73u,75u,69u,32u), 5u); }
         default: { }
     }
 
@@ -1693,8 +1698,12 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
                 if (modifier < 2u) { organ_base_type = 20u; }       // KA/KB/CA/CB: normal mouth
                 else if (modifier < 4u) { organ_base_type = 44u; }  // KD/KE/CD/CE: beta mouth
                 else if (modifier < 7u) {
-                    // Remove vampire mouth from KG/CG specifically (modifier G = 5).
-                    organ_base_type = select(33u, 0u, modifier == 5u);
+                    // Spike organ: KG/CG (modifier G = 5)
+                    if (modifier == 5u) {
+                        organ_base_type = 46u;
+                    } else {
+                        organ_base_type = 33u; // Vampire mouth for KF/CF/KH/CH
+                    }
                 }
                 else if (modifier < 10u) { organ_base_type = 26u; }
                 else if (modifier < 14u) { organ_base_type = 32u; }
