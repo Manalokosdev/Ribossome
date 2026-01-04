@@ -401,8 +401,26 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             // NEW VAMPIRE BEHAVIOR: Kill victim and decompose energy onto chem grids
                             // around victim's mouth positions, as alpha or beta based on mouth type
 
-                            // Kill the victim
-                            agents_out[closest_victim_id].alive = 0u;
+                            // Poison protection organs reduce vampire kill probability by 50% each
+                            let victim_poison_protection = agents_out[closest_victim_id].poison_resistant_count;
+                            var vampire_kill_succeeds = true;
+                            
+                            if (victim_poison_protection > 0u) {
+                                // Each poison protection organ gives 50% chance to survive vampire attack
+                                // Generate random number based on agent ID, vampire ID, and frame
+                                let protection_seed = (closest_victim_id * 747796405u) ^ (agent_id * 2891336453u) ^ params.random_seed;
+                                let protection_hash = (protection_seed * 1664525u + 1013904223u) ^ (protection_seed >> 16u);
+                                let protection_roll = f32(protection_hash) / f32(0xFFFFFFFFu);
+                                
+                                // Survival probability = 0.5^count (same as poison reduction formula)
+                                let kill_probability = pow(0.5, f32(victim_poison_protection));
+                                vampire_kill_succeeds = (protection_roll < kill_probability);
+                            }
+
+                            // Only proceed with kill if protection check passed
+                            if (vampire_kill_succeeds) {
+                                // Kill the victim
+                                agents_out[closest_victim_id].alive = 0u;
 
                             // Get victim's body configuration
                             let victim_rotation = agents_out[closest_victim_id].rotation;
@@ -525,6 +543,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                             // Set cooldown timer
                             agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
+                            } // End vampire_kill_succeeds check
                         } else {
                             agents_out[agent_id].body[i]._pad.y = 0.0;
                         }
