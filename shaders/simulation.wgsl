@@ -404,14 +404,14 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             // Poison protection organs reduce vampire kill probability by 50% each
                             let victim_poison_protection = agents_out[closest_victim_id].poison_resistant_count;
                             var vampire_kill_succeeds = true;
-                            
+
                             if (victim_poison_protection > 0u) {
                                 // Each poison protection organ gives 50% chance to survive vampire attack
                                 // Generate random number based on agent ID, vampire ID, and frame
                                 let protection_seed = (closest_victim_id * 747796405u) ^ (agent_id * 2891336453u) ^ params.random_seed;
                                 let protection_hash = (protection_seed * 1664525u + 1013904223u) ^ (protection_seed >> 16u);
                                 let protection_roll = f32(protection_hash) / f32(0xFFFFFFFFu);
-                                
+
                                 // Survival probability = 0.5^count (same as poison reduction formula)
                                 let kill_probability = pow(0.5, f32(victim_poison_protection));
                                 vampire_kill_succeeds = (protection_roll < kill_probability);
@@ -1728,12 +1728,55 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let max_repulsion_distance = 500.0;
 
         if (dist < max_repulsion_distance && dist > 0.1) {
+            // Calculate attractor/repulsor modifier for this agent
+            // Sum all attractor/repulsor organs (type 45) force strengths
+            var attractor_strength = 0.0;
+            let this_body_count = min(agents_out[agent_id].body_count, MAX_BODY_PARTS);
+            for (var i = 0u; i < this_body_count; i++) {
+                let part = agents_out[agent_id].body[i];
+                let base_type = get_base_part_type(part.part_type);
+                if (base_type == 45u) {
+                    // Decode modifier (0..255) -> 0..19 with rounding for stability.
+                    let organ_param = get_organ_param(part.part_type);
+                    let modifier_index = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
+
+                    // Fixed polarity by modifier:
+                    // - QD (modifier D = 2) => attract
+                    // - QE (modifier E = 3) => repel
+                    // This avoids relying on param1 variation.
+                    let is_d = modifier_index == 2u;
+                    let is_e = modifier_index == 3u;
+                    let strength = select(0.0, select(-1.0, 1.0, is_d), is_d || is_e);
+
+                    // Modulate by enabler activation (same metric used elsewhere):
+                    // per-part amplification computed from nearby enablers.
+                    let enabler_activation = clamp(amplification_per_part[i], 0.0, 1.0);
+                    attractor_strength += strength * enabler_activation;
+                }
+            }
+
+            // NaN guard (defensive): if anything went off the rails, don't poison physics.
+            var attractor_strength_safe = attractor_strength;
+            if (attractor_strength_safe != attractor_strength_safe) {
+                attractor_strength_safe = 0.0;
+            }
+
             // Inverse square repulsion: F = k / (d^2)
             let base_strength = params.agent_repulsion_strength * 100000.0;
-            let force_magnitude = base_strength / (dist * dist);
+
+            // Apply attractor/repulsor modification (2x multiplier)
+            // Negative strength = stronger repulsion, Positive = attraction (negative force)
+            // Clamp the scaled term to keep forces stable and NaN-free.
+            let attractor_term = clamp(attractor_strength_safe * 2.0, -4.0, 4.0);
+            let modified_strength = base_strength * (1.0 - attractor_term);
+            let force_magnitude = modified_strength / (dist * dist);
 
             // Clamp to prevent extreme forces at very small distances
-            let clamped_force = min(force_magnitude, 5000.0);
+            var safe_force_magnitude = force_magnitude;
+            if (safe_force_magnitude != safe_force_magnitude) {
+                safe_force_magnitude = 0.0;
+            }
+            let clamped_force = min(abs(safe_force_magnitude), 5000.0) * sign(safe_force_magnitude);
 
             let direction = delta / dist; // Normalize
 
@@ -2167,8 +2210,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // poison_resistant_count stored in agent struct during morphology
     // Each poison-resistant organ reduces poison/radiation damage by 50%
     let poison_multiplier = pow(0.5, f32(agents_out[agent_id].poison_resistant_count));
-    // Each poison-resistant organ also reduces food power by 25% (0.75^count)
-    let food_power_multiplier = pow(0.75, f32(agents_out[agent_id].poison_resistant_count));
+    // Each poison-resistant organ also reduces food power by 10% (0.90^count)
+    let food_power_multiplier = pow(0.90, f32(agents_out[agent_id].poison_resistant_count));
 
     // Initialize accumulators
     let trail_deposit_strength = 0.08; // Strength of trail deposition (0-1)

@@ -536,7 +536,7 @@ struct AminoAcidProperties {
 // AMINO ACID & ORGAN PROPERTY LOOKUP TABLE (0–19 amino, 20–44 organs)
 // ============================================================================
 
-const AMINO_COUNT: u32 = 45u;
+const AMINO_COUNT: u32 = 46u;
 
 var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<vec4<f32>, 6>, AMINO_COUNT>(
     // 0  A - Alanine
@@ -630,12 +630,14 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     // 43 MUTATION PROTECTION
     array<vec4<f32>,6>( vec4<f32>(9.0, 4.0, -0.07, 0.02), vec4<f32>(0.2, -0.61, 0.0, 0.001), vec4<f32>(0.6, 0.4, 0.2, 0.0), vec4<f32>(0.0, 0.3, -0.35, -0.35), vec4<f32>(0.997, 1.2, -0.2, -0.3), vec4<f32>(1.3, 0.0, 0.0, 0.0) ),
     // 44 BETA MOUTH (KD/KE/CD/CE) - consumes beta for energy, alpha for poison
-    array<vec4<f32>,6>( vec4<f32>(8.0, 3.5, 0.0872665, 0.05), vec4<f32>(0.6, -0.16, 0.0, 0.0025), vec4<f32>(0.78, 0.55, 0.78, 10.0), vec4<f32>(0.8, 0.8, -0.12, -0.12), vec4<f32>(0.997, 1.4, -0.4, 1.3), vec4<f32>(-0.3, 0.0, 0.0, 0.0) )
+    array<vec4<f32>,6>( vec4<f32>(8.0, 3.5, 0.0872665, 0.05), vec4<f32>(0.6, -0.16, 0.0, 0.0025), vec4<f32>(0.78, 0.55, 0.78, 10.0), vec4<f32>(0.8, 0.8, -0.12, -0.12), vec4<f32>(0.997, 1.4, -0.4, 1.3), vec4<f32>(-0.3, 0.0, 0.0, 0.0) ),
+    // 45 ATTRACTOR_REPULSOR (QD/QE) - fixed polarity: QD=attract, QE=repel
+    array<vec4<f32>,6>( vec4<f32>(12.0, 3.0, 0.0, 0.015), vec4<f32>(0.0, 0.0, 0.0, 0.001), vec4<f32>(0.6, 0.7, 0.9, 0.0), vec4<f32>(0.0, 0.3, 0.53, 0.53), vec4<f32>(0.997, 1.0, 0.0, 0.75), vec4<f32>(0.25, 0.0, 0.0, 0.0) )
 );
 
 var<private> AMINO_FLAGS: array<u32, AMINO_COUNT> = array<u32, AMINO_COUNT>(
     0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (1u<<9), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, // 0–19
-    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<13), (1u<<9), (1u<<13), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u, (1u<<12), (1u<<1) // 20–44
+    (1u<<1), (1u<<0), (1u<<2), (1u<<3), (1u<<4), (1u<<13), (1u<<9), (1u<<13), 0u, 0u, 0u, (1u<<7), 0u, (1u<<1), (1u<<5), (1u<<6), 0u, (1u<<11), (1u<<2), (1u<<2), (1u<<3), (1u<<3), 0u, (1u<<12), (1u<<1), 0u // 20–45
 );
 
 fn get_amino_acid_properties(amino_type: u32) -> AminoAcidProperties {
@@ -870,6 +872,9 @@ fn get_part_name(part_type: u32) -> PartName {
         case 40u:{ name = PartName(array<u32,6>(66u,77u,65u,71u,32u,32u), 4u); }
         case 41u:{ name = PartName(array<u32,6>(66u,77u,65u,71u,50u,32u), 5u); }
         case 42u:{ name = PartName(array<u32,6>(65u,78u,67u,72u,79u,82u), 6u); }
+        case 43u:{ name = PartName(array<u32,6>(77u,85u,84u,80u,82u,84u), 6u); }
+        case 44u:{ name = PartName(array<u32,6>(66u,69u,84u,65u,77u,32u), 5u); }
+        case 45u:{ name = PartName(array<u32,6>(65u,84u,84u,82u,65u,67u), 6u); }
         default: { }
     }
 
@@ -1702,6 +1707,8 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
                 if (modifier == 0u) { organ_base_type = 43u; }
                 // Storage reduced to HC/QC only.
                 else if (modifier == 1u) { organ_base_type = 28u; }
+                // Attractor/Repulsor: QD and QE (modifiers 2 and 3)
+                else if (amino_type == 13u && (modifier == 2u || modifier == 3u)) { organ_base_type = 45u; }
                 // Pairing sensor remains HI/HK and QI/QK (modifiers I/K).
                 else if (modifier == 7u || modifier == 8u) { organ_base_type = 36u; }
                 // Trail energy sensor remains HL/QL (modifier L).

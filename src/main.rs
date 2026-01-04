@@ -92,13 +92,13 @@ const FUMAROLE_BUFFER_FLOATS: usize = 1 + MAX_FUMAROLES * FUMAROLE_STRIDE_F32;
 const FUMAROLE_BUFFER_BYTES: usize = FUMAROLE_BUFFER_FLOATS * 4;
 
 // Part base-angle override slots.
-// NOTE: Shader currently defines 45 part types, but we reserve 128 slots for future expansion.
-const PART_TYPE_COUNT: usize = 45;
+// NOTE: Shader currently defines 46 part types (0..=45), but we reserve 128 slots for future expansion.
+const PART_TYPE_COUNT: usize = 46;
 const PART_OVERRIDE_SLOTS: usize = 128;
 const PART_OVERRIDE_VEC4S: usize = (PART_OVERRIDE_SLOTS + 3) / 4; // 32
 const PART_OVERRIDES_CSV_PATH: &str = "config/part_base_angle_overrides.csv";
 
-// Part (amino + organ) property table: 45 parts, each with 6x vec4<f32> entries.
+// Part (amino + organ) property table: 46 parts, each with 6x vec4<f32> entries.
 // This mirrors the AMINO_DATA layout in shaders/shared.wgsl.
 const PART_PROPS_VEC4S_PER_PART: usize = 6;
 // NOTE: GPU buffer reserves 256 vec4s for part property overrides (matches shaders/shared.wgsl).
@@ -114,11 +114,11 @@ const PART_PROPERTIES_JSON_PATH: &str = "config/part_properties.json";
 const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     // 0�19 amino acids
     "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y",
-    // 20�43 organs / specials (keep in sync with shaders/shared.wgsl table comments)
+    // 20�45 organs / specials (keep in sync with shaders/shared.wgsl table comments)
     "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "ALPHA_EMITTER", "ENABLER", "BETA_EMITTER",
     "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "VAMPIRE_MOUTH", "AGENT_ALPHA_SENSOR",
     "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
-    "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2", "ANCHOR", "MUTATION_PROTECTION", "BetaMouth",
+    "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2", "ANCHOR", "MUTATION_PROTECTION", "BetaMouth", "ATTRACTOR_REPULSOR",
 ];
 
 const APP_NAME: &str = "Ribossome";
@@ -2149,7 +2149,7 @@ fn part_base_color_rgb(base_type: u32) -> [f32; 3] {
         41 => [1.0, 0.3, 0.4],
         42 => [0.6, 0.0, 0.8],
         44 => [0.78, 0.55, 0.78], // BetaMouth (mauve)
-        45 => [0.78, 0.55, 0.78], // (legacy id; keep consistent)
+        45 => [0.6, 0.7, 0.9], // ATTRACTOR_REPULSOR (matches shaders/shared.wgsl)
         _ => DEFAULT_PART_COLOR,
     }
 }
@@ -2207,7 +2207,7 @@ fn part_base_name(base_type: u32) -> &'static str {
         42 => "Anchor",
         43 => "Mutation Protection",
         44 => "BetaMouth",
-        45 => "BetaMouth",
+        45 => "ATTRAC",
         _ => "Organ",
     }
 }
@@ -4074,6 +4074,12 @@ struct GpuState {
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
+
+    // Debug: population scan for specific organ presence
+    organ45_alive_with: u32,
+    organ45_total_with: u32,
+    organ45_last_scan: Option<std::time::Instant>,
+    organ45_last_scan_error: Option<String>,
 
     // Run naming
     run_seed: u32,
@@ -7510,6 +7516,11 @@ impl GpuState {
             last_sample_epoch: 0,
             max_history_points: 5000,
             last_autosave_epoch: 0,
+
+            organ45_alive_with: 0,
+            organ45_total_with: 0,
+            organ45_last_scan: None,
+            organ45_last_scan_error: None,
 
             run_seed,
             run_name: naming::sim::generate_sim_name(&settings, run_seed, max_agents as u32),
@@ -11183,6 +11194,67 @@ impl GpuState {
         }
     }
 
+    fn scan_population_for_organ45(&mut self) {
+        self.organ45_last_scan_error = None;
+
+        let current_buffer = if self.ping_pong {
+            &self.agents_buffer_b
+        } else {
+            &self.agents_buffer_a
+        };
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Organ45 Scan Encoder"),
+            });
+
+        encoder.copy_buffer_to_buffer(
+            current_buffer,
+            0,
+            &self.agents_readback,
+            0,
+            (std::mem::size_of::<Agent>() * self.agent_buffer_capacity) as u64,
+        );
+
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = self.agents_readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::Maintain::Wait);
+
+        let mut total_with = 0u32;
+        let mut alive_with = 0u32;
+
+        {
+            let data = slice.get_mapped_range();
+            let agents: &[Agent] = bytemuck::cast_slice(&data);
+
+            let take_len = (self.agent_count as usize).min(agents.len());
+            for agent in agents.iter().take(take_len) {
+                let body_len = (agent.body_count as usize).min(MAX_BODY_PARTS);
+                let mut has_organ45 = false;
+                for part in agent.body.iter().take(body_len) {
+                    if part.base_type() == 45 {
+                        has_organ45 = true;
+                        break;
+                    }
+                }
+                if has_organ45 {
+                    total_with += 1;
+                    if agent.alive != 0 {
+                        alive_with += 1;
+                    }
+                }
+            }
+        }
+
+        self.agents_readback.unmap();
+        self.organ45_total_with = total_with;
+        self.organ45_alive_with = alive_with;
+        self.organ45_last_scan = Some(std::time::Instant::now());
+    }
+
     fn spawn_agent_at_cursor(&mut self, screen_pos: [f32; 2]) {
         // Convert screen coordinates to world coordinates (same logic as select_agent_at_screen_pos)
         let norm_x = screen_pos[0] / self.surface_config.width as f32;
@@ -11412,15 +11484,15 @@ impl GpuState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
+
         // Create screenshots directory if it doesn't exist
         std::fs::create_dir_all("screenshots")?;
-        
+
         let filename = format!("screenshots/screenshot_{}x{}_{}_{}.jpg", width, height, self.run_name, timestamp);
 
         let img = image::RgbaImage::from_raw(width, height, rgba_data)
             .ok_or_else(|| anyhow::anyhow!("Failed to create image from buffer"))?;
-        
+
         // Convert to RGB and save as JPEG with 90% quality
         let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
         let mut output = std::fs::File::create(&filename)?;
@@ -11431,7 +11503,7 @@ impl GpuState {
             rgb_img.height(),
             image::ColorType::Rgb8,
         )?;
-        
+
         println!("📸 Screenshot saved: {}", filename);
         Ok(())
     }
@@ -11846,15 +11918,15 @@ impl GpuState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
+
         // Create screenshots directory if it doesn't exist
         std::fs::create_dir_all("screenshots")?;
-        
+
         let filename = format!("screenshots/screenshot_4k_{}_{}.jpg", self.run_name, timestamp);
 
         let img = image::RgbaImage::from_raw(SCREENSHOT_SIZE, SCREENSHOT_SIZE, stitched_rgba)
             .ok_or_else(|| anyhow::anyhow!("Failed to create image from stitched buffer"))?;
-        
+
         // Convert to RGB and save as JPEG with 90% quality
         let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
         let mut output = std::fs::File::create(&filename)?;
@@ -11865,7 +11937,7 @@ impl GpuState {
             rgb_img.height(),
             image::ColorType::Rgb8,
         )?;
-        
+
         println!("Screenshot saved: {}", filename);
         Ok(())
     }
@@ -14028,6 +14100,25 @@ fn main() {
                                             ui.heading("Population Overview");
                                             ui.label(format!("Total Agents: {}", state.agent_count));
                                             ui.label(format!("Living Agents: {}", state.alive_count));
+                                            ui.horizontal(|ui| {
+                                                let denom = state.alive_count.max(1) as f32;
+                                                let pct = (state.organ45_alive_with as f32 / denom) * 100.0;
+                                                ui.label(format!(
+                                                    "Attractor/Repulsor (45): {}/{} ({:.2}%)",
+                                                    state.organ45_alive_with,
+                                                    state.alive_count,
+                                                    pct
+                                                ));
+                                                if ui.button("Scan").clicked() {
+                                                    state.scan_population_for_organ45();
+                                                }
+                                            });
+                                            if let Some(t) = state.organ45_last_scan {
+                                                ui.label(format!("Last scan: {:.1}s ago", t.elapsed().as_secs_f32()));
+                                            }
+                                            if let Some(err) = &state.organ45_last_scan_error {
+                                                ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
+                                            }
                                             ui.label(format!(
                                                 "Capacity: {}",
                                                 state.agent_buffer_capacity

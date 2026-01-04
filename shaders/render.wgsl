@@ -414,6 +414,77 @@ fn render_body_part_ctx(
         draw_filled_circle_ctx(world_pos, size, vec4<f32>(blended, 0.95), ctx);
     }
 
+    // Attractor/Repulsor organ (type 45): wavy circle, blue=attract, yellow=repel, size by enabler
+    if (base_type == 45u) {
+        // Extract modifier to determine strength and color
+        let organ_param = get_organ_param(part.part_type);
+        let modifier_index = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
+
+        // Fixed polarity by modifier:
+        // - QD (modifier D = 2) => attract
+        // - QE (modifier E = 3) => repel
+        let is_d = modifier_index == 2u;
+        let is_e = modifier_index == 3u;
+        let strength = select(0.0, select(-1.0, 1.0, is_d), is_d || is_e);
+
+        // Get enabler activation (0-1) from nearby enablers (same as simulation amplification)
+        var activation = 0.0;
+        for (var e = 0u; e < body_count; e++) {
+            var e_part: BodyPart;
+            if (use_selected_buffer) {
+                e_part = selected_agent_buffer[0].body[e];
+            } else {
+                e_part = agents_out[agent_id].body[e];
+            }
+            let e_base_type = get_base_part_type(e_part.part_type);
+            let e_props = get_amino_acid_properties(e_base_type);
+            if (e_props.is_inhibitor) { // enabler flag
+                let d = length(part.pos - e_part.pos);
+                if (d < 20.0) {
+                    activation += max(0.0, 1.0 - d / 20.0);
+                }
+            }
+        }
+        activation = min(activation, 1.0);
+
+        // Base size modulated by enabler activation (20% to 100% of base)
+        let base_size = get_part_visual_size(part.part_type) * 2.5;
+        let modulated_size = base_size * mix(0.2, 1.0, activation);
+
+        // Choose color: blue for attraction, yellow for repulsion
+        let blue = vec3<f32>(0.2, 0.5, 1.0);
+        let yellow = vec3<f32>(1.0, 0.9, 0.0);
+        let organ_color = select(yellow, blue, strength >= 0.0);
+        let blended = mix(organ_color, agent_color, params.agent_color_blend * 0.2);
+
+        // Draw wavy circle: outer ring with sine wave modulation
+        let segments = 32u;
+        let wave_amplitude = modulated_size * 0.2; // 20% waviness
+        let wave_frequency = 6.0; // Number of waves around circle
+
+        var prev_point = vec2<f32>(0.0);
+        for (var s = 0u; s <= segments; s++) {
+            let t = f32(s) / f32(segments);
+            let angle = t * 6.28318530718; // 2π
+
+            // Add sine wave to radius
+            let wave = sin(angle * wave_frequency) * wave_amplitude;
+            let radius = modulated_size + wave;
+
+            let point = world_pos + vec2<f32>(cos(angle) * radius, sin(angle) * radius);
+
+            if (s > 0u) {
+                let thickness = max(modulated_size * 0.15, 1.5);
+                draw_thick_line_ctx(prev_point, point, thickness, vec4<f32>(blended, 0.9), ctx);
+            }
+            prev_point = point;
+        }
+
+        // Draw center dot for visibility at small sizes
+        let dot_size = max(modulated_size * 0.3, 2.0);
+        draw_filled_circle_ctx(world_pos, dot_size, vec4<f32>(blended, 0.85), ctx);
+    }
+
     // 9. ORGAN: Alpha/Beta Sensors - visual marker scaled by sensing radius
     if (amino_props.is_alpha_sensor || amino_props.is_beta_sensor) {
         // Extract organ parameters to calculate actual sensor radius

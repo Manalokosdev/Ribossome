@@ -7,18 +7,11 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Read from agents_out (which is the INPUT buffer, same as agents_in in this bind group)
-    // Reproduction runs BEFORE process_agents, so we read the clean input buffer
-    // and write pairing/energy updates back to it.
     var agent = agents_out[agent_id];
 
     if (agent.alive == 0u) {
         return;
     }
-
-    // ====== REPRODUCTION LOGIC ======
-    // NOTE: Pairing counter advancement happens in process_agents (simulation.wgsl).
-    // This shader only checks if pairing is complete and spawns offspring.
 
     let gene_length = agent.gene_length;
     let genome_offset = agent.genome_offset;
@@ -28,24 +21,19 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_generation = agent.generation;
     let agent_pos = agent.position;
 
-    // Better RNG using hash function with time and agent variation
     let hash_base = (agent_id + params.random_seed) * 747796405u + 2891336453u;
     let hash2 = hash_base ^ (hash_base >> 13u);
     let hash3 = hash2 * 1103515245u;
 
-    // Check if pairing is complete and ready to spawn
     if (pairing_counter >= gene_length && gene_length > 0u) {
-        // Gene splitting logic: when using start/end codons, check if there's a second AUG after a stop codon
         var split_reproduction = false;
-        var first_gene_end: u32 = 0xFFFFFFFFu;  // End of first gene (after stop codon)
-        var second_gene_start: u32 = 0xFFFFFFFFu;  // Start of second gene (second AUG)
+        var first_gene_end: u32 = 0xFFFFFFFFu;
+        var second_gene_start: u32 = 0xFFFFFFFFu;
 
         if (params.require_start_codon == 1u) {
-            // Find the first start codon
             let first_start = genome_find_start_codon(agent_genome_packed, genome_offset, gene_length);
             if (first_start != 0xFFFFFFFFu) {
-                // Scan from after the first AUG until we find a stop codon
-                var scan_pos = first_start + 3u;  // Skip the AUG itself
+                var scan_pos = first_start + 3u;
                 var found_stop = false;
 
                 for (var i = 0u; i < MAX_BODY_PARTS && scan_pos + 2u < GENOME_LENGTH; i++) {
@@ -54,21 +42,17 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         first_gene_end = scan_pos;
                         break;
                     }
-                    // Continue scanning with nucleotide stride (3 bases per codon)
                     scan_pos += 3u;
                 }
 
-                // If we found a stop codon, continue scanning for a second AUG
                 if (found_stop) {
-                    scan_pos = first_gene_end + 3u;  // Start after the stop codon
+                    scan_pos = first_gene_end + 3u;
                     let gene_end = genome_offset + gene_length;
-                    // Scan codon-aligned within the active gene range.
-                    // This avoids out-of-frame hits and reduces work significantly.
                     for (var j = scan_pos; j + 2u < gene_end; j += 3u) {
                         let b0 = genome_get_base_ascii(agent_genome_packed, j, genome_offset, gene_length);
                         let b1 = genome_get_base_ascii(agent_genome_packed, j + 1u, genome_offset, gene_length);
                         let b2 = genome_get_base_ascii(agent_genome_packed, j + 2u, genome_offset, gene_length);
-                        if (b0 == 65u && b1 == 85u && b2 == 71u) {  // AUG
+                        if (b0 == 65u && b1 == 85u && b2 == 71u) {
                             second_gene_start = j;
                             split_reproduction = true;
                             break;
@@ -78,50 +62,36 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        // Calculate how many offspring to create (1 or 2)
         let num_offspring = select(1u, 2u, split_reproduction);
 
-        // Attempt reproduction: create complementary genome offspring with mutations
         let inherited_energy = agent_energy_cur * 0.5;
         if (inherited_energy > 0.0) {
-            // Atomically reserve spawn slots (1 or 2)
-            // spawn_debug_counters[0] is reset to 0 at frame start and tracks total spawns
             let spawn_index = atomicAdd(&spawn_debug_counters[0], num_offspring);
 
-            // Create each offspring (loop 1 or 2 times)
             for (var offspring_idx = 0u; offspring_idx < num_offspring; offspring_idx++) {
                 let current_spawn_index = spawn_index + offspring_idx;
-
-                // Only proceed if we have room in the spawn request buffer
                 if (current_spawn_index >= MAX_SPAWN_REQUESTS) {
                     break;
                 }
 
-                // Determine genome range for this offspring
                 var offspring_gene_offset = genome_offset;
                 var offspring_gene_length = gene_length;
 
                 if (split_reproduction) {
                     if (offspring_idx == 0u) {
-                        // First offspring: from original start to stop codon
                         offspring_gene_length = first_gene_end - genome_offset;
                     } else {
-                        // Second offspring: from second AUG to end of gene
                         offspring_gene_offset = second_gene_start;
                         offspring_gene_length = (genome_offset + gene_length) - second_gene_start;
                     }
                 }
 
-                // Generate hash for offspring randomization (include offspring_idx for uniqueness)
                 let offspring_hash = (hash3 ^ (current_spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu) ^ (offspring_idx * 0x7f4a7c13u)) * 1664525u + 1013904223u;
 
-                // Create brand new offspring agent (don't copy parent)
                 var offspring: Agent;
 
-                // Random rotation
                 offspring.rotation = hash_f32(offspring_hash) * 6.28318530718;
 
-                // Spawn near parent with a small jitter
                 {
                     let jitter_angle = hash_f32(offspring_hash ^ 0xBADC0FFEu) * 6.28318530718;
                     let jitter_dist = 5.0 + hash_f32(offspring_hash ^ 0x1B56C4E9u) * 10.0;
@@ -130,35 +100,28 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 offspring.velocity = vec2<f32>(0.0);
 
-                // Initialize offspring energy; final value assigned after viability check
                 offspring.energy = 0.0;
-
                 offspring.energy_capacity = 0.0;
                 offspring.torque_debug = 0.0;
                 offspring.morphology_origin = vec2<f32>(0.0);
 
-                // Initialize as alive, will build body on first frame
                 offspring.alive = 1u;
-                offspring.body_count = 0u; // Forces morphology rebuild
+                offspring.body_count = 0u;
                 offspring.pairing_counter = 0u;
                 offspring.is_selected = 0u;
-                // Lineage and lifecycle
                 offspring.generation = agent_generation + 1u;
                 offspring.age = 0u;
                 offspring.total_mass = 0.0;
                 offspring.poison_resistant_count = 0u;
 
-                // Default genome metadata.
                 offspring.gene_length = 0u;
                 offspring.genome_offset = 0u;
                 for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
                     offspring.genome_packed[w] = 0u;
                 }
 
-                // Child genome: materialize to a temporary ASCII buffer
                 var offspring_ascii: array<u32, GENOME_ASCII_WORDS>;
                 if (params.asexual_reproduction == 1u) {
-                    // Asexual reproduction: direct copy of bases from the split range
                     for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
                         let bi0 = w * 4u + 0u;
                         let bi1 = w * 4u + 1u;
@@ -171,22 +134,15 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         offspring_ascii[w] = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
                     }
                 } else {
-                    // Sexual reproduction: reverse complement of parent (from split range)
                     for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
                         offspring_ascii[w] = genome_revcomp_ascii_word(agent_genome_packed, offspring_gene_offset, offspring_gene_length, w);
                     }
                 }
 
-                // Beta-driven (radiation) mutation multiplier disabled: mutation rate depends only on
-                // the user slider (params.mutation_rate) and mutation-protection organs.
                 let mutation_multiplier = 1.0;
-
-                // Keep mutation math NaN-safe. In particular, avoid 0 * INF => NaN.
                 let base_mut_rate = sanitize_f32(params.mutation_rate);
                 var effective_mutation_rate = select(base_mut_rate * mutation_multiplier, 0.0, base_mut_rate == 0.0);
 
-                // Mutation Protection organ (type 43): each organ reduces mutation rate by 30%.
-                // Implemented as a multiplicative stack: rate *= 0.7^count.
                 {
                     var mp_count = 0u;
                     let bc = min(agent.body_count, MAX_BODY_PARTS);
@@ -202,7 +158,6 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 effective_mutation_rate = clamp(sanitize_f32(effective_mutation_rate), 0.0, 1.0);
 
-                // Determine active gene region (non-'X' bytes) in offspring after reverse complement
                 var first_non_x: u32 = GENOME_LENGTH;
                 var last_non_x: u32 = 0xFFFFFFFFu;
                 for (var bi = 0u; bi < GENOME_LENGTH; bi++) {
@@ -226,7 +181,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let insert_seed = offspring_hash ^ 0xB5297A4Du;
                     let insert_roll = hash_f32(insert_seed);
                     let can_insert = (last_non_x != 0xFFFFFFFFu);
-                    if (can_insert && insert_roll < (effective_mutation_rate * 0.50)) {
+                    if (can_insert && insert_roll < (effective_mutation_rate * 0.20)) {
                         var seq: array<u32, GENOME_LENGTH>;
                         var L: u32 = 0u;
                         for (var bi = active_start; bi <= active_end; bi++) {
@@ -245,17 +200,17 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             if (mode == 0u) { pos = 0u; }
                             else if (mode == 1u) { pos = L; }
                             else { pos = hash(insert_seed ^ 0x2C9F85A1u) % (L + 1u); }
-                            var j: i32 = i32(L);
+                            var j: u32 = pos;
                             loop {
-                                j = j - 1;
-                                if (j < i32(pos)) { break; }
-                                seq[u32(j) + k] = seq[u32(j)];
+                                if (j + k >= L) { break; }
+                                seq[j + k] = seq[j];
+                                j += 1u;
                             }
                             for (var t = 0u; t < k; t++) {
                                 let nb = get_random_rna_base(insert_seed ^ (t * 1664525u + 1013904223u));
                                 seq[pos + t] = nb;
                             }
-                            L = min(GENOME_LENGTH, L + k);
+                            L += k;
                             var out_bytes: array<u32, GENOME_LENGTH>;
                             for (var t = 0u; t < GENOME_LENGTH; t++) { out_bytes[t] = 88u; }
                             let left_pad = (GENOME_LENGTH - L) / 2u;
@@ -281,7 +236,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let delete_seed = offspring_hash ^ 0xE7037ED1u;
                     let delete_roll = hash_f32(delete_seed);
                     let has_active = (active_end != 0xFFFFFFFFu);
-                    if (has_active && delete_roll < (effective_mutation_rate * 0.50)) {
+                    if (has_active && delete_roll < (effective_mutation_rate * 0.35)) {
                         var seq: array<u32, GENOME_LENGTH>;
                         var L: u32 = 0u;
                         for (var bi = active_start; bi <= active_end; bi++) {
@@ -296,8 +251,8 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let removable = L - MIN_GENE_LENGTH;
                             let k = 3u;
                             if (removable >= k) {
-                                var pos: u32 = 0u;
                                 let mode = hash(delete_seed ^ 0x1B56C4E9u) % 3u;
+                                var pos: u32 = 0u;
                                 if (mode == 0u) { pos = 0u; }
                                 else if (mode == 1u) { pos = L - k; }
                                 else { pos = hash(delete_seed ^ 0x2C9F85A1u) % (L - k + 1u); }
@@ -305,9 +260,9 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 loop {
                                     if (j + k >= L) { break; }
                                     seq[j] = seq[j + k];
-                                    j = j + 1u;
+                                    j += 1u;
                                 }
-                                L = L - k;
+                                L -= k;
                                 var out_bytes: array<u32, GENOME_LENGTH>;
                                 for (var t = 0u; t < GENOME_LENGTH; t++) { out_bytes[t] = 88u; }
                                 let left_pad = (GENOME_LENGTH - L) / 2u;
@@ -348,7 +303,178 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
 
-                // Compute and cache gene_length once for the offspring.
+                // Optional X-mutation: mutate padding 'X's and incorporate if valid + adjacent
+                {
+                    let x_mut_rate = effective_mutation_rate * 0.5;
+                    var new_active_start = active_start;
+                    var new_active_end = active_end;
+
+                    var left_pos = active_start;
+                    while (left_pos > 0u) {
+                        left_pos -= 1u;
+                        let word = left_pos / 4u;
+                        let byte_offset = left_pos % 4u;
+                        let b = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
+                        if (b != 88u) { break; }
+
+                        let mut_seed = offspring_hash ^ (left_pos * 0x12345678u);
+                        let mut_chance = hash_f32(mut_seed);
+                        if (mut_chance < x_mut_rate) {
+                            let new_base = get_random_rna_base(mut_seed * 1664525u);
+                            let mask = ~(0xFFu << (byte_offset * 8u));
+                            let current_word = offspring_ascii[word];
+                            let updated_word = (current_word & mask) | (new_base << (byte_offset * 8u));
+                            offspring_ascii[word] = updated_word;
+                            mutated_count += 1u;
+                            new_active_start = left_pos;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    var right_pos = active_end;
+                    while (right_pos + 1u < GENOME_LENGTH) {
+                        right_pos += 1u;
+                        let word = right_pos / 4u;
+                        let byte_offset = right_pos % 4u;
+                        let b = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
+                        if (b != 88u) { break; }
+
+                        let mut_seed = offspring_hash ^ (right_pos * 0x87654321u);
+                        let mut_chance = hash_f32(mut_seed);
+                        if (mut_chance < x_mut_rate) {
+                            let new_base = get_random_rna_base(mut_seed * 1664525u);
+                            let mask = ~(0xFFu << (byte_offset * 8u));
+                            let current_word = offspring_ascii[word];
+                            let updated_word = (current_word & mask) | (new_base << (byte_offset * 8u));
+                            offspring_ascii[word] = updated_word;
+                            mutated_count += 1u;
+                            new_active_end = right_pos;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if (new_active_start != active_start || new_active_end != active_end) {
+                        active_start = new_active_start;
+                        active_end = new_active_end;
+                    }
+                }
+
+                // Optional active-to-X mutation: low-prob point deletions, with split handling
+                {
+                    let x_delete_rate = effective_mutation_rate * 0.2;
+
+                    if (active_end != 0xFFFFFFFFu) {
+                        for (var bi = active_start; bi <= active_end; bi++) {
+                            let delete_seed = offspring_hash ^ (bi * 0xFEDCBA98u);
+                            let delete_chance = hash_f32(delete_seed);
+                            if (delete_chance < x_delete_rate) {
+                                let word = bi / 4u;
+                                let byte_offset = bi % 4u;
+                                let mask = ~(0xFFu << (byte_offset * 8u));
+                                let current_word = offspring_ascii[word];
+                                let updated_word = (current_word & mask) | (88u << (byte_offset * 8u));
+                                offspring_ascii[word] = updated_word;
+                                mutated_count += 1u;
+                            }
+                        }
+
+                        var pieces: array<u32, 8>;
+                        var piece_count = 0u;
+                        var in_active = false;
+                        var curr_start = 0u;
+
+                        for (var bi = 0u; bi < GENOME_LENGTH; bi++) {
+                            let word = bi / 4u;
+                            let byte_offset = bi % 4u;
+                            let b = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
+
+                            if (b != 88u) {
+                                if (!in_active) {
+                                    in_active = true;
+                                    curr_start = bi;
+                                }
+                            } else {
+                                if (in_active) {
+                                    in_active = false;
+                                    let piece_len = bi - curr_start;
+                                    if (piece_len >= MIN_GENE_LENGTH) {
+                                        if (piece_count < 8u) {
+                                            pieces[piece_count] = curr_start;
+                                            pieces[piece_count + 1u] = bi - 1u;
+                                            piece_count += 2u;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (in_active) {
+                            let piece_len = GENOME_LENGTH - curr_start;
+                            if (piece_len >= MIN_GENE_LENGTH) {
+                                if (piece_count < 8u) {
+                                    pieces[piece_count] = curr_start;
+                                    pieces[piece_count + 1u] = GENOME_LENGTH - 1u;
+                                    piece_count += 2u;
+                                }
+                            }
+                        }
+
+                        if (piece_count > 0u) {
+                            var max_len = 0u;
+                            var best_piece_idx = 0u;
+                            var best_has_start = false;
+
+                            for (var p = 0u; p < piece_count; p += 2u) {
+                                let p_start = pieces[p];
+                                let p_end = pieces[p + 1u];
+                                let p_len = p_end - p_start + 1u;
+
+                                var has_start = false;
+                                var scan_pos = p_start;
+                                loop {
+                                    if (scan_pos + 2u > p_end) { break; }
+                                    let b0 = (offspring_ascii[scan_pos / 4u] >> ((scan_pos % 4u) * 8u)) & 0xFFu;
+                                    let b1 = (offspring_ascii[(scan_pos + 1u) / 4u] >> (((scan_pos + 1u) % 4u) * 8u)) & 0xFFu;
+                                    let b2 = (offspring_ascii[(scan_pos + 2u) / 4u] >> (((scan_pos + 2u) % 4u) * 8u)) & 0xFFu;
+                                    if (b0 == 65u && b1 == 85u && b2 == 71u) {
+                                        has_start = true;
+                                        break;
+                                    }
+                                    scan_pos += 3u;
+                                }
+
+                                if (p_len > max_len || (p_len == max_len && has_start && !best_has_start)) {
+                                    max_len = p_len;
+                                    best_piece_idx = p;
+                                    best_has_start = has_start;
+                                }
+                            }
+
+                            active_start = pieces[best_piece_idx];
+                            active_end = pieces[best_piece_idx + 1u];
+
+                            for (var p = 0u; p < piece_count; p += 2u) {
+                                if (p != best_piece_idx) {
+                                    let d_start = pieces[p];
+                                    let d_end = pieces[p + 1u];
+                                    for (var bi = d_start; bi <= d_end; bi++) {
+                                        let word = bi / 4u;
+                                        let byte_offset = bi % 4u;
+                                        let mask = ~(0xFFu << (byte_offset * 8u));
+                                        let current_word = offspring_ascii[word];
+                                        let updated_word = (current_word & mask) | (88u << (byte_offset * 8u));
+                                        offspring_ascii[word] = updated_word;
+                                    }
+                                }
+                            }
+                        } else {
+                            active_start = 0u;
+                            active_end = 0xFFFFFFFFu;
+                        }
+                    }
+                }
+
                 if (active_end != 0xFFFFFFFFu) {
                     offspring.gene_length = active_end - active_start + 1u;
                     offspring.genome_offset = active_start;
@@ -357,7 +483,6 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     offspring.genome_offset = 0u;
                 }
 
-                // Pack ASCII offspring genome into 2-bit packed representation.
                 {
                     var packed: array<u32, GENOME_PACKED_WORDS>;
                     for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
@@ -379,13 +504,9 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
 
-                // Offspring receives energy split evenly among all offspring
-                // If 1 offspring: gets 50% of parent energy
-                // If 2 offspring: each gets 25% of parent energy (50% total)
                 let energy_per_offspring = inherited_energy / f32(num_offspring);
                 offspring.energy = energy_per_offspring;
 
-                // Initialize body array to zeros
                 for (var bi = 0u; bi < MAX_BODY_PARTS; bi++) {
                     offspring.body[bi].pos = vec2<f32>(0.0);
                     offspring.body[bi].data = 0.0;
@@ -397,14 +518,9 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
 
                 new_agents[current_spawn_index] = offspring;
-            } // End offspring loop
+            }
 
-            // Parent loses energy for all offspring created
             agent_energy_cur -= inherited_energy;
-
-            // NOTE: Do NOT update parent here! Reproduction writes to a different buffer
-            // than process_agents, so these updates would be lost.
-            // Instead, process_agents detects spawn completion and handles energy/counter reset.
         }
     }
 }
