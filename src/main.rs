@@ -4112,6 +4112,7 @@ struct GpuState {
     snapshot_save_requested: bool,
     snapshot_load_requested: bool,
     screenshot_4k_requested: bool,
+    screenshot_requested: bool,
     // Resolution change state
     pending_resolution_change: Option<u32>, // If Some(res), reset with new resolution
     // Visual buffer stride (pixels per row)
@@ -7538,6 +7539,7 @@ impl GpuState {
             snapshot_save_requested: false,
             snapshot_load_requested: false,
             screenshot_4k_requested: false,
+            screenshot_requested: false,
             pending_resolution_change: None,
             visual_stride_pixels,
             alpha_blur: settings.alpha_blur,
@@ -11346,6 +11348,94 @@ impl GpuState {
         Ok(())
     }
 
+    fn capture_screenshot(&mut self) -> anyhow::Result<()> {
+        // Capture the current visual_grid texture as-is (no tiling, just the current view)
+        let texture_size = self.visual_grid_texture.size();
+        let width = texture_size.width;
+        let height = texture_size.height;
+
+        // Create a buffer to read the texture data
+        let buffer_size = (width * height * 4) as u64; // RGBA, 1 byte per channel
+        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Screenshot Output Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Screenshot Encoder"),
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &self.visual_grid_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &output_buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+            },
+            texture_size,
+        );
+
+        self.queue.submit(Some(encoder.finish()));
+
+        // Map the buffer and read the data
+        let buffer_slice = output_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()??;
+
+        let data = buffer_slice.get_mapped_range();
+        let mut rgba_data: Vec<u8> = data.to_vec();
+        drop(data);
+        output_buffer.unmap();
+
+        // Convert BGRA to RGBA if needed (wgpu texture format dependent)
+        for chunk in rgba_data.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        // Create screenshots directory if it doesn't exist
+        std::fs::create_dir_all("screenshots")?;
+        
+        let filename = format!("screenshots/screenshot_{}x{}_{}_{}.jpg", width, height, self.run_name, timestamp);
+
+        let img = image::RgbaImage::from_raw(width, height, rgba_data)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create image from buffer"))?;
+        
+        // Convert to RGB and save as JPEG with 90% quality
+        let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
+        let mut output = std::fs::File::create(&filename)?;
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 90);
+        encoder.encode(
+            rgb_img.as_raw(),
+            rgb_img.width(),
+            rgb_img.height(),
+            image::ColorType::Rgb8,
+        )?;
+        
+        println!("📸 Screenshot saved: {}", filename);
+        Ok(())
+    }
+
     fn capture_4k_screenshot(&mut self) -> anyhow::Result<()> {
         // wgpu enforces a max storage-buffer binding size (commonly 128 MiB).
         // A single 4096x4096 RGBA32F buffer is 256 MiB, so we render in tiles and stitch.
@@ -13864,7 +13954,16 @@ fn main() {
                                                     state.snapshot_load_requested = true;
                                                 }
                                                 if ui
-                                                    .button("🖼️ 4K Screenshot")
+                                                    .button("� Screenshot")
+                                                    .on_hover_text(
+                                                        "Capture current view as JPEG",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    state.screenshot_requested = true;
+                                                }
+                                                if ui
+                                                    .button("�🖼️ 4K Screenshot")
                                                     .on_hover_text(
                                                         "Capture a full-world 4096×4096 PNG (tiled render)",
                                                     )
@@ -16001,11 +16100,16 @@ fn main() {
                             }
 
                             let mut screenshot_requested = false;
+                            let mut screenshot_4k_requested = false;
 
                             if let Some(gpu_state) = &mut self.state {
+                                if gpu_state.screenshot_requested {
+                                    gpu_state.screenshot_requested = false;
+                                    screenshot_requested = true;
+                                }
                                 if gpu_state.screenshot_4k_requested {
                                     gpu_state.screenshot_4k_requested = false;
-                                    screenshot_requested = true;
+                                    screenshot_4k_requested = true;
                                 }
 
                                 // Auto-snapshot every AUTO_SNAPSHOT_INTERVAL epochs.
@@ -16101,6 +16205,15 @@ fn main() {
                             }
 
                             if screenshot_requested {
+                                if let Some(gpu_state) = self.state.as_mut() {
+                                    println!("Capturing screenshot...");
+                                    if let Err(e) = gpu_state.capture_screenshot() {
+                                        eprintln!("Screenshot failed: {e:?}");
+                                    }
+                                }
+                            }
+
+                            if screenshot_4k_requested {
                                 if let Some(gpu_state) = self.state.as_mut() {
                                     println!("Capturing 4K screenshot...");
                                     if let Err(e) = gpu_state.capture_4k_screenshot() {
