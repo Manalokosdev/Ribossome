@@ -79,6 +79,8 @@ Ribossome is more than a toy; it's a controlled demonstration that a body-as-gen
 
 Extract and run `ribossome.exe` - GPU-accelerated evolution starts immediately!
 
+> **Note:** Windows SmartScreen will show a warning because the executable is not code-signed (certificates are expensive). Click **"More info"** → **"Run anyway"**. This is normal for unsigned open-source software.
+
 ### Build from Source
 
 > **Disclaimer (LLM-generated instructions):** This section was drafted with help from a large language model and may be incomplete or out of date on some systems.
