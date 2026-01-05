@@ -83,7 +83,7 @@ The first run may take 10–60 seconds due to shader compilation (normal for lar
 
 Watch Ribossome in action - **[▶️ Click here to view the video](https://github.com/Manalokosdev/Ribossome/raw/main/site-content/recording_900x900_Ribossome_Serenus-Rupes-5872_20260105_131652_880UTC_1767619039.mp4)** (80MB MP4)
 
-> *Note: GitHub doesn't support embedded video players in READMEs. The link above will download the video for viewing.*
+> *Note: The recording feature supports both MP4 and GIF formats. Use the 🎬 Recording panel (accessible from the UI) to capture simulations directly. GIF format is ideal for creating embeddable animated previews for documentation.*
 
 ## Controls
 
