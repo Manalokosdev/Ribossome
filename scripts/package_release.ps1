@@ -27,6 +27,11 @@ Copy-Item ".\config" -Destination "$packageDir\config" -Recurse
 Copy-Item ".\shaders" -Destination "$packageDir\shaders" -Recurse
 Copy-Item ".\maps" -Destination "$packageDir\maps" -Recurse
 
+Write-Host "Copying autosave snapshot..." -ForegroundColor Cyan
+if (Test-Path ".\autosave_snapshot.png") {
+    Copy-Item ".\autosave_snapshot.png" -Destination "$packageDir\autosave_snapshot.png"
+}
+
 Write-Host "Copying documentation..." -ForegroundColor Cyan
 Copy-Item ".\docs\README.md" -Destination "$packageDir\README.md"
 Copy-Item ".\docs\LICENSE" -Destination "$packageDir\LICENSE" -ErrorAction SilentlyContinue
