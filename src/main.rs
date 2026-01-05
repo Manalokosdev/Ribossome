@@ -4141,6 +4141,7 @@ struct GpuState {
     recording: bool,
     recording_fps: u32,
     recording_size: u32,
+    recording_format: RecordingFormat,  // MP4 or GIF
     recording_show_ui: bool,
     recording_bar_visible: bool,
     recording_center_norm: [f32; 2],
@@ -4294,6 +4295,12 @@ struct GpuState {
 
 const FULL_SPEED_PRESENT_INTERVAL_MICROS: u64 = 16_667; // ~60 Hz
 const EGUI_UPDATE_INTERVAL_MICROS: u64 = 33_333; // ~30 Hz
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingFormat {
+    MP4,
+    GIF,
+}
 
 struct RecordingPipe {
     child: Child,
@@ -7627,6 +7634,7 @@ impl GpuState {
             recording: false,
             recording_fps: 30,
             recording_size: 720,
+            recording_format: RecordingFormat::MP4,
             recording_show_ui: false,
             recording_bar_visible: false,
             recording_center_norm: [0.5, 0.5],
@@ -11734,35 +11742,59 @@ impl GpuState {
         );
         let in_pix_fmt: &'static str = if swap_is_bgra { "bgra" } else { "rgba" };
 
-        let output_path = PathBuf::from(format!(
-            "recordings/recording_{}x{}_{}_{}.mp4",
-            side, side, self.run_name, timestamp
-        ));
-
-        // Stream raw frames to ffmpeg over stdin.
-        // NOTE: This requires `ffmpeg` to be available in PATH.
-        let mut cmd = Command::new("ffmpeg");
-        cmd.arg("-y")
-            .arg("-f")
-            .arg("rawvideo")
-            .arg("-pix_fmt")
-            .arg(in_pix_fmt)
-            .arg("-s")
-            .arg(format!("{}x{}", side, side))
-            .arg("-r")
-            .arg(format!("{}", fps))
-            .arg("-i")
-            .arg("-")
-            .arg("-an")
-            .arg("-c:v")
-            .arg("libx264")
-            .arg("-preset")
-            .arg("veryfast")
-            .arg("-crf")
-            .arg("18")
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            ;
+        let (output_path, mut cmd) = match self.recording_format {
+            RecordingFormat::MP4 => {
+                let path = PathBuf::from(format!(
+                    "recordings/recording_{}x{}_{}_{}.mp4",
+                    side, side, self.run_name, timestamp
+                ));
+                let mut cmd = Command::new("ffmpeg");
+                cmd.arg("-y")
+                    .arg("-f")
+                    .arg("rawvideo")
+                    .arg("-pix_fmt")
+                    .arg(in_pix_fmt)
+                    .arg("-s")
+                    .arg(format!("{}x{}", side, side))
+                    .arg("-r")
+                    .arg(format!("{}", fps))
+                    .arg("-i")
+                    .arg("-")
+                    .arg("-an")
+                    .arg("-c:v")
+                    .arg("libx264")
+                    .arg("-preset")
+                    .arg("veryfast")
+                    .arg("-crf")
+                    .arg("18")
+                    .arg("-pix_fmt")
+                    .arg("yuv420p");
+                (path, cmd)
+            }
+            RecordingFormat::GIF => {
+                let path = PathBuf::from(format!(
+                    "recordings/recording_{}x{}_{}_{}.gif",
+                    side, side, self.run_name, timestamp
+                ));
+                let mut cmd = Command::new("ffmpeg");
+                cmd.arg("-y")
+                    .arg("-f")
+                    .arg("rawvideo")
+                    .arg("-pix_fmt")
+                    .arg(in_pix_fmt)
+                    .arg("-s")
+                    .arg(format!("{}x{}", side, side))
+                    .arg("-r")
+                    .arg(format!("{}", fps))
+                    .arg("-i")
+                    .arg("-")
+                    .arg("-vf")
+                    .arg("split[s0][s1];[s0]palettegen=max_colors=256[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5")
+                    .arg("-loop")
+                    .arg("0");  // Loop forever
+                (path, cmd)
+            }
+        };
 
         let mut child = cmd
             .arg(output_path.to_string_lossy().to_string())
@@ -11772,7 +11804,7 @@ impl GpuState {
             .spawn()
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to start ffmpeg (is it installed and on PATH?): {e}. Install ffmpeg or add it to PATH to record MP4."
+                    "Failed to start ffmpeg (is it installed and on PATH?): {e}. Install ffmpeg or add it to PATH to record videos."
                 )
             })?;
 
@@ -14538,6 +14570,28 @@ fn main() {
                                                     }
                                                 });
 
+                                                // Simulation Speed controls (4th row)
+                                                ui.horizontal(|ui| {
+                                                    let mut mode = state.current_mode;
+                                                    ui.selectable_value(&mut mode, 3, "Slow");
+                                                    ui.selectable_value(&mut mode, 0, "VSync");
+                                                    ui.selectable_value(&mut mode, 1, "Full Speed");
+                                                    ui.selectable_value(&mut mode, 2, "Fast Draw");
+                                                    if mode != state.current_mode {
+                                                        state.set_speed_mode(mode);
+                                                    }
+                                                });
+                                                if state.current_mode == 2 {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("Draw every");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.render_interval, 1..=10000)
+                                                                .logarithmic(true)
+                                                                .suffix(" steps")
+                                                        );
+                                                    });
+                                                }
+
                                                 ui.horizontal(|ui| {
                                                     if ui.button("📷 Save Snapshot").clicked() {
                                                         state.snapshot_save_requested = true;
@@ -14653,25 +14707,6 @@ fn main() {
                                             }
 
                                             ui.separator();
-                                            ui.heading("Simulation Speed");
-                                            let mut mode = state.current_mode;
-                                            let old_mode = mode;
-                                            ui.horizontal(|ui| {
-                                                ui.selectable_value(&mut mode, 3, "Slow (25 FPS)");
-                                                ui.selectable_value(&mut mode, 0, "VSync (60 FPS)");
-                                                ui.selectable_value(&mut mode, 1, "Full Speed");
-                                                ui.selectable_value(&mut mode, 2, "Fast Draw");
-                                            });
-                                            if mode != old_mode {
-                                                state.set_speed_mode(mode);
-                                            }
-                                            if mode == 2 {
-                                                ui.add(
-                                                    egui::Slider::new(&mut state.render_interval, 1..=10000)
-                                                        .text("Draw every N steps")
-                                                        .logarithmic(true),
-                                                );
-                                            }
                                             ui.label(format!("Epoch: {}", state.epoch));
                                             ui.label(format!(
                                                 "Epochs/sec: {:.1}",
@@ -16484,6 +16519,20 @@ fn main() {
                                                                 ui.selectable_value(&mut state.recording_fps, 24, "24");
                                                                 ui.selectable_value(&mut state.recording_fps, 30, "30");
                                                                 ui.selectable_value(&mut state.recording_fps, 60, "60");
+                                                            });
+                                                    });
+
+                                                    ui.separator();
+                                                    ui.label("Format:");
+                                                    ui.add_enabled_ui(!state.recording, |ui| {
+                                                        egui::ComboBox::from_id_salt("format_combo")
+                                                            .selected_text(match state.recording_format {
+                                                                RecordingFormat::MP4 => "MP4",
+                                                                RecordingFormat::GIF => "GIF",
+                                                            })
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(&mut state.recording_format, RecordingFormat::MP4, "MP4");
+                                                                ui.selectable_value(&mut state.recording_format, RecordingFormat::GIF, "GIF");
                                                             });
                                                     });
 
