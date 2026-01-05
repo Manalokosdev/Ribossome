@@ -1812,10 +1812,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             let direction = delta / dist; // Normalize
 
-            // Use reduced mass for proper two-body physics: Î¼ = (m1 * m2) / (m1 + m2)
-            let reduced_mass = (total_mass * neighbor_mass) / (total_mass + neighbor_mass);
-
-            force += direction * clamped_force * reduced_mass;
+            // In overdamped regime with drag ∝ mass, velocity = force / (drag * mass).
+            // Each agent calculates its own repulsion from neighbors.
+            // The drag coefficient already scales with mass, so we don't need reduced mass here.
+            // This gives proper two-body physics: heavy agents move less, light agents move more.
+            force += direction * clamped_force;
         }
     }
 
