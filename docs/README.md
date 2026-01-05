@@ -108,7 +108,22 @@ Contributions are welcome! See CONTRIBUTING.md for guidelines.
 
 ## Acknowledgments
 
-Built with Rust, wgpu, egui, and a lot of passion for artificial life.
+### Core Technologies
+- Built with [Rust](https://www.rust-lang.org/) and powered by [wgpu](https://wgpu.rs/) for GPU acceleration
+- User interface by [egui](https://github.com/emilk/egui) (Emil Ernerfeldt)
+- Video recording via [FFmpeg](https://ffmpeg.org/)
+- WGSL shader development aided by [Arsiliath's WGSL workshop](https://x.com/arsiliath)
+
+### Inspiration & Algorithms
+- **Thomas S. Ray** - Tierra digital evolution system inspired the body-as-genome concept
+- **Jos Stam** - "Stable Fluids" algorithm for real-time Navier-Stokes simulation
+- **E.M. Purcell** - "Life at Low Reynolds Number" informed microswimming physics
+- **Karl Sims** - Evolved virtual creatures demonstrated the power of morphological evolution
+- The **RNA World hypothesis** and early biochemistry research inspired the nucleotide→codon→amino acid translation metaphor
+- Inspired by [this RNA world visualization](https://www.youtube.com/watch?v=K1xnYFCZ9Yg&t=116s)
+
+### Special Thanks
+Developed with passion for artificial life by Filipe da Veiga Ventura Alves since 2019.
 
 ---
 
