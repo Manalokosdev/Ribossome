@@ -73,6 +73,14 @@ Ribossome is more than a toy; it's a controlled demonstration that a body-as-gen
 
 ## Building & Running
 
+### Download Pre-built Release
+
+**[📦 Download Ribossome v0.1.0](https://github.com/Manalokosdev/Ribossome/releases/latest)** - Windows x64 (no installation required)
+
+Extract and run `ribossome.exe` - GPU-accelerated evolution starts immediately!
+
+### Build from Source
+
 Requirements:
 - Rust toolchain (stable)
 - A GPU with WebGPU support (modern NVIDIA/AMD/Intel, or Vulkan/Metal/DX12)
