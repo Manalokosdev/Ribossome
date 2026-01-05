@@ -40,6 +40,9 @@ The entire simulation runs on the GPU via large WGSL compute shaders. On an RTX 
 
 From random initial genomes, coherent life appears rapidly: graceful microswimmers, propeller-driven cruisers, trail-following predators, vampire energy thieves, symbiotic partnerships, and self-regulating ecosystems. Complementary reproduction adds another layer—lineages must evolve genomes viable in both strands, often leading to paired "species" that alternately dominate or to rapid diversification when one strand proves superior.
 
+![Ribossome Simulation](../site-content/demo.gif)
+*Live simulation showing evolved agents swimming, feeding, and reproducing*
+
 Ribossome is more than a toy; it's a controlled demonstration that a body-as-genome paradigm, combined with energy constraints, local physical interactions, and optional complementary inheritance, is sufficient to bootstrap open-ended evolutionary complexity from almost nothing.
 
 ## Features
