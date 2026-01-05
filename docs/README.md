@@ -81,17 +81,59 @@ Extract and run `ribossome.exe` - GPU-accelerated evolution starts immediately!
 
 ### Build from Source
 
+> **Disclaimer (LLM-generated instructions):** This section was drafted with help from a large language model and may be incomplete or out of date on some systems.
+> If you run into build or runtime issues, please ask the latest LLMs (or GitHub Copilot) and include your OS, GPU model, driver version, and the full error output.
+
 Requirements:
 - Rust toolchain (stable)
 - A GPU with WebGPU support (modern NVIDIA/AMD/Intel, or Vulkan/Metal/DX12)
 
 ```bash
 git clone https://github.com/Manalokosdev/Ribossome.git
-cd ribossome
+cd Ribossome
+
+# Development build (faster compile, slower runtime)
+cargo run
+
+# Optimized build (slower compile, faster runtime)
 cargo run --release
 ```
 
 The first run may take 10–60 seconds due to shader compilation (normal for large WGSL shaders). Subsequent runs are instant.
+
+#### Platform Notes
+
+**Windows (recommended toolchain: MSVC)**
+- Install Rust via https://rustup.rs (choose the default MSVC toolchain).
+- Install Git.
+- Install Visual Studio Build Tools (or Visual Studio) with **Desktop development with C++**.
+- Update your GPU drivers (this fixes many wgpu/DX12/Vulkan startup issues).
+
+**Linux (Ubuntu/Debian quick deps)**
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config \
+	libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev libudev-dev
+```
+Then install Rust via https://rustup.rs and run the commands above.
+
+**macOS**
+```bash
+xcode-select --install
+```
+Then install Rust via https://rustup.rs and run the commands above.
+
+#### Troubleshooting
+
+- If the build fails with linker/toolchain errors on Windows, double-check that the **C++ build tools** are installed.
+- If the app starts but shows a blank window / crashes early, update GPU drivers first.
+- If you suspect a backend issue, try forcing a backend:
+	- Windows PowerShell: `setx WGPU_BACKEND dx12` (or `vulkan`), then restart the terminal.
+	- Linux/macOS: `export WGPU_BACKEND=vulkan` (macOS typically uses Metal by default).
+- Recording requires FFmpeg. If recordings fail, install FFmpeg and try again:
+	- Windows: `choco install ffmpeg` (or install it manually and ensure it’s on PATH)
+	- macOS: `brew install ffmpeg`
+	- Ubuntu/Debian: `sudo apt install ffmpeg`
 
 ## Video Demo
 
