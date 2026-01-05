@@ -1760,9 +1760,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let max_repulsion_distance = 500.0;
 
         if (dist < max_repulsion_distance && dist > 0.1) {
-            // Calculate attractor/repulsor modifier for this agent
-            // Sum all attractor/repulsor organs (type 45) force strengths
-            var attractor_strength = 0.0;
+            // Calculate attractor/repulsor mass modifier for this agent
+            // QD organs make agent appear heavier (stronger repulsion, resists being pushed)
+            // QE organs make agent appear lighter (weaker repulsion, easily pushed)
+            var mass_modifier = 1.0;
             let this_body_count = min(agents_out[agent_id].body_count, MAX_BODY_PARTS);
             for (var i = 0u; i < this_body_count; i++) {
                 let part = agents_out[agent_id].body[i];
@@ -1773,50 +1774,39 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let modifier_index = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
 
                     // Fixed polarity by modifier:
-                    // - QD (modifier D = 2) => attract
-                    // - QE (modifier E = 3) => repel
-                    // This avoids relying on param1 variation.
+                    // - QD (modifier D = 2) => heavier (resist being pushed, push others harder)
+                    // - QE (modifier E = 3) => lighter (easily pushed, weak push on others)
                     let is_d = modifier_index == 2u;
                     let is_e = modifier_index == 3u;
                     let strength = select(0.0, select(-1.0, 1.0, is_d), is_d || is_e);
 
-                    // Modulate by enabler activation (same metric used elsewhere):
-                    // per-part amplification computed from nearby enablers.
+                    // Modulate by enabler activation
                     let enabler_activation = clamp(amplification_per_part[i], 0.0, 1.0);
-                    attractor_strength += strength * enabler_activation;
+                    mass_modifier += strength * enabler_activation * 2.0; // ±2x per organ max
                 }
             }
 
-            // NaN guard (defensive): if anything went off the rails, don't poison physics.
-            var attractor_strength_safe = attractor_strength;
-            if (attractor_strength_safe != attractor_strength_safe) {
-                attractor_strength_safe = 0.0;
-            }
+            // Sanitize mass modifier to prevent division by zero
+            // Clamp to reasonable range: 0.01x to 10x effective mass
+            mass_modifier = clamp(mass_modifier, 0.01, 10.0);
+
+            // Calculate effective mass for this interaction
+            let effective_mass = total_mass * mass_modifier;
 
             // Inverse square repulsion: F = k / (d^2)
             let base_strength = params.agent_repulsion_strength * 100000.0;
-
-            // Apply attractor/repulsor modification (2x multiplier)
-            // Negative strength = stronger repulsion, Positive = attraction (negative force)
-            // Clamp the scaled term to keep forces stable and NaN-free.
-            let attractor_term = clamp(attractor_strength_safe * 2.0, -4.0, 4.0);
-            let modified_strength = base_strength * (1.0 - attractor_term);
-            let force_magnitude = modified_strength / (dist * dist);
+            let force_magnitude = base_strength / (dist * dist);
 
             // Clamp to prevent extreme forces at very small distances
-            var safe_force_magnitude = force_magnitude;
-            if (safe_force_magnitude != safe_force_magnitude) {
-                safe_force_magnitude = 0.0;
-            }
-            let clamped_force = min(abs(safe_force_magnitude), 5000.0) * sign(safe_force_magnitude);
+            let clamped_force = min(abs(force_magnitude), 5000.0) * sign(force_magnitude);
 
             let direction = delta / dist; // Normalize
 
-            // In overdamped regime with drag ∝ mass, velocity = force / (drag * mass).
-            // Each agent calculates its own repulsion from neighbors.
-            // The drag coefficient already scales with mass, so we don't need reduced mass here.
-            // This gives proper two-body physics: heavy agents move less, light agents move more.
-            force += direction * clamped_force;
+            // In overdamped regime: velocity = force / drag, drag = effective_mass * k
+            // Heavier effective mass → less velocity change from same force
+            // Lighter effective mass → more velocity change from same force
+            // Scale force by inverse of mass modifier so it gets divided by effective drag later
+            force += direction * clamped_force / mass_modifier;
         }
     }
 
