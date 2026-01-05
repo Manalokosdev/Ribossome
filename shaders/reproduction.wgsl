@@ -200,11 +200,13 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             if (mode == 0u) { pos = 0u; }
                             else if (mode == 1u) { pos = L; }
                             else { pos = hash(insert_seed ^ 0x2C9F85A1u) % (L + 1u); }
-                            var j: u32 = pos;
+                            // Shift right by k starting from the end to avoid overwrite.
+                            // Forward shifting would smear values and create artificial repeats.
+                            var j: u32 = L;
                             loop {
-                                if (j + k >= L) { break; }
+                                if (j == pos) { break; }
+                                j -= 1u;
                                 seq[j + k] = seq[j];
-                                j += 1u;
                             }
                             for (var t = 0u; t < k; t++) {
                                 let nb = get_random_rna_base(insert_seed ^ (t * 1664525u + 1013904223u));
