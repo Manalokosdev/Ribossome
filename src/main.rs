@@ -15481,28 +15481,30 @@ fn main() {
                                                         let base_beta = state.difficulty.beta_rain.apply_to(state.beta_multiplier, true);
 
                                                         let time = state.epoch as f64;
-                                                        let points = 500;
+                                                        let points = 1000;
                                                         let alpha_points: PlotPoints = (0..points).map(|i| {
-                                                            let t = time + i as f64;
+                                                            let t = time + i as f64 * 10.0;
                                                             let freq = state.alpha_rain_freq as f64 / 1000.0;
                                                             let phase = state.alpha_rain_phase as f64;
                                                             let sin_val = (t * freq * 2.0 * std::f64::consts::PI + phase).sin();
                                                             let val = base_alpha as f64 * (1.0 + sin_val * state.alpha_rain_variation as f64).max(0.0);
-                                                            [i as f64, val]
+                                                            [t, val]
                                                         }).collect();
 
                                                         let beta_points: PlotPoints = (0..points).map(|i| {
-                                                            let t = time + i as f64;
+                                                            let t = time + i as f64 * 10.0;
                                                             let freq = state.beta_rain_freq as f64 / 1000.0;
                                                             let phase = state.beta_rain_phase as f64;
                                                             let sin_val = (t * freq * 2.0 * std::f64::consts::PI + phase).sin();
                                                             let val = base_beta as f64 * (1.0 + sin_val * state.beta_rain_variation as f64).max(0.0);
-                                                            [i as f64, val]
+                                                            [t, val]
                                                         }).collect();
 
                                                         Plot::new("rain_plot_future")
                                                             .view_aspect(2.0)
-                                                            .auto_bounds([false, true].into())
+                                                            .auto_bounds([true, true].into())
+                                                            .include_x(time)
+                                                            .include_x(time + 10000.0)
                                                             .show(ui, |plot_ui| {
                                                                 plot_ui.line(Line::new(alpha_points).name("Alpha").color(Color32::GREEN));
                                                                 plot_ui.line(Line::new(beta_points).name("Beta").color(Color32::RED));
