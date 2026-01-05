@@ -381,7 +381,7 @@ fn render_body_part_ctx(
         let spike_radius = 20.0;
         let spike_count = 12u; // 12 spikes around the organ
         let spike_color = vec3<f32>(0.3, 0.8, 0.4); // Greenish
-        
+
         for (var i = 0u; i < spike_count; i++) {
             let angle = (f32(i) / f32(spike_count)) * 6.28318530718; // 2*PI
             let spike_end = world_pos + vec2<f32>(cos(angle), sin(angle)) * spike_radius;
@@ -737,6 +737,8 @@ fn inspector_clip_screen(ctx: InspectorContext) -> vec4<i32> {
     return vec4<i32>(bx.x - offx, bx.y - offx, by.x - offy, by.y - offy);
 }
 
+
+
 // Helper function to draw a line directly in screen-space coordinates (pixels)
 fn draw_screen_line(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
     if (params.draw_enabled == 0u) { return; }
@@ -749,14 +751,12 @@ fn draw_screen_line(p0: vec2<i32>, p1: vec2<i32>, color: vec4<f32>) {
     let sy = select(-1, 1, p0.y < p1.y);
     var err = dx - dy;
 
-    // Bresenham's line algorithm
     loop {
-        // Draw pixel if within bounds
-        if (x >= 0 && x < i32(params.window_width) && y >= 0 && y < i32(params.window_height)) {
-            let idx = y * i32(params.window_width) + x;
-            if (idx >= 0 && idx < i32(arrayLength(&visual_grid))) {
-                visual_grid[idx] = color;
-            }
+        var screen_pos = vec2<i32>(x, y);
+        if (screen_pos.x >= 0 && screen_pos.x < i32(params.window_width) &&
+            screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
+            let idx = screen_to_grid_index(screen_pos);
+            agent_grid[idx] = color;
         }
 
         if (x == p1.x && y == p1.y) {
@@ -868,8 +868,10 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
                 gradient_t = t / len;
             }
 
-            // Check if pixel is within capsule radius
-            if (dist_sq <= half_thick * half_thick) {
+            // Antialiased edge detection with smooth falloff
+            let dist = sqrt(dist_sq);
+
+            if (dist <= half_thick) {
                 // Cylindrical surface lighting with curved surface
                 // Calculate the point on the cylinder axis closest to this pixel
                 // Clamp t to [0, len] so normals always point perpendicular to cylinder axis
@@ -900,42 +902,48 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
                 let highlight = diffuse * params.light_power;
                 let lighting = 1.0 + highlight;  // 1.0 = base color, >1.0 = brightened
 
-                let shaded_color = vec4<f32>(
-                    color.rgb * lighting,
-                    color.a
-                );
+                // No antialiasing - hard edge
+                let alpha = select(0.0, 1.0, dist <= half_thick);
 
-                var screen_pos = vec2<i32>(px, py);
-                var idx: u32;
-                var in_bounds = false;
+                if (alpha > 0.01) {
+                    let shaded_color = vec4<f32>(
+                        color.rgb * lighting,
+                        color.a * alpha
+                    );
 
-                if (ctx.use_inspector_coords.x >= 0.0) {
-                    // Inspector mode: offset to actual buffer position and check inspector bounds
-                    let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
-                    let y_clip = inspector_clip_y(ctx);
-                    let x_clip = inspector_clip_x(ctx);
-                    // Allow drawing anywhere in the inspector area (300px wide, full height)
-                    if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
-                        buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
-                        idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
-                        in_bounds = true;
+                    // Direct pixel write with bounds checking
+                    var idx: u32;
+                    var in_bounds = false;
+
+                    if (ctx.use_inspector_coords.x >= 0.0) {
+                        // Inspector mode
+                        let buffer_pos = vec2<i32>(px, py) + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                        let y_clip = inspector_clip_y(ctx);
+                        let x_clip = inspector_clip_x(ctx);
+                        if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
+                            buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
+                            idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                            in_bounds = true;
+                        }
+                    } else {
+                        // World mode
+                        let max_x = select(i32(params.window_width), i32(params.window_width) - i32(INSPECTOR_WIDTH),
+                                          params.selected_agent_index != 0xFFFFFFFFu);
+                        if (px >= 0 && px < max_x && py >= 0 && py < i32(params.window_height)) {
+                            idx = screen_to_grid_index(vec2<i32>(px, py));
+                            in_bounds = true;
+                        }
                     }
-                } else {
-                    // World mode: check screen bounds
-                    // Exclude inspector area if inspector is active (selected_agent_index != u32::MAX)
-                    let inspector_active = params.selected_agent_index != 0xFFFFFFFFu;
-                    let max_x = select(i32(params.window_width),
-                                       i32(params.window_width) - i32(INSPECTOR_WIDTH),
-                                       inspector_active);
-                    if (screen_pos.x >= 0 && screen_pos.x < max_x &&
-                        screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
-                        idx = screen_to_grid_index(screen_pos);
-                        in_bounds = true;
-                    }
-                }
 
-                if (in_bounds) {
-                    agent_grid[idx] = shaded_color;
+                    if (in_bounds) {
+                        let bg_color = agent_grid[idx];
+                        let inv_alpha = 1.0 - shaded_color.a;
+                        let blended = vec4<f32>(
+                            shaded_color.rgb * shaded_color.a + bg_color.rgb * inv_alpha,
+                            max(shaded_color.a, bg_color.a)
+                        );
+                        agent_grid[idx] = blended;
+                    }
                 }
             }
         }
@@ -1094,7 +1102,9 @@ fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32,
                 gradient_t = t / len;
             }
 
-            if (dist_sq <= half_thick * half_thick) {
+            let dist = sqrt(dist_sq);
+
+            if (dist <= half_thick) {
                 // Interpolate color based on position along line
                 let base_color = mix(start_color, end_color, gradient_t);
 
@@ -1125,35 +1135,45 @@ fn draw_thick_line_gradient_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32,
                 let highlight = diffuse * params.light_power;
                 let lighting = 1.0 + highlight;  // 1.0 = base color, >1.0 = brightened
 
-                let color = vec4<f32>(base_color.rgb * lighting, base_color.a);
+                // No antialiasing - hard edge
+                let alpha = select(0.0, 1.0, dist <= half_thick);
 
-                var screen_pos = vec2<i32>(px, py);
-                var idx: u32;
-                var in_bounds = false;
+                if (alpha > 0.01) {
+                    let color = vec4<f32>(base_color.rgb * lighting, base_color.a * alpha);
 
-                if (ctx.use_inspector_coords.x >= 0.0) {
-                    let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
-                    let y_clip = inspector_clip_y(ctx);
-                    let x_clip = inspector_clip_x(ctx);
-                    if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
-                        buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
-                        idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
-                        in_bounds = true;
+                    // Direct pixel write with bounds checking
+                    var idx: u32;
+                    var in_bounds = false;
+
+                    if (ctx.use_inspector_coords.x >= 0.0) {
+                        // Inspector mode
+                        let buffer_pos = vec2<i32>(px, py) + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                        let y_clip = inspector_clip_y(ctx);
+                        let x_clip = inspector_clip_x(ctx);
+                        if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
+                            buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
+                            idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                            in_bounds = true;
+                        }
+                    } else {
+                        // World mode
+                        let max_x = select(i32(params.window_width), i32(params.window_width) - i32(INSPECTOR_WIDTH),
+                                          params.selected_agent_index != 0xFFFFFFFFu);
+                        if (px >= 0 && px < max_x && py >= 0 && py < i32(params.window_height)) {
+                            idx = screen_to_grid_index(vec2<i32>(px, py));
+                            in_bounds = true;
+                        }
                     }
-                } else {
-                    let inspector_active = params.selected_agent_index != 0xFFFFFFFFu;
-                    let max_x = select(i32(params.window_width),
-                                       i32(params.window_width) - i32(INSPECTOR_WIDTH),
-                                       inspector_active);
-                    if (screen_pos.x >= 0 && screen_pos.x < max_x &&
-                        screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
-                        idx = screen_to_grid_index(screen_pos);
-                        in_bounds = true;
-                    }
-                }
 
-                if (in_bounds) {
-                    agent_grid[idx] = color;
+                    if (in_bounds) {
+                        let bg_color = agent_grid[idx];
+                        let inv_alpha = 1.0 - color.a;
+                        let blended = vec4<f32>(
+                            color.rgb * color.a + bg_color.rgb * inv_alpha,
+                            max(color.a, bg_color.a)
+                        );
+                        agent_grid[idx] = blended;
+                    }
                 }
             }
         }
@@ -1167,43 +1187,58 @@ fn draw_filled_circle_optimized(center: vec2<i32>, radius: f32, color: vec4<f32>
 
     for (var dy = -radius_i; dy <= radius_i; dy++) {
         for (var dx = -radius_i; dx <= radius_i; dx++) {
-            let dist_sq = f32(dx * dx + dy * dy);
-            if (dist_sq <= radius_sq) {
+            let dist = sqrt(f32(dx * dx + dy * dy));
+
+            if (dist <= radius) {
                 // Radial gradient shading: lighter at center, darker at edges
-                let dist_factor = sqrt(dist_sq) / radius;  // 0.0 at center, 1.0 at edge
-                let shaded_color = vec4<f32>(
-                    mix(color.rgb, color.rgb * 0.5, dist_factor),  // Interpolate brightness
+                let dist_factor = dist / radius;  // 0.0 at center, 1.0 at edge
+                let base_color = vec4<f32>(
+                    mix(color.rgb, color.rgb * 0.5, min(dist_factor, 1.0)),  // Interpolate brightness
                     color.a
                 );
 
-                var screen_pos = center + vec2<i32>(dx, dy);
-                var idx: u32;
-                var in_bounds = false;
+                // No antialiasing - hard edge
+                let alpha = select(0.0, 1.0, dist <= radius);
 
-                if (ctx.use_inspector_coords.x >= 0.0) {
-                    // Inspector mode
-                    let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
-                    let y_clip = inspector_clip_y(ctx);
-                    let x_clip = inspector_clip_x(ctx);
-                    if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
-                        buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
-                        idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
-                        in_bounds = true;
-                    }
-                } else {
-                    // World mode
-                    let max_x = select(i32(params.window_width), i32(params.window_width) - i32(INSPECTOR_WIDTH), params.selected_agent_index != 0xFFFFFFFFu);
-                    // World mode
-                    if (screen_pos.x >= 0 && screen_pos.x < max_x &&
-                    // World mode
-                        screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
-                        idx = screen_to_grid_index(screen_pos);
-                        in_bounds = true;
-                    }
-                }
+                if (alpha > 0.01) {
+                    let shaded_color = vec4<f32>(base_color.rgb, base_color.a * alpha);
 
-                if (in_bounds) {
-                    agent_grid[idx] = shaded_color;
+                    let px = center.x + dx;
+                    let py = center.y + dy;
+
+                    // Direct pixel write with bounds checking
+                    var idx: u32;
+                    var in_bounds = false;
+
+                    if (ctx.use_inspector_coords.x >= 0.0) {
+                        // Inspector mode
+                        let buffer_pos = vec2<i32>(px, py) + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                        let y_clip = inspector_clip_y(ctx);
+                        let x_clip = inspector_clip_x(ctx);
+                        if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
+                            buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
+                            idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                            in_bounds = true;
+                        }
+                    } else {
+                        // World mode
+                        let max_x = select(i32(params.window_width), i32(params.window_width) - i32(INSPECTOR_WIDTH),
+                                          params.selected_agent_index != 0xFFFFFFFFu);
+                        if (px >= 0 && px < max_x && py >= 0 && py < i32(params.window_height)) {
+                            idx = screen_to_grid_index(vec2<i32>(px, py));
+                            in_bounds = true;
+                        }
+                    }
+
+                    if (in_bounds) {
+                        let bg_color = agent_grid[idx];
+                        let inv_alpha = 1.0 - shaded_color.a;
+                        let blended = vec4<f32>(
+                            shaded_color.rgb * shaded_color.a + bg_color.rgb * inv_alpha,
+                            max(shaded_color.a, bg_color.a)
+                        );
+                        agent_grid[idx] = blended;
+                    }
                 }
             }
         }
@@ -1293,15 +1328,17 @@ fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx:
         let dx1 = select(radius_i,  min(radius_i,  clip_screen.y - 1 - screen_center.x), ctx.use_inspector_coords.x >= 0.0);
         for (var dx = dx0; dx <= dx1; dx++) {
             let offset = vec2<f32>(f32(dx), f32(dy));
-            let dist2 = dot(offset, offset);
-            if (dist2 <= screen_radius * screen_radius) {
+            let dist = length(offset);
+
+            if (dist <= screen_radius) {
                 // Spherical surface lighting (optimized: avoid extra sqrt)
                 let radius_sq = screen_radius * screen_radius;
-                let dist_factor_sq = dist2 / radius_sq;  // (dist/radius)Â²
+                let dist2 = dist * dist;
+                let dist_factor_sq = dist2 / radius_sq;  // (dist/radius)²
 
                 // Calculate 3D surface normal for a sphere
                 // In 2D view, we see a circle; assume sphere extends in z-direction
-                let z_sq = 1.0 - dist_factor_sq;  // xÂ² + yÂ² + zÂ² = 1
+                let z_sq = 1.0 - dist_factor_sq;  // x² + y² + z² = 1
                 let z = sqrt(max(z_sq, 0.0));
                 let surface_normal = normalize(vec3<f32>(offset.x / screen_radius, offset.y / screen_radius, z));
 
@@ -1315,45 +1352,51 @@ fn draw_filled_circle_ctx(center: vec2<f32>, radius: f32, color: vec4<f32>, ctx:
                 let highlight = diffuse * params.light_power;
                 let lighting = 1.0 + highlight;  // 1.0 = base color, >1.0 = brightened
 
-                let shaded_color = vec4<f32>(
-                    color.rgb * lighting,
-                    color.a
-                );
+                // No antialiasing - hard edge
+                let alpha = select(0.0, 1.0, dist <= screen_radius);
 
-                var screen_pos = screen_center + vec2<i32>(dx, dy);
-                var idx: u32;
-                var in_bounds = false;
-
-                if (ctx.use_inspector_coords.x >= 0.0) {
-                    // Inspector mode
-                    let buffer_pos = screen_pos + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
-                    let y_clip = inspector_clip_y(ctx);
-                    let x_clip = inspector_clip_x(ctx);
-                    if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
-                        buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
-                        idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
-                        in_bounds = true;
-                    }
-                } else {
-                    // World mode
-                    let max_x = select(i32(params.window_width), i32(params.window_width) - i32(INSPECTOR_WIDTH), params.selected_agent_index != 0xFFFFFFFFu);
-                    if (screen_pos.x >= 0 && screen_pos.x < max_x &&
-                        screen_pos.y >= 0 && screen_pos.y < i32(params.window_height)) {
-                        idx = screen_to_grid_index(screen_pos);
-                        in_bounds = true;
-                    }
-                }
-
-                if (in_bounds) {
-                    // Alpha blending: blend new color with existing background
-                    let bg_color = agent_grid[idx];
-                    let src_alpha = shaded_color.a;
-                    let inv_alpha = 1.0 - src_alpha;
-                    let blended = vec4<f32>(
-                        shaded_color.rgb * src_alpha + bg_color.rgb * inv_alpha,
-                        max(shaded_color.a, bg_color.a)
+                if (alpha > 0.01) {
+                    let shaded_color = vec4<f32>(
+                        color.rgb * lighting,
+                        color.a * alpha
                     );
-                    agent_grid[idx] = blended;
+
+                    let px = screen_center.x + dx;
+                    let py = screen_center.y + dy;
+
+                    // Direct pixel write with bounds checking
+                    var idx: u32;
+                    var in_bounds = false;
+
+                    if (ctx.use_inspector_coords.x >= 0.0) {
+                        // Inspector mode
+                        let buffer_pos = vec2<i32>(px, py) + vec2<i32>(i32(ctx.offset.x), i32(ctx.offset.y));
+                        let y_clip = inspector_clip_y(ctx);
+                        let x_clip = inspector_clip_x(ctx);
+                        if (buffer_pos.x >= x_clip.x && buffer_pos.x < x_clip.y &&
+                            buffer_pos.y >= y_clip.x && buffer_pos.y < y_clip.y) {
+                            idx = u32(buffer_pos.y) * params.visual_stride + u32(buffer_pos.x);
+                            in_bounds = true;
+                        }
+                    } else {
+                        // World mode
+                        let max_x = select(i32(params.window_width), i32(params.window_width) - i32(INSPECTOR_WIDTH),
+                                          params.selected_agent_index != 0xFFFFFFFFu);
+                        if (px >= 0 && px < max_x && py >= 0 && py < i32(params.window_height)) {
+                            idx = screen_to_grid_index(vec2<i32>(px, py));
+                            in_bounds = true;
+                        }
+                    }
+
+                    if (in_bounds) {
+                        let bg_color = agent_grid[idx];
+                        let inv_alpha = 1.0 - shaded_color.a;
+                        let blended = vec4<f32>(
+                            shaded_color.rgb * shaded_color.a + bg_color.rgb * inv_alpha,
+                            max(shaded_color.a, bg_color.a)
+                        );
+                        agent_grid[idx] = blended;
+                    }
                 }
             }
         }

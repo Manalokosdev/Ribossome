@@ -678,6 +678,25 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var first_build = (agent_body_count == 0u);
     var start_byte = 0u;
 
+    // Optimization: detect if agent has any signal-PRODUCING organs (sensors, clocks, emitters)
+    // If not, signals will remain zero and morphology won't change, so skip rebuild and diffusion.
+    var has_signal_producers = false;
+    if (!first_build) {
+        for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+            let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
+            let props = get_amino_acid_properties(base_type);
+            // Check if this part produces signals:
+            // - Sensors (alpha/beta env sensors, agent sensors, etc.)
+            // - Clocks (standalone or signal-driven oscillators)
+            // - Internal signal emitters
+            // - Slope sensors (type 32)
+            if (props.is_alpha_sensor || props.is_beta_sensor || props.is_clock || props.is_signal_emitter || base_type == 32u) {
+                has_signal_producers = true;
+                break;
+            }
+        }
+    }
+
     // Cache previous-frame body geometry so we can estimate morphology-driven motion.
     // NOTE: agents_in.body[].pos is already in the *recentered + avg-angle-normalized* local frame
     // from last frame (what you see as stable orientation in the inspector preview).
@@ -743,12 +762,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // REBUILD body positions every frame (enables dynamic shape changes from signals)
     // Now we just read the cached part_type from body[] instead of re-scanning genome
+    // OPTIMIZATION: Skip morphology rebuild if agent has no signal-producing organs
 
     // Initialize outside the if block so they're in scope for agent_color calculation
     var total_mass_morphology = 0.05; // Default minimum
     var color_sum_morphology = 0.0;
 
-    if (body_count_val > 0u) {
+    if (body_count_val > 0u && (first_build || has_signal_producers)) {
 
         // Poison resistance affects only poison damage (handled later), not signal-controlled bending.
 
@@ -890,6 +910,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 o.x * s_inv + o.y * c_inv
             );
         }
+    } else if (!first_build) {
+        // OPTIMIZATION: Morphology rebuild skipped - just copy body positions from previous frame
+        for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+            agents_out[agent_id].body[i] = agents_in[agent_id].body[i];
+        }
+        // Preserve essential values
+        total_mass_morphology = agents_in[agent_id].total_mass;
+        color_sum_morphology = agents_in[agent_id].body[0].data; // Approximation: stored in first part's data field if needed
     }
 
     // Cache previous frame's *already-recentered* positions.
@@ -1277,10 +1305,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // Second pass: calculate amplification and propagate signals (merged for efficiency)
-    // Track cumulative chirality so directional env sensors can swap left/right.
-    var chirality_flip_signal = 1.0;
-    for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+    // OPTIMIZATION: Skip signal diffusion if agent has no signal producers
+    if (first_build || has_signal_producers) {
+        // Second pass: calculate amplification and propagate signals (merged for efficiency)
+        // Track cumulative chirality so directional env sensors can swap left/right.
+        var chirality_flip_signal = 1.0;
+        for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part_pos = agents_out[agent_id].body[i].pos;
         let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
         let amino_props = get_amino_acid_properties(base_type);
@@ -1684,6 +1714,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Clamp to -1.0 to 1.0 (allows inhibitory and excitatory signals)
         agents_out[agent_id].body[i].alpha_signal = clamp(smoothed_alpha, -1.0, 1.0);
         agents_out[agent_id].body[i].beta_signal = clamp(smoothed_beta, -1.0, 1.0);
+    }
+    } else {
+        // OPTIMIZATION: Signal diffusion skipped - preserve signals from previous frame
+        for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+            agents_out[agent_id].body[i].alpha_signal = agents_in[agent_id].body[i].alpha_signal;
+            agents_out[agent_id].body[i].beta_signal = agents_in[agent_id].body[i].beta_signal;
+        }
     }
 
     // ====== PHYSICS CALCULATIONS ======
@@ -2475,6 +2512,42 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let available_alpha = w00 * c00.x + w10 * c10.x + w01 * c01.x + w11 * c11.x;
             let available_beta  = w00 * c00.y + w10 * c10.y + w01 * c01.y + w11 * c11.y;
 
+            // Also allow mouths to absorb from the advected dye layer (fluid_dye).
+            // NOTE: This is an experimental direct write into fluid_dye (racy under contention).
+            let env_scale = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
+            let egx = (clamped_pos.x / env_scale) - 0.5;
+            let egy = (clamped_pos.y / env_scale) - 0.5;
+
+            let ex0 = i32(floor(egx));
+            let ey0 = i32(floor(egy));
+            let ex1 = min(ex0 + 1, i32(ENV_GRID_SIZE) - 1);
+            let ey1 = min(ey0 + 1, i32(ENV_GRID_SIZE) - 1);
+
+            let efx = fract(egx);
+            let efy = fract(egy);
+
+            let ew00 = (1.0 - efx) * (1.0 - efy);
+            let ew10 = efx * (1.0 - efy);
+            let ew01 = (1.0 - efx) * efy;
+            let ew11 = efx * efy;
+
+            let eidx00 = u32(clamp(ey0, 0, i32(ENV_GRID_SIZE) - 1)) * ENV_GRID_SIZE + u32(clamp(ex0, 0, i32(ENV_GRID_SIZE) - 1));
+            let eidx10 = u32(clamp(ey0, 0, i32(ENV_GRID_SIZE) - 1)) * ENV_GRID_SIZE + u32(clamp(ex1, 0, i32(ENV_GRID_SIZE) - 1));
+            let eidx01 = u32(clamp(ey1, 0, i32(ENV_GRID_SIZE) - 1)) * ENV_GRID_SIZE + u32(clamp(ex0, 0, i32(ENV_GRID_SIZE) - 1));
+            let eidx11 = u32(clamp(ey1, 0, i32(ENV_GRID_SIZE) - 1)) * ENV_GRID_SIZE + u32(clamp(ex1, 0, i32(ENV_GRID_SIZE) - 1));
+
+            let d00 = fluid_dye[eidx00];
+            let d10 = fluid_dye[eidx10];
+            let d01 = fluid_dye[eidx01];
+            let d11 = fluid_dye[eidx11];
+
+            // fluid_dye mapping: beta=x, alpha=y
+            let available_alpha_dye = ew00 * d00.y + ew10 * d10.y + ew01 * d01.y + ew11 * d11.y;
+            let available_beta_dye  = ew00 * d00.x + ew10 * d10.x + ew01 * d01.x + ew11 * d11.x;
+
+            let total_available_alpha = available_alpha + available_alpha_dye;
+            let total_available_beta  = available_beta + available_beta_dye;
+
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed effects and amplification to the rates themselves
             // Vampire mouths absorb 50% of what a normal mouth would.
@@ -2497,29 +2570,45 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
-            if (rate_total > 0.0 && (available_alpha > 0.0 || available_beta > 0.0)) {
+            if (rate_total > 0.0 && (total_available_alpha > 0.0 || total_available_beta > 0.0)) {
                 let max_total = rate_total;
 
                 // Weight consumption toward whichever is present and allowed by its rate
-                let weighted_alpha = available_alpha * alpha_rate;
-                let weighted_beta  = available_beta * beta_rate;
+                let weighted_alpha = total_available_alpha * alpha_rate;
+                let weighted_beta  = total_available_beta * beta_rate;
                 let weighted_sum   = max(weighted_alpha + weighted_beta, 1e-6);
                 let alpha_weight   = weighted_alpha / weighted_sum;
                 let beta_weight    = 1.0 - alpha_weight;
 
-                let consumed_alpha = min(available_alpha, max_total * alpha_weight);
-                let consumed_beta  = min(available_beta,  max_total * beta_weight);
+                let consumed_alpha = min(total_available_alpha, max_total * alpha_weight);
+                let consumed_beta  = min(total_available_beta,  max_total * beta_weight);
 
                 // Apply alpha consumption
                 // Normal mouths: alpha = energy gain
                 // Beta mouths: alpha = poison damage
                 if (consumed_alpha > 0.0) {
+                    // Split source: dye first, then chem.
+                    let take_alpha_dye = min(available_alpha_dye, consumed_alpha);
+                    let take_alpha_chem = consumed_alpha - take_alpha_dye;
+
+                    if (take_alpha_dye > 0.0) {
+                        let da00 = take_alpha_dye * ew00;
+                        let da10 = take_alpha_dye * ew10;
+                        let da01 = take_alpha_dye * ew01;
+                        let da11 = take_alpha_dye * ew11;
+
+                        if (da00 > 0.0) { let prev = fluid_dye[eidx00]; write_dye_alpha(eidx00, clamp(prev.y - da00, 0.0, prev.y)); }
+                        if (da10 > 0.0) { let prev = fluid_dye[eidx10]; write_dye_alpha(eidx10, clamp(prev.y - da10, 0.0, prev.y)); }
+                        if (da01 > 0.0) { let prev = fluid_dye[eidx01]; write_dye_alpha(eidx01, clamp(prev.y - da01, 0.0, prev.y)); }
+                        if (da11 > 0.0) { let prev = fluid_dye[eidx11]; write_dye_alpha(eidx11, clamp(prev.y - da11, 0.0, prev.y)); }
+                    }
+
                     // Distribute absorption bilinearly into the 4 neighbor cells.
                     // NOTE: This is intentionally non-atomic and can be racy under contention.
-                    let da00 = consumed_alpha * w00;
-                    let da10 = consumed_alpha * w10;
-                    let da01 = consumed_alpha * w01;
-                    let da11 = consumed_alpha * w11;
+                    let da00 = take_alpha_chem * w00;
+                    let da10 = take_alpha_chem * w10;
+                    let da01 = take_alpha_chem * w01;
+                    let da11 = take_alpha_chem * w11;
 
                     if (da00 > 0.0) { let prev = chem_grid[idx00]; write_chem_alpha(idx00, clamp(prev.x - da00, 0.0, prev.x)); }
                     if (da10 > 0.0) { let prev = chem_grid[idx10]; write_chem_alpha(idx10, clamp(prev.x - da10, 0.0, prev.x)); }
@@ -2540,12 +2629,28 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Normal mouths: beta = poison damage
                 // Beta mouths: beta = energy gain
                 if (consumed_beta > 0.0) {
+                    // Split source: dye first, then chem.
+                    let take_beta_dye = min(available_beta_dye, consumed_beta);
+                    let take_beta_chem = consumed_beta - take_beta_dye;
+
+                    if (take_beta_dye > 0.0) {
+                        let db00 = take_beta_dye * ew00;
+                        let db10 = take_beta_dye * ew10;
+                        let db01 = take_beta_dye * ew01;
+                        let db11 = take_beta_dye * ew11;
+
+                        if (db00 > 0.0) { let prev = fluid_dye[eidx00]; write_dye_beta(eidx00, clamp(prev.x - db00, 0.0, prev.x)); }
+                        if (db10 > 0.0) { let prev = fluid_dye[eidx10]; write_dye_beta(eidx10, clamp(prev.x - db10, 0.0, prev.x)); }
+                        if (db01 > 0.0) { let prev = fluid_dye[eidx01]; write_dye_beta(eidx01, clamp(prev.x - db01, 0.0, prev.x)); }
+                        if (db11 > 0.0) { let prev = fluid_dye[eidx11]; write_dye_beta(eidx11, clamp(prev.x - db11, 0.0, prev.x)); }
+                    }
+
                     // Distribute absorption bilinearly into the 4 neighbor cells.
                     // NOTE: This is intentionally non-atomic and can be racy under contention.
-                    let db00 = consumed_beta * w00;
-                    let db10 = consumed_beta * w10;
-                    let db01 = consumed_beta * w01;
-                    let db11 = consumed_beta * w11;
+                    let db00 = take_beta_chem * w00;
+                    let db10 = take_beta_chem * w10;
+                    let db01 = take_beta_chem * w01;
+                    let db11 = take_beta_chem * w11;
 
                     if (db00 > 0.0) { let prev = chem_grid[idx00]; write_chem_beta(idx00, clamp(prev.y - db00, 0.0, prev.y)); }
                     if (db10 > 0.0) { let prev = chem_grid[idx10]; write_chem_beta(idx10, clamp(prev.y - db10, 0.0, prev.y)); }
@@ -3804,7 +3909,7 @@ fn apply_motion_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Scale motion by zoom and normalize by frame time so blur length is frame-rate independent
     let frame_dt = max(params.frame_dt, 0.0001);
     let time_scale = clamp(0.016 / frame_dt, 0.1, 10.0); // Normalize to ~60fps reference
-    let motion_scale = params.camera_zoom * time_scale * 0.5; // Halve blur length
+    let motion_scale = params.camera_zoom * time_scale * 0.25; // Halve blur length again
     let motion_vector = camera_motion * motion_scale;
     let motion_length = length(motion_vector);
 
@@ -3815,7 +3920,7 @@ fn apply_motion_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Get current pixel color
         let base_color = visual_grid[visual_idx].xyz;
 
-        // Take 8 samples in direction opposite to camera motion (backward blur)
+        // Take 8 samples in the flipped direction
         let sample_count = 8;
         var color_sum = base_color;
 
@@ -3823,12 +3928,12 @@ fn apply_motion_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
         let pixel_hash = hash(visual_idx * 73856093u + params.random_seed);
 
         for (var i = 1; i <= sample_count; i++) {
-            // Sample in opposite direction to camera motion (0.0 to 1.0 range)
+            // Sample distance along the blur vector (0.0 to 1.0 range)
             let sample_hash = hash(pixel_hash + u32(i) * 1664525u);
             let random_t = f32(sample_hash % 1000u) / 1000.0;
 
-            // Sample opposite to motion vector (negative direction)
-            let offset = -motion_vector * random_t;
+            // Sample along the motion vector (direction flipped vs. previous)
+            let offset = motion_vector * random_t;
             let sample_screen_pos = screen_pos + offset;
 
             // Convert to pixel coordinates with clamping

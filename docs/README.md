@@ -68,6 +68,9 @@ Ribossome is more than a toy; it's a controlled demonstration that a body-as-gen
 ![Dense population with chemical trails](../images/screenshot2.jpg)
 *High-density simulation showing chemical signal propagation and agent interactions*
 
+![Agent Inspector with Genome and Signal Visualization](../images/recording_512x512_Ribossome_Tranquillus-Uber-4150_20260105_230926_754UTC_1767654754.gif)
+*The inspector panel shows detailed agent information including genome sequence bars (colored by amino acid type) and real-time alpha/beta signal propagation through the body segments*
+
 ## Building & Running
 
 Requirements:

@@ -358,7 +358,7 @@ var<storage, read_write> chem_grid: array<vec4<f32>>;
 // - fluid_dye[idx].x = beta (red)
 // - fluid_dye[idx].y = alpha (green)
 // - fluid_dye[idx].z = gamma (blue)
-var<storage, read> fluid_dye: array<vec4<f32>>;
+var<storage, read_write> fluid_dye: array<vec4<f32>>;
 
 @group(0) @binding(18)
 // Rain map (static probability field), sampled as a texture so it doesn't consume
@@ -1089,6 +1089,16 @@ fn write_chem_beta(idx: u32, beta: f32) {
 fn write_chem_alpha_beta(idx: u32, alpha: f32, beta: f32) {
     let prev = chem_grid[idx];
     chem_grid[idx] = vec4<f32>(alpha, beta, prev.z, prev.w);
+}
+
+fn write_dye_alpha(idx: u32, alpha: f32) {
+    let prev = fluid_dye[idx];
+    fluid_dye[idx] = vec4<f32>(prev.x, alpha, prev.z, prev.w);
+}
+
+fn write_dye_beta(idx: u32, beta: f32) {
+    let prev = fluid_dye[idx];
+    fluid_dye[idx] = vec4<f32>(beta, prev.y, prev.z, prev.w);
 }
 
 fn read_rain_maps(idx: u32) -> vec2<f32> {

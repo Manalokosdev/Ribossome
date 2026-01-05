@@ -59,8 +59,8 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Hybrid Re blend - kept conservative thresholds
     let mass = agents_out[agent_id].total_mass;
-    let mass_threshold_low = 0.5;
-    let mass_threshold_high = 3.0;
+    let mass_threshold_low = 2.0;
+    let mass_threshold_high = 10.0;
     var re_blend = clamp((mass - mass_threshold_low) / (mass_threshold_high - mass_threshold_low), 0.0, 1.0);
 
     // Lower base drag for overall faster motion from deformation

@@ -5695,7 +5695,7 @@ impl GpuState {
                         binding: 3,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -9328,17 +9328,17 @@ impl GpuState {
             _pad_rain0: 0,
             _pad_rain1: 0,
             // Calculate expected rain drops for targeted dispatch
-            // Expected drops = grid_cells * multiplier * 0.05 * avg_rain_map
+            // Expected drops = grid_cells * multiplier * 0.00005 * avg_rain_map
             // For simplicity, assume avg_rain_map ~= 1.0 (can refine later)
             rain_drop_count: {
                 let grid_cells = (GRID_DIM * GRID_DIM) as f32;
-                let alpha_drops = (grid_cells * current_alpha * 0.05).ceil() as u32;
-                let beta_drops = (grid_cells * current_beta * 0.05).ceil() as u32;
+                let alpha_drops = (grid_cells * current_alpha * 0.00005).ceil() as u32;
+                let beta_drops = (grid_cells * current_beta * 0.00005).ceil() as u32;
                 alpha_drops + beta_drops
             },
             alpha_rain_drop_count: {
                 let grid_cells = (GRID_DIM * GRID_DIM) as f32;
-                (grid_cells * current_alpha * 0.05).ceil() as u32
+                (grid_cells * current_alpha * 0.00005).ceil() as u32
             },
             dye_precipitation: self.dye_precipitation,
             chemical_slope_scale_alpha: self.chemical_slope_scale_alpha,
@@ -14422,148 +14422,13 @@ fn main() {
                                             .fill(egui::Color32::from_rgb(70, 70, 70))
                                             .inner_margin(egui::Margin::same(10.0)))
                                         .show(ctx, |ui| {
-                                            // Action buttons at the top with lighter background
-                                            egui::Frame::none()
-                                                .fill(egui::Color32::from_rgb(85, 85, 85))
-                                                .inner_margin(egui::Margin::same(8.0))
-                                                .show(ui, |ui| {
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        if ui.button("Spawn 20000 Agents").clicked() && !state.is_paused {
-                                                            state.queue_random_spawns(20000);
-                                                        }
-
-                                                        if ui.button("Load Agent & Spawn 100...").clicked() && !state.is_paused {
-                                                            match load_agent_via_dialog() {
-                                                                Ok(genome) => {
-                                                                    println!("Successfully loaded genome, spawning 100 clones...");
-
-                                                                    let (
-                                                                        genome_override_len,
-                                                                        genome_override_offset,
-                                                                        genome_override_packed,
-                                                                    ) = genome_pack_ascii_words(&genome);
-
-                                                                    for _ in 0..100 {
-                                                                        state.rng_state = state.rng_state
-                                                                            .wrapping_mul(6364136223846793005u64)
-                                                                            .wrapping_add(1442695040888963407u64);
-                                                                        let seed = (state.rng_state >> 32) as u32;
-
-                                                                        state.rng_state = state.rng_state
-                                                                            .wrapping_mul(6364136223846793005u64)
-                                                                            .wrapping_add(1442695040888963407u64);
-                                                                        let genome_seed = (state.rng_state >> 32) as u32;
-
-                                                                        state.rng_state = state.rng_state
-                                                                            .wrapping_mul(6364136223846793005u64)
-                                                                            .wrapping_add(1442695040888963407u64);
-                                                                        let rx = (state.rng_state >> 32) as f32 / u32::MAX as f32;
-
-                                                                        state.rng_state = state.rng_state
-                                                                            .wrapping_mul(6364136223846793005u64)
-                                                                            .wrapping_add(1442695040888963407u64);
-                                                                        let ry = (state.rng_state >> 32) as f32 / u32::MAX as f32;
-
-                                                                        state.rng_state = state.rng_state
-                                                                            .wrapping_mul(6364136223846793005u64)
-                                                                            .wrapping_add(1442695040888963407u64);
-                                                                        let rotation = ((state.rng_state >> 32) as f32 / u32::MAX as f32)
-                                                                            * std::f32::consts::TAU;
-
-                                                                        let request = SpawnRequest {
-                                                                            seed,
-                                                                            genome_seed,
-                                                                            flags: 1,
-                                                                            _pad_seed: 0,
-                                                                            position: [rx * state.sim_size, ry * state.sim_size],
-                                                                            energy: 10.0,
-                                                                            rotation,
-                                                                            genome_override_len,
-                                                                            genome_override_offset,
-                                                                            genome_override_packed,
-                                                                            _pad_genome: [0u32; 2],
-                                                                        };
-
-                                                                        state.cpu_spawn_queue.push(request);
-                                                                    }
-                                                                    println!("Queued 100 clones for spawning.");
-                                                                }
-                                                                Err(err) => eprintln!("Load canceled or failed: {err:?}"),
-                                                            }
-                                                        }
-
-                                                        if ui.button("Save Selected Agent").clicked() {
-                                                            if let Some(agent) = state.selected_agent_data {
-                                                                if let Err(err) = save_agent_via_dialog(&agent) {
-                                                                    eprintln!("Save canceled or failed: {err:?}");
-                                                                }
-                                                            }
-                                                        }
-                                                    });
-
-                                                    ui.separator();
-
-                                                    // Spawn mode controls
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        if ui.button("Load Template for Spawning...").clicked() {
-                                                            match load_agent_via_dialog() {
-                                                                Ok(genome) => {
-                                                                    state.spawn_template_genome = Some(genome);
-                                                                    println!("? Template loaded for spawn mode");
-                                                                }
-                                                                Err(err) => eprintln!("Load canceled or failed: {err:?}"),
-                                                            }
-                                                        }
-
-                                                        let has_template = state.spawn_template_genome.is_some();
-                                                        ui.add_enabled_ui(has_template, |ui| {
-                                                            let spawn_mode_text = if state.spawn_mode_active {
-                                                                "?? Spawn Mode ON"
-                                                            } else {
-                                                                "Enable Spawn Mode"
-                                                            };
-
-                                                            if ui.button(spawn_mode_text).clicked() {
-                                                                state.spawn_mode_active = !state.spawn_mode_active;
-                                                                if state.spawn_mode_active {
-                                                                    println!("? Spawn mode enabled - click to spawn agents");
-                                                                } else {
-                                                                    println!("? Spawn mode disabled");
-                                                                }
-                                                            }
-                                                        });
-
-                                                        if has_template && ui.button("Clear Template").clicked() {
-                                                            state.spawn_template_genome = None;
-                                                            state.spawn_mode_active = false;
-                                                            println!("? Template cleared");
-                                                        }
-                                                    });
-
-                                                    if state.spawn_mode_active {
-                                                        ui.colored_label(egui::Color32::from_rgb(100, 255, 100),
-                                                            "?? Click anywhere to spawn agent");
-                                                    } else if state.spawn_template_genome.is_some() {
-                                                        ui.colored_label(egui::Color32::from_rgb(200, 200, 100),
-                                                            "Template loaded - enable spawn mode to use");
-                                                    }
-                                                });
-
-                                            ui.add_space(4.0);
-
                                             // Top section (no tabs) - Always visible (split into 3 rows to keep panel narrow)
                                             ui.vertical(|ui| {
                                                 ui.horizontal(|ui| {
                                                     if ui.button(if state.is_paused { "Resume" } else { "Pause" }).clicked() {
                                                         state.is_paused = !state.is_paused;
                                                     }
-                                                    if ui.button("Reset Simulation").clicked() {
-                                                        reset_requested = true;
-                                                    }
-                                                });
-
-                                                // Simulation Speed controls (4th row)
-                                                ui.horizontal(|ui| {
+                                                    ui.separator();
                                                     let mut mode = state.current_mode;
                                                     ui.selectable_value(&mut mode, 3, "Slow");
                                                     ui.selectable_value(&mut mode, 0, "VSync");
@@ -14571,6 +14436,17 @@ fn main() {
                                                     ui.selectable_value(&mut mode, 2, "Fast Draw");
                                                     if mode != state.current_mode {
                                                         state.set_speed_mode(mode);
+                                                    }
+
+                                                    ui.separator();
+                                                    let reset_button = egui::Button::new("Reset Simulation")
+                                                        .fill(egui::Color32::from_rgb(90, 25, 25))
+                                                        .stroke(egui::Stroke::new(
+                                                            1.0,
+                                                            egui::Color32::from_rgb(180, 80, 80),
+                                                        ));
+                                                    if ui.add(reset_button).clicked() {
+                                                        reset_requested = true;
                                                     }
                                                 });
                                                 if state.current_mode == 2 {
@@ -14584,6 +14460,153 @@ fn main() {
                                                     });
                                                 }
 
+                                                ui.separator();
+                                                ui.heading("Agents");
+                                                ui.horizontal_wrapped(|ui| {
+                                                    if ui.button("Spawn 20000 Agents").clicked() && !state.is_paused {
+                                                        state.queue_random_spawns(20000);
+                                                    }
+
+                                                    if ui.button("Load Agent & Spawn 100...").clicked() && !state.is_paused {
+                                                        match load_agent_via_dialog() {
+                                                            Ok(genome) => {
+                                                                println!(
+                                                                    "Successfully loaded genome, spawning 100 clones..."
+                                                                );
+
+                                                                let (
+                                                                    genome_override_len,
+                                                                    genome_override_offset,
+                                                                    genome_override_packed,
+                                                                ) = genome_pack_ascii_words(&genome);
+
+                                                                for _ in 0..100 {
+                                                                    state.rng_state = state
+                                                                        .rng_state
+                                                                        .wrapping_mul(6364136223846793005u64)
+                                                                        .wrapping_add(1442695040888963407u64);
+                                                                    let seed = (state.rng_state >> 32) as u32;
+
+                                                                    state.rng_state = state
+                                                                        .rng_state
+                                                                        .wrapping_mul(6364136223846793005u64)
+                                                                        .wrapping_add(1442695040888963407u64);
+                                                                    let genome_seed = (state.rng_state >> 32) as u32;
+
+                                                                    state.rng_state = state
+                                                                        .rng_state
+                                                                        .wrapping_mul(6364136223846793005u64)
+                                                                        .wrapping_add(1442695040888963407u64);
+                                                                    let rx = (state.rng_state >> 32) as f32
+                                                                        / u32::MAX as f32;
+
+                                                                    state.rng_state = state
+                                                                        .rng_state
+                                                                        .wrapping_mul(6364136223846793005u64)
+                                                                        .wrapping_add(1442695040888963407u64);
+                                                                    let ry = (state.rng_state >> 32) as f32
+                                                                        / u32::MAX as f32;
+
+                                                                    state.rng_state = state
+                                                                        .rng_state
+                                                                        .wrapping_mul(6364136223846793005u64)
+                                                                        .wrapping_add(1442695040888963407u64);
+                                                                    let rotation =
+                                                                        ((state.rng_state >> 32) as f32
+                                                                            / u32::MAX as f32)
+                                                                            * std::f32::consts::TAU;
+
+                                                                    let request = SpawnRequest {
+                                                                        seed,
+                                                                        genome_seed,
+                                                                        flags: 1,
+                                                                        _pad_seed: 0,
+                                                                        position: [
+                                                                            rx * state.sim_size,
+                                                                            ry * state.sim_size,
+                                                                        ],
+                                                                        energy: 10.0,
+                                                                        rotation,
+                                                                        genome_override_len,
+                                                                        genome_override_offset,
+                                                                        genome_override_packed,
+                                                                        _pad_genome: [0u32; 2],
+                                                                    };
+
+                                                                    state.cpu_spawn_queue.push(request);
+                                                                }
+
+                                                                state.spawn_request_count =
+                                                                    state.cpu_spawn_queue.len() as u32;
+                                                                state.pending_spawn_upload = true;
+                                                                state.window.request_redraw();
+                                                                println!("Queued 100 spawn requests");
+                                                            }
+                                                            Err(err) => eprintln!("Load canceled or failed: {err:?}"),
+                                                        }
+                                                    }
+
+                                                    if ui.button("Save Selected Agent").clicked() {
+                                                        if let Some(agent) = state.selected_agent_data {
+                                                            if let Err(err) = save_agent_via_dialog(&agent) {
+                                                                eprintln!("Save canceled or failed: {err:?}");
+                                                            }
+                                                        }
+                                                    }
+                                                });
+
+                                                // Spawn mode controls
+                                                ui.horizontal_wrapped(|ui| {
+                                                    if ui.button("Load Template for Spawning...").clicked() {
+                                                        match load_agent_via_dialog() {
+                                                            Ok(genome) => {
+                                                                state.spawn_template_genome = Some(genome);
+                                                                println!("? Template loaded for spawn mode");
+                                                            }
+                                                            Err(err) => eprintln!("Load canceled or failed: {err:?}"),
+                                                        }
+                                                    }
+
+                                                    let has_template = state.spawn_template_genome.is_some();
+                                                    ui.add_enabled_ui(has_template, |ui| {
+                                                        let spawn_mode_text = if state.spawn_mode_active {
+                                                            "Spawn Mode ON"
+                                                        } else {
+                                                            "Enable Spawn Mode"
+                                                        };
+
+                                                        if ui.button(spawn_mode_text).clicked() {
+                                                            state.spawn_mode_active = !state.spawn_mode_active;
+                                                            if state.spawn_mode_active {
+                                                                println!(
+                                                                    "? Spawn mode enabled - click to spawn agents"
+                                                                );
+                                                            } else {
+                                                                println!("? Spawn mode disabled");
+                                                            }
+                                                        }
+                                                    });
+
+                                                    if has_template && ui.button("Clear Template").clicked() {
+                                                        state.spawn_template_genome = None;
+                                                        state.spawn_mode_active = false;
+                                                        println!("? Template cleared");
+                                                    }
+                                                });
+
+                                                if state.spawn_mode_active {
+                                                    ui.colored_label(
+                                                        egui::Color32::from_rgb(100, 255, 100),
+                                                        "Click anywhere to spawn agent",
+                                                    );
+                                                } else if state.spawn_template_genome.is_some() {
+                                                    ui.colored_label(
+                                                        egui::Color32::from_rgb(200, 200, 100),
+                                                        "Template loaded - enable spawn mode to use",
+                                                    );
+                                                }
+
+                                                ui.separator();
                                                 ui.horizontal(|ui| {
                                                     if ui
                                                         .button("📸 Screenshot")
@@ -14619,19 +14642,6 @@ fn main() {
                                                     }
                                                 });
                                             });
-
-                                            ui.separator();
-                                            ui.heading("Camera");
-                                            ui.add(
-                                                egui::Slider::new(&mut state.camera_zoom, 0.1..=2000.0)
-                                                    .text("Zoom")
-                                                    .logarithmic(true),
-                                            );
-                                            if ui.button("Reset Camera (R)").clicked() {
-                                                let sim_size = state.sim_size;
-                                                state.camera_zoom = 1.0;
-                                                state.camera_pan = [sim_size / 2.0, sim_size / 2.0];
-                                            }
 
                                             ui.separator();
                                             ui.heading("Settings");
@@ -14702,41 +14712,6 @@ fn main() {
                                             }
 
                                             ui.separator();
-                                            ui.label(format!("Epoch: {}", state.epoch));
-                                            ui.label(format!(
-                                                "Epochs/sec: {:.1}",
-                                                state.epochs_per_second
-                                            ));
-
-                                            ui.separator();
-                                            ui.heading("Population Overview");
-                                            ui.label(format!("Total Agents: {}", state.agent_count));
-                                            ui.label(format!("Living Agents: {}", state.alive_count));
-                                            ui.horizontal(|ui| {
-                                                let denom = state.alive_count.max(1) as f32;
-                                                let pct = (state.organ45_alive_with as f32 / denom) * 100.0;
-                                                ui.label(format!(
-                                                    "Attractor/Repulsor (45): {}/{} ({:.2}%)",
-                                                    state.organ45_alive_with,
-                                                    state.alive_count,
-                                                    pct
-                                                ));
-                                                if ui.button("Scan").clicked() {
-                                                    state.scan_population_for_organ45();
-                                                }
-                                            });
-                                            if let Some(t) = state.organ45_last_scan {
-                                                ui.label(format!("Last scan: {:.1}s ago", t.elapsed().as_secs_f32()));
-                                            }
-                                            if let Some(err) = &state.organ45_last_scan_error {
-                                                ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
-                                            }
-                                            ui.label(format!(
-                                                "Capacity: {}",
-                                                state.agent_buffer_capacity
-                                            ));
-
-                                            ui.separator();
                                             ui.collapsing("Population History", |ui| {
                                                 ui.label(format!(
                                                     "Samples: {} (every {} epochs)",
@@ -14771,12 +14746,11 @@ fn main() {
                                             ui.horizontal(|ui| {
                                                 let tab_colors = [
                                                     ("Agents", egui::Color32::from_rgb(55, 50, 60)),
-                                                    ("Environment", egui::Color32::from_rgb(50, 60, 55)),
-                                                    ("Evolution", egui::Color32::from_rgb(60, 55, 50)),
-                                                    ("Difficulty", egui::Color32::from_rgb(60, 50, 50)),
-                                                    ("Visualization", egui::Color32::from_rgb(55, 55, 55)),
+                                                    ("Env", egui::Color32::from_rgb(50, 60, 55)),
+                                                    ("EnvEvolution", egui::Color32::from_rgb(60, 55, 50)),
                                                     ("Microswimming", egui::Color32::from_rgb(50, 55, 60)),
                                                     ("Fluid", egui::Color32::from_rgb(50, 55, 60)),
+                                                    ("Viz", egui::Color32::from_rgb(55, 55, 55)),
                                                 ];
 
                                                 // Guard against stale indices.
@@ -14800,12 +14774,11 @@ fn main() {
                                             // Tab content with colored backgrounds
                                             let tab_color = match state.ui_tab {
                                                 0 => egui::Color32::from_rgb(55, 50, 60),  // Agents - purple-gray
-                                                1 => egui::Color32::from_rgb(50, 60, 55),  // Environment - green-gray
-                                                2 => egui::Color32::from_rgb(60, 55, 50),  // Evolution - orange-gray
-                                                3 => egui::Color32::from_rgb(60, 50, 50),  // Difficulty - red-gray
-                                                4 => egui::Color32::from_rgb(55, 55, 55),  // Visualization - neutral gray
-                                                5 => egui::Color32::from_rgb(50, 55, 60),  // Microswimming
-                                                6 => egui::Color32::from_rgb(50, 55, 60),  // Fluid - blue-gray
+                                                1 => egui::Color32::from_rgb(50, 60, 55),  // Env - green-gray
+                                                2 => egui::Color32::from_rgb(60, 55, 50),  // EnvEvolution - orange-gray
+                                                3 => egui::Color32::from_rgb(50, 55, 60),  // Microswimming
+                                                4 => egui::Color32::from_rgb(50, 55, 60),  // Fluid - blue-gray
+                                                5 => egui::Color32::from_rgb(55, 55, 55),  // Viz - neutral gray
                                                 _ => egui::Color32::from_rgb(50, 50, 50),
                                             };
 
@@ -14830,6 +14803,31 @@ fn main() {
                                                             "Capacity: {}",
                                                             state.agent_buffer_capacity
                                                         ));
+                                                        ui.horizontal(|ui| {
+                                                            let denom = state.alive_count.max(1) as f32;
+                                                            let pct = (state.organ45_alive_with as f32 / denom) * 100.0;
+                                                            ui.label(format!(
+                                                                "Attractor/Repulsor (45): {}/{} ({:.2}%)",
+                                                                state.organ45_alive_with,
+                                                                state.alive_count,
+                                                                pct
+                                                            ));
+                                                            if ui.button("Scan").clicked() {
+                                                                state.scan_population_for_organ45();
+                                                            }
+                                                        });
+                                                        if let Some(t) = state.organ45_last_scan {
+                                                            ui.label(format!(
+                                                                "Last scan: {:.1}s ago",
+                                                                t.elapsed().as_secs_f32()
+                                                            ));
+                                                        }
+                                                        if let Some(err) = &state.organ45_last_scan_error {
+                                                            ui.colored_label(
+                                                                egui::Color32::from_rgb(255, 120, 120),
+                                                                err,
+                                                            );
+                                                        }
                                                         ui.horizontal(|ui| {
                                                             if ui
                                                                 .button(if state.auto_replenish {
@@ -15096,13 +15094,6 @@ fn main() {
                                                             .text("Agent-Agent Repulsion"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.agent_repulsion_strength,
-                                                                0.0..=10.0,
-                                                            )
-                                                            .text("Agent-Agent Repulsion"),
-                                                        );
-                                                        ui.add(
                                                             egui::Slider::new(&mut state.vector_force_power, 0.0..=100.0)
                                                                 .text("Vector Force Power"),
                                                         );
@@ -15118,7 +15109,7 @@ fn main() {
                                                     });
                                                 }
                                                 1 => {
-                                                    // Environment tab
+                                                    // Env tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Environment Scheduling");
                                                         ui.add(
@@ -15268,7 +15259,7 @@ fn main() {
                                                                 .text("Noise Power (Contrast)"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.0..=0.01)
+                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.0..=2.0)
                                                                 .text("Rain Probability"),
                                                         );
                                                         ui.add(
@@ -15344,7 +15335,7 @@ fn main() {
                                                                 .text("Beta Noise Scale"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.beta_multiplier, 0.0..=0.01)
+                                                            egui::Slider::new(&mut state.beta_multiplier, 0.0..=2.0)
                                                                 .text("Rain Probability"),
                                                         );
                                                         ui.horizontal(|ui| {
@@ -15476,7 +15467,7 @@ fn main() {
                                                     });
                                                 }
                                                 2 => {
-                                                    // Evolution tab
+                                                    // EnvEvolution tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Rain Cycling");
 
@@ -15535,15 +15526,15 @@ fn main() {
                                                             .auto_bounds([true, true].into())
                                                             .include_x(time)
                                                             .include_x(time + 10000.0)
+                                                            .allow_drag(false)
+                                                            .allow_zoom([false, false])
+                                                            .allow_scroll(false)
                                                             .show(ui, |plot_ui| {
                                                                 plot_ui.line(Line::new(alpha_points).name("Alpha").color(Color32::GREEN));
                                                                 plot_ui.line(Line::new(beta_points).name("Beta").color(Color32::RED));
                                                             });
-                                                    });
-                                                }
-                                                3 => {
-                                                    // Difficulty tab
-                                                    egui::ScrollArea::vertical().show(ui, |ui| {
+
+                                                        ui.separator();
                                                         ui.heading("Auto Difficulty Settings");
                                                         ui.label("Automatically adjust parameters based on population count.");
                                                         ui.label(format!("Current Population: {}", state.alive_count));
@@ -15564,7 +15555,11 @@ fn main() {
                                                         }
 
                                                         let current_epoch = state.epoch;
-                                                        let draw_param = |ui: &mut egui::Ui, param: &mut AutoDifficultyParam, name: &str, current_val: f32, current_epoch: u64| {
+                                                        let draw_param = |ui: &mut egui::Ui,
+                                                                          param: &mut AutoDifficultyParam,
+                                                                          name: &str,
+                                                                          current_val: f32,
+                                                                          current_epoch: u64| {
                                                             ui.separator();
                                                             ui.heading(name);
                                                             ui.horizontal(|ui| {
@@ -15589,35 +15584,84 @@ fn main() {
                                                                     ui.add(egui::DragValue::new(&mut param.cooldown_epochs));
                                                                 });
 
-                                                                let epochs_passed = current_epoch.saturating_sub(param.last_adjustment_epoch);
+                                                                let epochs_passed =
+                                                                    current_epoch.saturating_sub(param.last_adjustment_epoch);
                                                                 if epochs_passed < param.cooldown_epochs {
                                                                     let remaining = param.cooldown_epochs - epochs_passed;
                                                                     ui.label(format!("Cooldown: {} epochs", remaining));
-                                                                    ui.add(egui::ProgressBar::new(epochs_passed as f32 / param.cooldown_epochs as f32));
+                                                                    ui.add(egui::ProgressBar::new(
+                                                                        epochs_passed as f32 / param.cooldown_epochs as f32,
+                                                                    ));
                                                                 }
                                                             }
                                                         };
 
                                                         // Calculate effective values with difficulty applied
-                                                        let effective_food_power = state.difficulty.food_power.apply_to(state.food_power, false);
-                                                        let effective_poison_power = state.difficulty.poison_power.apply_to(state.poison_power, true);
-                                                        let effective_spawn_prob = state.difficulty.spawn_prob.apply_to(state.spawn_probability, false);
-                                                        let effective_death_prob = state.difficulty.death_prob.apply_to(state.death_probability, true);
-                                                        let effective_alpha_rain = state.difficulty.alpha_rain.apply_to(state.alpha_multiplier, false);
-                                                        let effective_beta_rain = state.difficulty.beta_rain.apply_to(state.beta_multiplier, true);
+                                                        let effective_food_power =
+                                                            state.difficulty.food_power.apply_to(state.food_power, false);
+                                                        let effective_poison_power =
+                                                            state.difficulty.poison_power.apply_to(state.poison_power, true);
+                                                        let effective_spawn_prob = state
+                                                            .difficulty
+                                                            .spawn_prob
+                                                            .apply_to(state.spawn_probability, false);
+                                                        let effective_death_prob =
+                                                            state.difficulty.death_prob.apply_to(state.death_probability, true);
+                                                        let effective_alpha_rain = state
+                                                            .difficulty
+                                                            .alpha_rain
+                                                            .apply_to(state.alpha_multiplier, false);
+                                                        let effective_beta_rain =
+                                                            state.difficulty.beta_rain.apply_to(state.beta_multiplier, true);
 
-                                                        draw_param(ui, &mut state.difficulty.food_power, "Food Power (Harder = Less)", effective_food_power, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.poison_power, "Poison Power (Harder = More)", effective_poison_power, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.spawn_prob, "Spawn Prob (Harder = Less)", effective_spawn_prob, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.death_prob, "Death Prob (Harder = More)", effective_death_prob, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.alpha_rain, "Alpha Rain (Harder = Less)", effective_alpha_rain, current_epoch);
-                                                        draw_param(ui, &mut state.difficulty.beta_rain, "Beta Rain (Harder = More)", effective_beta_rain, current_epoch);
+                                                        draw_param(
+                                                            ui,
+                                                            &mut state.difficulty.food_power,
+                                                            "Food Power (Harder = Less)",
+                                                            effective_food_power,
+                                                            current_epoch,
+                                                        );
+                                                        draw_param(
+                                                            ui,
+                                                            &mut state.difficulty.poison_power,
+                                                            "Poison Power (Harder = More)",
+                                                            effective_poison_power,
+                                                            current_epoch,
+                                                        );
+                                                        draw_param(
+                                                            ui,
+                                                            &mut state.difficulty.spawn_prob,
+                                                            "Spawn Prob (Harder = Less)",
+                                                            effective_spawn_prob,
+                                                            current_epoch,
+                                                        );
+                                                        draw_param(
+                                                            ui,
+                                                            &mut state.difficulty.death_prob,
+                                                            "Death Prob (Harder = More)",
+                                                            effective_death_prob,
+                                                            current_epoch,
+                                                        );
+                                                        draw_param(
+                                                            ui,
+                                                            &mut state.difficulty.alpha_rain,
+                                                            "Alpha Rain (Harder = Less)",
+                                                            effective_alpha_rain,
+                                                            current_epoch,
+                                                        );
+                                                        draw_param(
+                                                            ui,
+                                                            &mut state.difficulty.beta_rain,
+                                                            "Beta Rain (Harder = More)",
+                                                            effective_beta_rain,
+                                                            current_epoch,
+                                                        );
                                                     });
                                                 }
-                                                4 => {
-                                                    // Visualization tab
+                                                5 => {
+                                                    // Viz tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
-                                                        ui.heading("Visualization Settings");
+                                                        ui.heading("Viz Settings");
 
                                                         ui.separator();
                                                         ui.label("Grid Interpolation");
@@ -15912,7 +15956,7 @@ fn main() {
                                                         );
                                                     });
                                                 }
-                                                5 => {
+                                                3 => {
                                                     // Microswimming tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Microswimming");
@@ -15985,7 +16029,7 @@ fn main() {
                                                         );
                                                     });
                                                 }
-                                                6 => {
+                                                4 => {
                                                     // Fluid tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Fluid Configuration");
@@ -16198,6 +16242,25 @@ fn main() {
                                                 _ => {}
                                             }
                             });
+
+                                    // One-line HUD over the simulation view.
+                                    egui::Area::new(egui::Id::new("sim_hud_line"))
+                                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 4.0))
+                                        .show(ctx, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.colored_label(
+                                                    egui::Color32::WHITE,
+                                                    format!(
+                                                        "{}  |  Epoch {}  |  {:.1} eps  |  Agents {}  |  Cap {}",
+                                                        state.run_name,
+                                                        state.epoch,
+                                                        state.epochs_per_second,
+                                                        state.alive_count,
+                                                        state.agent_buffer_capacity
+                                                    ),
+                                                );
+                                            });
+                                        });
 
                                    } // End ui_visible check
 
@@ -17090,22 +17153,16 @@ fn main() {
                                         .default_pos([10.0, 10.0])
                                         .default_size([300.0, 400.0])
                                         .show(ctx, |ui| {
-                                            ui.heading("Camera");
-                                            ui.add(
-                                                egui::Slider::new(&mut state.camera_zoom, 0.1..=2000.0)
-                                                    .text("Zoom").logarithmic(true),
-                                            );
-                                            if ui.button("Reset Camera (R)").clicked() {
-                                                state.camera_zoom = 1.0;
-                                                let sim_size = state.sim_size;
-                                                state.camera_pan = [sim_size / 2.0, sim_size / 2.0];
-                                            }
-
-                                            ui.separator();
                                             ui.heading("Info");
                                             ui.label(format!("Agents: {}", state.agent_count));
                                             ui.label(format!("Living Agents: {}", state.alive_count));
-                                            if ui.button("Reset Simulation").clicked() {
+                                            let reset_button = egui::Button::new("Reset Simulation")
+                                                .fill(egui::Color32::from_rgb(90, 25, 25))
+                                                .stroke(egui::Stroke::new(
+                                                    1.0,
+                                                    egui::Color32::from_rgb(180, 80, 80),
+                                                ));
+                                            if ui.add(reset_button).clicked() {
                                                 reset_requested = true;
                                             }
                                             if ui.button("Spawn 5000 Random Agents").clicked() && !state.is_paused {
@@ -17247,7 +17304,7 @@ fn main() {
                                             });
 
                                             ui.separator();
-                                            ui.collapsing("Evolution", |ui| {
+                                            ui.collapsing("EnvEvolution", |ui| {
                                                 ui.label("Rain Cycling");
                                                 ui.add(egui::Slider::new(&mut state.alpha_rain_variation, 0.0..=1.0).text("Alpha Var %"));
                                                 ui.add(egui::Slider::new(&mut state.beta_rain_variation, 0.0..=1.0).text("Beta Var %"));
@@ -17283,6 +17340,9 @@ fn main() {
 
                                                 Plot::new("rain_plot")
                                                     .view_aspect(2.0)
+                                                    .allow_drag(false)
+                                                    .allow_zoom([false, false])
+                                                    .allow_scroll(false)
                                                     .show(ui, |plot_ui| {
                                                         plot_ui.line(Line::new(alpha_points).name("Alpha").color(Color32::GREEN));
                                                         plot_ui.line(Line::new(beta_points).name("Beta").color(Color32::RED));

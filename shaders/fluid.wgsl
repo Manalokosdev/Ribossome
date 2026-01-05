@@ -988,10 +988,6 @@ fn gamma_slope_force(x: u32, y: u32) -> vec2<f32> {
 
     var slope_grad = gamma_slope_at_idx(idx);
 
-    // Add the global vector force (physics uses vector_force_x/y scaled by vector_force_power).
-    let global_vec = vec2<f32>(fp_f32(FP_VECTOR_FORCE_X), fp_f32(FP_VECTOR_FORCE_Y)) * fp_f32(FP_VECTOR_FORCE_POWER);
-    slope_grad = slope_grad + global_vec;
-
     // gamma_slope is a gradient (points uphill). Fluid should be driven downhill.
     return -sanitize_vec2(slope_grad) * fp_f32(FP_FLUID_SLOPE_FORCE_SCALE);
 }
@@ -1000,10 +996,6 @@ fn gamma_slope_vector(x: u32, y: u32) -> vec2<f32> {
     // Uses the simulation-provided slope vector field (gamma+alpha+beta contributions).
     let idx = gamma_idx_for_fluid_cell(x, y);
     var slope_grad = gamma_slope_at_idx(idx);
-
-    // Match the old behavior: include the global vector force.
-    let global_vec = vec2<f32>(fp_f32(FP_VECTOR_FORCE_X), fp_f32(FP_VECTOR_FORCE_Y)) * fp_f32(FP_VECTOR_FORCE_POWER);
-    slope_grad = slope_grad + global_vec;
 
     // gamma_slope is a gradient (points uphill). We want the downhill direction.
     return -sanitize_vec2(slope_grad);
