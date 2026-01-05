@@ -83,7 +83,11 @@ The first run may take 10–60 seconds due to shader compilation (normal for lar
 
 Watch Ribossome in action:
 
-[recording_900x900_Ribossome_Serenus-Rupes-5872_20260105_131652_880UTC_1767619039.mp4](../site-content/recording_900x900_Ribossome_Serenus-Rupes-5872_20260105_131652_880UTC_1767619039.mp4)
+<video src="https://github.com/Manalokosdev/Ribossome/raw/main/site-content/recording_900x900_Ribossome_Serenus-Rupes-5872_20260105_131652_880UTC_1767619039.mp4" controls="controls" style="max-width: 100%;">
+Your browser does not support the video tag.
+</video>
+
+*[Download video if player doesn't work](https://github.com/Manalokosdev/Ribossome/raw/main/site-content/recording_900x900_Ribossome_Serenus-Rupes-5872_20260105_131652_880UTC_1767619039.mp4)*
 
 ## Controls
 
