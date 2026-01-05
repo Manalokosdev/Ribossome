@@ -14560,14 +14560,6 @@ fn main() {
                                                     if ui.button("Reset Simulation").clicked() {
                                                         reset_requested = true;
                                                     }
-                                                    let mut fps_cap_enabled = matches!(state.current_mode, 0 | 3);
-                                                    if ui.checkbox(&mut fps_cap_enabled, "Enable FPS Cap").changed() {
-                                                        if fps_cap_enabled {
-                                                            state.set_speed_mode(if state.current_mode == 3 { 3 } else { 0 });
-                                                        } else {
-                                                            state.set_speed_mode(1);
-                                                        }
-                                                    }
                                                 });
 
                                                 // Simulation Speed controls (4th row)
@@ -14593,12 +14585,6 @@ fn main() {
                                                 }
 
                                                 ui.horizontal(|ui| {
-                                                    if ui.button("📷 Save Snapshot").clicked() {
-                                                        state.snapshot_save_requested = true;
-                                                    }
-                                                    if ui.button("📂 Load Snapshot").clicked() {
-                                                        state.snapshot_load_requested = true;
-                                                    }
                                                     if ui
                                                         .button("📸 Screenshot")
                                                         .on_hover_text("Capture current view as JPEG")
@@ -14678,6 +14664,15 @@ fn main() {
                                                             eprintln!("Failed to load settings from {}", path.display());
                                                         }
                                                     }
+                                                }
+                                            });
+
+                                            ui.horizontal(|ui| {
+                                                if ui.button("📷 Save Snapshot").clicked() {
+                                                    state.snapshot_save_requested = true;
+                                                }
+                                                if ui.button("📂 Load Snapshot").clicked() {
+                                                    state.snapshot_load_requested = true;
                                                 }
                                             });
 
@@ -17298,25 +17293,6 @@ fn main() {
                                             ui.collapsing("Part Base-Angle Overrides", |ui| {
                                                 ui_part_base_angle_overrides(ui, state);
                                             });
-
-                                            ui.separator();
-                                            ui.heading("Performance");
-                                            let mut fps_cap_enabled = matches!(state.current_mode, 0 | 3);
-                                            if ui.checkbox(&mut fps_cap_enabled, "Enable FPS Cap").changed() {
-                                                if fps_cap_enabled {
-                                                    state.set_speed_mode(0);
-                                                } else {
-                                                    state.set_speed_mode(1);
-                                                }
-                                            }
-                                            if fps_cap_enabled {
-                                                let mut slow_mode = state.current_mode == 3;
-                                                if ui.checkbox(&mut slow_mode, "Slow (25 FPS)").changed() {
-                                                    state.set_speed_mode(if slow_mode { 3 } else { 0 });
-                                                }
-                                            } else {
-                                                ui.label("Running at maximum speed");
-                                            }
 
                                             ui.separator();
                                             ui.label("Controls:");
