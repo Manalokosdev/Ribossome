@@ -10,6 +10,8 @@ use egui_wgpu::ScreenDescriptor;
 use image::imageops::FilterType;
 use image::GrayImage;
 use serde::{Deserialize, Serialize};
+use std::io::{BufWriter, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -4135,6 +4137,19 @@ struct GpuState {
     snapshot_load_requested: bool,
     screenshot_4k_requested: bool,
     screenshot_requested: bool,
+    // Screen recording state
+    recording: bool,
+    recording_fps: u32,
+    recording_size: u32,
+    recording_show_ui: bool,
+    recording_bar_visible: bool,
+    recording_center_norm: [f32; 2],
+    recording_output_path: Option<PathBuf>,
+    recording_error: Option<String>,
+    recording_last_frame_time: Option<std::time::Instant>,
+    recording_pipe: Option<RecordingPipe>,
+    recording_readbacks: Vec<RecordingReadbackSlot>,
+    recording_readback_index: usize,
     // Resolution change state
     pending_resolution_change: Option<u32>, // If Some(res), reset with new resolution
     // Visual buffer stride (pixels per row)
@@ -4279,6 +4294,25 @@ struct GpuState {
 
 const FULL_SPEED_PRESENT_INTERVAL_MICROS: u64 = 16_667; // ~60 Hz
 const EGUI_UPDATE_INTERVAL_MICROS: u64 = 33_333; // ~30 Hz
+
+struct RecordingPipe {
+    child: Child,
+    stdin: BufWriter<ChildStdin>,
+    output_path: PathBuf,
+    fps: u32,
+    out_size: u32,
+    in_side: u32,
+    in_pix_fmt: &'static str,
+}
+
+struct RecordingReadbackSlot {
+    buffer: wgpu::Buffer,
+    padded_bytes_per_row: u32,
+    side: u32,
+    pending_copy: bool,
+    rx: Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
+    scratch: Vec<u8>,
+}
 
 #[allow(dead_code)]
 impl GpuState {
@@ -4751,7 +4785,7 @@ impl GpuState {
         let surface_format = surface_caps.formats[0];
 
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             width: size.width,
             height: size.height,
@@ -7581,7 +7615,7 @@ impl GpuState {
                 .as_nanos() as u64,
             window: window_clone,
             egui_renderer,
-            ui_tab: 0, // Start on Simulation tab
+            ui_tab: 0, // Start on Agents tab
             ui_visible: true, // Control panel visible by default
             selected_fumarole_index: 0,
             debug_per_segment: settings.debug_per_segment,
@@ -7590,6 +7624,18 @@ impl GpuState {
             snapshot_load_requested: false,
             screenshot_4k_requested: false,
             screenshot_requested: false,
+            recording: false,
+            recording_fps: 30,
+            recording_size: 720,
+            recording_show_ui: false,
+            recording_bar_visible: false,
+            recording_center_norm: [0.5, 0.5],
+            recording_output_path: None,
+            recording_error: None,
+            recording_last_frame_time: None,
+            recording_pipe: None,
+            recording_readbacks: Vec::new(),
+            recording_readback_index: 0,
             pending_resolution_change: None,
             visual_stride_pixels,
             alpha_blur: settings.alpha_blur,
@@ -10808,6 +10854,12 @@ impl GpuState {
         self.frame_profiler
             .write_ts_encoder(&mut encoder, TS_RENDER_ENC_END);
 
+        // If "Show UI" is disabled, capture BEFORE egui draws into the swapchain.
+        // This keeps the on-screen UI visible while excluding it from the recording.
+        if !skip_egui && self.recording && !self.recording_show_ui {
+            self.recording_schedule_readback(&output.texture, &mut encoder, now);
+        }
+
         if skip_egui {
             // Keep egui markers stable when egui is skipped.
             self.frame_profiler
@@ -10822,6 +10874,11 @@ impl GpuState {
             // Resolve/copy timestamps at the end of the frame work.
             self.frame_profiler.resolve_and_copy(&mut encoder);
 
+            // Schedule recording readback from the swapchain (no egui this frame).
+            if self.recording {
+                self.recording_schedule_readback(&output.texture, &mut encoder, now);
+            }
+
             // Submit simulation rendering and present.
             self.frame_profiler.submit_cmd_buffer(
                 &self.device,
@@ -10829,7 +10886,18 @@ impl GpuState {
                 encoder.finish(),
                 DispatchSegment::Render,
             );
+
+            if self.recording {
+                self.recording_begin_pending_maps();
+            }
             output.present();
+
+            if self.recording {
+                self.recording_drain_ready_frames();
+                if !self.recording && self.recording_pipe.is_some() {
+                    let _ = self.save_recording();
+                }
+            }
 
             if self.perf_force_gpu_sync {
                 self.device.poll(wgpu::Maintain::Wait);
@@ -10920,6 +10988,11 @@ impl GpuState {
                 .write_ts_render_pass(&mut rpass, TS_EGUI_PASS_END);
         }
 
+        // Schedule recording readback after egui has been drawn into the swapchain.
+        if self.recording && self.recording_show_ui {
+            self.recording_schedule_readback(&output.texture, &mut encoder, now);
+        }
+
         self.frame_profiler
             .write_ts_encoder(&mut encoder, TS_EGUI_ENC_END);
         self.frame_profiler.resolve_and_copy(&mut encoder);
@@ -10934,10 +11007,21 @@ impl GpuState {
             encoder.finish(),
             DispatchSegment::Egui,
         );
+
+        if self.recording {
+            self.recording_begin_pending_maps();
+        }
         output.present();
 
         if self.perf_force_gpu_sync {
             self.device.poll(wgpu::Maintain::Wait);
+        }
+
+        if self.recording {
+            self.recording_drain_ready_frames();
+            if !self.recording && self.recording_pipe.is_some() {
+                let _ = self.save_recording();
+            }
         }
 
         let cpu_egui_ms = cpu_egui_start.elapsed().as_secs_f64() * 1000.0;
@@ -11537,20 +11621,20 @@ impl GpuState {
         rx.recv()??;
 
         let data = buffer_slice.get_mapped_range();
-        
+
         // Convert Rgba32Float to RGBA8 by unpacking padded rows
         let mut rgba_data: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height {
             let row_start = (y * padded_bytes_per_row) as usize;
             let row_data = &data[row_start..row_start + (width * bytes_per_pixel) as usize];
-            
+
             // Rgba32Float: 4 f32s per pixel (16 bytes)
             for pixel_bytes in row_data.chunks_exact(16) {
                 let r = f32::from_le_bytes([pixel_bytes[0], pixel_bytes[1], pixel_bytes[2], pixel_bytes[3]]);
                 let g = f32::from_le_bytes([pixel_bytes[4], pixel_bytes[5], pixel_bytes[6], pixel_bytes[7]]);
                 let b = f32::from_le_bytes([pixel_bytes[8], pixel_bytes[9], pixel_bytes[10], pixel_bytes[11]]);
                 let a = f32::from_le_bytes([pixel_bytes[12], pixel_bytes[13], pixel_bytes[14], pixel_bytes[15]]);
-                
+
                 // Apply sRGB gamma correction (linear → sRGB) to match screen appearance
                 let to_srgb = |linear: f32| -> u8 {
                     let linear = linear.clamp(0.0, 1.0);
@@ -11561,14 +11645,14 @@ impl GpuState {
                     };
                     (srgb * 255.0) as u8
                 };
-                
+
                 rgba_data.push(to_srgb(r));
                 rgba_data.push(to_srgb(g));
                 rgba_data.push(to_srgb(b));
                 rgba_data.push((a.clamp(0.0, 1.0) * 255.0) as u8); // Alpha stays linear
             }
         }
-        
+
         drop(data);
         output_buffer.unmap();
 
@@ -11599,6 +11683,346 @@ impl GpuState {
 
         println!("📸 Screenshot saved: {}", filename);
         Ok(())
+    }
+
+    fn save_recording(&mut self) -> anyhow::Result<()> {
+        // Stop ffmpeg pipe (if any). The output file is finalized when stdin closes.
+        self.recording = false;
+        self.recording_last_frame_time = None;
+
+        self.recording_readbacks.clear();
+        self.recording_readback_index = 0;
+
+        if let Some(mut pipe) = self.recording_pipe.take() {
+            // Drop stdin to signal EOF.
+            drop(pipe.stdin);
+
+            let output_path = pipe.output_path.clone();
+            std::thread::spawn(move || {
+                let _ = pipe.child.wait();
+                println!("🎬 Recording saved: {}", output_path.display());
+            });
+        }
+
+        Ok(())
+    }
+
+    fn start_recording(&mut self) -> anyhow::Result<()> {
+        if self.recording_pipe.is_some() {
+            return Ok(());
+        }
+
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        std::fs::create_dir_all("recordings")?;
+
+        let requested_side = self.recording_size.max(16);
+        let fps = self.recording_fps.max(1);
+
+        let width = self.surface_config.width;
+        let height = self.surface_config.height;
+        anyhow::ensure!(width > 0 && height > 0, "Cannot start recording with a zero-sized surface");
+        let side = requested_side.min(width).min(height).max(1);
+
+        let swap_is_bgra = matches!(
+            self.surface_config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let in_pix_fmt: &'static str = if swap_is_bgra { "bgra" } else { "rgba" };
+
+        let output_path = PathBuf::from(format!(
+            "recordings/recording_{}x{}_{}_{}.mp4",
+            side, side, self.run_name, timestamp
+        ));
+
+        // Stream raw frames to ffmpeg over stdin.
+        // NOTE: This requires `ffmpeg` to be available in PATH.
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-y")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg(in_pix_fmt)
+            .arg("-s")
+            .arg(format!("{}x{}", side, side))
+            .arg("-r")
+            .arg(format!("{}", fps))
+            .arg("-i")
+            .arg("-")
+            .arg("-an")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-preset")
+            .arg("veryfast")
+            .arg("-crf")
+            .arg("18")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            ;
+
+        let mut child = cmd
+            .arg(output_path.to_string_lossy().to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to start ffmpeg (is it installed and on PATH?): {e}. Install ffmpeg or add it to PATH to record MP4."
+                )
+            })?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to open ffmpeg stdin"))?;
+
+        self.recording_output_path = Some(output_path.clone());
+        self.recording_error = None;
+        self.recording_last_frame_time = None;
+        self.recording_readbacks.clear();
+        self.recording_readback_index = 0;
+        self.recording_pipe = Some(RecordingPipe {
+            child,
+            stdin: BufWriter::new(stdin),
+            output_path,
+            fps,
+            out_size: side,
+            in_side: side,
+            in_pix_fmt,
+        });
+
+        Ok(())
+    }
+
+    fn recording_schedule_readback(
+        &mut self,
+        output_texture: &wgpu::Texture,
+        encoder: &mut wgpu::CommandEncoder,
+        now: std::time::Instant,
+    ) {
+        if !self.recording {
+            return;
+        }
+        let Some(pipe) = &self.recording_pipe else {
+            return;
+        };
+
+        let frame_interval = std::time::Duration::from_secs_f64(1.0 / pipe.fps.max(1) as f64);
+        if let Some(last) = self.recording_last_frame_time {
+            if now.duration_since(last) < frame_interval {
+                return;
+            }
+        }
+
+        let width = self.surface_config.width;
+        let height = self.surface_config.height;
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let side = self.recording_size.min(width).min(height);
+        if side == 0 {
+            return;
+        }
+
+        // Ensure readback ring matches the current capture square.
+        let needs_recreate = self
+            .recording_readbacks
+            .first()
+            .map(|s| s.side != side)
+            .unwrap_or(true);
+        if needs_recreate {
+            self.recording_readbacks.clear();
+            self.recording_readback_index = 0;
+
+            let bytes_per_pixel = 4u32;
+            let unpadded_bytes_per_row = side * bytes_per_pixel;
+            let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
+            let buffer_size = (padded_bytes_per_row * side) as u64;
+
+            for i in 0..2 {
+                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Recording Readback Buffer[{i}]")),
+                    size: buffer_size,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                self.recording_readbacks.push(RecordingReadbackSlot {
+                    buffer,
+                    padded_bytes_per_row,
+                    side,
+                    pending_copy: false,
+                    rx: None,
+                    scratch: Vec::new(),
+                });
+            }
+        }
+
+        if self.recording_readbacks.is_empty() {
+            return;
+        }
+
+        let slot_index = self.recording_readback_index % self.recording_readbacks.len();
+        let slot = &mut self.recording_readbacks[slot_index];
+        if slot.rx.is_some() || slot.pending_copy {
+            // Still busy; skip scheduling to avoid piling up.
+            return;
+        }
+
+        let w_px = width as f32;
+        let h_px = height as f32;
+        let side_px = side as f32;
+
+        let cx = (self.recording_center_norm[0] * w_px).clamp(0.0, w_px);
+        let cy = (self.recording_center_norm[1] * h_px).clamp(0.0, h_px);
+
+        let max_x = (w_px - side_px).max(0.0);
+        let max_y = (h_px - side_px).max(0.0);
+
+        let origin_x = (cx - side_px * 0.5).clamp(0.0, max_x).round() as u32;
+        let origin_y = (cy - side_px * 0.5).clamp(0.0, max_y).round() as u32;
+
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: output_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: origin_x,
+                    y: origin_y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &slot.buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(slot.padded_bytes_per_row),
+                    rows_per_image: Some(side),
+                },
+            },
+            wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // IMPORTANT: Do NOT map here. Mapping before submission will trip wgpu validation
+        // because the buffer is considered mapped while it is also used by the submitted copy.
+        slot.pending_copy = true;
+
+        self.recording_last_frame_time = Some(now);
+        self.recording_readback_index = (slot_index + 1) % self.recording_readbacks.len();
+    }
+
+    fn recording_begin_pending_maps(&mut self) {
+        if !self.recording {
+            return;
+        }
+        if self.recording_pipe.is_none() {
+            return;
+        }
+
+        for slot in &mut self.recording_readbacks {
+            if slot.pending_copy && slot.rx.is_none() {
+                let slice = slot.buffer.slice(..);
+                let (tx, rx) = std::sync::mpsc::channel();
+                slice.map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = tx.send(result);
+                });
+                slot.rx = Some(rx);
+                slot.pending_copy = false;
+            }
+        }
+    }
+
+    fn recording_drain_ready_frames(&mut self) {
+        if !self.recording {
+            return;
+        }
+        let Some(pipe) = &mut self.recording_pipe else {
+            return;
+        };
+
+        self.device.poll(wgpu::Maintain::Poll);
+
+        let swap_is_bgra = matches!(
+            self.surface_config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let want_bgra = pipe.in_pix_fmt == "bgra";
+
+        for slot in &mut self.recording_readbacks {
+            let Some(rx) = slot.rx.take() else {
+                continue;
+            };
+
+            match rx.try_recv() {
+                Ok(Ok(())) => {
+                    let slice = slot.buffer.slice(..);
+                    let data = slice.get_mapped_range();
+
+                    // Unpad rows and (optionally) swizzle channels.
+                    let side = slot.side;
+                    let needed = (side * side * 4) as usize;
+                    if slot.scratch.len() != needed {
+                        slot.scratch.resize(needed, 0);
+                    }
+                    let row_bytes = (side * 4) as usize;
+
+                    for y in 0..side as usize {
+                        let src_start = y * slot.padded_bytes_per_row as usize;
+                        let src_row = &data[src_start..src_start + row_bytes];
+                        let dst_start = y * row_bytes;
+                        let dst_row = &mut slot.scratch[dst_start..dst_start + row_bytes];
+
+                        if swap_is_bgra != want_bgra {
+                            for (src_px, dst_px) in src_row
+                                .chunks_exact(4)
+                                .zip(dst_row.chunks_exact_mut(4))
+                            {
+                                dst_px[0] = src_px[2];
+                                dst_px[1] = src_px[1];
+                                dst_px[2] = src_px[0];
+                                dst_px[3] = src_px[3];
+                            }
+                        } else {
+                            dst_row.copy_from_slice(src_row);
+                        }
+                    }
+
+                    drop(data);
+                    slot.buffer.unmap();
+
+                    if let Err(e) = pipe.stdin.write_all(&slot.scratch) {
+                        self.recording_error = Some(format!("Recording write failed: {e}"));
+                        self.recording = false;
+                        return;
+                    }
+                }
+                Ok(Err(e)) => {
+                    self.recording_error = Some(format!("Recording readback failed: {e:?}"));
+                    self.recording = false;
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Not ready yet; put receiver back.
+                    slot.rx = Some(rx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.recording_error = Some("Recording readback channel disconnected".to_string());
+                    self.recording = false;
+                    return;
+                }
+            }
+        }
     }
 
     fn capture_4k_screenshot(&mut self) -> anyhow::Result<()> {
@@ -13037,7 +13461,7 @@ fn render_splash_screen(
     // Configure surface
     let size = window.inner_size();
     let config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         format: swapchain_format,
         width: size.width,
         height: size.height,
@@ -13819,6 +14243,7 @@ fn main() {
                         WindowEvent::RedrawRequested => {
                             let mut reset_requested = self.force_reset_requested;
                             self.force_reset_requested = false;
+                            let mut save_recording_requested = false;
 
                             // Render loading screen while state is being initialized
                             if self.state.is_none() {
@@ -14094,47 +14519,111 @@ fn main() {
 
                                             ui.add_space(4.0);
 
-                                            // Top section (no tabs) - Always visible
+                                            // Top section (no tabs) - Always visible (split into 3 rows to keep panel narrow)
+                                            ui.vertical(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    if ui.button(if state.is_paused { "Resume" } else { "Pause" }).clicked() {
+                                                        state.is_paused = !state.is_paused;
+                                                    }
+                                                    if ui.button("Reset Simulation").clicked() {
+                                                        reset_requested = true;
+                                                    }
+                                                    let mut fps_cap_enabled = matches!(state.current_mode, 0 | 3);
+                                                    if ui.checkbox(&mut fps_cap_enabled, "Enable FPS Cap").changed() {
+                                                        if fps_cap_enabled {
+                                                            state.set_speed_mode(if state.current_mode == 3 { 3 } else { 0 });
+                                                        } else {
+                                                            state.set_speed_mode(1);
+                                                        }
+                                                    }
+                                                });
+
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("📷 Save Snapshot").clicked() {
+                                                        state.snapshot_save_requested = true;
+                                                    }
+                                                    if ui.button("📂 Load Snapshot").clicked() {
+                                                        state.snapshot_load_requested = true;
+                                                    }
+                                                    if ui
+                                                        .button("📸 Screenshot")
+                                                        .on_hover_text("Capture current view as JPEG")
+                                                        .clicked()
+                                                    {
+                                                        state.screenshot_requested = true;
+                                                    }
+                                                    if ui
+                                                        .button("🖼️ 4K Screenshot")
+                                                        .on_hover_text("Capture a full-world 4096×4096 PNG (tiled render)")
+                                                        .clicked()
+                                                    {
+                                                        state.screenshot_4k_requested = true;
+                                                    }
+                                                });
+
+                                                ui.horizontal(|ui| {
+                                                    if ui
+                                                        .button(if state.recording_bar_visible { "🎬 Hide Recording" } else { "🎬 Show Recording" })
+                                                        .on_hover_text("Show/hide the floating recording controls")
+                                                        .clicked()
+                                                    {
+                                                        state.recording_bar_visible = !state.recording_bar_visible;
+                                                    }
+
+                                                    if ui
+                                                        .button("Overrides...")
+                                                        .on_hover_text("Edit part & organ property overrides")
+                                                        .clicked()
+                                                    {
+                                                        state.show_part_properties_editor = true;
+                                                    }
+                                                });
+                                            });
+
+                                            ui.separator();
+                                            ui.heading("Camera");
+                                            ui.add(
+                                                egui::Slider::new(&mut state.camera_zoom, 0.1..=2000.0)
+                                                    .text("Zoom")
+                                                    .logarithmic(true),
+                                            );
+                                            if ui.button("Reset Camera (R)").clicked() {
+                                                let sim_size = state.sim_size;
+                                                state.camera_zoom = 1.0;
+                                                state.camera_pan = [sim_size / 2.0, sim_size / 2.0];
+                                            }
+
+                                            ui.separator();
+                                            ui.heading("Settings");
                                             ui.horizontal(|ui| {
-                                                if ui.button(if state.is_paused { "Resume" } else { "Pause" }).clicked() {
-                                                    state.is_paused = !state.is_paused;
-                                                }
-                                                if ui.button("Reset Simulation").clicked() {
-                                                    reset_requested = true;
-                                                }
-                                                let mut fps_cap_enabled = matches!(state.current_mode, 0 | 3);
-                                                if ui.checkbox(&mut fps_cap_enabled, "Enable FPS Cap").changed() {
-                                                    if fps_cap_enabled {
-                                                        state.set_speed_mode(if state.current_mode == 3 { 3 } else { 0 });
-                                                    } else {
-                                                        state.set_speed_mode(1);
+                                                ui.checkbox(&mut state.fluid_enabled, "Fluids");
+                                                ui.checkbox(&mut state.microswim_enabled, "Microswimming");
+                                                ui.checkbox(&mut state.propellers_enabled, "Propellers");
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Save Settings").clicked() {
+                                                    if let Some(path) = rfd::FileDialog::new()
+                                                        .set_file_name("simulation_settings.json")
+                                                        .add_filter("JSON", &["json"])
+                                                        .save_file()
+                                                    {
+                                                        let settings = state.current_settings();
+                                                        if let Err(err) = settings.save_to_disk(&path) {
+                                                            eprintln!("Failed to save settings: {err:?}");
+                                                        }
                                                     }
                                                 }
-
-                                                ui.separator();
-                                                if ui.button("📷 Save Snapshot").clicked() {
-                                                    state.snapshot_save_requested = true;
-                                                }
-                                                if ui.button("📂 Load Snapshot").clicked() {
-                                                    state.snapshot_load_requested = true;
-                                                }
-                                                if ui
-                                                    .button("� Screenshot")
-                                                    .on_hover_text(
-                                                        "Capture current view as JPEG",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    state.screenshot_requested = true;
-                                                }
-                                                if ui
-                                                    .button("�🖼️ 4K Screenshot")
-                                                    .on_hover_text(
-                                                        "Capture a full-world 4096×4096 PNG (tiled render)",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    state.screenshot_4k_requested = true;
+                                                if ui.button("Load Settings").clicked() {
+                                                    if let Some(path) = rfd::FileDialog::new()
+                                                        .add_filter("JSON", &["json"])
+                                                        .pick_file()
+                                                    {
+                                                        if let Ok(settings) = SimulationSettings::load_from_disk(&path) {
+                                                            state.apply_settings(&settings);
+                                                        } else {
+                                                            eprintln!("Failed to load settings from {}", path.display());
+                                                        }
+                                                    }
                                                 }
                                             });
 
@@ -14251,7 +14740,6 @@ fn main() {
                                             // Tab selection for detailed controls with colored buttons
                                             ui.horizontal(|ui| {
                                                 let tab_colors = [
-                                                    ("Simulation", egui::Color32::from_rgb(50, 55, 60)),
                                                     ("Agents", egui::Color32::from_rgb(55, 50, 60)),
                                                     ("Environment", egui::Color32::from_rgb(50, 60, 55)),
                                                     ("Evolution", egui::Color32::from_rgb(60, 55, 50)),
@@ -14259,8 +14747,12 @@ fn main() {
                                                     ("Visualization", egui::Color32::from_rgb(55, 55, 55)),
                                                     ("Microswimming", egui::Color32::from_rgb(50, 55, 60)),
                                                     ("Fluid", egui::Color32::from_rgb(50, 55, 60)),
-                                                    ("Overrides", egui::Color32::from_rgb(55, 55, 55)),
                                                 ];
+
+                                                // Guard against stale indices.
+                                                if state.ui_tab >= tab_colors.len() {
+                                                    state.ui_tab = 0;
+                                                }
 
                                                 for (idx, (name, color)) in tab_colors.iter().enumerate() {
                                                     let is_selected = state.ui_tab == idx;
@@ -14277,15 +14769,13 @@ fn main() {
 
                                             // Tab content with colored backgrounds
                                             let tab_color = match state.ui_tab {
-                                                0 => egui::Color32::from_rgb(50, 55, 60),  // Simulation - blue-gray
-                                                1 => egui::Color32::from_rgb(55, 50, 60),  // Agents - purple-gray
-                                                2 => egui::Color32::from_rgb(50, 60, 55),  // Environment - green-gray
-                                                3 => egui::Color32::from_rgb(60, 55, 50),  // Evolution - orange-gray
-                                                4 => egui::Color32::from_rgb(60, 50, 50),  // Difficulty - red-gray
-                                                5 => egui::Color32::from_rgb(55, 55, 55),  // Visualization - neutral gray
-                                                6 => egui::Color32::from_rgb(50, 55, 60),  // Microswimming
-                                                7 => egui::Color32::from_rgb(50, 55, 60),  // Fluid - blue-gray
-                                                8 => egui::Color32::from_rgb(55, 55, 55),  // Overrides - neutral gray
+                                                0 => egui::Color32::from_rgb(55, 50, 60),  // Agents - purple-gray
+                                                1 => egui::Color32::from_rgb(50, 60, 55),  // Environment - green-gray
+                                                2 => egui::Color32::from_rgb(60, 55, 50),  // Evolution - orange-gray
+                                                3 => egui::Color32::from_rgb(60, 50, 50),  // Difficulty - red-gray
+                                                4 => egui::Color32::from_rgb(55, 55, 55),  // Visualization - neutral gray
+                                                5 => egui::Color32::from_rgb(50, 55, 60),  // Microswimming
+                                                6 => egui::Color32::from_rgb(50, 55, 60),  // Fluid - blue-gray
                                                 _ => egui::Color32::from_rgb(50, 50, 50),
                                             };
 
@@ -14297,154 +14787,7 @@ fn main() {
                                             ui_part_properties_editor_popup(ui, state);
 
                                             match state.ui_tab {
-                                                8 => {
-                                                    // Overrides tab
-                                                    egui::ScrollArea::vertical().show(ui, |ui| {
-                                                        ui.heading("Overrides");
-
-                                                        ui.separator();
-                                                        ui.horizontal(|ui| {
-                                                            if ui.button("Edit Part & Organ Properties...").clicked() {
-                                                                state.show_part_properties_editor = true;
-                                                            }
-                                                            if ui.button("Save Part Properties JSON").clicked() {
-                                                                if let Err(err) = save_part_properties_json(
-                                                                    Path::new(PART_PROPERTIES_JSON_PATH),
-                                                                    &state.part_props_override,
-                                                                    &state.part_props_defaults,
-                                                                ) {
-                                                                    eprintln!("Failed to save {}: {err:?}", PART_PROPERTIES_JSON_PATH);
-                                                                }
-                                                            }
-                                                        });
-
-                                                        ui.separator();
-                                                        ui.heading("Part Base-Angle Overrides");
-                                                        ui_part_base_angle_overrides(ui, state);
-                                                    });
-                                                }
                                                 0 => {
-                                                    // Simulation tab
-                                                    egui::ScrollArea::vertical().show(ui, |ui| {
-                                                        ui.heading("Camera");
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.camera_zoom, 0.1..=2000.0)
-                                                                .text("Zoom")
-                                                                .logarithmic(true),
-                                                        );
-                                                        if ui.button("Reset Camera (R)").clicked() {
-                                                            let sim_size = state.sim_size;
-                                                            state.camera_zoom = 1.0;
-                                                            state.camera_pan = [sim_size / 2.0, sim_size / 2.0];
-                                                        }
-                                                        ui.separator();
-                                                        ui.heading("Settings");
-                                                        ui.horizontal(|ui| {
-                                                            ui.checkbox(&mut state.fluid_enabled, "Fluids");
-                                                            ui.checkbox(&mut state.microswim_enabled, "Microswimming");
-                                                            ui.checkbox(&mut state.propellers_enabled, "Propellers");
-                                                        });
-                                                        ui.separator();
-                                                        ui.horizontal(|ui| {
-                                                            if ui.button("Save Settings").clicked() {
-                                                                if let Some(path) = rfd::FileDialog::new()
-                                                                    .set_file_name("simulation_settings.json")
-                                                                    .add_filter("JSON", &["json"])
-                                                                    .save_file()
-                                                                {
-                                                                    let settings = state.current_settings();
-                                                                    if let Err(err) = settings.save_to_disk(&path) {
-                                                                        eprintln!("Failed to save settings: {err:?}");
-                                                                    }
-                                                                }
-                                                            }
-                                                            if ui.button("Load Settings").clicked() {
-                                                                if let Some(path) = rfd::FileDialog::new()
-                                                                    .add_filter("JSON", &["json"])
-                                                                    .pick_file()
-                                                                {
-                                                                    if let Ok(settings) = SimulationSettings::load_from_disk(&path) {
-                                                                        state.apply_settings(&settings);
-                                                                    } else {
-                                                                        eprintln!("Failed to load settings from {}", path.display());
-                                                                    }
-                                                                }
-                                                            }
-                                                        });
-
-                                                        ui.separator();
-                                                        ui.heading("Simulation Speed");
-                                                        let mut mode = state.current_mode;
-                                                        let old_mode = mode;
-                                                        ui.horizontal(|ui| {
-                                                            ui.selectable_value(&mut mode, 3, "Slow (25 FPS)");
-                                                            ui.selectable_value(&mut mode, 0, "VSync (60 FPS)");
-                                                            ui.selectable_value(&mut mode, 1, "Full Speed");
-                                                            ui.selectable_value(&mut mode, 2, "Fast Draw");
-                                                        });
-                                                        if mode != old_mode {
-                                                            state.set_speed_mode(mode);
-                                                        }
-                                                        if mode == 2 {
-                                                            ui.add(
-                                                                egui::Slider::new(&mut state.render_interval, 1..=10000)
-                                                                    .text("Draw every N steps")
-                                                                    .logarithmic(true),
-                                                            );
-                                                        }
-                                                        ui.label(format!("Epoch: {}", state.epoch));
-                                                        ui.label(format!(
-                                                            "Epochs/sec: {:.1}",
-                                                            state.epochs_per_second
-                                                        ));
-
-                                                        ui.separator();
-                                                        ui.heading("Population Overview");
-                                                        ui.label(format!("Total Agents: {}", state.agent_count));
-                                                        ui.label(format!("Living Agents: {}", state.alive_count));
-                                                        ui.label(format!(
-                                                            "Capacity: {}",
-                                                            state.agent_buffer_capacity
-                                                        ));
-
-                                                        ui.separator();
-                                                        ui.collapsing("Population History", |ui| {
-                                                            ui.label(format!(
-                                                                "Samples: {} (every {} epochs)",
-                                                                state.population_history.len(),
-                                                                state.epoch_sample_interval
-                                                            ));
-
-                                                            if !state.population_plot_points.is_empty() {
-                                                                            use egui_plot::{Line, Plot};
-
-                                                                            let line = Line::new(state.population_plot_points.clone())
-                                                                    .color(egui::Color32::from_rgb(100, 200, 100))
-                                                                    .name("Population");
-
-                                                                Plot::new("population_plot")
-                                                                    .height(150.0)
-                                                                    .show_axes(true)
-                                                                    .show_grid(true)
-                                                                    .allow_drag(true)
-                                                                    .allow_zoom([true, false])
-                                                                    .allow_scroll(false)
-                                                                    .show(ui, |plot_ui| {
-                                                                        plot_ui.line(line);
-                                                                    });
-                                                            } else {
-                                                                ui.label("No data yet (waiting for first sample)");
-                                                            }
-                                                        });
-
-                                                        ui.separator();
-                                                        ui.checkbox(
-                                                            &mut state.debug_per_segment,
-                                                            "Debug: Per-segment overlay",
-                                                        );
-                                                    });
-                                                }
-                                                1 => {
                                                     // Agents tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Population Controls");
@@ -14744,7 +15087,7 @@ fn main() {
                                                         ui.label("Constant force applied to all agents (wind/gravity effect)");
                                                     });
                                                 }
-                                                2 => {
+                                                1 => {
                                                     // Environment tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Environment Scheduling");
@@ -15102,7 +15445,7 @@ fn main() {
                                                         );
                                                     });
                                                 }
-                                                3 => {
+                                                2 => {
                                                     // Evolution tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Rain Cycling");
@@ -15166,7 +15509,7 @@ fn main() {
                                                             });
                                                     });
                                                 }
-                                                4 => {
+                                                3 => {
                                                     // Difficulty tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Auto Difficulty Settings");
@@ -15239,7 +15582,7 @@ fn main() {
                                                         draw_param(ui, &mut state.difficulty.beta_rain, "Beta Rain (Harder = More)", effective_beta_rain, current_epoch);
                                                     });
                                                 }
-                                                5 => {
+                                                4 => {
                                                     // Visualization tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Visualization Settings");
@@ -15537,7 +15880,7 @@ fn main() {
                                                         );
                                                     });
                                                 }
-                                                6 => {
+                                                5 => {
                                                     // Microswimming tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Microswimming");
@@ -15610,7 +15953,7 @@ fn main() {
                                                         );
                                                     });
                                                 }
-                                                7 => {
+                                                6 => {
                                                     // Fluid tab
                                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                                         ui.heading("Fluid Configuration");
@@ -16092,8 +16435,144 @@ fn main() {
                                             });
 
                                         }); // Close the dark grey frame
+                                    } // Close if let Some(agent)
+
+                                        // Floating Recording Bar (optional)
+                                        let mut recording_bar_open = state.recording_bar_visible;
+                                        if state.recording_bar_visible || state.recording {
+                                            egui::Window::new("🎬 Recording")
+                                                .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -10.0])
+                                                .open(&mut recording_bar_open)
+                                                .resizable(false)
+                                                .collapsible(false)
+                                                .show(ctx, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    let btn_text = if state.recording { "⏹ Stop" } else { "🔴 Record" };
+                                                    if ui.button(btn_text).clicked() {
+                                                        if state.recording {
+                                                            save_recording_requested = true;
+                                                        } else {
+                                                            match state.start_recording() {
+                                                                Ok(()) => {
+                                                                    state.recording = true;
+                                                                }
+                                                                Err(e) => {
+                                                                    state.recording_error = Some(e.to_string());
+                                                                    state.recording = false;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    ui.separator();
+                                                    ui.label("Size:");
+                                                    ui.add_enabled(
+                                                        !state.recording,
+                                                        egui::DragValue::new(&mut state.recording_size)
+                                                            .speed(10)
+                                                            .range(360..=1920),
+                                                    );
+
+                                                    ui.separator();
+                                                    ui.label("FPS:");
+                                                    ui.add_enabled_ui(!state.recording, |ui| {
+                                                        egui::ComboBox::from_id_salt("fps_combo")
+                                                            .selected_text(format!("{}", state.recording_fps))
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(&mut state.recording_fps, 24, "24");
+                                                                ui.selectable_value(&mut state.recording_fps, 30, "30");
+                                                                ui.selectable_value(&mut state.recording_fps, 60, "60");
+                                                            });
+                                                    });
+
+                                                    ui.separator();
+                                                    ui.checkbox(&mut state.recording_show_ui, "Show UI");
+                                                });
+
+                                                ui.separator();
+                                                ui.label("Frame center (px):");
+                                                let w = state.surface_config.width as f32;
+                                                let h = state.surface_config.height as f32;
+                                                let capture_side = state
+                                                    .recording_size
+                                                    .min(state.surface_config.width)
+                                                    .min(state.surface_config.height) as f32;
+                                                let min_cx = (capture_side * 0.5).min(w * 0.5);
+                                                let max_cx = (w - capture_side * 0.5).max(min_cx);
+                                                let min_cy = (capture_side * 0.5).min(h * 0.5);
+                                                let max_cy = (h - capture_side * 0.5).max(min_cy);
+
+                                                let mut cx = (state.recording_center_norm[0] * w).clamp(min_cx, max_cx);
+                                                let mut cy = (state.recording_center_norm[1] * h).clamp(min_cy, max_cy);
+                                                ui.horizontal(|ui| {
+                                                    ui.label("X:");
+                                                    ui.add(egui::DragValue::new(&mut cx).speed(1.0).range(min_cx..=max_cx));
+                                                    ui.separator();
+                                                    ui.label("Y:");
+                                                    ui.add(egui::DragValue::new(&mut cy).speed(1.0).range(min_cy..=max_cy));
+                                                    ui.separator();
+                                                    if ui.button("Center").clicked() {
+                                                        cx = w * 0.5;
+                                                        cy = h * 0.5;
+                                                    }
+                                                });
+                                                if w > 0.0 && h > 0.0 {
+                                                    state.recording_center_norm = [
+                                                        (cx / w).clamp(0.0, 1.0),
+                                                        (cy / h).clamp(0.0, 1.0),
+                                                    ];
+                                                }
+
+                                                if let Some(path) = &state.recording_output_path {
+                                                    ui.label(format!("Output: {}", path.display()));
+                                                } else {
+                                                    ui.label("Output: (not started)");
+                                                }
+
+                                                if let Some(err) = &state.recording_error {
+                                                    ui.colored_label(egui::Color32::RED, err);
+                                                }
+                                            });  // Close recording window
                                         }
-                                    });
+
+                                        // If the user closed the recording bar via X while recording, stop recording.
+                                        if state.recording && !recording_bar_open {
+                                            save_recording_requested = true;
+                                        }
+                                        state.recording_bar_visible = recording_bar_open;
+
+                                        // Red capture frame overlay (preview even before recording starts).
+                                        if state.recording || state.recording_bar_visible {
+                                            let ppp = ctx.pixels_per_point();
+                                            let w_px = state.surface_config.width as f32;
+                                            let h_px = state.surface_config.height as f32;
+                                            let capture_side_px = (state.recording_size
+                                                .min(state.surface_config.width)
+                                                .min(state.surface_config.height)) as f32;
+
+                                            let cx_px = (state.recording_center_norm[0] * w_px).clamp(0.0, w_px);
+                                            let cy_px = (state.recording_center_norm[1] * h_px).clamp(0.0, h_px);
+
+                                            let min_x = 0.0;
+                                            let max_x = (w_px - capture_side_px).max(0.0);
+                                            let min_y = 0.0;
+                                            let max_y = (h_px - capture_side_px).max(0.0);
+
+                                            let origin_x_px = (cx_px - capture_side_px * 0.5).clamp(min_x, max_x);
+                                            let origin_y_px = (cy_px - capture_side_px * 0.5).clamp(min_y, max_y);
+
+                                            let rect = egui::Rect::from_min_size(
+                                                egui::pos2(origin_x_px / ppp, origin_y_px / ppp),
+                                                egui::vec2(capture_side_px / ppp, capture_side_px / ppp),
+                                            );
+                                            let painter = ctx.layer_painter(egui::LayerId::new(
+                                                egui::Order::Foreground,
+                                                egui::Id::new("recording_frame"),
+                                            ));
+                                            painter.rect_stroke(rect, 0.0, egui::Stroke::new(3.0, egui::Color32::RED));
+                                        }
+
+                                        }); // Close egui .run() call
 
                                         // Handle platform output
                                         self.egui_state.handle_platform_output(&window, full_output.platform_output);
@@ -16412,6 +16891,14 @@ fn main() {
                                     println!("Capturing 4K screenshot...");
                                     if let Err(e) = gpu_state.capture_4k_screenshot() {
                                         eprintln!("4K screenshot failed: {e:?}");
+                                    }
+                                }
+                            }
+
+                            if save_recording_requested {
+                                if let Some(gpu_state) = self.state.as_mut() {
+                                    if let Err(e) = gpu_state.save_recording() {
+                                        eprintln!("Recording save failed: {e:?}");
                                     }
                                 }
                             }
@@ -16855,8 +17342,8 @@ fn main() {
             }
             _ => {}
         }
-        }
     }
+    }  // Close impl App
 
     let mut app = App {
         state: None,

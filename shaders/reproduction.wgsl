@@ -181,7 +181,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let insert_seed = offspring_hash ^ 0xB5297A4Du;
                     let insert_roll = hash_f32(insert_seed);
                     let can_insert = (last_non_x != 0xFFFFFFFFu);
-                    if (can_insert && insert_roll < (effective_mutation_rate * 0.20)) {
+                    if (can_insert && insert_roll < (effective_mutation_rate * 4.0)) {
                         var seq: array<u32, GENOME_LENGTH>;
                         var L: u32 = 0u;
                         for (var bi = active_start; bi <= active_end; bi++) {
@@ -236,7 +236,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let delete_seed = offspring_hash ^ 0xE7037ED1u;
                     let delete_roll = hash_f32(delete_seed);
                     let has_active = (active_end != 0xFFFFFFFFu);
-                    if (has_active && delete_roll < (effective_mutation_rate * 0.35)) {
+                    if (has_active && delete_roll < (effective_mutation_rate * 4.0)) {
                         var seq: array<u32, GENOME_LENGTH>;
                         var L: u32 = 0u;
                         for (var bi = active_start; bi <= active_end; bi++) {

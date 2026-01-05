@@ -2242,8 +2242,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // poison_resistant_count stored in agent struct during morphology
     // Each poison-resistant organ reduces poison/radiation damage by 50%
     let poison_multiplier = pow(0.5, f32(agents_out[agent_id].poison_resistant_count));
-    // Each poison-resistant organ also reduces food power by 10% (0.90^count)
-    let food_power_multiplier = pow(0.90, f32(agents_out[agent_id].poison_resistant_count));
+    // Each poison-resistant organ also reduces food power by 25% (0.75^count)
+    let food_power_multiplier = pow(0.75, f32(agents_out[agent_id].poison_resistant_count));
 
     // Initialize accumulators
     let trail_deposit_strength = 0.08; // Strength of trail deposition (0-1)
