@@ -15474,9 +15474,15 @@ fn main() {
                                                         let current_alpha = state.alpha_rain_history.back().copied().unwrap_or(state.alpha_multiplier);
                                                         let current_beta = state.beta_rain_history.back().copied().unwrap_or(state.beta_multiplier);
 
+                                                        // Calculate base values with difficulty (but without cycle modulation) for display
+                                                        let base_alpha_with_difficulty = state.difficulty.alpha_rain.apply_to(state.alpha_multiplier, false);
+                                                        let base_beta_with_difficulty = state.difficulty.beta_rain.apply_to(state.beta_multiplier, true);
+
                                                         ui.separator();
                                                         ui.heading("Alpha Rain");
-                                                        ui.label(egui::RichText::new(format!("Current Alpha Rain: {:.6}", current_alpha)).color(Color32::GREEN));
+                                                        ui.label(format!("Base value (saved): {:.6}", state.alpha_multiplier));
+                                                        ui.label(format!("After difficulty: {:.6}", base_alpha_with_difficulty));
+                                                        ui.label(egui::RichText::new(format!("Current (with cycle): {:.6}", current_alpha)).color(Color32::GREEN));
                                                         let mut alpha_var_percent = state.alpha_rain_variation * 100.0;
                                                         if ui.add(egui::Slider::new(&mut alpha_var_percent, 0.0..=100.0).text("Variation %")).changed() {
                                                             state.alpha_rain_variation = alpha_var_percent / 100.0;
@@ -15486,7 +15492,9 @@ fn main() {
 
                                                         ui.separator();
                                                         ui.heading("Beta Rain");
-                                                        ui.label(egui::RichText::new(format!("Current Beta Rain: {:.6}", current_beta)).color(Color32::RED));
+                                                        ui.label(format!("Base value (saved): {:.6}", state.beta_multiplier));
+                                                        ui.label(format!("After difficulty: {:.6}", base_beta_with_difficulty));
+                                                        ui.label(egui::RichText::new(format!("Current (with cycle): {:.6}", current_beta)).color(Color32::RED));
                                                         let mut beta_var_percent = state.beta_rain_variation * 100.0;
                                                         if ui.add(egui::Slider::new(&mut beta_var_percent, 0.0..=100.0).text("Variation %")).changed() {
                                                             state.beta_rain_variation = beta_var_percent / 100.0;
