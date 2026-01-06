@@ -6819,7 +6819,7 @@ impl GpuState {
 
         // Fluid params buffer (flat f32 array, packed as vec4<f32> array in WGSL).
         // Indices must match shaders/fluid.wgsl FP_* constants.
-        let fluid_params_f32: [f32; 28] = [
+        let fluid_params_f32: [f32; 32] = [
             0.0,                       // time
             0.016,                     // dt
             0.995,                     // decay
@@ -6839,7 +6839,9 @@ impl GpuState {
             1.0,                       // dye_deposit_scale (dye -> chem)
             0.0,                       // (unused / legacy)
             0.0,                       // (unused / legacy)
-            100.0, 0.0, 0.0,           // reserved (slope_steer_rate, _, _)
+            0.01,                      // dye_diffusion (fluid on)
+            0.15,                      // dye_diffusion_no_fluid (fluid off)
+            100.0, 0.0, 0.0, 0.0, 0.0, // reserved (slope_steer_rate, _, _, _, _)
         ];
         let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
 
@@ -9532,7 +9534,7 @@ impl GpuState {
 
         // Update fluid params (dt is the user-controlled fluid solver dt)
         {
-            let fluid_params_f32: [f32; 30] = [
+            let fluid_params_f32: [f32; 32] = [
                 self.epoch as f32,         // time
                 self.fluid_dt,             // dt
                 self.fluid_decay,          // decay
@@ -9558,7 +9560,7 @@ impl GpuState {
                 self.fluid_ooze_fade_rate_gamma,
                 self.dye_diffusion,
                 self.dye_diffusion_no_fluid,
-                0.0, 0.0, 0.0,  // padding
+                0.0, 0.0, 0.0, 0.0, 0.0,  // padding
             ];
             let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
             self.queue
