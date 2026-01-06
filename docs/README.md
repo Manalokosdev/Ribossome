@@ -75,7 +75,7 @@ Ribossome is more than a toy; it's a controlled demonstration that a body-as-gen
 
 ### Download Pre-built Release
 
-**[📦 Download Ribossome (Windows x64)](https://github.com/Manalokosdev/Ribossome/raw/main/dist/Ribossome_2026-01-05.zip)** - 13 MB, no installation required
+**[📦 Download Ribossome (Windows x64)](https://github.com/Manalokosdev/Ribossome/raw/main/dist/Ribossome_2026-01-06.zip)** - 14 MB, no installation required
 
 Extract and run `ribossome.exe` - GPU-accelerated evolution starts immediately!
 
