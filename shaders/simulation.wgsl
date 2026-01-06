@@ -1879,39 +1879,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let max_repulsion_distance = 500.0;
 
         if (dist < max_repulsion_distance && dist > 0.1) {
-            // Calculate attractor/repulsor mass modifier for this agent
-            // QD organs make agent appear heavier (stronger repulsion, resists being pushed)
-            // QE organs make agent appear lighter (weaker repulsion, easily pushed)
-            var mass_modifier = 1.0;
-            let this_body_count = min(agents_out[agent_id].body_count, MAX_BODY_PARTS);
-            for (var i = 0u; i < this_body_count; i++) {
-                let part = agents_out[agent_id].body[i];
-                let base_type = get_base_part_type(part.part_type);
-                if (base_type == 45u) {
-                    // Decode modifier (0..255) -> 0..19 with rounding for stability.
-                    let organ_param = get_organ_param(part.part_type);
-                    let modifier_index = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
-
-                    // Fixed polarity by modifier:
-                    // - QD (modifier D = 2) => heavier (resist being pushed, push others harder)
-                    // - QE (modifier E = 3) => lighter (easily pushed, weak push on others)
-                    let is_d = modifier_index == 2u;
-                    let is_e = modifier_index == 3u;
-                    let strength = select(0.0, select(-1.0, 1.0, is_d), is_d || is_e);
-
-                    // Modulate by enabler activation
-                    let enabler_activation = clamp(amplification_per_part[i], 0.0, 1.0);
-                    mass_modifier += strength * enabler_activation * 2.0; // ±2x per organ max
-                }
-            }
-
-            // Sanitize mass modifier to prevent division by zero
-            // Clamp to reasonable range: 0.01x to 10x effective mass
-            mass_modifier = clamp(mass_modifier, 0.01, 10.0);
-
-            // Calculate effective mass for this interaction
-            let effective_mass = total_mass * mass_modifier;
-
             // Inverse square repulsion: F = k / (d^2)
             let base_strength = params.agent_repulsion_strength * 100000.0;
             let force_magnitude = base_strength / (dist * dist);
@@ -1920,12 +1887,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let clamped_force = min(abs(force_magnitude), 5000.0) * sign(force_magnitude);
 
             let direction = delta / dist; // Normalize
-
-            // In overdamped regime: velocity = force / drag, drag = effective_mass * k
-            // Heavier effective mass → less velocity change from same force
-            // Lighter effective mass → more velocity change from same force
-            // Scale force by inverse of mass modifier so it gets divided by effective drag later
-            force += direction * clamped_force / mass_modifier;
+            force += direction * clamped_force;
         }
     }
 
@@ -2233,6 +2195,62 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
                 let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1 * params.prop_wash_strength_fluid;
                 add_fluid_force_splat(world_pos, scaled_force);
+            }
+        }
+
+        // MAGNET-LIKE ATTRACTION/REPULSION ORGANS (type 45)
+        // These organs search for other agents with matching organs and apply forces like magnets:
+        // - Opposite polarities (different modifiers) attract
+        // - Same polarities (same modifier) repel
+        if (base_type == 45u && agent_energy_cur >= amino_props.energy_consumption) {
+            // Get this organ's polarity from modifier index
+            let organ_param = get_organ_param(part.part_type);
+            let my_modifier = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
+            
+            const MAGNET_SEARCH_RADIUS: f32 = 400.0;
+            const MAGNET_BASE_STRENGTH: f32 = 2000.0;
+            
+            // Search through neighbors for matching organs
+            for (var n = 0u; n < neighbor_count; n++) {
+                let neighbor_id = neighbor_ids[n];
+                let neighbor_pos = agents_in[neighbor_id].position;
+                let neighbor_body_count = min(agents_in[neighbor_id].body_count, MAX_BODY_PARTS);
+                let neighbor_rot = agents_in[neighbor_id].rotation;
+                
+                // Check each part of the neighbor for type 45 organs
+                for (var j = 0u; j < neighbor_body_count; j++) {
+                    let neighbor_part = agents_in[neighbor_id].body[j];
+                    let neighbor_base_type = get_base_part_type(neighbor_part.part_type);
+                    
+                    if (neighbor_base_type == 45u) {
+                        // Found a matching organ type - check distance
+                        let neighbor_part_offset = apply_agent_rotation(neighbor_part.pos, neighbor_rot);
+                        let neighbor_part_world = neighbor_pos + neighbor_part_offset;
+                        let delta_to_neighbor = neighbor_part_world - world_pos;
+                        let dist_to_neighbor = length(delta_to_neighbor);
+                        
+                        if (dist_to_neighbor > 0.1 && dist_to_neighbor < MAGNET_SEARCH_RADIUS) {
+                            // Get neighbor organ's polarity
+                            let neighbor_organ_param = get_organ_param(neighbor_part.part_type);
+                            let neighbor_modifier = u32(clamp(round((f32(neighbor_organ_param) / 255.0) * 19.0), 0.0, 19.0));
+                            
+                            // Calculate force based on polarity match
+                            // Same modifier = repel (positive force), different = attract (negative force)
+                            let polarity_sign = select(-1.0, 1.0, my_modifier == neighbor_modifier);
+                            
+                            // Inverse square law for magnetic force
+                            let force_magnitude = (MAGNET_BASE_STRENGTH / (dist_to_neighbor * dist_to_neighbor)) * polarity_sign;
+                            let clamped_force_mag = clamp(force_magnitude, -1000.0, 1000.0);
+                            
+                            let direction = delta_to_neighbor / dist_to_neighbor;
+                            let magnet_force = direction * clamped_force_mag;
+                            
+                            // Apply force and torque (like propellers)
+                            force += magnet_force;
+                            torque += (r_com.x * magnet_force.y - r_com.y * magnet_force.x);
+                        }
+                    }
+                }
             }
         }
 
