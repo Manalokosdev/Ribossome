@@ -153,6 +153,7 @@ const MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL: f32 = 0.15;
 // Vampire mouth and spike organ constants
 const VAMPIRE_REACH: f32 = 50.0; // Fixed 50 unit radius for vampire drain
 const SPIKE_REACH: f32 = 20.0;   // Fixed 20 unit radius for spike kill
+const SPIKE_CHEM_DEPOSIT_RADIUS: f32 = 30.0; // Radius around mouth to deposit victim energy
 
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -559,8 +560,84 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 let dist = length(spike_world_pos - agents_out[neighbor_id].position);
                 if (dist < SPIKE_REACH) {
+                    // Collect victim's mouths (type 31 = normal mouth, types 44-45 = beta mouth)
+                    let victim_energy = agents_out[neighbor_id].energy;
+                    let victim_body_count = min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS);
+                    let victim_position = agents_out[neighbor_id].position;
+                    let victim_rotation = agents_out[neighbor_id].rotation;
+                    
+                    var mouth_positions: array<vec2<f32>, MAX_BODY_PARTS>;
+                    var mouth_is_beta: array<bool, MAX_BODY_PARTS>;
+                    var mouth_count = 0u;
+                    
+                    for (var m = 0u; m < victim_body_count; m++) {
+                        let base_type = get_base_part_type(agents_out[neighbor_id].body[m].part_type);
+                        if (base_type == 31u || (base_type >= 44u && base_type <= 45u)) {
+                            let mouth_rel_pos = agents_out[neighbor_id].body[m].pos;
+                            mouth_positions[mouth_count] = victim_position + apply_agent_rotation(mouth_rel_pos, victim_rotation);
+                            mouth_is_beta[mouth_count] = (base_type >= 44u && base_type <= 45u);
+                            mouth_count += 1u;
+                        }
+                    }
+                    
+                    // Kill the victim
                     agents_out[neighbor_id].alive = 0u;
                     agents_out[neighbor_id].energy = 0.0;
+                    
+                    // Deposit victim energy around each mouth
+                    if (mouth_count > 0u) {
+                        let energy_per_mouth = victim_energy / f32(mouth_count);
+                        let chem_grid_scale = f32(ENV_GRID_SIZE) / f32(SIM_SIZE);
+                        let chem_cell_size = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
+                        let deposit_grid_radius = i32(ceil(SPIKE_CHEM_DEPOSIT_RADIUS / chem_cell_size));
+                        
+                        for (var m = 0u; m < mouth_count; m++) {
+                            let mouth_world_pos = mouth_positions[m];
+                            let mouth_grid_x = u32(clamp(mouth_world_pos.x * chem_grid_scale, 0.0, f32(ENV_GRID_SIZE - 1u)));
+                            let mouth_grid_y = u32(clamp(mouth_world_pos.y * chem_grid_scale, 0.0, f32(ENV_GRID_SIZE - 1u)));
+                            
+                            // Deposit energy in a circular pattern around the mouth
+                            var deposit_cells = 0u;
+                            for (var dy: i32 = -deposit_grid_radius; dy <= deposit_grid_radius; dy++) {
+                                for (var dx: i32 = -deposit_grid_radius; dx <= deposit_grid_radius; dx++) {
+                                    let check_x = i32(mouth_grid_x) + dx;
+                                    let check_y = i32(mouth_grid_y) + dy;
+                                    if (check_x >= 0 && check_x < i32(ENV_GRID_SIZE) && check_y >= 0 && check_y < i32(ENV_GRID_SIZE)) {
+                                        let cell_center = vec2<f32>(f32(check_x) + 0.5, f32(check_y) + 0.5) * chem_cell_size;
+                                        let dist_to_mouth = length(cell_center - mouth_world_pos);
+                                        if (dist_to_mouth <= SPIKE_CHEM_DEPOSIT_RADIUS) {
+                                            deposit_cells += 1u;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if (deposit_cells > 0u) {
+                                let deposit_per_cell = energy_per_mouth / f32(deposit_cells);
+                                for (var dy: i32 = -deposit_grid_radius; dy <= deposit_grid_radius; dy++) {
+                                    for (var dx: i32 = -deposit_grid_radius; dx <= deposit_grid_radius; dx++) {
+                                        let check_x = i32(mouth_grid_x) + dx;
+                                        let check_y = i32(mouth_grid_y) + dy;
+                                        if (check_x >= 0 && check_x < i32(ENV_GRID_SIZE) && check_y >= 0 && check_y < i32(ENV_GRID_SIZE)) {
+                                            let cell_center = vec2<f32>(f32(check_x) + 0.5, f32(check_y) + 0.5) * chem_cell_size;
+                                            let dist_to_mouth = length(cell_center - mouth_world_pos);
+                                            if (dist_to_mouth <= SPIKE_CHEM_DEPOSIT_RADIUS) {
+                                                let idx = u32(check_y) * ENV_GRID_SIZE + u32(check_x);
+                                                let prev = chem_grid[idx];
+                                                if (mouth_is_beta[m]) {
+                                                    // Beta mouth deposits beta chemical
+                                                    write_chem_beta(idx, min(prev.y + deposit_per_cell, 1.0));
+                                                } else {
+                                                    // Normal mouth deposits alpha chemical
+                                                    write_chem_alpha(idx, min(prev.x + deposit_per_cell, 1.0));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
