@@ -1105,8 +1105,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // coupling inside the physics pass (per-part slip + reaction force). Disable this older one-way
     // deformation->fluid injection to avoid double-counting.
     if (!FLUID_TWO_WAY_COUPLING_ENABLED && MORPHOLOGY_INJECT_FLUID_FORCE && !first_build && params.fluid_wind_push_strength != 0.0) {
-        let strength = max(params.prop_wash_strength_fluid, 0.0) * MORPHOLOGY_FLUID_COUPLING;
-        if (strength > 0.0) {
+        let strength = params.prop_wash_strength_fluid * MORPHOLOGY_FLUID_COUPLING;
+        if (abs(strength) > 0.0) {
             let dt_safe = max(params.dt, 1e-3);
             let new_rot = agents_out[agent_id].rotation;
 
@@ -2230,7 +2230,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 // INJECT PROPELLER FORCE DIRECTLY INTO FLUID FORCES BUFFER
                 // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
-                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1 * max(params.prop_wash_strength_fluid, 0.0);
+                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1 * params.prop_wash_strength_fluid;
                 add_fluid_force_splat(world_pos, scaled_force);
             }
         }
