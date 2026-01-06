@@ -4158,6 +4158,7 @@ struct GpuState {
     recording_center_norm: [f32; 2],
     recording_output_path: Option<PathBuf>,
     recording_error: Option<String>,
+    recording_start_time: Option<std::time::Instant>,
     recording_last_frame_time: Option<std::time::Instant>,
     recording_pipe: Option<RecordingPipe>,
     recording_readbacks: Vec<RecordingReadbackSlot>,
@@ -7659,6 +7660,7 @@ impl GpuState {
             recording_center_norm: [0.5, 0.5],
             recording_output_path: None,
             recording_error: None,
+            recording_start_time: None,
             recording_last_frame_time: None,
             recording_pipe: None,
             recording_readbacks: Vec::new(),
@@ -11721,6 +11723,7 @@ impl GpuState {
     fn save_recording(&mut self) -> anyhow::Result<()> {
         // Stop ffmpeg pipe (if any). The output file is finalized when stdin closes.
         self.recording = false;
+        self.recording_start_time = None;
         self.recording_last_frame_time = None;
 
         self.recording_readbacks.clear();
@@ -11842,6 +11845,7 @@ impl GpuState {
 
         self.recording_output_path = Some(output_path.clone());
         self.recording_error = None;
+        self.recording_start_time = Some(std::time::Instant::now());
         self.recording_last_frame_time = None;
         self.recording_readbacks.clear();
         self.recording_readback_index = 0;
@@ -16721,7 +16725,7 @@ fn main() {
                                         }
                                         state.recording_bar_visible = recording_bar_open;
 
-                                        // Red capture frame overlay (preview even before recording starts).
+                                        // Capture frame overlay (grey preview, red when recording).
                                         if state.recording || state.recording_bar_visible {
                                             let ppp = ctx.pixels_per_point();
                                             let w_px = state.surface_config.width as f32;
@@ -16748,7 +16752,45 @@ fn main() {
                                                 egui::Order::Foreground,
                                                 egui::Id::new("recording_frame"),
                                             ));
-                                            painter.rect_stroke(rect, 0.0, egui::Stroke::new(3.0, egui::Color32::RED));
+                                            
+                                            // Grey when not recording, red when actively recording
+                                            let frame_color = if state.recording {
+                                                egui::Color32::RED
+                                            } else {
+                                                egui::Color32::GRAY
+                                            };
+                                            painter.rect_stroke(rect, 0.0, egui::Stroke::new(3.0, frame_color));
+                                            
+                                            // Show elapsed time when recording
+                                            if state.recording {
+                                                if let Some(start_time) = state.recording_start_time {
+                                                    let elapsed = now.duration_since(start_time);
+                                                    let total_secs = elapsed.as_secs();
+                                                    let hours = total_secs / 3600;
+                                                    let minutes = (total_secs % 3600) / 60;
+                                                    let seconds = total_secs % 60;
+                                                    
+                                                    let time_text = if hours > 0 {
+                                                        format!("🔴 {:02}:{:02}:{:02}", hours, minutes, seconds)
+                                                    } else {
+                                                        format!("🔴 {:02}:{:02}", minutes, seconds)
+                                                    };
+                                                    
+                                                    // Position timer above the recording frame
+                                                    let timer_pos = egui::pos2(
+                                                        (origin_x_px + capture_width_px * 0.5) / ppp,
+                                                        (origin_y_px - 30.0) / ppp,
+                                                    );
+                                                    
+                                                    painter.text(
+                                                        timer_pos,
+                                                        egui::Align2::CENTER_CENTER,
+                                                        time_text,
+                                                        egui::FontId::monospace(20.0),
+                                                        egui::Color32::RED,
+                                                    );
+                                                }
+                                            }
                                         }
 
                                         }); // Close egui .run() call
