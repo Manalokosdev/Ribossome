@@ -62,9 +62,6 @@ Ribossome is more than a toy; it's a controlled demonstration that a body-as-gen
 
 ## Screenshots
 
-![Simulation with active vampire predators](../images/screenshot1.jpg)
-*Complex ecosystem with evolved agents competing for resources*
-
 ![Dense population with chemical trails](../images/screenshot2.jpg)
 *High-density simulation showing chemical signal propagation and agent interactions*
 
