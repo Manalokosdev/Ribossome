@@ -2208,7 +2208,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let my_modifier = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
             
             let MAGNET_SEARCH_RADIUS: f32 = 400.0;
-            let MAGNET_BASE_STRENGTH: f32 = 2000.0;
+            // Magnet force is 3x stronger than agent-to-agent repulsion
+            let MAGNET_BASE_STRENGTH: f32 = params.agent_repulsion_strength * 300000.0;
             let MAX_MAGNET_NEIGHBORS: u32 = 3u;
             
             // Find the 3 closest neighbors first
@@ -2273,9 +2274,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             // Same modifier = repel (positive force), different = attract (negative force)
                             let polarity_sign = select(-1.0, 1.0, my_modifier == neighbor_modifier);
                             
-                            // Inverse square law for magnetic force
+                            // Inverse square law for magnetic force (3x stronger than repulsion)
                             let force_magnitude = (MAGNET_BASE_STRENGTH / (dist_to_neighbor * dist_to_neighbor)) * polarity_sign;
-                            let clamped_force_mag = clamp(force_magnitude, -1000.0, 1000.0);
+                            let clamped_force_mag = clamp(force_magnitude, -15000.0, 15000.0);
                             
                             let direction = delta_to_neighbor / dist_to_neighbor;
                             let magnet_force = direction * clamped_force_mag;
