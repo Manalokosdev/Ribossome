@@ -39,7 +39,7 @@ fn pack_f32_uniform(values: &[f32]) -> Vec<u8> {
 // Changes require restart to take effect as they affect shader compilation and buffer allocation
 const DEFAULT_ENV_GRID_RESOLUTION: u32 = 2048;
 const DEFAULT_FLUID_GRID_RESOLUTION: u32 = 512;
-const DEFAULT_SPATIAL_GRID_RESOLUTION: u32 = 512;
+const DEFAULT_SPATIAL_GRID_RESOLUTION: u32 = 1024;
 
 // World size calibrated for DEFAULT_ENV_GRID_RESOLUTION.
 // For other env grid resolutions, we scale proportionally so that each env cell keeps the same
