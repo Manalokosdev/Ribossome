@@ -229,8 +229,10 @@ const FP_DYE_ESCAPE_RATE_BETA: u32 = 21u;
 const FP_DYE_DEPOSIT_SCALE: u32 = 22u;
 const FP_CHEM_SPEED_EQUIL_GAMMA: u32 = 23u;
 const FP_CHEM_SPEED_MAX_LIFT_GAMMA: u32 = 24u;
-const FP_SLOPE_STEER_RATE: u32 = 25u;
-const FP_VEC4_COUNT: u32 = 7u;
+const FP_DYE_DIFFUSION: u32 = 25u;
+const FP_DYE_DIFFUSION_NO_FLUID: u32 = 26u;
+const FP_SLOPE_STEER_RATE: u32 = 27u;
+const FP_VEC4_COUNT: u32 = 8u;
 
 // Precomputed grid-scale conversions.
 const DYE_TO_FLUID_SCALE: f32 = f32(FLUID_GRID_SIZE) / f32(GAMMA_GRID_DIM);
@@ -633,7 +635,8 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
         (d_l + d_r + d_u + d_d) * 2.0 +
         (d_lu + d_ru + d_ld + d_rd)
     ) * (1.0 / 16.0);
-    let advected_diffused = mix(advected_dye, neighbor_blur, clamp(DYE_DIFFUSE_MIX, 0.0, 1.0));
+    let dye_diffusion_mix = clamp(fp_f32(FP_DYE_DIFFUSION), 0.0, 1.0);
+    let advected_diffused = mix(advected_dye, neighbor_blur, dye_diffusion_mix);
 
     // Dye ignores obstacles: don't attenuate by permeability.
     var dye_val = clamp(advected_diffused, vec4<f32>(0.0), vec4<f32>(1.0));
@@ -833,7 +836,7 @@ fn diffuse_dye_no_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
     ) * (1.0 / 16.0);
 
     // Stronger diffusion when fluids are off (per-epoch).
-    let diffuse_mix = clamp(NO_FLUID_DYE_DIFFUSE_MIX_PER_EPOCH, 0.0, 1.0);
+    let diffuse_mix = clamp(fp_f32(FP_DYE_DIFFUSION_NO_FLUID), 0.0, 1.0);
     var dye_val = mix(d_c, neighbor_blur, diffuse_mix);
     dye_val = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
 

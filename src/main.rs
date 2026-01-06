@@ -3045,6 +3045,8 @@ fn default_fluid_ooze_rate_beta_unset() -> f32 { -1.0 }
 fn default_fluid_ooze_fade_rate_beta_unset() -> f32 { -1.0 }
 fn default_fluid_ooze_rate_gamma_unset() -> f32 { -1.0 }
 fn default_fluid_ooze_fade_rate_gamma_unset() -> f32 { -1.0 }
+fn default_dye_diffusion() -> f32 { 0.01 }
+fn default_dye_diffusion_no_fluid() -> f32 { 0.15 }
 fn default_env_grid_resolution() -> u32 { DEFAULT_ENV_GRID_RESOLUTION }
 fn default_fluid_grid_resolution() -> u32 { DEFAULT_FLUID_GRID_RESOLUTION }
 fn default_spatial_grid_resolution() -> u32 { DEFAULT_SPATIAL_GRID_RESOLUTION }
@@ -3231,6 +3233,10 @@ struct SimulationSettings {
     fluid_dye_escape_rate: f32, // Dye decay (ALPHA): removes dye without depositing back into chem (1/sec)
     #[serde(default = "default_fluid_dye_escape_rate_beta_unset")]
     fluid_dye_escape_rate_beta: f32, // Dye decay (BETA): removes dye without depositing back into chem (1/sec)
+    #[serde(default = "default_dye_diffusion")]
+    dye_diffusion: f32,  // Dye diffusion strength when fluid is enabled (blend fraction per step)
+    #[serde(default = "default_dye_diffusion_no_fluid")]
+    dye_diffusion_no_fluid: f32,  // Dye diffusion strength when fluid is disabled (per epoch)
     fluid_wind_push_strength: f32, // Global multiplier for how much fluid pushes agents
     vector_force_power: f32,  // Global force multiplier (0.0 = off)
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
@@ -3379,6 +3385,8 @@ impl Default for SimulationSettings {
             fluid_dye_escape_rate: default_fluid_dye_escape_rate(),
             // Beta channel uses alpha defaults unless overridden.
             fluid_dye_escape_rate_beta: default_fluid_dye_escape_rate_beta_unset(),
+            dye_diffusion: default_dye_diffusion(),
+            dye_diffusion_no_fluid: default_dye_diffusion_no_fluid(),
             // Matches the previous hardcoded scale used in shaders/simulation.wgsl.
             fluid_wind_push_strength: 0.0005,
             fluid_slope_force_scale: 100.0,
@@ -3765,6 +3773,8 @@ impl SimulationSettings {
         self.fluid_jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
         self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 50.0);
         self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 5.0);
+        self.dye_diffusion = self.dye_diffusion.clamp(0.0, 1.0);
+        self.dye_diffusion_no_fluid = self.dye_diffusion_no_fluid.clamp(0.0, 1.0);
 
         // Validate and enforce resolution constraints
         self.env_grid_resolution = self.env_grid_resolution.clamp(256, 8192);
@@ -4220,6 +4230,8 @@ struct GpuState {
     fluid_ooze_still_rate: f32,
     fluid_dye_escape_rate: f32,
     fluid_dye_escape_rate_beta: f32,
+    dye_diffusion: f32,
+    dye_diffusion_no_fluid: f32,
     fluid_wind_push_strength: f32,
     fluid_slope_force_scale: f32,
     fluid_obstacle_strength: f32,
@@ -4442,6 +4454,8 @@ impl GpuState {
         self.fluid_ooze_still_rate = settings.fluid_ooze_still_rate;
         self.fluid_dye_escape_rate = settings.fluid_dye_escape_rate;
         self.fluid_dye_escape_rate_beta = settings.fluid_dye_escape_rate_beta;
+        self.dye_diffusion = settings.dye_diffusion;
+        self.dye_diffusion_no_fluid = settings.dye_diffusion_no_fluid;
         self.fluid_wind_push_strength = settings.fluid_wind_push_strength;
 
         self.fumaroles = settings.fumaroles;
@@ -7705,6 +7719,8 @@ impl GpuState {
             fluid_ooze_still_rate: settings.fluid_ooze_still_rate,
             fluid_dye_escape_rate: settings.fluid_dye_escape_rate,
             fluid_dye_escape_rate_beta: settings.fluid_dye_escape_rate_beta,
+            dye_diffusion: settings.dye_diffusion,
+            dye_diffusion_no_fluid: settings.dye_diffusion_no_fluid,
             fluid_wind_push_strength: settings.fluid_wind_push_strength,
             fluid_slope_force_scale: settings.fluid_slope_force_scale,
             fluid_obstacle_strength: settings.fluid_obstacle_strength,
@@ -8597,6 +8613,8 @@ impl GpuState {
             fluid_ooze_still_rate: self.fluid_ooze_still_rate,
             fluid_dye_escape_rate: self.fluid_dye_escape_rate,
             fluid_dye_escape_rate_beta: self.fluid_dye_escape_rate_beta,
+            dye_diffusion: self.dye_diffusion,
+            dye_diffusion_no_fluid: self.dye_diffusion_no_fluid,
             fluid_wind_push_strength: self.fluid_wind_push_strength,
             vector_force_power: self.vector_force_power,
             vector_force_x: self.vector_force_x,
@@ -9514,7 +9532,7 @@ impl GpuState {
 
         // Update fluid params (dt is the user-controlled fluid solver dt)
         {
-            let fluid_params_f32: [f32; 28] = [
+            let fluid_params_f32: [f32; 30] = [
                 self.epoch as f32,         // time
                 self.fluid_dt,             // dt
                 self.fluid_decay,          // decay
@@ -9538,7 +9556,9 @@ impl GpuState {
                 self.dye_precipitation,
                 self.fluid_ooze_rate_gamma,
                 self.fluid_ooze_fade_rate_gamma,
-                self.fluid_slope_force_scale, 0.0, 0.0,
+                self.dye_diffusion,
+                self.dye_diffusion_no_fluid,
+                self.fluid_slope_force_scale, 0.0,
             ];
             let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
             self.queue
@@ -16102,6 +16122,25 @@ fn main() {
                                                             egui::Slider::new(&mut state.fluid_viscosity, 0.0..=5.0)
                                                                 .text("Viscosity")
                                                                 .clamping(egui::SliderClamping::Always),
+                                                        );
+
+                                                        ui.separator();
+                                                        ui.heading("Dye Diffusion");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.dye_diffusion, 0.0..=1.0)
+                                                                .text("Dye Diffusion (Fluid On)")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Dye diffusion strength when fluid simulation is enabled (blend fraction per step).",
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.dye_diffusion_no_fluid, 0.0..=1.0)
+                                                                .text("Dye Diffusion (Fluid Off)")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Dye diffusion strength when fluid simulation is disabled (per epoch).",
                                                         );
 
                                                         ui.separator();
