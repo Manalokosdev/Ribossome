@@ -71,6 +71,9 @@ Ribossome is more than a toy; it's a controlled demonstration that a body-as-gen
 ![Agent Inspector with Genome and Signal Visualization](../images/recording_512x512_Ribossome_Tranquillus-Uber-4150_20260105_230926_754UTC_1767654754.gif)
 *The inspector panel shows detailed agent information including genome sequence bars (colored by amino acid type) and real-time alpha/beta signal propagation through the body segments*
 
+![Navier-Stokes fluid simulation with vorticity confinement](../images/fluid1.jpg)
+*Optional full Navier-Stokes fluid simulation with advection, projection, vorticity confinement, and realistic prop wash from agent propellers*
+
 ## Building & Running
 
 ### Download Pre-built Release
