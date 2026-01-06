@@ -2209,10 +2209,45 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             
             const MAGNET_SEARCH_RADIUS: f32 = 400.0;
             const MAGNET_BASE_STRENGTH: f32 = 2000.0;
+            const MAX_MAGNET_NEIGHBORS: u32 = 3u;
             
-            // Search through neighbors for matching organs
+            // Find the 3 closest neighbors first
+            var closest_distances: array<f32, 3> = array<f32, 3>(1e10, 1e10, 1e10);
+            var closest_indices: array<u32, 3> = array<u32, 3>(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
+            
             for (var n = 0u; n < neighbor_count; n++) {
                 let neighbor_id = neighbor_ids[n];
+                let neighbor_pos = agents_in[neighbor_id].position;
+                let dist_to_agent = length(neighbor_pos - agent_pos);
+                
+                if (dist_to_agent < MAGNET_SEARCH_RADIUS) {
+                    // Insert into sorted closest list
+                    if (dist_to_agent < closest_distances[0]) {
+                        closest_distances[2] = closest_distances[1];
+                        closest_indices[2] = closest_indices[1];
+                        closest_distances[1] = closest_distances[0];
+                        closest_indices[1] = closest_indices[0];
+                        closest_distances[0] = dist_to_agent;
+                        closest_indices[0] = neighbor_id;
+                    } else if (dist_to_agent < closest_distances[1]) {
+                        closest_distances[2] = closest_distances[1];
+                        closest_indices[2] = closest_indices[1];
+                        closest_distances[1] = dist_to_agent;
+                        closest_indices[1] = neighbor_id;
+                    } else if (dist_to_agent < closest_distances[2]) {
+                        closest_distances[2] = dist_to_agent;
+                        closest_indices[2] = neighbor_id;
+                    }
+                }
+            }
+            
+            // Apply magnet forces only to the 3 closest neighbors
+            for (var c = 0u; c < MAX_MAGNET_NEIGHBORS; c++) {
+                if (closest_indices[c] == 0xFFFFFFFFu) {
+                    continue;
+                }
+                
+                let neighbor_id = closest_indices[c];
                 let neighbor_pos = agents_in[neighbor_id].position;
                 let neighbor_body_count = min(agents_in[neighbor_id].body_count, MAX_BODY_PARTS);
                 let neighbor_rot = agents_in[neighbor_id].rotation;
