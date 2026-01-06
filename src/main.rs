@@ -4115,6 +4115,9 @@ struct GpuState {
 
     // Mouse dragging state
     is_dragging: bool,
+    is_zoom_dragging: bool,
+    zoom_drag_start_y: f32,
+    zoom_drag_start_zoom: f32,
     last_mouse_pos: Option<[f32; 2]>,
 
     // Agent selection for debug panel
@@ -7625,6 +7628,9 @@ impl GpuState {
             run_name: naming::sim::generate_sim_name(&settings, run_seed, max_agents as u32),
 
             is_dragging: false,
+            is_zoom_dragging: false,
+            zoom_drag_start_y: 0.0,
+            zoom_drag_start_zoom: 1.0,
             last_mouse_pos: None,
             selected_agent_index: None,
             selected_agent_data: None,
@@ -14187,6 +14193,14 @@ fn main() {
                                     if !state.is_dragging {
                                         state.last_mouse_pos = None;
                                     }
+                                } else if button == winit::event::MouseButton::Middle {
+                                    state.is_zoom_dragging = button_state == ElementState::Pressed;
+                                    if state.is_zoom_dragging {
+                                        if let Some(mouse_pos) = state.last_mouse_pos {
+                                            state.zoom_drag_start_y = mouse_pos[1];
+                                            state.zoom_drag_start_zoom = state.camera_zoom;
+                                        }
+                                    }
                                 } else if button == winit::event::MouseButton::Left
                                     && button_state == ElementState::Pressed
                                 {
@@ -14206,7 +14220,14 @@ fn main() {
                             if let Some(state) = self.state.as_mut() {
                                 let current_pos = [position.x as f32, position.y as f32];
 
-                                if state.is_dragging {
+                                if state.is_zoom_dragging {
+                                    // Middle mouse drag for zoom
+                                    let delta_y = state.zoom_drag_start_y - current_pos[1];
+                                    // Use exponential scaling: 100 pixels = 2x zoom change
+                                    let zoom_factor = (delta_y / 100.0).exp();
+                                    state.camera_zoom = (state.zoom_drag_start_zoom * zoom_factor).clamp(0.1, 2000.0);
+                                    window.request_redraw();
+                                } else if state.is_dragging {
                                     if let Some(last_pos) = state.last_mouse_pos {
                                         let delta_x = current_pos[0] - last_pos[0];
                                         let delta_y = current_pos[1] - last_pos[1];

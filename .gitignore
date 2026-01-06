@@ -31,3 +31,6 @@ autosave_snapshot*.png
 
 # Screenshots folder (user-generated captures)
 screenshots/
+
+# Recordings folder (user-generated videos/gifs)
+recordings/
