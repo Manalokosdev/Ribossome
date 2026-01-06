@@ -591,16 +591,21 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // Read current velocity
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
-    let vel_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
+    let vel0_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
 
     // Convert velocity to dye-grid units before tracing.
-    let vel_dye = vel_fluid * FLUID_TO_DYE_SCALE;
+    let vel0_dye = vel0_fluid * FLUID_TO_DYE_SCALE;
 
-    // Backward trace - follow the flow backwards to find where dye came from
-    let trace_pos = pos - vel_dye * dt;
+    // Backward trace using RK2 (midpoint) for less numerical diffusion than Euler backtrace.
+    let mid_pos = pos - vel0_dye * (0.5 * dt);
+    let vel1_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(mid_pos * DYE_TO_FLUID_SCALE)), MAX_VEL);
+    let vel1_dye = vel1_fluid * FLUID_TO_DYE_SCALE;
+    let trace_pos = pos - vel1_dye * dt;
 
-    // Sample dye concentration at traced position using bilinear interpolation
-    let advected_dye = sample_dye(trace_pos);
+    // Sample dye concentration at traced position.
+    // Use bicubic (Catmull-Rom) sampling with a local min/max limiter to reduce the
+    // characteristic semi-Lagrangian directional blur even when diffusion_mix = 0.
+    let advected_dye = sample_dye_cubic_limited(trace_pos);
 
     // Extra diffusion: blend advected dye towards a local isotropic blur.
     // IMPORTANT: A 4-neighbor (axis-only) blur can imprint a subtle "+" pattern
@@ -1237,6 +1242,107 @@ fn sample_dye(pos: vec2<f32>) -> vec4<f32> {
     return mix(d0, d1, fy);
 }
 
+fn catmull_rom_vec4(p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, p3: vec4<f32>, t: f32) -> vec4<f32> {
+    // Catmull-Rom spline (centripetal-ish with fixed tension = 0.5).
+    // Produces sharper advection sampling than bilinear, at the cost of potential overshoot.
+    let a0 = (-0.5) * p0 + ( 1.5) * p1 + (-1.5) * p2 + ( 0.5) * p3;
+    let a1 = ( 1.0) * p0 + (-2.5) * p1 + ( 2.0) * p2 + (-0.5) * p3;
+    let a2 = (-0.5) * p0 + ( 0.0) * p1 + ( 0.5) * p2 + ( 0.0) * p3;
+    let a3 = p1;
+    return (((a0 * t + a1) * t + a2) * t + a3);
+}
+
+fn sample_dye_cubic_limited(pos: vec2<f32>) -> vec4<f32> {
+    // Dye is sampled in dye-grid coordinates (GAMMA_GRID_DIM).
+    // Out-of-bounds contributes no dye.
+    let min_pos = 0.5;
+    let max_pos = f32(GAMMA_GRID_DIM) - 0.5;
+    if (pos.x < min_pos || pos.x > max_pos || pos.y < min_pos || pos.y > max_pos) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let p = clamp(pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
+
+    let x = p.x - 0.5;
+    let y = p.y - 0.5;
+
+    let ix = i32(floor(x));
+    let iy = i32(floor(y));
+    let fx = fract(x);
+    let fy = fract(y);
+
+    // Gather 4x4 neighborhood (clamped to bounds).
+    let c_xm1 = dye_clamp_coords(ix - 1, iy);
+    let c_x0  = dye_clamp_coords(ix + 0, iy);
+    let c_x1  = dye_clamp_coords(ix + 1, iy);
+    let c_x2  = dye_clamp_coords(ix + 2, iy);
+    let c_ym1 = dye_clamp_coords(ix, iy - 1);
+    let c_y0  = dye_clamp_coords(ix, iy + 0);
+    let c_y1  = dye_clamp_coords(ix, iy + 1);
+    let c_y2  = dye_clamp_coords(ix, iy + 2);
+
+    // Rows: y = iy-1 .. iy+2
+    let y_m1 = i32(c_ym1.y);
+    let y_0  = i32(c_y0.y);
+    let y_1  = i32(c_y1.y);
+    let y_2  = i32(c_y2.y);
+
+    // Columns: x = ix-1 .. ix+2
+    let x_m1 = i32(c_xm1.x);
+    let x_0  = i32(c_x0.x);
+    let x_1  = i32(c_x1.x);
+    let x_2  = i32(c_x2.x);
+
+    let r0 = catmull_rom_vec4(
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_m1, y_m1).x), u32(dye_clamp_coords(x_m1, y_m1).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_0,  y_m1).x), u32(dye_clamp_coords(x_0,  y_m1).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_1,  y_m1).x), u32(dye_clamp_coords(x_1,  y_m1).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_2,  y_m1).x), u32(dye_clamp_coords(x_2,  y_m1).y))],
+        fx,
+    );
+    let r1 = catmull_rom_vec4(
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_m1, y_0).x), u32(dye_clamp_coords(x_m1, y_0).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_0,  y_0).x), u32(dye_clamp_coords(x_0,  y_0).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_1,  y_0).x), u32(dye_clamp_coords(x_1,  y_0).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_2,  y_0).x), u32(dye_clamp_coords(x_2,  y_0).y))],
+        fx,
+    );
+    let r2 = catmull_rom_vec4(
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_m1, y_1).x), u32(dye_clamp_coords(x_m1, y_1).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_0,  y_1).x), u32(dye_clamp_coords(x_0,  y_1).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_1,  y_1).x), u32(dye_clamp_coords(x_1,  y_1).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_2,  y_1).x), u32(dye_clamp_coords(x_2,  y_1).y))],
+        fx,
+    );
+    let r3 = catmull_rom_vec4(
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_m1, y_2).x), u32(dye_clamp_coords(x_m1, y_2).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_0,  y_2).x), u32(dye_clamp_coords(x_0,  y_2).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_1,  y_2).x), u32(dye_clamp_coords(x_1,  y_2).y))],
+        dye_in[dye_grid_index(u32(dye_clamp_coords(x_2,  y_2).x), u32(dye_clamp_coords(x_2,  y_2).y))],
+        fx,
+    );
+
+    var cubic = catmull_rom_vec4(r0, r1, r2, r3, fy);
+
+    // Limit overshoot using the local bilinear cell's 2x2 bounds.
+    let x0 = ix;
+    let y0 = iy;
+    let x1 = ix + 1;
+    let y1 = iy + 1;
+    let c00 = dye_clamp_coords(x0, y0);
+    let c10 = dye_clamp_coords(x1, y0);
+    let c01 = dye_clamp_coords(x0, y1);
+    let c11 = dye_clamp_coords(x1, y1);
+    let d00 = dye_in[dye_grid_index(c00.x, c00.y)];
+    let d10 = dye_in[dye_grid_index(c10.x, c10.y)];
+    let d01 = dye_in[dye_grid_index(c01.x, c01.y)];
+    let d11 = dye_in[dye_grid_index(c11.x, c11.y)];
+    let min4 = min(min(d00, d10), min(d01, d11));
+    let max4 = max(max(d00, d10), max(d01, d11));
+    cubic = clamp(cubic, min4, max4);
+
+    return clamp(cubic, vec4<f32>(0.0), vec4<f32>(1.0));
+}
+
 fn sample_trail(pos: vec2<f32>) -> vec4<f32> {
     // Trail is sampled in dye-grid coordinates (GAMMA_GRID_DIM).
     // Out-of-bounds contributes no trail.
@@ -1273,6 +1379,95 @@ fn sample_trail(pos: vec2<f32>) -> vec4<f32> {
     return mix(t0, t1, fy);
 }
 
+fn sample_trail_cubic_limited(pos: vec2<f32>) -> vec4<f32> {
+    // Trail is sampled in dye-grid coordinates (GAMMA_GRID_DIM).
+    // Out-of-bounds contributes no trail.
+    let min_pos = 0.5;
+    let max_pos = f32(GAMMA_GRID_DIM) - 0.5;
+    if (pos.x < min_pos || pos.x > max_pos || pos.y < min_pos || pos.y > max_pos) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let p = clamp(pos, vec2<f32>(min_pos), vec2<f32>(max_pos));
+
+    let x = p.x - 0.5;
+    let y = p.y - 0.5;
+
+    let ix = i32(floor(x));
+    let iy = i32(floor(y));
+    let fx = fract(x);
+    let fy = fract(y);
+
+    // Gather 4x4 neighborhood (clamped to bounds).
+    let c_xm1 = dye_clamp_coords(ix - 1, iy);
+    let c_x0  = dye_clamp_coords(ix + 0, iy);
+    let c_x1  = dye_clamp_coords(ix + 1, iy);
+    let c_x2  = dye_clamp_coords(ix + 2, iy);
+    let c_ym1 = dye_clamp_coords(ix, iy - 1);
+    let c_y0  = dye_clamp_coords(ix, iy + 0);
+    let c_y1  = dye_clamp_coords(ix, iy + 1);
+    let c_y2  = dye_clamp_coords(ix, iy + 2);
+
+    let y_m1 = i32(c_ym1.y);
+    let y_0  = i32(c_y0.y);
+    let y_1  = i32(c_y1.y);
+    let y_2  = i32(c_y2.y);
+
+    let x_m1 = i32(c_xm1.x);
+    let x_0  = i32(c_x0.x);
+    let x_1  = i32(c_x1.x);
+    let x_2  = i32(c_x2.x);
+
+    let r0 = catmull_rom_vec4(
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_m1, y_m1).x), u32(dye_clamp_coords(x_m1, y_m1).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_0,  y_m1).x), u32(dye_clamp_coords(x_0,  y_m1).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_1,  y_m1).x), u32(dye_clamp_coords(x_1,  y_m1).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_2,  y_m1).x), u32(dye_clamp_coords(x_2,  y_m1).y))],
+        fx,
+    );
+    let r1 = catmull_rom_vec4(
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_m1, y_0).x), u32(dye_clamp_coords(x_m1, y_0).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_0,  y_0).x), u32(dye_clamp_coords(x_0,  y_0).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_1,  y_0).x), u32(dye_clamp_coords(x_1,  y_0).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_2,  y_0).x), u32(dye_clamp_coords(x_2,  y_0).y))],
+        fx,
+    );
+    let r2 = catmull_rom_vec4(
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_m1, y_1).x), u32(dye_clamp_coords(x_m1, y_1).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_0,  y_1).x), u32(dye_clamp_coords(x_0,  y_1).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_1,  y_1).x), u32(dye_clamp_coords(x_1,  y_1).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_2,  y_1).x), u32(dye_clamp_coords(x_2,  y_1).y))],
+        fx,
+    );
+    let r3 = catmull_rom_vec4(
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_m1, y_2).x), u32(dye_clamp_coords(x_m1, y_2).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_0,  y_2).x), u32(dye_clamp_coords(x_0,  y_2).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_1,  y_2).x), u32(dye_clamp_coords(x_1,  y_2).y))],
+        trail_in[dye_grid_index(u32(dye_clamp_coords(x_2,  y_2).x), u32(dye_clamp_coords(x_2,  y_2).y))],
+        fx,
+    );
+
+    var cubic = catmull_rom_vec4(r0, r1, r2, r3, fy);
+
+    // Limit overshoot using the local bilinear cell's 2x2 bounds.
+    let x0 = ix;
+    let y0 = iy;
+    let x1 = ix + 1;
+    let y1 = iy + 1;
+    let c00 = dye_clamp_coords(x0, y0);
+    let c10 = dye_clamp_coords(x1, y0);
+    let c01 = dye_clamp_coords(x0, y1);
+    let c11 = dye_clamp_coords(x1, y1);
+    let t00 = trail_in[dye_grid_index(c00.x, c00.y)];
+    let t10 = trail_in[dye_grid_index(c10.x, c10.y)];
+    let t01 = trail_in[dye_grid_index(c01.x, c01.y)];
+    let t11 = trail_in[dye_grid_index(c11.x, c11.y)];
+    let min4 = min(min(t00, t10), min(t01, t11));
+    let max4 = max(max(t00, t10), max(t01, t11));
+    cubic = clamp(cubic, min4, max4);
+
+    return clamp(cubic, vec4<f32>(0.0), vec4<f32>(1.0));
+}
+
 @compute @workgroup_size(16, 16)
 fn advect_trail(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
@@ -1290,16 +1485,20 @@ fn advect_trail(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let fluid_pos = pos * DYE_TO_FLUID_SCALE;
 
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
-    let vel_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
-    let vel_dye = vel_fluid * FLUID_TO_DYE_SCALE;
+    let vel0_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
+    let vel0_dye = vel0_fluid * FLUID_TO_DYE_SCALE;
 
-    // Semi-Lagrangian backtrace
-    let trace_pos = pos - vel_dye * dt;
-    let advected = sample_trail(trace_pos);
+    // Semi-Lagrangian backtrace using RK2 (midpoint)
+    let mid_pos = pos - vel0_dye * (0.5 * dt);
+    let vel1_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(mid_pos * DYE_TO_FLUID_SCALE)), MAX_VEL);
+    let vel1_dye = vel1_fluid * FLUID_TO_DYE_SCALE;
+    let trace_pos = pos - vel1_dye * dt;
+    let advected = sample_trail_cubic_limited(trace_pos);
 
     // Optional extra diffusion: blend towards a small isotropic 3x3 blur from trail_in.
     // Keep subtle; most spreading should come from advection.
-    let TRAIL_DIFFUSE_MIX: f32 = 0.005;
+    // Keep at 0 for "no diffusion" expectations; trail spreading should come from advection.
+    let TRAIL_DIFFUSE_MIX: f32 = 0.0;
     let cx = i32(x);
     let cy = i32(y);
 
