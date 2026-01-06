@@ -3725,7 +3725,7 @@ impl SimulationSettings {
         if self.prop_wash_strength_fluid < 0.0 {
             self.prop_wash_strength_fluid = self.prop_wash_strength;
         }
-        self.prop_wash_strength_fluid = self.prop_wash_strength_fluid.clamp(0.0, 5.0);
+        self.prop_wash_strength_fluid = self.prop_wash_strength_fluid.clamp(-5.0, 5.0);
 
         // Microswimming
         self.microswim_coupling = self.microswim_coupling.clamp(0.0, 10.0);
@@ -16061,12 +16061,12 @@ fn main() {
                                                             "Scales direct (non-fluid) propeller/displacer wash effects (e.g. chemical transport).",
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.prop_wash_strength_fluid, 0.0..=5.0)
+                                                            egui::Slider::new(&mut state.prop_wash_strength_fluid, -5.0..=5.0)
                                                                 .text("Fluid Wash Strength")
                                                                 .clamping(egui::SliderClamping::Always),
                                                         )
                                                         .on_hover_text(
-                                                            "Scales how strongly propellers/displacers inject forces into the fluid.",
+                                                            "Scales how strongly propellers/displacers inject forces into the fluid. Negative values reverse the direction.",
                                                         );
 
                                                         ui.separator();
