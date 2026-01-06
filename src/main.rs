@@ -4150,7 +4150,8 @@ struct GpuState {
     // Screen recording state
     recording: bool,
     recording_fps: u32,
-    recording_size: u32,
+    recording_width: u32,
+    recording_height: u32,
     recording_format: RecordingFormat,  // MP4 or GIF
     recording_show_ui: bool,
     recording_bar_visible: bool,
@@ -4319,15 +4320,16 @@ struct RecordingPipe {
     stdin: BufWriter<ChildStdin>,
     output_path: PathBuf,
     fps: u32,
-    out_size: u32,
-    in_side: u32,
+    out_width: u32,
+    out_height: u32,
     in_pix_fmt: &'static str,
 }
 
 struct RecordingReadbackSlot {
     buffer: wgpu::Buffer,
     padded_bytes_per_row: u32,
-    side: u32,
+    width: u32,
+    height: u32,
     pending_copy: bool,
     rx: Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
     scratch: Vec<u8>,
@@ -7649,7 +7651,8 @@ impl GpuState {
             screenshot_requested: false,
             recording: false,
             recording_fps: 30,
-            recording_size: 720,
+            recording_width: 720,
+            recording_height: 720,
             recording_format: RecordingFormat::MP4,
             recording_show_ui: false,
             recording_bar_visible: false,
@@ -11750,13 +11753,15 @@ impl GpuState {
 
         std::fs::create_dir_all("recordings")?;
 
-        let requested_side = self.recording_size.max(16);
+        let requested_width = self.recording_width.max(16);
+        let requested_height = self.recording_height.max(16);
         let fps = self.recording_fps.max(1);
 
-        let width = self.surface_config.width;
-        let height = self.surface_config.height;
-        anyhow::ensure!(width > 0 && height > 0, "Cannot start recording with a zero-sized surface");
-        let side = requested_side.min(width).min(height).max(1);
+        let surface_width = self.surface_config.width;
+        let surface_height = self.surface_config.height;
+        anyhow::ensure!(surface_width > 0 && surface_height > 0, "Cannot start recording with a zero-sized surface");
+        let capture_width = requested_width.min(surface_width).max(1);
+        let capture_height = requested_height.min(surface_height).max(1);
 
         let swap_is_bgra = matches!(
             self.surface_config.format,
@@ -11768,7 +11773,7 @@ impl GpuState {
             RecordingFormat::MP4 => {
                 let path = PathBuf::from(format!(
                     "recordings/recording_{}x{}_{}_{}.mp4",
-                    side, side, self.run_name, timestamp
+                    capture_width, capture_height, self.run_name, timestamp
                 ));
                 let mut cmd = Command::new("ffmpeg");
                 cmd.arg("-y")
@@ -11777,7 +11782,7 @@ impl GpuState {
                     .arg("-pix_fmt")
                     .arg(in_pix_fmt)
                     .arg("-s")
-                    .arg(format!("{}x{}", side, side))
+                    .arg(format!("{}x{}", capture_width, capture_height))
                     .arg("-r")
                     .arg(format!("{}", fps))
                     .arg("-i")
@@ -11796,7 +11801,7 @@ impl GpuState {
             RecordingFormat::GIF => {
                 let path = PathBuf::from(format!(
                     "recordings/recording_{}x{}_{}_{}.gif",
-                    side, side, self.run_name, timestamp
+                    capture_width, capture_height, self.run_name, timestamp
                 ));
                 let mut cmd = Command::new("ffmpeg");
                 cmd.arg("-y")
@@ -11805,7 +11810,7 @@ impl GpuState {
                     .arg("-pix_fmt")
                     .arg(in_pix_fmt)
                     .arg("-s")
-                    .arg(format!("{}x{}", side, side))
+                    .arg(format!("{}x{}", capture_width, capture_height))
                     .arg("-r")
                     .arg(format!("{}", fps))
                     .arg("-i")
@@ -11845,8 +11850,8 @@ impl GpuState {
             stdin: BufWriter::new(stdin),
             output_path,
             fps,
-            out_size: side,
-            in_side: side,
+            out_width: capture_width,
+            out_height: capture_height,
             in_pix_fmt,
         });
 
@@ -11879,26 +11884,27 @@ impl GpuState {
             return;
         }
 
-        let side = self.recording_size.min(width).min(height);
-        if side == 0 {
+        let capture_width = self.recording_width.min(width);
+        let capture_height = self.recording_height.min(height);
+        if capture_width == 0 || capture_height == 0 {
             return;
         }
 
-        // Ensure readback ring matches the current capture square.
+        // Ensure readback ring matches the current capture dimensions.
         let needs_recreate = self
             .recording_readbacks
             .first()
-            .map(|s| s.side != side)
+            .map(|s| s.width != capture_width || s.height != capture_height)
             .unwrap_or(true);
         if needs_recreate {
             self.recording_readbacks.clear();
             self.recording_readback_index = 0;
 
             let bytes_per_pixel = 4u32;
-            let unpadded_bytes_per_row = side * bytes_per_pixel;
+            let unpadded_bytes_per_row = capture_width * bytes_per_pixel;
             let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
             let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
-            let buffer_size = (padded_bytes_per_row * side) as u64;
+            let buffer_size = (padded_bytes_per_row * capture_height) as u64;
 
             for i in 0..2 {
                 let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -11910,7 +11916,8 @@ impl GpuState {
                 self.recording_readbacks.push(RecordingReadbackSlot {
                     buffer,
                     padded_bytes_per_row,
-                    side,
+                    width: capture_width,
+                    height: capture_height,
                     pending_copy: false,
                     rx: None,
                     scratch: Vec::new(),
@@ -11931,16 +11938,17 @@ impl GpuState {
 
         let w_px = width as f32;
         let h_px = height as f32;
-        let side_px = side as f32;
+        let capture_width_px = capture_width as f32;
+        let capture_height_px = capture_height as f32;
 
         let cx = (self.recording_center_norm[0] * w_px).clamp(0.0, w_px);
         let cy = (self.recording_center_norm[1] * h_px).clamp(0.0, h_px);
 
-        let max_x = (w_px - side_px).max(0.0);
-        let max_y = (h_px - side_px).max(0.0);
+        let max_x = (w_px - capture_width_px).max(0.0);
+        let max_y = (h_px - capture_height_px).max(0.0);
 
-        let origin_x = (cx - side_px * 0.5).clamp(0.0, max_x).round() as u32;
-        let origin_y = (cy - side_px * 0.5).clamp(0.0, max_y).round() as u32;
+        let origin_x = (cx - capture_width_px * 0.5).clamp(0.0, max_x).round() as u32;
+        let origin_y = (cy - capture_height_px * 0.5).clamp(0.0, max_y).round() as u32;
 
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
@@ -11958,12 +11966,12 @@ impl GpuState {
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(slot.padded_bytes_per_row),
-                    rows_per_image: Some(side),
+                    rows_per_image: Some(capture_height),
                 },
             },
             wgpu::Extent3d {
-                width: side,
-                height: side,
+                width: capture_width,
+                height: capture_height,
                 depth_or_array_layers: 1,
             },
         );
@@ -12024,14 +12032,15 @@ impl GpuState {
                     let data = slice.get_mapped_range();
 
                     // Unpad rows and (optionally) swizzle channels.
-                    let side = slot.side;
-                    let needed = (side * side * 4) as usize;
+                    let width = slot.width;
+                    let height = slot.height;
+                    let needed = (width * height * 4) as usize;
                     if slot.scratch.len() != needed {
                         slot.scratch.resize(needed, 0);
                     }
-                    let row_bytes = (side * 4) as usize;
+                    let row_bytes = (width * 4) as usize;
 
-                    for y in 0..side as usize {
+                    for y in 0..height as usize {
                         let src_start = y * slot.padded_bytes_per_row as usize;
                         let src_row = &data[src_start..src_start + row_bytes];
                         let dst_start = y * row_bytes;
@@ -16614,12 +16623,23 @@ fn main() {
 
                                                     ui.separator();
                                                     ui.label("Size:");
-                                                    ui.add_enabled(
-                                                        !state.recording,
-                                                        egui::DragValue::new(&mut state.recording_size)
-                                                            .speed(10)
-                                                            .range(360..=1920),
-                                                    );
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("W:");
+                                                        ui.add_enabled(
+                                                            !state.recording,
+                                                            egui::DragValue::new(&mut state.recording_width)
+                                                                .speed(10)
+                                                                .range(360..=1920),
+                                                        );
+                                                        ui.separator();
+                                                        ui.label("H:");
+                                                        ui.add_enabled(
+                                                            !state.recording,
+                                                            egui::DragValue::new(&mut state.recording_height)
+                                                                .speed(10)
+                                                                .range(360..=1920),
+                                                        );
+                                                    });
 
                                                     ui.separator();
                                                     ui.label("FPS:");
@@ -16655,14 +16675,12 @@ fn main() {
                                                 ui.label("Frame center (px):");
                                                 let w = state.surface_config.width as f32;
                                                 let h = state.surface_config.height as f32;
-                                                let capture_side = state
-                                                    .recording_size
-                                                    .min(state.surface_config.width)
-                                                    .min(state.surface_config.height) as f32;
-                                                let min_cx = (capture_side * 0.5).min(w * 0.5);
-                                                let max_cx = (w - capture_side * 0.5).max(min_cx);
-                                                let min_cy = (capture_side * 0.5).min(h * 0.5);
-                                                let max_cy = (h - capture_side * 0.5).max(min_cy);
+                                                let capture_width = state.recording_width.min(state.surface_config.width) as f32;
+                                                let capture_height = state.recording_height.min(state.surface_config.height) as f32;
+                                                let min_cx = (capture_width * 0.5).min(w * 0.5);
+                                                let max_cx = (w - capture_width * 0.5).max(min_cx);
+                                                let min_cy = (capture_height * 0.5).min(h * 0.5);
+                                                let max_cy = (h - capture_height * 0.5).max(min_cy);
 
                                                 let mut cx = (state.recording_center_norm[0] * w).clamp(min_cx, max_cx);
                                                 let mut cy = (state.recording_center_norm[1] * h).clamp(min_cy, max_cy);
@@ -16708,24 +16726,23 @@ fn main() {
                                             let ppp = ctx.pixels_per_point();
                                             let w_px = state.surface_config.width as f32;
                                             let h_px = state.surface_config.height as f32;
-                                            let capture_side_px = (state.recording_size
-                                                .min(state.surface_config.width)
-                                                .min(state.surface_config.height)) as f32;
+                                            let capture_width_px = state.recording_width.min(state.surface_config.width) as f32;
+                                            let capture_height_px = state.recording_height.min(state.surface_config.height) as f32;
 
                                             let cx_px = (state.recording_center_norm[0] * w_px).clamp(0.0, w_px);
                                             let cy_px = (state.recording_center_norm[1] * h_px).clamp(0.0, h_px);
 
                                             let min_x = 0.0;
-                                            let max_x = (w_px - capture_side_px).max(0.0);
+                                            let max_x = (w_px - capture_width_px).max(0.0);
                                             let min_y = 0.0;
-                                            let max_y = (h_px - capture_side_px).max(0.0);
+                                            let max_y = (h_px - capture_height_px).max(0.0);
 
-                                            let origin_x_px = (cx_px - capture_side_px * 0.5).clamp(min_x, max_x);
-                                            let origin_y_px = (cy_px - capture_side_px * 0.5).clamp(min_y, max_y);
+                                            let origin_x_px = (cx_px - capture_width_px * 0.5).clamp(min_x, max_x);
+                                            let origin_y_px = (cy_px - capture_height_px * 0.5).clamp(min_y, max_y);
 
                                             let rect = egui::Rect::from_min_size(
                                                 egui::pos2(origin_x_px / ppp, origin_y_px / ppp),
-                                                egui::vec2(capture_side_px / ppp, capture_side_px / ppp),
+                                                egui::vec2(capture_width_px / ppp, capture_height_px / ppp),
                                             );
                                             let painter = ctx.layer_painter(egui::LayerId::new(
                                                 egui::Order::Foreground,
