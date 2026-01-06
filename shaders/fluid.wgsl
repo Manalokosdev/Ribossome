@@ -572,79 +572,53 @@ fn inject_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     dye_out[idx] = clamp(dye_in[idx], vec4<f32>(0.0), vec4<f32>(1.0));
 }
 
-// Advect dye concentration using semi-Lagrangian method (same as velocity advection)
+// Advect dye concentration using MacCormack method for sharper results
 @compute @workgroup_size(16, 16)
 fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-
     if (x >= GAMMA_GRID_DIM || y >= GAMMA_GRID_DIM) {
         return;
     }
-
     let idx = dye_grid_index(x, y);
-    // Position in dye-grid coordinates.
+
+    // Position in dye-grid coordinates (center of cell)
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
 
-    // Convert dye-grid position into fluid-grid coordinates for velocity sampling.
+    // Convert to fluid-grid coordinates for velocity sampling
     let fluid_pos = pos * DYE_TO_FLUID_SCALE;
 
-    // Read current velocity
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
-    let vel0_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
 
-    // Convert velocity to dye-grid units before tracing.
-    let vel0_dye = vel0_fluid * FLUID_TO_DYE_SCALE;
+    // Sample high-resolution velocity at current position (no low-pass for sharp advection)
+    var vel_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos)), MAX_VEL);
+    let vel_dye = vel_fluid * FLUID_TO_DYE_SCALE;
 
-    // Backward trace using RK2 (midpoint) for less numerical diffusion than Euler backtrace.
-    let mid_pos = pos - vel0_dye * (0.5 * dt);
-    let vel1_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(mid_pos * DYE_TO_FLUID_SCALE)), MAX_VEL);
-    let vel1_dye = vel1_fluid * FLUID_TO_DYE_SCALE;
-    let trace_pos = pos - vel1_dye * dt;
+    // RK2 (midpoint) backward trace
+    let mid_pos = pos - vel_dye * (0.5 * dt);
+    let vel_mid_fluid = clamp_vec2_len(sanitize_vec2(sample_velocity(mid_pos * DYE_TO_FLUID_SCALE)), MAX_VEL);
+    let vel_mid_dye = vel_mid_fluid * FLUID_TO_DYE_SCALE;
+    let trace_pos_bwd = pos - vel_mid_dye * dt;
 
-    // Sample dye concentration at traced position.
-    // Use bicubic (Catmull-Rom) sampling with a local min/max limiter to reduce the
-    // characteristic semi-Lagrangian directional blur even when diffusion_mix = 0.
-    let advected_dye = sample_dye_cubic_limited(trace_pos);
+    // First advection: backward trace
+    let adv_bwd = sample_dye_cubic_limited(trace_pos_bwd);
 
-    // Extra diffusion: blend advected dye towards a local isotropic blur.
-    // IMPORTANT: A 4-neighbor (axis-only) blur can imprint a subtle "+" pattern
-    // under strong local forcing; include diagonals to reduce grid-direction bias.
-    let cx = i32(x);
-    let cy = i32(y);
-    let l = dye_clamp_coords(cx - 1, cy);
-    let r = dye_clamp_coords(cx + 1, cy);
-    let u = dye_clamp_coords(cx, cy - 1);
-    let d = dye_clamp_coords(cx, cy + 1);
-    let lu = dye_clamp_coords(cx - 1, cy - 1);
-    let ru = dye_clamp_coords(cx + 1, cy - 1);
-    let ld = dye_clamp_coords(cx - 1, cy + 1);
-    let rd = dye_clamp_coords(cx + 1, cy + 1);
+    // Forward trace from the backward-traced position
+    let vel_at_bwd = clamp_vec2_len(sanitize_vec2(sample_velocity(trace_pos_bwd * DYE_TO_FLUID_SCALE)), MAX_VEL) * FLUID_TO_DYE_SCALE;
+    let trace_pos_fwd = trace_pos_bwd + vel_at_bwd * dt;
+    let adv_fwd = sample_dye_cubic_limited(trace_pos_fwd);
 
-    let d_c = dye_in[dye_grid_index(x, y)];
-    let d_l = dye_in[dye_grid_index(u32(l.x), u32(l.y))];
-    let d_r = dye_in[dye_grid_index(u32(r.x), u32(r.y))];
-    let d_u = dye_in[dye_grid_index(u32(u.x), u32(u.y))];
-    let d_d = dye_in[dye_grid_index(u32(d.x), u32(d.y))];
-    let d_lu = dye_in[dye_grid_index(u32(lu.x), u32(lu.y))];
-    let d_ru = dye_in[dye_grid_index(u32(ru.x), u32(ru.y))];
-    let d_ld = dye_in[dye_grid_index(u32(ld.x), u32(ld.y))];
-    let d_rd = dye_in[dye_grid_index(u32(rd.x), u32(rd.y))];
+    // MacCormack correction
+    let original = dye_in[idx];
+    var advected_dye = adv_bwd + (original - adv_fwd);
 
-    // 3x3 kernel (Gaussian-ish):
-    //   1 2 1
-    //   2 4 2   / 16
-    //   1 2 1
-    let neighbor_blur = (
-        d_c * 4.0 +
-        (d_l + d_r + d_u + d_d) * 2.0 +
-        (d_lu + d_ru + d_ld + d_rd)
-    ) * (1.0 / 16.0);
-    let dye_diffusion_mix = clamp(fp_f32(FP_DYE_DIFFUSION), 0.0, 1.0);
-    let advected_diffused = mix(advected_dye, neighbor_blur, dye_diffusion_mix);
+    // Strong clamping to prevent overshoot and maintain sharpness
+    let min_val = min(adv_bwd, adv_fwd);
+    let max_val = max(adv_bwd, adv_fwd);
+    advected_dye = clamp(advected_dye, min_val, max_val);
 
-    // Dye ignores obstacles: don't attenuate by permeability.
-    var dye_val = clamp(advected_diffused, vec4<f32>(0.0), vec4<f32>(1.0));
+    // Final dye value after advection
+    var dye_val = clamp(advected_dye, vec4<f32>(0.0), vec4<f32>(1.0));
 
     // === Chem erosion/deposition coupling (mass-conserving) ===
     // Use dye-grid velocity magnitude (in dye cells / sec) as the driver.
