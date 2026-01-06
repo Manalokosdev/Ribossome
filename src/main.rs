@@ -9558,7 +9558,7 @@ impl GpuState {
                 self.fluid_ooze_fade_rate_gamma,
                 self.dye_diffusion,
                 self.dye_diffusion_no_fluid,
-                self.fluid_slope_force_scale, 0.0,
+                0.0, 0.0, 0.0,  // padding
             ];
             let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
             self.queue
