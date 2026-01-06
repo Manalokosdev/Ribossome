@@ -2207,9 +2207,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let organ_param = get_organ_param(part.part_type);
             let my_modifier = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
             
-            const MAGNET_SEARCH_RADIUS: f32 = 400.0;
-            const MAGNET_BASE_STRENGTH: f32 = 2000.0;
-            const MAX_MAGNET_NEIGHBORS: u32 = 3u;
+            let MAGNET_SEARCH_RADIUS: f32 = 400.0;
+            let MAGNET_BASE_STRENGTH: f32 = 2000.0;
+            let MAX_MAGNET_NEIGHBORS: u32 = 3u;
             
             // Find the 3 closest neighbors first
             var closest_distances: array<f32, 3> = array<f32, 3>(1e10, 1e10, 1e10);
