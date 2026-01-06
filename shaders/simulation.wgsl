@@ -625,11 +625,15 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
                                                 let idx = u32(check_y) * ENV_GRID_SIZE + u32(check_x);
                                                 let prev = chem_grid[idx];
                                                 if (mouth_is_beta[m]) {
-                                                    // Beta mouth deposits beta chemical
+                                                    // Beta mouth deposits beta chemical and dye
                                                     write_chem_beta(idx, min(prev.y + deposit_per_cell, 1.0));
+                                                    let prev_dye = fluid_dye[idx];
+                                                    write_dye_beta(idx, min(prev_dye.x + deposit_per_cell, 1.0));
                                                 } else {
-                                                    // Normal mouth deposits alpha chemical
+                                                    // Normal mouth deposits alpha chemical and dye
                                                     write_chem_alpha(idx, min(prev.x + deposit_per_cell, 1.0));
+                                                    let prev_dye = fluid_dye[idx];
+                                                    write_dye_alpha(idx, min(prev_dye.y + deposit_per_cell, 1.0));
                                                 }
                                             }
                                         }
@@ -2842,9 +2846,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (part_rnd < alpha_ratio) {
                     let prev = chem_grid[idx];
                     write_chem_alpha(idx, min(prev.x + deposit_per_part, 1.0));
+                    let prev_dye = fluid_dye[idx];
+                    write_dye_alpha(idx, min(prev_dye.y + deposit_per_part, 1.0));
                 } else {
                     let prev = chem_grid[idx];
                     write_chem_beta(idx, min(prev.y + deposit_per_part, 1.0));
+                    let prev_dye = fluid_dye[idx];
+                    write_dye_beta(idx, min(prev_dye.x + deposit_per_part, 1.0));
                 }
             }
         }
