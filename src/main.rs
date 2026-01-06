@@ -3709,8 +3709,8 @@ impl SimulationSettings {
         self.gamma_shift = self.gamma_shift.clamp(0.0, 1.0);
         self.alpha_slope_bias = self.alpha_slope_bias.clamp(-10.0, 10.0);
         self.beta_slope_bias = self.beta_slope_bias.clamp(-10.0, 10.0);
-        self.alpha_multiplier = self.alpha_multiplier.clamp(0.0, 0.001);
-        self.beta_multiplier = self.beta_multiplier.clamp(0.0, 0.001);
+        self.alpha_multiplier = self.alpha_multiplier.clamp(0.00001, 2.0);
+        self.beta_multiplier = self.beta_multiplier.clamp(0.00001, 2.0);
         self.dye_precipitation = self.dye_precipitation.clamp(0.0, 1.0);
         self.chemical_slope_scale_alpha = self.chemical_slope_scale_alpha.clamp(0.0, 1.0);
         self.chemical_slope_scale_beta = self.chemical_slope_scale_beta.clamp(0.0, 1.0);
