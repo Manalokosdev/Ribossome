@@ -419,7 +419,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             // Poison protection organs reduce vampire drain effectiveness by 50% each
                             let victim_poison_protection = agents_out[closest_victim_id].poison_resistant_count;
                             var drain_effectiveness = distance_factor;
-                            
+
                             if (victim_poison_protection > 0u) {
                                 // Each poison protection organ halves the drain rate
                                 drain_effectiveness *= pow(0.5, f32(victim_poison_protection));
@@ -565,11 +565,11 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let victim_body_count = min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS);
                     let victim_position = agents_out[neighbor_id].position;
                     let victim_rotation = agents_out[neighbor_id].rotation;
-                    
+
                     var mouth_positions: array<vec2<f32>, MAX_BODY_PARTS>;
                     var mouth_is_beta: array<bool, MAX_BODY_PARTS>;
                     var mouth_count = 0u;
-                    
+
                     for (var m = 0u; m < victim_body_count; m++) {
                         let base_type = get_base_part_type(agents_out[neighbor_id].body[m].part_type);
                         if (base_type == 31u || (base_type >= 44u && base_type <= 45u)) {
@@ -579,23 +579,23 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
                             mouth_count += 1u;
                         }
                     }
-                    
+
                     // Kill the victim
                     agents_out[neighbor_id].alive = 0u;
                     agents_out[neighbor_id].energy = 0.0;
-                    
+
                     // Deposit victim energy around each mouth
                     if (mouth_count > 0u) {
                         let energy_per_mouth = victim_energy / f32(mouth_count);
                         let chem_grid_scale = f32(ENV_GRID_SIZE) / f32(SIM_SIZE);
                         let chem_cell_size = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
                         let deposit_grid_radius = i32(ceil(SPIKE_CHEM_DEPOSIT_RADIUS / chem_cell_size));
-                        
+
                         for (var m = 0u; m < mouth_count; m++) {
                             let mouth_world_pos = mouth_positions[m];
                             let mouth_grid_x = u32(clamp(mouth_world_pos.x * chem_grid_scale, 0.0, f32(ENV_GRID_SIZE - 1u)));
                             let mouth_grid_y = u32(clamp(mouth_world_pos.y * chem_grid_scale, 0.0, f32(ENV_GRID_SIZE - 1u)));
-                            
+
                             // Deposit energy in a circular pattern around the mouth
                             var deposit_cells = 0u;
                             for (var dy: i32 = -deposit_grid_radius; dy <= deposit_grid_radius; dy++) {
@@ -611,7 +611,7 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
                                     }
                                 }
                             }
-                            
+
                             if (deposit_cells > 0u) {
                                 let deposit_per_cell = energy_per_mouth / f32(deposit_cells);
                                 for (var dy: i32 = -deposit_grid_radius; dy <= deposit_grid_radius; dy++) {

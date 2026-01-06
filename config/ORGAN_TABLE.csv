@@ -17,5 +17,5 @@ Modifier,Modifier_AA,V_Valine,M_Methionine,L_Leucine,P_Proline,K_Lysine,C_Cystei
 15,S,Beta Sensor,Beta Sensor,,+Beta Emitter,Clock (alpha/green),Clock (beta/red),Chiral Flipper,
 16,T,Beta Magnitude Sensor,Beta Magnitude Sensor,,-Beta Emitter,Sine Gen (alpha/green),Sine Gen (beta/red),,
 17,V,Beta Magnitude Sensor (var),Beta Magnitude Sensor (var),,,Sine Gen (alpha/green),Sine Gen (beta/red),,
-18,W,Beta Sensor,Beta Sensor,,,Sine Gen (alpha/green),Sine Gen (beta/red),,
-19,Y,Agent Beta Sensor,Agent Beta Sensor,,,Sine Gen (alpha/green),Sine Gen (beta/red),,
+18,W,Beta Sensor,Beta Sensor,Anchor,Anchor,Sine Gen (alpha/green),Sine Gen (beta/red),,
+19,Y,Agent Beta Sensor,Agent Beta Sensor,Anchor,Anchor,Sine Gen (alpha/green),Sine Gen (beta/red),,

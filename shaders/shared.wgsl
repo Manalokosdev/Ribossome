@@ -1700,6 +1700,9 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
                     organ_base_type = 25u;
                 } else if (amino_type == 12u && (modifier == 15u || modifier == 16u)) {
                     organ_base_type = 27u;
+                } else if (modifier == 18u || modifier == 19u) {
+                    // Anchor: LW/LY and PW/PY
+                    organ_base_type = 42u;
                 } else {
                     organ_base_type = 0u;
                 }

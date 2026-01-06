@@ -617,6 +617,44 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let max_val = max(adv_bwd, adv_fwd);
     advected_dye = clamp(advected_dye, min_val, max_val);
 
+    // Extra diffusion: blend advected dye towards a local isotropic blur.
+    // IMPORTANT: include diagonals to reduce grid-direction bias.
+    let dye_diffuse_mix = clamp(fp_f32(FP_DYE_DIFFUSION), 0.0, 1.0);
+    if (dye_diffuse_mix > 0.0) {
+        let cx = i32(x);
+        let cy = i32(y);
+        let l = dye_clamp_coords(cx - 1, cy);
+        let r = dye_clamp_coords(cx + 1, cy);
+        let u = dye_clamp_coords(cx, cy - 1);
+        let d = dye_clamp_coords(cx, cy + 1);
+        let lu = dye_clamp_coords(cx - 1, cy - 1);
+        let ru = dye_clamp_coords(cx + 1, cy - 1);
+        let ld = dye_clamp_coords(cx - 1, cy + 1);
+        let rd = dye_clamp_coords(cx + 1, cy + 1);
+
+        let d_c = dye_in[dye_grid_index(x, y)];
+        let d_l = dye_in[dye_grid_index(u32(l.x), u32(l.y))];
+        let d_r = dye_in[dye_grid_index(u32(r.x), u32(r.y))];
+        let d_u = dye_in[dye_grid_index(u32(u.x), u32(u.y))];
+        let d_d = dye_in[dye_grid_index(u32(d.x), u32(d.y))];
+        let d_lu = dye_in[dye_grid_index(u32(lu.x), u32(lu.y))];
+        let d_ru = dye_in[dye_grid_index(u32(ru.x), u32(ru.y))];
+        let d_ld = dye_in[dye_grid_index(u32(ld.x), u32(ld.y))];
+        let d_rd = dye_in[dye_grid_index(u32(rd.x), u32(rd.y))];
+
+        // 3x3 kernel (Gaussian-ish):
+        //   1 2 1
+        //   2 4 2   / 16
+        //   1 2 1
+        let neighbor_blur = (
+            d_c * 4.0 +
+            (d_l + d_r + d_u + d_d) * 2.0 +
+            (d_lu + d_ru + d_ld + d_rd)
+        ) * (1.0 / 16.0);
+
+        advected_dye = mix(advected_dye, neighbor_blur, dye_diffuse_mix);
+    }
+
     // Final dye value after advection
     var dye_val = clamp(advected_dye, vec4<f32>(0.0), vec4<f32>(1.0));
 
