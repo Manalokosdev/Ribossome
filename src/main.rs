@@ -15259,8 +15259,10 @@ fn main() {
                                                                 .text("Noise Power (Contrast)"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.0..=2.0)
-                                                                .text("Rain Probability"),
+                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.00001..=2.0)
+                                                                .text("Rain Probability")
+                                                                .logarithmic(true)
+                                                                .custom_formatter(|n, _| format!("{:.6}", n)),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.dye_precipitation, 0.0..=1.0)
@@ -15335,8 +15337,10 @@ fn main() {
                                                                 .text("Beta Noise Scale"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.beta_multiplier, 0.0..=2.0)
-                                                                .text("Rain Probability"),
+                                                            egui::Slider::new(&mut state.beta_multiplier, 0.00001..=2.0)
+                                                                .text("Rain Probability")
+                                                                .logarithmic(true)
+                                                                .custom_formatter(|n, _| format!("{:.6}", n)),
                                                         );
                                                         ui.horizontal(|ui| {
                                                             if ui.button("Load Beta Rain Map").clicked() {
