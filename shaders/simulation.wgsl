@@ -586,7 +586,8 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Deposit victim energy around each mouth
                     if (mouth_count > 0u) {
-                        let energy_per_mouth = victim_energy / f32(mouth_count);
+                        // Divide by food_power to compensate for consumption multiplier
+                        let energy_per_mouth = (victim_energy / params.food_power) / f32(mouth_count);
                         let chem_grid_scale = f32(ENV_GRID_SIZE) / f32(SIM_SIZE);
                         let chem_cell_size = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
                         let deposit_grid_radius = i32(ceil(SPIKE_CHEM_DEPOSIT_RADIUS / chem_cell_size));
