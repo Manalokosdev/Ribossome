@@ -18,6 +18,32 @@ const SIM_SIZE: u32 = 61440u;
 // Keep this modest; the overlay also applies a tone-map to avoid blowout.
 const DYE_VIS_GAIN: f32 = 2.0;
 
+const TAU: f32 = 6.2831853;
+
+fn thin_film_rgb(opd: f32) -> vec3<f32> {
+    // Approximate thin-film interference (2-beam) sampled at representative wavelengths.
+    // We treat `opd` as an optical path difference in arbitrary units.
+    // Intensity per wavelength: I = 0.5 + 0.5*cos(2π*opd/λ + φ)
+    // Using shorter λ for blue makes it oscillate faster, producing the expected color order.
+
+    // Representative wavelengths (arbitrary scale; only ratios matter).
+    let lambda_r = 0.650;
+    let lambda_g = 0.530;
+    let lambda_b = 0.460;
+
+    // Reflection phase shift. A constant π shift flips bright/dark ordering; using π makes
+    // the early bands closer to typical thin-film photos for a single-interface approximation.
+    let phi = 3.1415927;
+
+    let r = 0.5 + 0.5 * cos(TAU * (opd / lambda_r) + phi);
+    let g = 0.5 + 0.5 * cos(TAU * (opd / lambda_g) + phi);
+    let b = 0.5 + 0.5 * cos(TAU * (opd / lambda_b) + phi);
+
+    // Mild contrast boost (keeps mid-bands visible without crushing).
+    let rgb = vec3<f32>(r, g, b);
+    return clamp(pow(rgb, vec3<f32>(1.1)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 // Must match SimParams layout from main.rs.
 struct SimParams {
     dt: f32,
@@ -221,16 +247,27 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let dye_tm = dye_lin / (vec2<f32>(1.0, 1.0) + dye_lin);
 
             // Composite dye using independent dye colors, but reusing alpha/beta blend mode + gamma controls.
-            let alpha_color = vec3<f32>(
+            var alpha_color = vec3<f32>(
                 clamp(params.dye_alpha_color_r, 0.0, 1.0),
                 clamp(params.dye_alpha_color_g, 0.0, 1.0),
                 clamp(params.dye_alpha_color_b, 0.0, 1.0)
             );
-            let beta_color = vec3<f32>(
+            var beta_color = vec3<f32>(
                 clamp(params.dye_beta_color_r, 0.0, 1.0),
                 clamp(params.dye_beta_color_g, 0.0, 1.0),
                 clamp(params.dye_beta_color_b, 0.0, 1.0)
             );
+
+            // Thin-film mode: reuse padding float as (enable + phase multiplier).
+            // If multiplier > 0, dye is colored by thin-film palette; otherwise uses flat tint.
+            let alpha_thinfilm_mult = max(params._pad_dye_alpha_color, 0.0);
+            let beta_thinfilm_mult = max(params._pad_dye_beta_color, 0.0);
+            if (alpha_thinfilm_mult > 0.0) {
+                alpha_color = thin_film_rgb(dye_raw.y * alpha_thinfilm_mult);
+            }
+            if (beta_thinfilm_mult > 0.0) {
+                beta_color = thin_film_rgb(dye_raw.x * beta_thinfilm_mult);
+            }
 
             // Apply gamma adjustment to dye intensities for consistent look.
             let dye_alpha = pow(dye_tm.y, params.alpha_gamma_adjust);

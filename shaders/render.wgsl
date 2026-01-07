@@ -378,13 +378,32 @@ fn render_body_part_ctx(
 
     // Spike organs (organ 46) - radial thin greenish spikes
     if (base_type == 46u) {
-        let spike_radius = 20.0;
-        let spike_count = 12u; // 12 spikes around the organ
-        let spike_color = vec3<f32>(0.3, 0.8, 0.4); // Greenish
+        // Deterministic seed: vary by lineage generation so each generation looks slightly different.
+        var agent_generation: u32;
+        if (use_selected_buffer) {
+            agent_generation = selected_agent_buffer[0].generation;
+        } else {
+            agent_generation = agents_out[agent_id].generation;
+        }
+
+        let spike_count = 12u;
+        let base_radius = 18.0;
+        let spike_color = vec3<f32>(0.3, 0.8, 0.4);
+        let seed0 = (agent_generation + 1u) * 2654435761u + part_index * 2246822519u;
 
         for (var i = 0u; i < spike_count; i++) {
-            let angle = (f32(i) / f32(spike_count)) * 6.28318530718; // 2*PI
-            let spike_end = world_pos + vec2<f32>(cos(angle), sin(angle)) * spike_radius;
+            // Two stable random values per spike.
+            let h1 = hash_f32(seed0 + (i + 1u) * 1597334677u);
+            let h2 = hash_f32(seed0 + (i + 1u) * 3812015801u);
+
+            // Evenly spaced angle + small jitter.
+            let base_angle = (f32(i) / f32(spike_count)) * 6.28318530718;
+            let angle = base_angle + (h2 - 0.5) * 0.55;
+
+            // Randomize length a bit.
+            let len = base_radius * (0.65 + 0.75 * h1);
+            let spike_end = world_pos + vec2<f32>(cos(angle), sin(angle)) * len;
+
             draw_thick_line_ctx(world_pos, spike_end, 0.5, vec4<f32>(spike_color, 0.9), ctx);
         }
     }
@@ -427,18 +446,11 @@ fn render_body_part_ctx(
         draw_filled_circle_ctx(world_pos, size, vec4<f32>(blended, 0.95), ctx);
     }
 
-    // Attractor/Repulsor organ (type 45): wavy circle, blue=attract, yellow=repel, size by enabler
+    // Attractor/Repulsor organ (type 45): wavy circle, blue=attract, red=repel, size 4x larger
     if (base_type == 45u) {
-        // Extract modifier to determine strength and color
+        // Extract modifier to determine polarity
         let organ_param = get_organ_param(part.part_type);
         let modifier_index = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
-
-        // Fixed polarity by modifier:
-        // - QD (modifier D = 2) => attract
-        // - QE (modifier E = 3) => repel
-        let is_d = modifier_index == 2u;
-        let is_e = modifier_index == 3u;
-        let strength = select(0.0, select(-1.0, 1.0, is_d), is_d || is_e);
 
         // Get enabler activation (0-1) from nearby enablers (same as simulation amplification)
         var activation = 0.0;
@@ -460,14 +472,22 @@ fn render_body_part_ctx(
         }
         activation = min(activation, 1.0);
 
-        // Base size modulated by enabler activation (20% to 100% of base)
-        let base_size = get_part_visual_size(part.part_type) * 2.5;
+        // Base size 4x larger than before (was 2.5, now 10.0)
+        let base_size = get_part_visual_size(part.part_type) * 10.0;
         let modulated_size = base_size * mix(0.2, 1.0, activation);
 
-        // Choose color: blue for attraction, yellow for repulsion
-        let blue = vec3<f32>(0.2, 0.5, 1.0);
-        let yellow = vec3<f32>(1.0, 0.9, 0.0);
-        let organ_color = select(yellow, blue, strength >= 0.0);
+        // Color by modifier: each modifier gets a different hue
+        // Red tones for some modifiers, blue tones for others
+        // This way agents can visually identify polarity
+        let hue = f32(modifier_index) / 19.0;
+        var organ_color: vec3<f32>;
+
+        // Use simple color coding: even modifiers = red, odd modifiers = blue
+        if ((modifier_index % 2u) == 0u) {
+            organ_color = vec3<f32>(1.0, 0.2, 0.2); // Red for even indices
+        } else {
+            organ_color = vec3<f32>(0.2, 0.5, 1.0); // Blue for odd indices
+        }
         let blended = mix(organ_color, agent_color, params.agent_color_blend * 0.2);
 
         // Draw wavy circle: outer ring with sine wave modulation

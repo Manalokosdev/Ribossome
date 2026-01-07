@@ -73,6 +73,25 @@ fn add_fluid_force_splat(pos_world: vec2<f32>, f: vec2<f32>) {
     atomic_add_f32(base11 + 1u, f.y * w11);
 }
 
+// Option 5B: force dipole (push–pull) to generate a wake/current with ~zero net momentum.
+// `dir_world` need not be normalized.
+fn add_fluid_force_dipole(pos_world: vec2<f32>, dir_world: vec2<f32>, f_mag: f32, separation_world: f32) {
+    let dl = length(dir_world);
+    if (dl < 1e-6 || separation_world <= 0.0 || f_mag == 0.0) {
+        return;
+    }
+    let d = dir_world / dl;
+
+    // Place push/pull around the body center.
+    let p_push = pos_world - d * (0.5 * separation_world);
+    let p_pull = pos_world + d * (0.5 * separation_world);
+    let f = d * f_mag;
+
+    // Equal and opposite forces -> dipole-like stirring.
+    add_fluid_force_splat(p_push, f);
+    add_fluid_force_splat(p_pull, -f);
+}
+
 fn is_bad_f32(x: f32) -> bool {
     // WGSL portability: detect NaN via (x != x). Detect Inf/overflow via a large threshold.
     return (x != x) || (abs(x) > 1e20);
@@ -127,6 +146,7 @@ const MORPHOLOGY_SWIM_MAX_FRAME_VEL: f32 = 2;
 const FLUID_TWO_WAY_COUPLING_ENABLED: bool = false;
 
 // Simple isotropic fluid coupling (penalty method).
+// For option 5B we keep agent motion microswim-driven and only inject wakes into the fluid.
 const FLUID_COUPLING_SIMPLE_ENABLED: bool = false;
 // Anisotropic coupling: perpendicular drag > parallel drag along segment tangent.
 // This allows undulation to generate net thrust.
@@ -154,6 +174,21 @@ const MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL: f32 = 0.15;
 const VAMPIRE_REACH: f32 = 50.0; // Fixed 50 unit radius for vampire drain
 const SPIKE_REACH: f32 = 20.0;   // Fixed 20 unit radius for spike kill
 const SPIKE_CHEM_DEPOSIT_RADIUS: f32 = 30.0; // Radius around mouth to deposit victim energy
+// Vampire finisher: after a successful drain, vampire mouths may kill the victim.
+// Probability scales with victim body length (body_count).
+const VAMPIRE_KILL_PROB_PER_PART: f32 = 0.01;
+const VAMPIRE_KILL_PROB_MAX: f32 = 0.75;
+// Spike tuning: spikes should not be free/continuous in dense stationary blobs.
+// - Cooldown is stored in spike part body[i]._pad.x (no struct changes).
+// - Energy cost is paid by the attacker on successful kill.
+const SPIKE_COOLDOWN_FRAMES: f32 = 45.0;
+const SPIKE_KILL_COST_BASE: f32 = 0.25;
+const SPIKE_KILL_COST_FRAC_OF_VICTIM: f32 = 0.15;
+
+// Decomposition tuning:
+// Fixed deposit per ORGAN (base_type >= 20), with no scaling by food_power or remaining energy.
+// Deterministic (no per-part randomness) to avoid run-to-run variation.
+const DECOMPOSE_DEPOSIT_PER_ORGAN: f32 = 0.05;
 
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -170,8 +205,9 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     // operate on the fully materialized per-agent state in agents_out.
     let agent = agents_out[agent_id];
 
-    // Skip dead agents
-    if (agent.alive == 0u || agent.energy <= 0.0) {
+    // Skip dead agents and pending-kill agents.
+    // alive==2u is a kill signal (agent will decompose itself next tick in process_agents).
+    if (agent.alive != 1u || agent.energy <= 0.0) {
         return;
     }
 
@@ -253,7 +289,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                             if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                                 let neighbor = agents_out[neighbor_id];
-                                if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                     let dist = length(mouth_world_pos - neighbor.position);
                                     if (dist < VAMPIRE_REACH) {
                                         closest_victim_id = neighbor_id;
@@ -279,7 +315,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                     let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                                     if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                                         let neighbor = agents_out[neighbor_id];
-                                        if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                        if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                             let dist = length(mouth_world_pos - neighbor.position);
                                             if (dist < VAMPIRE_REACH) {
                                                 closest_victim_id = neighbor_id;
@@ -302,7 +338,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                                             let neighbor = agents_out[neighbor_id];
-                                            if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                            if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                                 let dist = length(mouth_world_pos - neighbor.position);
                                                 if (dist < VAMPIRE_REACH) {
                                                     closest_victim_id = neighbor_id;
@@ -331,7 +367,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                     let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                                     if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                                         let neighbor = agents_out[neighbor_id];
-                                        if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                        if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                             let dist = length(mouth_world_pos - neighbor.position);
                                             if (dist < VAMPIRE_REACH) {
                                                 closest_victim_id = neighbor_id;
@@ -354,7 +390,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                                             let neighbor = agents_out[neighbor_id];
-                                            if (neighbor.alive != 0u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                            if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                                 let dist = length(mouth_world_pos - neighbor.position);
                                                 if (dist < VAMPIRE_REACH) {
                                                     closest_victim_id = neighbor_id;
@@ -438,6 +474,23 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 // Vampire gains the drained energy
                                 total_energy_gained += drain_amount;
 
+                                // Chance to kill the victim (deferred) based on victim length.
+                                // Uses pending-kill marker so the victim self-decomposes next tick.
+                                let victim_len = f32(min(agents_out[closest_victim_id].body_count, MAX_BODY_PARTS));
+                                let kill_prob = min(VAMPIRE_KILL_PROB_MAX, VAMPIRE_KILL_PROB_PER_PART * victim_len);
+                                let kill_seed = hash(
+                                    (agent_id * 747796405u) ^
+                                    (closest_victim_id * 2891336453u) ^
+                                    (params.epoch * 196613u) ^
+                                    (i * 83492791u) ^
+                                    params.random_seed
+                                );
+                                let kill_rnd = f32(kill_seed) / 4294967295.0;
+                                if (kill_rnd < kill_prob) {
+                                    agents_out[closest_victim_id].alive = 2u;
+                                    agents_out[closest_victim_id].velocity = vec2<f32>(0.0);
+                                }
+
                                 // Store drained amount in _pad.y for visualization
                                 agents_out[agent_id].body[i]._pad.y = drain_amount;
 
@@ -468,7 +521,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ============================================================================
-// SPIKE ORGAN KILL LOGIC - Instant kill on contact
+// SPIKE ORGAN KILL LOGIC - Deferred kill signal (victim decomposes next tick)
 // ============================================================================
 
 @compute @workgroup_size(256)
@@ -486,8 +539,8 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_rotation = agents_out[agent_id].rotation;
     let body_count = agents_out[agent_id].body_count;
 
-    // Skip dead agents
-    if (agent_alive == 0u || agent_energy <= 0.0) {
+    // Skip dead agents and pending-kill agents.
+    if (agent_alive != 1u || agent_energy <= 0.0) {
         return;
     }
 
@@ -524,6 +577,14 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
     // For each spike organ
     for (var si = 0u; si < spike_count; si++) {
         let i = spike_indices[si];
+
+        // Per-spike cooldown countdown (stored in body[i]._pad.x).
+        let cd = agents_out[agent_id].body[i]._pad.x;
+        if (cd > 0.0) {
+            agents_out[agent_id].body[i]._pad.x = max(cd - 1.0, 0.0);
+            continue;
+        }
+
         let spike_rel_pos = agents_out[agent_id].body[i].pos;
         let spike_world_pos = agent_position + apply_agent_rotation(spike_rel_pos, agent_rotation);
 
@@ -554,95 +615,46 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let victim_alive = agents_out[neighbor_id].alive;
                 let victim_energy = agents_out[neighbor_id].energy;
                 let victim_age = agents_out[neighbor_id].age;
-                if (victim_alive == 0u || victim_energy <= 0.0 || victim_age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                if (victim_alive != 1u || victim_energy <= 0.0 || victim_age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
                     continue;
                 }
 
                 let dist = length(spike_world_pos - agents_out[neighbor_id].position);
                 if (dist < SPIKE_REACH) {
-                    // Collect victim's mouths (type 31 = normal mouth, types 44-45 = beta mouth)
-                    let victim_energy = agents_out[neighbor_id].energy;
-                    let victim_body_count = min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS);
-                    let victim_position = agents_out[neighbor_id].position;
-                    let victim_rotation = agents_out[neighbor_id].rotation;
-
-                    var mouth_positions: array<vec2<f32>, MAX_BODY_PARTS>;
-                    var mouth_is_beta: array<bool, MAX_BODY_PARTS>;
-                    var mouth_count = 0u;
-
-                    for (var m = 0u; m < victim_body_count; m++) {
-                        let base_type = get_base_part_type(agents_out[neighbor_id].body[m].part_type);
-                        if (base_type == 31u || (base_type >= 44u && base_type <= 45u)) {
-                            let mouth_rel_pos = agents_out[neighbor_id].body[m].pos;
-                            mouth_positions[mouth_count] = victim_position + apply_agent_rotation(mouth_rel_pos, victim_rotation);
-                            mouth_is_beta[mouth_count] = (base_type >= 44u && base_type <= 45u);
-                            mouth_count += 1u;
-                        }
+                    // Claim this victim cell (same pattern as vampire mouths) to avoid
+                    // cross-invocation races where multiple spikes kill the same victim.
+                    let victim_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
+                    if (victim_stamp != current_stamp) {
+                        continue;
+                    }
+                    let current_cell = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
+                    let cell_agent_id = current_cell & 0x7FFFFFFFu;
+                    let is_claimed = (current_cell & 0x80000000u) != 0u;
+                    if (cell_agent_id != neighbor_id || is_claimed) {
+                        continue;
+                    }
+                    let claimed_victim_id = neighbor_id | 0x80000000u;
+                    let claim_result = atomicCompareExchangeWeak(
+                        &agent_spatial_grid[spatial_id_index(check_cell)],
+                        neighbor_id,
+                        claimed_victim_id
+                    );
+                    if (!claim_result.exchanged) {
+                        continue;
                     }
 
-                    // Kill the victim
-                    agents_out[neighbor_id].alive = 0u;
-                    agents_out[neighbor_id].energy = 0.0;
+                    // Send kill signal: victim will decompose itself next tick in process_agents.
+                    // alive==2u means "pending kill".
+                    agents_out[neighbor_id].alive = 2u;
+                    agents_out[neighbor_id].velocity = vec2<f32>(0.0);
 
-                    // Deposit victim energy around each mouth
-                    if (mouth_count > 0u) {
-                        // Divide by food_power to compensate for consumption multiplier
-                        let energy_per_mouth = (victim_energy / params.food_power) / f32(mouth_count);
-                        let chem_grid_scale = f32(ENV_GRID_SIZE) / f32(SIM_SIZE);
-                        let chem_cell_size = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
-                        let deposit_grid_radius = i32(ceil(SPIKE_CHEM_DEPOSIT_RADIUS / chem_cell_size));
+                    // Pay an energy cost to prevent self-sustaining stationary spike blobs.
+                    let cost = SPIKE_KILL_COST_BASE + SPIKE_KILL_COST_FRAC_OF_VICTIM * victim_energy;
+                    agents_out[agent_id].energy = max(agents_out[agent_id].energy - cost, 0.0);
 
-                        for (var m = 0u; m < mouth_count; m++) {
-                            let mouth_world_pos = mouth_positions[m];
-                            let mouth_grid_x = u32(clamp(mouth_world_pos.x * chem_grid_scale, 0.0, f32(ENV_GRID_SIZE - 1u)));
-                            let mouth_grid_y = u32(clamp(mouth_world_pos.y * chem_grid_scale, 0.0, f32(ENV_GRID_SIZE - 1u)));
-
-                            // Deposit energy in a circular pattern around the mouth
-                            var deposit_cells = 0u;
-                            for (var dy: i32 = -deposit_grid_radius; dy <= deposit_grid_radius; dy++) {
-                                for (var dx: i32 = -deposit_grid_radius; dx <= deposit_grid_radius; dx++) {
-                                    let check_x = i32(mouth_grid_x) + dx;
-                                    let check_y = i32(mouth_grid_y) + dy;
-                                    if (check_x >= 0 && check_x < i32(ENV_GRID_SIZE) && check_y >= 0 && check_y < i32(ENV_GRID_SIZE)) {
-                                        let cell_center = vec2<f32>(f32(check_x) + 0.5, f32(check_y) + 0.5) * chem_cell_size;
-                                        let dist_to_mouth = length(cell_center - mouth_world_pos);
-                                        if (dist_to_mouth <= SPIKE_CHEM_DEPOSIT_RADIUS) {
-                                            deposit_cells += 1u;
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (deposit_cells > 0u) {
-                                let deposit_per_cell = energy_per_mouth / f32(deposit_cells);
-                                for (var dy: i32 = -deposit_grid_radius; dy <= deposit_grid_radius; dy++) {
-                                    for (var dx: i32 = -deposit_grid_radius; dx <= deposit_grid_radius; dx++) {
-                                        let check_x = i32(mouth_grid_x) + dx;
-                                        let check_y = i32(mouth_grid_y) + dy;
-                                        if (check_x >= 0 && check_x < i32(ENV_GRID_SIZE) && check_y >= 0 && check_y < i32(ENV_GRID_SIZE)) {
-                                            let cell_center = vec2<f32>(f32(check_x) + 0.5, f32(check_y) + 0.5) * chem_cell_size;
-                                            let dist_to_mouth = length(cell_center - mouth_world_pos);
-                                            if (dist_to_mouth <= SPIKE_CHEM_DEPOSIT_RADIUS) {
-                                                let idx = u32(check_y) * ENV_GRID_SIZE + u32(check_x);
-                                                let prev = chem_grid[idx];
-                                                if (mouth_is_beta[m]) {
-                                                    // Beta mouth deposits beta chemical and dye
-                                                    write_chem_beta(idx, min(prev.y + deposit_per_cell, 1.0));
-                                                    let prev_dye = fluid_dye[idx];
-                                                    write_dye_beta(idx, min(prev_dye.x + deposit_per_cell, 1.0));
-                                                } else {
-                                                    // Normal mouth deposits alpha chemical and dye
-                                                    write_chem_alpha(idx, min(prev.x + deposit_per_cell, 1.0));
-                                                    let prev_dye = fluid_dye[idx];
-                                                    write_dye_alpha(idx, min(prev_dye.y + deposit_per_cell, 1.0));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // Set cooldown and limit to one kill per agent per epoch.
+                    agents_out[agent_id].body[i]._pad.x = SPIKE_COOLDOWN_FRAMES;
+                    return;
                 }
             }
         }
@@ -668,6 +680,82 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Skip dead agents
     if (agent_alive == 0u) {
         // Avoid copying the full Agent payload for dead entries.
+        agents_out[agent_id].alive = 0u;
+        agents_out[agent_id].body_count = 0u;
+        agents_out[agent_id].energy = 0.0;
+        agents_out[agent_id].velocity = vec2<f32>(0.0);
+        agents_out[agent_id].pairing_counter = 0u;
+        agents_out[agent_id].is_selected = 0u;
+        return;
+    }
+
+    // Pending-kill: decompose remaining energy using mouth-rule ratios, then die.
+    // This is the deferred "kill signal" path (e.g. from spike kills) and avoids
+    // double-counting / contention issues in the attacker kernel.
+    if (agent_alive == 2u) {
+        let body_count = min(agents_in[agent_id].body_count, MAX_BODY_PARTS);
+        if (body_count > 0u) {
+            // Count mouth types to calculate decomposition ratio.
+            // Rule (requested): decompose into the OPPOSITE chemical of the mouth types.
+            // This discourages species from feeding on their own deaths:
+            // - Normal mouths (type 20, alpha mouths) => deposit beta
+            // - Beta mouths (type 44)                => deposit alpha
+            var normal_mouth_count = 0u;
+            var beta_mouth_count = 0u;
+            for (var i = 0u; i < body_count; i++) {
+                let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
+                if (base_type == 20u) {
+                    normal_mouth_count += 1u;
+                } else if (base_type == 44u) {
+                    beta_mouth_count += 1u;
+                }
+            }
+
+            // Count organs (base_type >= 20) so we can apply a fixed deposit per organ.
+            var organ_count = 0u;
+            for (var i = 0u; i < body_count; i++) {
+                let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
+                if (base_type >= 20u) {
+                    organ_count += 1u;
+                }
+            }
+
+            if (organ_count > 0u) {
+                let total_relevant_mouths = normal_mouth_count + beta_mouth_count;
+                var alpha_ratio = 0.5;
+                if (total_relevant_mouths > 0u) {
+                    // Opposite-matter mapping: alpha deposit ratio follows beta mouths.
+                    alpha_ratio = f32(beta_mouth_count) / f32(total_relevant_mouths);
+                }
+
+                // Deterministic split: first N organs deposit alpha, rest deposit beta.
+                let alpha_organs = min(u32(round(alpha_ratio * f32(organ_count))), organ_count);
+
+                let agent_pos = agents_in[agent_id].position;
+                let agent_rot = agents_in[agent_id].rotation;
+                var seen_organs = 0u;
+                for (var i = 0u; i < body_count; i++) {
+                    let part = agents_in[agent_id].body[i];
+                    let base_type = get_base_part_type(part.part_type);
+                    if (base_type < 20u) {
+                        continue;
+                    }
+
+                    let world_pos = agent_pos + apply_agent_rotation(part.pos, agent_rot);
+                    let idx = grid_index(world_pos);
+                    let prev = chem_grid[idx];
+
+                    if (seen_organs < alpha_organs) {
+                        write_chem_alpha(idx, min(prev.x + DECOMPOSE_DEPOSIT_PER_ORGAN, 1.0));
+                    } else {
+                        write_chem_beta(idx, min(prev.y + DECOMPOSE_DEPOSIT_PER_ORGAN, 1.0));
+                    }
+                    seen_organs += 1u;
+                }
+            }
+        }
+
+        // Kill now.
         agents_out[agent_id].alive = 0u;
         agents_out[agent_id].body_count = 0u;
         agents_out[agent_id].energy = 0.0;
@@ -1154,9 +1242,22 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     v = v * (MORPHOLOGY_MAX_WORLD_VEL / max(vlen, 1e-6));
                 }
 
-                // Push fluid in the same direction as the deformation velocity.
-                let scaled_force = v * FLUID_FORCE_SCALE * 0.1 * strength;
-                add_fluid_force_splat(new_world, scaled_force);
+                // Option 5B: inject as a dipole (push–pull) to create a wake without adding net momentum.
+                // Use deformation velocity direction; magnitude scales with |v|.
+                let vdir = v;
+                let vmag = length(v);
+
+                // Choose a dipole separation based on the local body segment length.
+                var seg_dir = vec2<f32>(1.0, 0.0);
+                if (i > 0u) {
+                    seg_dir = agents_out[agent_id].body[i].pos - agents_out[agent_id].body[i - 1u].pos;
+                } else if (i + 1u < min(body_count_val, MAX_BODY_PARTS)) {
+                    seg_dir = agents_out[agent_id].body[i + 1u].pos - agents_out[agent_id].body[i].pos;
+                }
+                let sep = clamp(length(seg_dir), 1.0, 6.0);
+
+                let fmag = vmag * FLUID_FORCE_SCALE * 0.1 * strength;
+                add_fluid_force_dipole(new_world, vdir, fmag, sep);
             }
         }
     }
@@ -1242,7 +1343,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                         let neighbor_alive = agents_in[neighbor_id].alive;
                         let neighbor_energy = agents_in[neighbor_id].energy;
-                        if (neighbor_alive != 0u && neighbor_energy > 0.0) {
+                        if (neighbor_alive == 1u && neighbor_energy > 0.0) {
                             neighbor_seen++;
                             if (neighbor_count < 64u) {
                                 neighbor_ids[neighbor_count] = neighbor_id;
@@ -1274,7 +1375,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                             let neighbor_alive = agents_in[neighbor_id].alive;
                             let neighbor_energy = agents_in[neighbor_id].energy;
-                            if (neighbor_alive != 0u && neighbor_energy > 0.0) {
+                            if (neighbor_alive == 1u && neighbor_energy > 0.0) {
                                 neighbor_seen++;
                                 if (neighbor_count < 64u) {
                                     neighbor_ids[neighbor_count] = neighbor_id;
@@ -1304,7 +1405,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                             let neighbor_alive = agents_in[neighbor_id].alive;
                             let neighbor_energy = agents_in[neighbor_id].energy;
-                            if (neighbor_alive != 0u && neighbor_energy > 0.0) {
+                            if (neighbor_alive == 1u && neighbor_energy > 0.0) {
                                 neighbor_seen++;
                                 if (neighbor_count < 64u) {
                                     neighbor_ids[neighbor_count] = neighbor_id;
@@ -1337,7 +1438,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                             let neighbor_alive = agents_in[neighbor_id].alive;
                             let neighbor_energy = agents_in[neighbor_id].energy;
-                            if (neighbor_alive != 0u && neighbor_energy > 0.0) {
+                            if (neighbor_alive == 1u && neighbor_energy > 0.0) {
                                 neighbor_seen++;
                                 if (neighbor_count < 64u) {
                                     neighbor_ids[neighbor_count] = neighbor_id;
@@ -1367,7 +1468,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                             let neighbor_alive = agents_in[neighbor_id].alive;
                             let neighbor_energy = agents_in[neighbor_id].energy;
-                            if (neighbor_alive != 0u && neighbor_energy > 0.0) {
+                            if (neighbor_alive == 1u && neighbor_energy > 0.0) {
                                 neighbor_seen++;
                                 if (neighbor_count < 64u) {
                                     neighbor_ids[neighbor_count] = neighbor_id;
@@ -2187,14 +2288,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let thrust_force = thrust_dir_world * propeller_strength;
                 if (PROPELLERS_APPLY_DIRECT_FORCE) {
                     force += thrust_force;
-                    // Torque from lever arm r_com cross thrust (scaled down to reduce perpetual spinning)
-                    torque += (r_com.x * thrust_force.y - r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
+                    // Torque from lever arm (propeller organ position) cross thrust.
+                    // Using the segment midpoint lever arm here can severely reduce torque
+                    // compared to applying force at the organ itself.
+                    let prop_offset_from_com = part.pos - center_of_mass;
+                    let prop_r_com = apply_agent_rotation(prop_offset_from_com, agent_rot);
+                    torque += (prop_r_com.x * thrust_force.y - prop_r_com.y * thrust_force.x) * (6.0 * PROP_TORQUE_COUPLING);
                 }
 
-                // INJECT PROPELLER FORCE DIRECTLY INTO FLUID FORCES BUFFER
+                // INJECT PROPELLER FORCE INTO FLUID AS A DIPOLE (push–pull)
                 // NOTE: Race condition possible with multiple agents, but the effect is additive so acceptable.
-                let scaled_force = -thrust_force * FLUID_FORCE_SCALE * 0.1 * params.prop_wash_strength_fluid;
-                add_fluid_force_splat(world_pos, scaled_force);
+                let fmag = length(thrust_force) * FLUID_FORCE_SCALE * 0.1 * params.prop_wash_strength_fluid;
+                let sep = clamp(seg_len, 1.0, 6.0);
+                add_fluid_force_dipole(world_pos, thrust_dir_world, -fmag, sep);
             }
         }
 
@@ -2208,9 +2314,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let my_modifier = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
 
             let MAGNET_SEARCH_RADIUS: f32 = 400.0;
-            // Magnet force is 3x stronger than agent-to-agent repulsion
-            let MAGNET_BASE_STRENGTH: f32 = params.agent_repulsion_strength *100000.0;
-            let MAX_MAGNET_NEIGHBORS: u32 = 9u;
+            // Magnet force is 3x stronger than agent-to-agent repulsion (repulsion uses * 100000.0 above).
+            let MAGNET_BASE_STRENGTH: f32 = params.agent_repulsion_strength * 300000.0;
+            let MAGNET_CLOSEST_NEIGHBORS: u32 = 3u;
 
             // Find the 3 closest neighbors first
             var closest_distances: array<f32, 3> = array<f32, 3>(1e10, 1e10, 1e10);
@@ -2242,8 +2348,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
 
-            // Apply magnet forces only to the 3 closest neighbors
-            for (var c = 0u; c < MAX_MAGNET_NEIGHBORS; c++) {
+            // Apply magnet forces only to the closest neighbors
+            for (var c = 0u; c < MAGNET_CLOSEST_NEIGHBORS; c++) {
                 if (closest_indices[c] == 0xFFFFFFFFu) {
                     continue;
                 }
@@ -2271,23 +2377,69 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let neighbor_modifier = u32(clamp(round((f32(neighbor_organ_param) / 255.0) * 19.0), 0.0, 19.0));
 
                             // Calculate force based on polarity match
-                            // Same modifier = repel (positive force), different = attract (negative force)
-                            let polarity_sign = select(-1.0, 1.0, my_modifier == neighbor_modifier);
-
-                            // Inverse square law for magnetic force (3x stronger than repulsion)
-                            let force_magnitude = (MAGNET_BASE_STRENGTH / (dist_to_neighbor * dist_to_neighbor)) * polarity_sign;
-                            let clamped_force_mag = clamp(force_magnitude, -15000.0, 15000.0);
+                            // Polarity is based on modifier parity:
+                            // - odd repels odd; even repels even
+                            // - odd attracts even (and vice-versa)
+                            let my_polarity = my_modifier & 1u;
+                            let neighbor_polarity = neighbor_modifier & 1u;
+                            // Force sign: +1 = attract (toward), -1 = repel (away)
+                            let polarity_sign = select(1.0, -1.0, my_polarity == neighbor_polarity);
 
                             let direction = delta_to_neighbor / dist_to_neighbor;
+
+                            // "Stick" behavior for attraction:
+                            // Pure inverse-square attraction tends to slingshot/oscillate when agents get close.
+                            // Use a spring (rest distance) + damping (relative velocity along the line of action)
+                            // so the force goes to ~0 at the target separation and motion is critically damped.
+                            let MAGNET_REST_DISTANCE: f32 = 3.0;
+                            let MAGNET_STICK_DEADZONE: f32 =2.0;
+                            let MAGNET_SPRING_K: f32 = params.agent_repulsion_strength * 0.4;
+                            let MAGNET_DAMP_C: f32 = params.agent_repulsion_strength * 2.0;
+
+                            let rel_vel = agents_in[neighbor_id].velocity - agents_in[agent_id].velocity;
+                            let dist_rate = dot(delta_to_neighbor, rel_vel) / dist_to_neighbor;
+
+                            var force_magnitude = 0.0;
+                            if (polarity_sign > 0.0) {
+                                // Attraction: stable equilibrium at MAGNET_REST_DISTANCE.
+                                // error>0 => pull together, error<0 => push apart.
+                                var error = dist_to_neighbor - MAGNET_REST_DISTANCE;
+                                if (abs(error) < MAGNET_STICK_DEADZONE) {
+                                    error = 0.0;
+                                }
+                                force_magnitude = (MAGNET_SPRING_K * error) + (MAGNET_DAMP_C * dist_rate);
+                            } else {
+                                // Repulsion: keep inverse-square with softening to avoid singularity.
+                                let soft = 25.0;
+                                force_magnitude = -(MAGNET_BASE_STRENGTH / (dist_to_neighbor * dist_to_neighbor + soft));
+                            }
+
+                            let clamped_force_mag = clamp(force_magnitude, -15000.0, 15000.0);
                             let magnet_force = direction * clamped_force_mag;
 
                             // Apply force and torque
                             // Calculate lever arm from center of mass to organ position (not segment midpoint)
                             let organ_offset_from_com = part.pos - center_of_mass;
                             let organ_r_com = apply_agent_rotation(organ_offset_from_com, agent_rot);
-                            
+
                             force += magnet_force;
-                            torque += (organ_r_com.x * magnet_force.y - organ_r_com.y * magnet_force.x);
+                            torque += (organ_r_com.x * magnet_force.y - organ_r_com.y * magnet_force.x)* (24.0 * PROP_TORQUE_COUPLING);
+
+                            // Explicit alignment torque: rotate the agent so that the magnet's
+                            // axis (COM -> organ) points toward the neighbor for attraction,
+                            // and away for repulsion. This makes magnets visibly align even
+                            // when the net force line-of-action passes near the COM.
+                            let r_len = length(organ_r_com);
+                            if (r_len > 1e-3) {
+                                let axis = organ_r_com / r_len;
+                                // Align axis toward target for attraction, away for repulsion.
+                                let target_dir = direction * select(1.0, -1.0, polarity_sign > 0.0);
+                                let c2 = axis.x * target_dir.y - axis.y * target_dir.x;
+                                let d2 = axis.x * target_dir.x + axis.y * target_dir.y;
+                                let angle_err = atan2(c2, d2);
+                                let align_torque = clamp(angle_err * abs(clamped_force_mag) * r_len * 0.05, -20000.0, 20000.0);
+                                torque += align_torque;
+                            }
                         }
                     }
                 }
@@ -2681,9 +2833,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let d01 = fluid_dye[eidx01];
             let d11 = fluid_dye[eidx11];
 
+            // Fluids-enabled flag (Repurposed padding from SimParams).
+            // When fluids are disabled, fluid_dye is treated as a visual/sensing layer and is not edible.
+            let fluids_enabled = (params._pad_rain0 != 0u);
+
             // fluid_dye mapping: beta=x, alpha=y
-            let available_alpha_dye = ew00 * d00.y + ew10 * d10.y + ew01 * d01.y + ew11 * d11.y;
-            let available_beta_dye  = ew00 * d00.x + ew10 * d10.x + ew01 * d01.x + ew11 * d11.x;
+            let available_alpha_dye = select(0.0, ew00 * d00.y + ew10 * d10.y + ew01 * d01.y + ew11 * d11.y, fluids_enabled);
+            let available_beta_dye  = select(0.0, ew00 * d00.x + ew10 * d10.x + ew01 * d01.x + ew11 * d11.x, fluids_enabled);
 
             let total_available_alpha = available_alpha + available_alpha_dye;
             let total_available_beta  = available_beta + available_beta_dye;
@@ -2843,8 +2999,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         agent_energy_cur = 0.0;
     }
 
-    // 4) Energy-based death check - death probability inversely proportional to energy
-    // High energy = low death chance, low energy = high death chance
+    // 4) Death check
+    // - Energy-based: death probability inversely proportional to energy (starvation)
+    // - Genome-size-based: death probability proportional to sqrt(gene_length)
+    //   (longer genes die more often, but sublinearly; GENOME_BYTES length keeps multiplier ~= 1)
     let death_seed = agent_id * 2654435761u + params.random_seed * 1103515245u;
     let death_rnd = f32(hash(death_seed)) / 4294967295.0;
 
@@ -2855,14 +3013,20 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let energy_divisor = max(agent_energy_cur, 0.01);
     let energy_adjusted_death_prob = params.death_probability / energy_divisor;
 
+    // Gene size modifier: scale death probability by sqrt(gene_length) / sqrt(GENOME_BYTES).
+    // gene_length is in bases (0..GENOME_BYTES). Clamp to avoid div-by-zero.
+    let gene_len = max(f32(agent_gene_length), 1.0);
+    let gene_size_mult = sqrt(gene_len) / sqrt(f32(GENOME_BYTES));
+
     // Population pressure modifier (disabled for debugging):
     // When enabled, this multiplies death probability by 2^(floor(population_count / 20000)).
     let pop_mult = 1.0;
-    let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult, 0.0, 1.0);
+    let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * gene_size_mult, 0.0, 1.0);
 
     if (death_rnd < final_death_prob) {
         // Deposit remains: decomposition ratio based on mouth types
-        // Rule (requested): each mouth type decomposes into the opposite chemical.
+        // Rule (requested): decompose into the OPPOSITE chemical of the mouth types.
+        // This discourages species from feeding on their own deaths:
         // - Normal mouths (type 20, alpha mouths) => deposit beta
         // - Beta mouths (type 44)                => deposit alpha
         // If both exist, deposit ratio follows counts.
@@ -2886,32 +3050,40 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let total_relevant_mouths = normal_mouth_count + beta_mouth_count;
             var alpha_ratio = 0.5;
             if (total_relevant_mouths > 0u) {
-                // Beta mouths => alpha deposits; normal mouths => beta deposits.
+                // Opposite-matter mapping: alpha deposit ratio follows beta mouths.
                 alpha_ratio = f32(beta_mouth_count) / f32(total_relevant_mouths);
             }
 
-            let total_deposit = 1.0;
-            let deposit_per_part = total_deposit / f32(body_count);
+            // Fixed-per-organ deposit, deterministic (no randomness, no scaling by food_power or energy).
+            var organ_count = 0u;
             for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-                let part = agents_out[agent_id].body[i];
-                let rotated_pos = apply_agent_rotation(part.pos, agent_rot);
-                let world_pos = agent_pos + rotated_pos;
-                let idx = grid_index(world_pos);
+                let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+                if (base_type >= 20u) {
+                    organ_count += 1u;
+                }
+            }
 
-                // Stochastic decomposition based on mouth ratio
-                let part_hash = hash(agent_id * 1000u + i * 100u + params.random_seed);
-                let part_rnd = f32(part_hash % 1000u) / 1000.0;
+            if (organ_count > 0u) {
+                let alpha_organs = min(u32(round(alpha_ratio * f32(organ_count))), organ_count);
+                var seen_organs = 0u;
+                for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+                    let part = agents_out[agent_id].body[i];
+                    let base_type = get_base_part_type(part.part_type);
+                    if (base_type < 20u) {
+                        continue;
+                    }
 
-                if (part_rnd < alpha_ratio) {
+                    let rotated_pos = apply_agent_rotation(part.pos, agent_rot);
+                    let world_pos = agent_pos + rotated_pos;
+                    let idx = grid_index(world_pos);
                     let prev = chem_grid[idx];
-                    write_chem_alpha(idx, min(prev.x + deposit_per_part, 1.0));
-                    let prev_dye = fluid_dye[idx];
-                    write_dye_alpha(idx, min(prev_dye.y + deposit_per_part, 1.0));
-                } else {
-                    let prev = chem_grid[idx];
-                    write_chem_beta(idx, min(prev.y + deposit_per_part, 1.0));
-                    let prev_dye = fluid_dye[idx];
-                    write_dye_beta(idx, min(prev_dye.x + deposit_per_part, 1.0));
+
+                    if (seen_organs < alpha_organs) {
+                        write_chem_alpha(idx, min(prev.x + DECOMPOSE_DEPOSIT_PER_ORGAN, 1.0));
+                    } else {
+                        write_chem_beta(idx, min(prev.y + DECOMPOSE_DEPOSIT_PER_ORGAN, 1.0));
+                    }
+                    seen_organs += 1u;
                 }
             }
         }

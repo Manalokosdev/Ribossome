@@ -484,7 +484,7 @@ fn spatial_epoch_index(cell: u32) -> u32 {
 // Spatial grid special markers
 const SPATIAL_GRID_EMPTY: u32 = 0xFFFFFFFFu;     // No agent in this cell
 const SPATIAL_GRID_CLAIMED: u32 = 0xFFFFFFFEu;   // Cell claimed by vampire (victim being drained)
-const VAMPIRE_MOUTH_COOLDOWN: f32 = 2.0;          // Frames between drains
+const VAMPIRE_MOUTH_COOLDOWN: f32 = 12.0;          // Frames between drains
 const VAMPIRE_NEWBORN_GRACE_FRAMES: u32 = 60u;    // Newborn agents ignore/are immune to vampire drain for 1 second
 
 // Fluid constants

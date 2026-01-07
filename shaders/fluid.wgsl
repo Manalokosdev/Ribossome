@@ -699,8 +699,7 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var gamma_height = max(gamma_grid[env_idx], 0.0);
 
     // Baseline chem→dye ooze in still water, so sensors can detect signals without flow.
-    // IMPORTANT: this is intentionally NON-depleting (does not remove chem from the grid).
-    // Think of it as a sensing/bleed copy into the advected dye layer.
+    // Mass-conserving transfer: depletes chem/gamma as dye is added.
     let ooze_rate = max(fp_f32(FP_CHEM_OOZE_STILL_RATE), 0.0);
     // Still-water ooze should fade out once sedimentation starts becoming weak.
     let stillness = 1.0 - smoothstep(0.0, max(sediment_min_speed, 1e-6), speed);
@@ -711,22 +710,25 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ooze_frac_beta = clamp(ooze_rate * stillness_beta * dt, 0.0, CHEM_MAX_STEP_FRAC);
     let ooze_frac_gamma = clamp(ooze_rate * stillness_gamma * dt, 0.0, CHEM_MAX_STEP_FRAC);
     if (ooze_frac_alpha > 0.0) {
-        // Alpha: chem.x -> dye.y
-        let alpha_headroom = 1.0 - dye_val.y;
-        let ooze_alpha = min(chem.x * ooze_frac_alpha, max(alpha_headroom, 0.0));
+        // Alpha: chem.x -> dye.y (mass-conserving)
+        let alpha_headroom = max(1.0 - dye_val.y, 0.0);
+        let ooze_alpha = min(chem.x * ooze_frac_alpha, alpha_headroom);
         dye_val.y = min(dye_val.y + ooze_alpha, 1.0);
+        chem.x = max(chem.x - ooze_alpha, 0.0);
     }
     if (ooze_frac_beta > 0.0) {
-        // Beta: chem.y -> dye.x
-        let beta_headroom = 1.0 - dye_val.x;
-        let ooze_beta = min(chem.y * ooze_frac_beta, max(beta_headroom, 0.0));
+        // Beta: chem.y -> dye.x (mass-conserving)
+        let beta_headroom = max(1.0 - dye_val.x, 0.0);
+        let ooze_beta = min(chem.y * ooze_frac_beta, beta_headroom);
         dye_val.x = min(dye_val.x + ooze_beta, 1.0);
+        chem.y = max(chem.y - ooze_beta, 0.0);
     }
     if (ooze_frac_gamma > 0.0) {
-        // Gamma: gamma -> dye.z
-        let gamma_headroom = 1.0 - dye_val.z;
-        let ooze_gamma = min(gamma_height * ooze_frac_gamma, max(gamma_headroom, 0.0));
+        // Gamma: gamma -> dye.z (mass-conserving)
+        let gamma_headroom = max(1.0 - dye_val.z, 0.0);
+        let ooze_gamma = min(gamma_height * ooze_frac_gamma, gamma_headroom);
         dye_val.z = min(dye_val.z + ooze_gamma, 1.0);
+        gamma_height = max(gamma_height - ooze_gamma, 0.0);
     }
 
     // Shared lift/sedimentation model for alpha & beta.
@@ -863,7 +865,9 @@ fn diffuse_dye_no_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
     dye_val.y = dye_val.y * NO_FLUID_DYE_DECAY_PER_TICK;
     dye_val.z = dye_val.z * NO_FLUID_DYE_DECAY_PER_TICK;
 
-    // Non-depleting injection from chem and trail, then clamp.
+    // Non-depleting injection from chem and trail.
+    // When fluids are off, dye acts like a visual/sensing diffusion layer and should not
+    // drain the environment reservoirs.
     let env_idx = gamma_index(x, y);
     let chem = clamp(chem_grid[env_idx].xy, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
     let gamma_height = max(gamma_grid[env_idx], 0.0);
@@ -876,14 +880,16 @@ fn diffuse_dye_no_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ooze_frac = clamp(select(ooze_ui, NO_FLUID_DEFAULT_CHEM_OOZE_FRAC_PER_EPOCH, ooze_ui <= 0.0), 0.0, CHEM_MAX_STEP_FRAC);
     if (ooze_frac > 0.0) {
         // Alpha: chem.x -> dye.y
-        let alpha_headroom = 1.0 - dye_val.y;
-        dye_val.y = min(dye_val.y + min(chem.x * ooze_frac, max(alpha_headroom, 0.0)), 1.0);
+        let alpha_headroom = max(1.0 - dye_val.y, 0.0);
+        dye_val.y = min(dye_val.y + min(chem.x * ooze_frac, alpha_headroom), 1.0);
+
         // Beta: chem.y -> dye.x
-        let beta_headroom = 1.0 - dye_val.x;
-        dye_val.x = min(dye_val.x + min(chem.y * ooze_frac, max(beta_headroom, 0.0)), 1.0);
+        let beta_headroom = max(1.0 - dye_val.x, 0.0);
+        dye_val.x = min(dye_val.x + min(chem.y * ooze_frac, beta_headroom), 1.0);
+
         // Gamma: gamma -> dye.z
-        let gamma_headroom = 1.0 - dye_val.z;
-        dye_val.z = min(dye_val.z + min(gamma_height * ooze_frac, max(gamma_headroom, 0.0)), 1.0);
+        let gamma_headroom = max(1.0 - dye_val.z, 0.0);
+        dye_val.z = min(dye_val.z + min(gamma_height * ooze_frac, gamma_headroom), 1.0);
     }
 
     dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));

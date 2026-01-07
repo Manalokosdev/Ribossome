@@ -2221,6 +2221,7 @@ fn part_base_name(base_type: u32) -> &'static str {
         43 => "Mutation Protection",
         44 => "BetaMouth",
         45 => "ATTRAC",
+        46 => "Spike",
         _ => "Organ",
     }
 }
@@ -3055,6 +3056,7 @@ fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
 fn default_prop_wash_strength_fluid_unset() -> f32 { -1.0 }
 fn default_dye_alpha_color() -> [f32; 3] { [0.0, 1.0, 0.0] }
 fn default_dye_beta_color() -> [f32; 3] { [1.0, 0.0, 0.0] }
+fn default_dye_thinfilm_multiplier() -> f32 { 50.0 }
 fn default_dye_precipitation() -> f32 { 1.0 }
 
 fn default_microswim_enabled() -> bool { true }
@@ -3280,6 +3282,17 @@ struct SimulationSettings {
     #[serde(default = "default_dye_beta_color")]
     dye_beta_color: [f32; 3],
 
+    // Fluid dye visualization mode controls.
+    // When enabled, the dye is colored using a thin-film interference palette instead of a flat tint.
+    #[serde(default)]
+    dye_alpha_thinfilm: bool,
+    #[serde(default = "default_dye_thinfilm_multiplier")]
+    dye_alpha_thinfilm_mult: f32,
+    #[serde(default)]
+    dye_beta_thinfilm: bool,
+    #[serde(default = "default_dye_thinfilm_multiplier")]
+    dye_beta_thinfilm_mult: f32,
+
     // Fluid fumaroles (persisted in settings + snapshots). Sent to the fluid shader as a flat f32 buffer.
     #[serde(default)]
     fumaroles: Vec<FumaroleSettings>,
@@ -3429,6 +3442,10 @@ impl Default for SimulationSettings {
             gamma_color: [0.0, 0.0, 1.0], // blue
             dye_alpha_color: default_dye_alpha_color(),
             dye_beta_color: default_dye_beta_color(),
+            dye_alpha_thinfilm: false,
+            dye_alpha_thinfilm_mult: default_dye_thinfilm_multiplier(),
+            dye_beta_thinfilm: false,
+            dye_beta_thinfilm_mult: default_dye_thinfilm_multiplier(),
             grid_interpolation: 1, // bilinear by default
             alpha_gamma_adjust: 1.0,  // Linear (no adjustment)
             beta_gamma_adjust: 1.0,   // Linear (no adjustment)
@@ -3836,6 +3853,9 @@ impl SimulationSettings {
         for c in &mut self.dye_beta_color {
             *c = c.clamp(0.0, 1.0);
         }
+
+        self.dye_alpha_thinfilm_mult = self.dye_alpha_thinfilm_mult.clamp(0.001, 10_000.0);
+        self.dye_beta_thinfilm_mult = self.dye_beta_thinfilm_mult.clamp(0.001, 10_000.0);
     }
 }
 
@@ -4295,6 +4315,10 @@ struct GpuState {
     gamma_color: [f32; 3],
     dye_alpha_color: [f32; 3],
     dye_beta_color: [f32; 3],
+    dye_alpha_thinfilm: bool,
+    dye_alpha_thinfilm_mult: f32,
+    dye_beta_thinfilm: bool,
+    dye_beta_thinfilm_mult: f32,
     grid_interpolation: u32, // 0=nearest, 1=bilinear, 2=bicubic
     alpha_gamma_adjust: f32,
     beta_gamma_adjust: f32,
@@ -4518,6 +4542,10 @@ impl GpuState {
         self.gamma_color = settings.gamma_color;
         self.dye_alpha_color = settings.dye_alpha_color;
         self.dye_beta_color = settings.dye_beta_color;
+        self.dye_alpha_thinfilm = settings.dye_alpha_thinfilm;
+        self.dye_alpha_thinfilm_mult = settings.dye_alpha_thinfilm_mult;
+        self.dye_beta_thinfilm = settings.dye_beta_thinfilm;
+        self.dye_beta_thinfilm_mult = settings.dye_beta_thinfilm_mult;
         self.grid_interpolation = settings.grid_interpolation;
         self.alpha_gamma_adjust = settings.alpha_gamma_adjust;
         self.beta_gamma_adjust = settings.beta_gamma_adjust;
@@ -5185,7 +5213,11 @@ impl GpuState {
             beta_slope_bias: 5.0,
             alpha_multiplier: 0.0001, // Rain probability: 0.01% per cell per frame
             beta_multiplier: 0.0,     // Poison rain disabled
-            _pad_rain0: 0,
+            // NOTE: Repurposed padding: used by shaders as a boolean flag.
+            // 0 = fluid simulation disabled (dye layer is visual/sensing only)
+            // 1 = fluid simulation enabled
+            // This is just the initial value; the per-frame uniform upload overrides it.
+            _pad_rain0: 1,
             _pad_rain1: 0,
             rain_drop_count: 0,
             alpha_rain_drop_count: 0,
@@ -7820,6 +7852,10 @@ impl GpuState {
             gamma_color: settings.gamma_color,
             dye_alpha_color: settings.dye_alpha_color,
             dye_beta_color: settings.dye_beta_color,
+            dye_alpha_thinfilm: settings.dye_alpha_thinfilm,
+            dye_alpha_thinfilm_mult: settings.dye_alpha_thinfilm_mult,
+            dye_beta_thinfilm: settings.dye_beta_thinfilm,
+            dye_beta_thinfilm_mult: settings.dye_beta_thinfilm_mult,
             grid_interpolation: settings.grid_interpolation,
             alpha_gamma_adjust: settings.alpha_gamma_adjust,
             beta_gamma_adjust: settings.beta_gamma_adjust,
@@ -8667,6 +8703,10 @@ impl GpuState {
             gamma_color: self.gamma_color,
             dye_alpha_color: self.dye_alpha_color,
             dye_beta_color: self.dye_beta_color,
+            dye_alpha_thinfilm: self.dye_alpha_thinfilm,
+            dye_alpha_thinfilm_mult: self.dye_alpha_thinfilm_mult,
+            dye_beta_thinfilm: self.dye_beta_thinfilm,
+            dye_beta_thinfilm_mult: self.dye_beta_thinfilm_mult,
             grid_interpolation: self.grid_interpolation,
             alpha_gamma_adjust: self.alpha_gamma_adjust,
             beta_gamma_adjust: self.beta_gamma_adjust,
@@ -9356,7 +9396,10 @@ impl GpuState {
             beta_slope_bias: self.beta_slope_bias,
             alpha_multiplier: current_alpha,
             beta_multiplier: current_beta,
-            _pad_rain0: 0,
+            // NOTE: Repurposed padding: used by shaders as a boolean flag.
+            // 0 = fluid simulation disabled (dye layer is visual/sensing only)
+            // 1 = fluid simulation enabled
+            _pad_rain0: if self.fluid_enabled { 1 } else { 0 },
             _pad_rain1: 0,
             // Calculate expected rain drops for targeted dispatch
             // Expected drops = grid_cells * multiplier * 0.00005 * avg_rain_map
@@ -9498,11 +9541,19 @@ impl GpuState {
             dye_alpha_color_r: self.dye_alpha_color[0],
             dye_alpha_color_g: self.dye_alpha_color[1],
             dye_alpha_color_b: self.dye_alpha_color[2],
-            _pad_dye_alpha_color: 0.0,
+            _pad_dye_alpha_color: if self.dye_alpha_thinfilm {
+                self.dye_alpha_thinfilm_mult
+            } else {
+                0.0
+            },
             dye_beta_color_r: self.dye_beta_color[0],
             dye_beta_color_g: self.dye_beta_color[1],
             dye_beta_color_b: self.dye_beta_color[2],
-            _pad_dye_beta_color: 0.0,
+            _pad_dye_beta_color: if self.dye_beta_thinfilm {
+                self.dye_beta_thinfilm_mult
+            } else {
+                0.0
+            },
         };
 
         // Keep CPU mirror in sync with the GPU uniform buffer.
@@ -15975,20 +16026,32 @@ fn main() {
                                                             ui.radio_value(&mut state.alpha_blend_mode, 0, "Additive");
                                                             ui.radio_value(&mut state.alpha_blend_mode, 1, "Multiply");
                                                         });
+                                                        ui.checkbox(&mut state.dye_alpha_thinfilm, "Thin Film Interference");
+                                                        ui.add_enabled(
+                                                            state.dye_alpha_thinfilm,
+                                                            egui::Slider::new(
+                                                                &mut state.dye_alpha_thinfilm_mult,
+                                                                0.001..=10_000.0,
+                                                            )
+                                                            .text("Thin Film Multiplier")
+                                                            .logarithmic(true),
+                                                        );
                                                         ui.horizontal(|ui| {
                                                             ui.label("Color:");
-                                                            let mut alpha_color = [
-                                                                (state.dye_alpha_color[0] * 255.0) as u8,
-                                                                (state.dye_alpha_color[1] * 255.0) as u8,
-                                                                (state.dye_alpha_color[2] * 255.0) as u8,
-                                                            ];
-                                                            if ui.color_edit_button_srgb(&mut alpha_color).changed() {
-                                                                state.dye_alpha_color = [
-                                                                    alpha_color[0] as f32 / 255.0,
-                                                                    alpha_color[1] as f32 / 255.0,
-                                                                    alpha_color[2] as f32 / 255.0,
+                                                            ui.add_enabled_ui(!state.dye_alpha_thinfilm, |ui| {
+                                                                let mut alpha_color = [
+                                                                    (state.dye_alpha_color[0] * 255.0) as u8,
+                                                                    (state.dye_alpha_color[1] * 255.0) as u8,
+                                                                    (state.dye_alpha_color[2] * 255.0) as u8,
                                                                 ];
-                                                            }
+                                                                if ui.color_edit_button_srgb(&mut alpha_color).changed() {
+                                                                    state.dye_alpha_color = [
+                                                                        alpha_color[0] as f32 / 255.0,
+                                                                        alpha_color[1] as f32 / 255.0,
+                                                                        alpha_color[2] as f32 / 255.0,
+                                                                    ];
+                                                                }
+                                                            });
                                                         });
                                                         ui.add(
                                                             egui::Slider::new(&mut state.alpha_gamma_adjust, 0.1..=5.0)
@@ -16002,20 +16065,32 @@ fn main() {
                                                             ui.radio_value(&mut state.beta_blend_mode, 0, "Additive");
                                                             ui.radio_value(&mut state.beta_blend_mode, 1, "Multiply");
                                                         });
+                                                        ui.checkbox(&mut state.dye_beta_thinfilm, "Thin Film Interference");
+                                                        ui.add_enabled(
+                                                            state.dye_beta_thinfilm,
+                                                            egui::Slider::new(
+                                                                &mut state.dye_beta_thinfilm_mult,
+                                                                0.001..=10_000.0,
+                                                            )
+                                                            .text("Thin Film Multiplier")
+                                                            .logarithmic(true),
+                                                        );
                                                         ui.horizontal(|ui| {
                                                             ui.label("Color:");
-                                                            let mut beta_color = [
-                                                                (state.dye_beta_color[0] * 255.0) as u8,
-                                                                (state.dye_beta_color[1] * 255.0) as u8,
-                                                                (state.dye_beta_color[2] * 255.0) as u8,
-                                                            ];
-                                                            if ui.color_edit_button_srgb(&mut beta_color).changed() {
-                                                                state.dye_beta_color = [
-                                                                    beta_color[0] as f32 / 255.0,
-                                                                    beta_color[1] as f32 / 255.0,
-                                                                    beta_color[2] as f32 / 255.0,
+                                                            ui.add_enabled_ui(!state.dye_beta_thinfilm, |ui| {
+                                                                let mut beta_color = [
+                                                                    (state.dye_beta_color[0] * 255.0) as u8,
+                                                                    (state.dye_beta_color[1] * 255.0) as u8,
+                                                                    (state.dye_beta_color[2] * 255.0) as u8,
                                                                 ];
-                                                            }
+                                                                if ui.color_edit_button_srgb(&mut beta_color).changed() {
+                                                                    state.dye_beta_color = [
+                                                                        beta_color[0] as f32 / 255.0,
+                                                                        beta_color[1] as f32 / 255.0,
+                                                                        beta_color[2] as f32 / 255.0,
+                                                                    ];
+                                                                }
+                                                            });
                                                         });
                                                         ui.add(
                                                             egui::Slider::new(&mut state.beta_gamma_adjust, 0.1..=5.0)
@@ -16773,7 +16848,7 @@ fn main() {
                                                 egui::Order::Foreground,
                                                 egui::Id::new("recording_frame"),
                                             ));
-                                            
+
                                             // Grey when not recording, red when actively recording
                                             let frame_color = if state.recording {
                                                 egui::Color32::RED
@@ -16781,7 +16856,7 @@ fn main() {
                                                 egui::Color32::GRAY
                                             };
                                             painter.rect_stroke(rect, 0.0, egui::Stroke::new(3.0, frame_color));
-                                            
+
                                             // Show elapsed time when recording
                                             if state.recording {
                                                 if let Some(start_time) = state.recording_start_time {
@@ -16790,19 +16865,19 @@ fn main() {
                                                     let hours = total_secs / 3600;
                                                     let minutes = (total_secs % 3600) / 60;
                                                     let seconds = total_secs % 60;
-                                                    
+
                                                     let time_text = if hours > 0 {
                                                         format!("🔴 {:02}:{:02}:{:02}", hours, minutes, seconds)
                                                     } else {
                                                         format!("🔴 {:02}:{:02}", minutes, seconds)
                                                     };
-                                                    
+
                                                     // Position timer above the recording frame
                                                     let timer_pos = egui::pos2(
                                                         (origin_x_px + capture_width_px * 0.5) / ppp,
                                                         (origin_y_px - 30.0) / ppp,
                                                     );
-                                                    
+
                                                     painter.text(
                                                         timer_pos,
                                                         egui::Align2::CENTER_CENTER,
