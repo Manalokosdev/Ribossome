@@ -2206,21 +2206,21 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Get this organ's polarity from modifier index
             let organ_param = get_organ_param(part.part_type);
             let my_modifier = u32(clamp(round((f32(organ_param) / 255.0) * 19.0), 0.0, 19.0));
-            
+
             let MAGNET_SEARCH_RADIUS: f32 = 400.0;
             // Magnet force is 3x stronger than agent-to-agent repulsion
-            let MAGNET_BASE_STRENGTH: f32 = params.agent_repulsion_strength * 300000.0;
-            let MAX_MAGNET_NEIGHBORS: u32 = 3u;
-            
+            let MAGNET_BASE_STRENGTH: f32 = params.agent_repulsion_strength *100000.0;
+            let MAX_MAGNET_NEIGHBORS: u32 = 9u;
+
             // Find the 3 closest neighbors first
             var closest_distances: array<f32, 3> = array<f32, 3>(1e10, 1e10, 1e10);
             var closest_indices: array<u32, 3> = array<u32, 3>(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
-            
+
             for (var n = 0u; n < neighbor_count; n++) {
                 let neighbor_id = neighbor_ids[n];
                 let neighbor_pos = agents_in[neighbor_id].position;
                 let dist_to_agent = length(neighbor_pos - agent_pos);
-                
+
                 if (dist_to_agent < MAGNET_SEARCH_RADIUS) {
                     // Insert into sorted closest list
                     if (dist_to_agent < closest_distances[0]) {
@@ -2241,49 +2241,53 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
             }
-            
+
             // Apply magnet forces only to the 3 closest neighbors
             for (var c = 0u; c < MAX_MAGNET_NEIGHBORS; c++) {
                 if (closest_indices[c] == 0xFFFFFFFFu) {
                     continue;
                 }
-                
+
                 let neighbor_id = closest_indices[c];
                 let neighbor_pos = agents_in[neighbor_id].position;
                 let neighbor_body_count = min(agents_in[neighbor_id].body_count, MAX_BODY_PARTS);
                 let neighbor_rot = agents_in[neighbor_id].rotation;
-                
+
                 // Check each part of the neighbor for type 45 organs
                 for (var j = 0u; j < neighbor_body_count; j++) {
                     let neighbor_part = agents_in[neighbor_id].body[j];
                     let neighbor_base_type = get_base_part_type(neighbor_part.part_type);
-                    
+
                     if (neighbor_base_type == 45u) {
                         // Found a matching organ type - check distance
                         let neighbor_part_offset = apply_agent_rotation(neighbor_part.pos, neighbor_rot);
                         let neighbor_part_world = neighbor_pos + neighbor_part_offset;
                         let delta_to_neighbor = neighbor_part_world - world_pos;
                         let dist_to_neighbor = length(delta_to_neighbor);
-                        
+
                         if (dist_to_neighbor > 0.1 && dist_to_neighbor < MAGNET_SEARCH_RADIUS) {
                             // Get neighbor organ's polarity
                             let neighbor_organ_param = get_organ_param(neighbor_part.part_type);
                             let neighbor_modifier = u32(clamp(round((f32(neighbor_organ_param) / 255.0) * 19.0), 0.0, 19.0));
-                            
+
                             // Calculate force based on polarity match
                             // Same modifier = repel (positive force), different = attract (negative force)
                             let polarity_sign = select(-1.0, 1.0, my_modifier == neighbor_modifier);
-                            
+
                             // Inverse square law for magnetic force (3x stronger than repulsion)
                             let force_magnitude = (MAGNET_BASE_STRENGTH / (dist_to_neighbor * dist_to_neighbor)) * polarity_sign;
                             let clamped_force_mag = clamp(force_magnitude, -15000.0, 15000.0);
-                            
+
                             let direction = delta_to_neighbor / dist_to_neighbor;
                             let magnet_force = direction * clamped_force_mag;
+
+                            // Apply force and torque
+                            // Calculate lever arm from center of mass to organ position (not segment midpoint)
+                            let organ_offset_from_com = part.pos - center_of_mass;
+                            let organ_r_com = apply_agent_rotation(organ_offset_from_com, agent_rot);
                             
-                            // Apply force and torque (like propellers)
                             force += magnet_force;
-                            torque += (r_com.x * magnet_force.y - r_com.y * magnet_force.x);
+                            torque += (organ_r_com.x * magnet_force.y - organ_r_com.y * magnet_force.x);
                         }
                     }
                 }
