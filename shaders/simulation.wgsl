@@ -171,24 +171,26 @@ const MORPHOLOGY_ORIENT_FOLLOW_STRENGTH: f32 = 0.25;
 const MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL: f32 = 0.15;
 
 // Vampire mouth and spike organ constants
-const VAMPIRE_REACH: f32 = 50.0; // Fixed 50 unit radius for vampire drain
-const SPIKE_REACH: f32 = 20.0;   // Fixed 20 unit radius for spike kill
+// Reach is now variable per-part (10..80) derived from the next part's parameter1.
+const DEFENSE_RADIUS_DEFAULT: f32 = 30.0;
+const DEFENSE_RADIUS_MAX: f32 = 80.0;
 const SPIKE_CHEM_DEPOSIT_RADIUS: f32 = 30.0; // Radius around mouth to deposit victim energy
 // Vampire finisher: after a successful drain, vampire mouths may kill the victim.
 // Probability scales with victim body length (body_count).
 const VAMPIRE_KILL_PROB_PER_PART: f32 = 0.01;
 const VAMPIRE_KILL_PROB_MAX: f32 = 0.75;
-// Spike tuning: spikes should not be free/continuous in dense stationary blobs.
+// Spike tuning:
 // - Cooldown is stored in spike part body[i]._pad.x (no struct changes).
-// - Energy cost is paid by the attacker on successful kill.
-const SPIKE_COOLDOWN_FRAMES: f32 = 45.0;
-const SPIKE_KILL_COST_BASE: f32 = 0.25;
-const SPIKE_KILL_COST_FRAC_OF_VICTIM: f32 = 0.15;
+// - Open/close state is stored in body[i]._pad.y (smoothed, 0..1).
+// - Spikes are meant to be passive defense: keep kill cost low.
+const SPIKE_COOLDOWN_FRAMES: f32 = 2.0;
+const SPIKE_KILL_COST_BASE: f32 = 0.02;
+const SPIKE_KILL_COST_FRAC_OF_VICTIM: f32 = 0.00;
 
 // Decomposition tuning:
-// Fixed deposit per ORGAN (base_type >= 20), with no scaling by food_power or remaining energy.
+// Fixed deposit per BODYPART (amino segments + organs), with no scaling by food_power or remaining energy.
 // Deterministic (no per-part randomness) to avoid run-to-run variation.
-const DECOMPOSE_DEPOSIT_PER_ORGAN: f32 = 0.05;
+const DECOMPOSE_DEPOSIT_PER_BODYPART: f32 = 0.2;
 
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -237,7 +239,8 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     // NOTE: cap to 10 (previous behavior) to avoid pathological loop sizes.
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
     let cell_size = f32(SIM_SIZE) / f32(SPATIAL_GRID_SIZE);
-    let grid_radius = clamp(i32(ceil(VAMPIRE_REACH / cell_size)), 1, 10);
+    // Conservative grid search radius: max possible reach.
+    let grid_radius = clamp(i32(ceil(DEFENSE_RADIUS_MAX / cell_size)), 1, 10);
 
     // Process each vampire mouth organ
 
@@ -245,6 +248,20 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         let i = vampire_mouth_indices[mi];
         let part = agents_out[agent_id].body[i];
         let mouth_local_pos = part.pos;
+
+        // Open/close state stored in _pad.y (0..1). When closed, do nothing.
+        let mouth_open = clamp(part._pad.y, 0.0, 1.0);
+        if (mouth_open < 0.5) {
+            // Keep visualization stable.
+            continue;
+        }
+
+        // Variable reach from the NEXT part's parameter1 (or default when last).
+        var reach = DEFENSE_RADIUS_DEFAULT;
+        if (i + 1u < agents_out[agent_id].body_count) {
+            let next_base = get_base_part_type(agents_out[agent_id].body[i + 1u].part_type);
+            reach = param1_to_defense_radius(get_amino_acid_properties(next_base).parameter1);
+        }
 
         // World position for this mouth. Keep this computed regardless of enable state so
         // we can always update the tracking data.
@@ -291,7 +308,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 let neighbor = agents_out[neighbor_id];
                                 if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                     let dist = length(mouth_world_pos - neighbor.position);
-                                    if (dist < VAMPIRE_REACH) {
+                                    if (dist < reach) {
                                         closest_victim_id = neighbor_id;
                                         found_victim = true;
                                     }
@@ -317,7 +334,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         let neighbor = agents_out[neighbor_id];
                                         if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                             let dist = length(mouth_world_pos - neighbor.position);
-                                            if (dist < VAMPIRE_REACH) {
+                                            if (dist < reach) {
                                                 closest_victim_id = neighbor_id;
                                                 found_victim = true;
                                             }
@@ -340,7 +357,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                             let neighbor = agents_out[neighbor_id];
                                             if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                                 let dist = length(mouth_world_pos - neighbor.position);
-                                                if (dist < VAMPIRE_REACH) {
+                                                if (dist < reach) {
                                                     closest_victim_id = neighbor_id;
                                                     found_victim = true;
                                                 }
@@ -369,7 +386,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         let neighbor = agents_out[neighbor_id];
                                         if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                             let dist = length(mouth_world_pos - neighbor.position);
-                                            if (dist < VAMPIRE_REACH) {
+                                            if (dist < reach) {
                                                 closest_victim_id = neighbor_id;
                                                 found_victim = true;
                                             }
@@ -392,7 +409,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                             let neighbor = agents_out[neighbor_id];
                                             if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                                 let dist = length(mouth_world_pos - neighbor.position);
-                                                if (dist < VAMPIRE_REACH) {
+                                                if (dist < reach) {
                                                     closest_victim_id = neighbor_id;
                                                     found_victim = true;
                                                 }
@@ -404,11 +421,6 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                         }
                     }
                 }
-
-                if (!found_victim) {
-                    agents_out[agent_id].body[i]._pad.y = 0.0;
-                }
-
                 // Drain from closest victim only
                 if (closest_victim_id != 0xFFFFFFFFu) {
                     // Try to claim the victim's spatial grid cell atomically
@@ -444,74 +456,43 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Only proceed if we can drain this victim AND cooldown is ready
                     if (can_drain && current_cooldown <= 0.0) {
                         let victim_energy = agents_out[closest_victim_id].energy;
-
                         if (victim_energy > 0.0001) {
                             // VAMPIRE DRAIN: Gradually drain energy from victim
-                            // Distance-based falloff: full power at 0 distance, 0 power at max vampire reach
+                            // Distance-based falloff: full power at 0 distance, 0 power at max reach
                             let victim_pos = agents_out[closest_victim_id].position;
                             let victim_dist = length(mouth_world_pos - victim_pos);
-                            let distance_factor = max(0.0, 1.0 - (victim_dist / VAMPIRE_REACH));
+                            let distance_factor = max(0.0, 1.0 - (victim_dist / max(reach, 1e-3)));
 
                             // Poison protection organs reduce vampire drain effectiveness by 50% each
                             let victim_poison_protection = agents_out[closest_victim_id].poison_resistant_count;
                             var drain_effectiveness = distance_factor;
-
                             if (victim_poison_protection > 0u) {
-                                // Each poison protection organ halves the drain rate
                                 drain_effectiveness *= pow(0.5, f32(victim_poison_protection));
                             }
 
-                            // Drain rate: 20% of victim's current energy per drain
-                            // This creates exponential decay - victim slowly weakens over multiple drains
-                            let drain_rate = 0.2;
+                            // Drain rate: scale by size ratio (vampire / victim) using body-part count proxy.
+                            let vamp_size = max(f32(body_count), 1.0);
+                            let victim_size = max(f32(min(agents_out[closest_victim_id].body_count, MAX_BODY_PARTS)), 1.0);
+                            let size_ratio = vamp_size / victim_size;
+                            let drain_rate = clamp(0.2 * size_ratio, 0.0, 0.95);
                             let drain_amount = victim_energy * drain_rate * drain_effectiveness;
 
-                            // Minimum drain threshold - don't drain if effectiveness is too low
+                            // Minimum drain threshold
                             if (drain_amount >= 0.01) {
                                 // Drain energy from victim
                                 agents_out[closest_victim_id].energy = max(0.0, victim_energy - drain_amount);
-
                                 // Vampire gains the drained energy
                                 total_energy_gained += drain_amount;
-
-                                // Chance to kill the victim (deferred) based on victim length.
-                                // Uses pending-kill marker so the victim self-decomposes next tick.
-                                let victim_len = f32(min(agents_out[closest_victim_id].body_count, MAX_BODY_PARTS));
-                                let kill_prob = min(VAMPIRE_KILL_PROB_MAX, VAMPIRE_KILL_PROB_PER_PART * victim_len);
-                                let kill_seed = hash(
-                                    (agent_id * 747796405u) ^
-                                    (closest_victim_id * 2891336453u) ^
-                                    (params.epoch * 196613u) ^
-                                    (i * 83492791u) ^
-                                    params.random_seed
-                                );
-                                let kill_rnd = f32(kill_seed) / 4294967295.0;
-                                if (kill_rnd < kill_prob) {
-                                    agents_out[closest_victim_id].alive = 2u;
-                                    agents_out[closest_victim_id].velocity = vec2<f32>(0.0);
-                                }
-
-                                // Store drained amount in _pad.y for visualization
-                                agents_out[agent_id].body[i]._pad.y = drain_amount;
-
                                 // Set cooldown timer
                                 agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
-                        } else {
-                            agents_out[agent_id].body[i]._pad.y = 0.0;
+                            }
                         }
-                    } else {
-                        agents_out[agent_id].body[i]._pad.y = 0.0;
                     }
-                } else {
-                    agents_out[agent_id].body[i]._pad.y = 0.0;
                 }
-            } else {
-                agents_out[agent_id].body[i]._pad.y = 0.0;
             }
 
             // Store current position for next frame's movement calculation
             agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
-        }
     }
 
     // Add gained energy to vampire
@@ -555,7 +536,7 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
     let cell_size = f32(SIM_SIZE) / f32(SPATIAL_GRID_SIZE);
-    let grid_radius = clamp(i32(ceil(SPIKE_REACH / cell_size)), 1, 10);
+    let grid_radius = clamp(i32(ceil(DEFENSE_RADIUS_MAX / cell_size)), 1, 10);
 
     // Collect spike organ indices (type 46)
     var spike_indices: array<u32, MAX_BODY_PARTS>;
@@ -577,6 +558,19 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
     // For each spike organ
     for (var si = 0u; si < spike_count; si++) {
         let i = spike_indices[si];
+
+        // Open/close state stored in _pad.y (0..1). When closed, do nothing.
+        let spike_open = clamp(agents_out[agent_id].body[i]._pad.y, 0.0, 1.0);
+        if (spike_open < 0.5) {
+            continue;
+        }
+
+        // Variable reach from the NEXT part's parameter1 (or default when last).
+        var reach = DEFENSE_RADIUS_DEFAULT;
+        if (i + 1u < body_count) {
+            let next_base = get_base_part_type(agents_out[agent_id].body[i + 1u].part_type);
+            reach = param1_to_defense_radius(get_amino_acid_properties(next_base).parameter1);
+        }
 
         // Per-spike cooldown countdown (stored in body[i]._pad.x).
         let cd = agents_out[agent_id].body[i]._pad.x;
@@ -620,7 +614,7 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
 
                 let dist = length(spike_world_pos - agents_out[neighbor_id].position);
-                if (dist < SPIKE_REACH) {
+                if (dist < reach) {
                     // Claim this victim cell (same pattern as vampire mouths) to avoid
                     // cross-invocation races where multiple spikes kill the same victim.
                     let victim_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
@@ -711,16 +705,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
 
-            // Count organs (base_type >= 20) so we can apply a fixed deposit per organ.
-            var organ_count = 0u;
-            for (var i = 0u; i < body_count; i++) {
-                let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
-                if (base_type >= 20u) {
-                    organ_count += 1u;
-                }
-            }
-
-            if (organ_count > 0u) {
+            // Apply the same decomposition rule to amino segments + organs: deposit per bodypart.
+            let part_count = body_count;
+            if (part_count > 0u) {
                 let total_relevant_mouths = normal_mouth_count + beta_mouth_count;
                 var alpha_ratio = 0.5;
                 if (total_relevant_mouths > 0u) {
@@ -728,29 +715,24 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     alpha_ratio = f32(beta_mouth_count) / f32(total_relevant_mouths);
                 }
 
-                // Deterministic split: first N organs deposit alpha, rest deposit beta.
-                let alpha_organs = min(u32(round(alpha_ratio * f32(organ_count))), organ_count);
+                // Deterministic split: first N parts deposit alpha, rest deposit beta.
+                let alpha_parts = min(u32(round(alpha_ratio * f32(part_count))), part_count);
 
                 let agent_pos = agents_in[agent_id].position;
                 let agent_rot = agents_in[agent_id].rotation;
-                var seen_organs = 0u;
+                var seen_parts = 0u;
                 for (var i = 0u; i < body_count; i++) {
                     let part = agents_in[agent_id].body[i];
-                    let base_type = get_base_part_type(part.part_type);
-                    if (base_type < 20u) {
-                        continue;
-                    }
-
                     let world_pos = agent_pos + apply_agent_rotation(part.pos, agent_rot);
                     let idx = grid_index(world_pos);
                     let prev = chem_grid[idx];
 
-                    if (seen_organs < alpha_organs) {
-                        write_chem_alpha(idx, min(prev.x + DECOMPOSE_DEPOSIT_PER_ORGAN, 1.0));
+                    if (seen_parts < alpha_parts) {
+                        write_chem_alpha(idx, min(prev.x + DECOMPOSE_DEPOSIT_PER_BODYPART, 1.0));
                     } else {
-                        write_chem_beta(idx, min(prev.y + DECOMPOSE_DEPOSIT_PER_ORGAN, 1.0));
+                        write_chem_beta(idx, min(prev.y + DECOMPOSE_DEPOSIT_PER_BODYPART, 1.0));
                     }
-                    seen_organs += 1u;
+                    seen_parts += 1u;
                 }
             }
         }
@@ -1915,20 +1897,42 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Body positions are COM-centered; morphology_origin is the chain origin in the same frame.
     let morphology_origin = agents_out[agent_id].morphology_origin;
 
-    // Anchor mass multiplier when active (stored in part._pad.y as 0/1).
+    // Anchor mass multiplier when active (stored in part._pad.y as 0..1 strength).
     let ANCHOR_MASS_MULT = 100.0;
     var anchor_mass_extra = 0.0;
+    // Rough surface-area estimate from part geometry (length * thickness).
+    var total_area = 0.0;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part_out = agents_out[agent_id].body[i];
         let base_type_out = get_base_part_type(part_out.part_type);
-        if (base_type_out == 42u && part_out._pad.y > 0.5) {
+
+        total_area += get_part_area_estimate(part_out.part_type);
+
+        // Open vampire mouths (33) and spikes (46) add extra effective area.
+        // This area contribution fades out as the organ closes.
+        if (base_type_out == 33u || base_type_out == 46u) {
+            let open = clamp(part_out._pad.y, 0.0, 1.0);
+            var r = DEFENSE_RADIUS_DEFAULT;
+            if (i + 1u < body_count) {
+                let next_base = get_base_part_type(agents_out[agent_id].body[i + 1u].part_type);
+                r = param1_to_defense_radius(get_amino_acid_properties(next_base).parameter1);
+            }
+            // Empirical 2D proxy: opened fan area scales ~r^2.
+            total_area += open * (r * r) * 0.02;
+        }
+
+        if (base_type_out == 42u) {
             let props = get_amino_acid_properties(base_type_out);
             let base_mass = max(props.mass, 0.01);
-            anchor_mass_extra += base_mass * (ANCHOR_MASS_MULT - 1.0);
+            let anchor_strength = clamp(part_out._pad.y, 0.0, 1.0);
+            anchor_mass_extra += base_mass * (ANCHOR_MASS_MULT - 1.0) * anchor_strength;
         }
     }
     total_mass = max(total_mass + anchor_mass_extra, 0.05);
     agents_out[agent_id].total_mass = total_mass;
+
+    total_area = max(total_area, 1e-3);
+    let area_response = clamp(total_area / max(total_mass, 1e-6), 0.1, 10.0);
 
     // Anchor (type 42): if any anchor was active last frame, freeze the whole agent.
     // Read from agents_in to avoid same-frame ordering dependence.
@@ -1960,6 +1964,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var force = vec2<f32>(0.0);
     var torque = 0.0;
 
+    // Hard collision (minimum inter-agent separation).
+    // Note: this uses the pre-collected neighbor list (max 64, one per spatial cell).
+    // It's intended as a robust anti-clumping constraint even when repulsion is disabled.
+    let HARD_COLLISION_RADIUS: f32 = 10.0;
+    let HARD_COLLISION_EPS: f32 = 1e-3;
+    var hard_collision_vel = vec2<f32>(0.0);
+
     // (No global morphology-swim impulse here; handled per-part.)
 
     // Agent-to-agent repulsion (simplified: once per agent pair, using total masses)
@@ -1975,6 +1986,24 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let delta = agent_pos - neighbor_pos;
         let dist = length(delta);
+
+        // Hard minimum distance: accumulate a per-tick positional correction as an
+        // extra velocity term (applied after smoothing later).
+        if (dist < HARD_COLLISION_RADIUS) {
+            let penetration = HARD_COLLISION_RADIUS - dist;
+            var direction = vec2<f32>(0.0);
+            if (dist > HARD_COLLISION_EPS) {
+                direction = delta / dist;
+            } else {
+                // Deterministic fallback direction for exact overlaps.
+                let seed = (agent_id * 747796405u) ^ (neighbor_id * 2891336453u) ^ (params.epoch * 196613u) ^ (params.random_seed * 83492791u);
+                let h = hash(seed);
+                let angle = (f32(h & 4095u) / 4096.0) * 6.28318530718;
+                direction = vec2<f32>(cos(angle), sin(angle));
+            }
+            // Split correction across both agents (approx; each agent applies its own).
+            hard_collision_vel += direction * (penetration * 0.5);
+        }
 
         // Distance-based repulsion force (inverse square law with cutoff)
         let max_repulsion_distance = 500.0;
@@ -2112,15 +2141,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let offset_from_com = segment_midpoint - center_of_mass;
 
         // Moment of inertia (rotation-invariant; can be computed in local space)
-        let anchor_active = (base_type == 42u && part._pad.y > 0.5);
+        let anchor_strength = select(0.0, clamp(part._pad.y, 0.0, 1.0), base_type == 42u);
+        let anchor_active = anchor_strength > 0.5;
         let base_part_mass = max(amino_props.mass, 0.01);
-        let part_mass = select(base_part_mass, base_part_mass * ANCHOR_MASS_MULT, anchor_active);
+        let part_mass = base_part_mass * (1.0 + anchor_strength * (ANCHOR_MASS_MULT - 1.0));
         moment_of_inertia += part_mass * dot(offset_from_com, offset_from_com);
         let r_com = apply_agent_rotation(offset_from_com, agent_rot);
         let rotated_midpoint = apply_agent_rotation(segment_midpoint, agent_rot);
         let world_pos = agent_pos + rotated_midpoint;
 
-        let part_weight = part_mass / total_mass;
+        let part_weight = part_mass / max(total_mass, 1e-6);
+        let part_area_weight = get_part_area_estimate(part.part_type) / total_area;
 
         // (Virtual swim thrust is computed once per-agent above; avoid double-counting per-part.)
 
@@ -2173,7 +2204,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let v_frame = v * (cell_to_world * params.dt);
 
                     // Overdamped: choose force so resulting velocity contribution ~ v_frame scaled.
-                    let wind_force = v_frame * (wind_coupling * part_weight * params.fluid_wind_push_strength) * drag_coefficient;
+                    let wind_force = v_frame * (wind_coupling * part_area_weight * params.fluid_wind_push_strength * area_response) * drag_coefficient;
                     force += wind_force;
                     torque += (r_com.x * wind_force.y - r_com.y * wind_force.x);
                 }
@@ -2474,6 +2505,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mass_smoothing = clamp(1.0 - (total_mass * 2.5), 0.1, 0.95);
     agent_vel = mix(agent_vel, new_velocity, mass_smoothing);
 
+    // Apply hard-collision correction after smoothing so it can't be damped away
+    // for heavy agents. Cap to avoid huge teleports in extreme pileups.
+    if (!anchor_active_prev) {
+        let hc_len = length(hard_collision_vel);
+        if (hc_len > 20.0) {
+            hard_collision_vel = hard_collision_vel * (20.0 / max(hc_len, 1e-6));
+        }
+        agent_vel += hard_collision_vel;
+    }
+
     if (anchor_active_prev) {
         agent_vel = vec2<f32>(0.0);
     }
@@ -2532,7 +2573,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (com_world.x >= 0.0 && com_world.x < f32(SIM_SIZE) && com_world.y >= 0.0 && com_world.y < f32(SIM_SIZE)) {
             let curl = sample_fluid_curl(com_world);
             // Curl is in ~1/sec; convert to per-tick delta with params.dt.
-            angular_velocity += curl * params.fluid_wind_push_strength * WIND_CURL_ANGVEL_SCALE * params.dt;
+            angular_velocity += curl * params.fluid_wind_push_strength * WIND_CURL_ANGVEL_SCALE * params.dt * area_response;
         }
     }
     angular_velocity = angular_velocity * ANGULAR_BLEND;
@@ -2682,7 +2723,30 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Active iff signal is positive; inactive if signal is 0 or negative.
             let now_active = signal > 0.0;
 
-            agents_out[agent_id].body[i]._pad.y = select(0.0, 1.0, now_active);
+            // Requested behavior: anchors only "grab" where gamma exists.
+            // Gamma in this sim is capped around 10.0 in transfer logic; normalize to 0..1.
+            let gamma_here = max(read_gamma_height(idx), 0.0);
+            let gamma_amount = clamp(gamma_here / 10.0, 0.0, 1.0);
+
+            agents_out[agent_id].body[i]._pad.y = select(0.0, 1.0, now_active) * gamma_amount;
+        }
+
+        // Vampire mouths (33) and spikes (46):
+        // - K-promoter variants: open/close based on enabler proximity (amplification_per_part)
+        // - C-promoter variants: open/close and activation based on alpha signal
+        // Open amount is CONTINUOUS (0..1), but behaviors still treat activity as on/off at a
+        // threshold (e.g. open >= 0.5).
+        if (base_type == 33u || base_type == 46u) {
+            let organ_param = get_organ_param(part.part_type);
+            let is_C_promoter = (organ_param & 128u) != 0u;
+
+            let amp_open = clamp(amplification_per_part[i], 0.0, 1.0);
+            let alpha_open = clamp(part.alpha_signal, 0.0, 1.0);
+            let target_open = select(amp_open, alpha_open, is_C_promoter);
+
+            let prev_open = clamp(agents_in[agent_id].body[i]._pad.y, 0.0, 1.0);
+            let open = mix(prev_open, target_open, 0.2);
+            agents_out[agent_id].body[i]._pad.y = open;
         }
 
         // Calculate actual mouth speed for mouth organs (distance moved since last frame)
@@ -3054,36 +3118,24 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 alpha_ratio = f32(beta_mouth_count) / f32(total_relevant_mouths);
             }
 
-            // Fixed-per-organ deposit, deterministic (no randomness, no scaling by food_power or energy).
-            var organ_count = 0u;
-            for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-                let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
-                if (base_type >= 20u) {
-                    organ_count += 1u;
-                }
-            }
-
-            if (organ_count > 0u) {
-                let alpha_organs = min(u32(round(alpha_ratio * f32(organ_count))), organ_count);
-                var seen_organs = 0u;
+            // Fixed-per-bodypart deposit, deterministic (no randomness, no scaling by food_power or energy).
+            let part_count = min(body_count, MAX_BODY_PARTS);
+            if (part_count > 0u) {
+                let alpha_parts = min(u32(round(alpha_ratio * f32(part_count))), part_count);
+                var seen_parts = 0u;
                 for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
                     let part = agents_out[agent_id].body[i];
-                    let base_type = get_base_part_type(part.part_type);
-                    if (base_type < 20u) {
-                        continue;
-                    }
-
                     let rotated_pos = apply_agent_rotation(part.pos, agent_rot);
                     let world_pos = agent_pos + rotated_pos;
                     let idx = grid_index(world_pos);
                     let prev = chem_grid[idx];
 
-                    if (seen_organs < alpha_organs) {
-                        write_chem_alpha(idx, min(prev.x + DECOMPOSE_DEPOSIT_PER_ORGAN, 1.0));
+                    if (seen_parts < alpha_parts) {
+                        write_chem_alpha(idx, min(prev.x + DECOMPOSE_DEPOSIT_PER_BODYPART, 1.0));
                     } else {
-                        write_chem_beta(idx, min(prev.y + DECOMPOSE_DEPOSIT_PER_ORGAN, 1.0));
+                        write_chem_beta(idx, min(prev.y + DECOMPOSE_DEPOSIT_PER_BODYPART, 1.0));
                     }
-                    seen_organs += 1u;
+                    seen_parts += 1u;
                 }
             }
         }

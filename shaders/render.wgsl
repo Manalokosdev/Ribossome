@@ -337,74 +337,94 @@ fn render_body_part_ctx(
         draw_star_5_ctx(world_pos, star_radius, star_color, ctx);
     }
 
-    // 7. ORGAN: Mouth (feeding organ) - asterisk marker
-    if (amino_props.is_mouth) {
+    // 7. ORGAN: Mouth (feeding organ) - asterisk marker (exclude vampire mouths)
+    if (amino_props.is_mouth && base_type != 33u) {
         // Regular mouths get small yellow asterisk
         let mouth_radius = max(get_part_visual_size(part.part_type) * 1.5, 4.0);
         let mouth_color = mix(amino_props.color, agent_color, params.agent_color_blend);
         draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
     }
 
-    // Vampire mouths (organ 33) get special big flashing asterisks
-    if (base_type == 33u) {
-        let mouth_radius = max(get_part_visual_size(part.part_type) * 6.0, 16.0);
+    // Vampire mouths (33) and spikes (46): render as radial spikes.
+    // They open to 360° when enabled (open=1) and fold into a narrow fan along the organ angle when disabled.
+    if (base_type == 33u || base_type == 46u) {
+        // Open/close state stored in _pad.y (0..1).
+        let open = clamp(part._pad.y, 0.0, 1.0);
 
-        // Draw blinking white asterisk when draining energy (_pad.y stores drain amount)
-        let drain_amount = part._pad.y;
-        let has_any_drain = drain_amount > 0.0000001;
-
-        if (has_any_drain) {
-            // Blink white using epoch-based animation
-            let blink_speed = 0.3; // Faster blinking
-            let blink_phase = fract(f32(params.epoch) * blink_speed);
-            let blink_on = blink_phase < 0.5; // 50% duty cycle
-
-            if (blink_on) {
-                let mouth_color = vec3<f32>(1.0, 1.0, 1.0); // Bright white when vampiring
-                draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 1.0), ctx);
+        // Variable radius from NEXT part's parameter1 (or default when last).
+        var r = 30.0;
+        if (part_index + 1u < body_count) {
+            var next_part_type: u32;
+            if (use_selected_buffer) {
+                next_part_type = selected_agent_buffer[0].body[part_index + 1u].part_type;
             } else {
-                // Show amount as green intensity during off phase
-                let intensity = min(drain_amount * 100.0, 1.0);
-                let mouth_color = vec3<f32>(0.0, intensity, 0.0); // Green based on drain amount
-                draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
+                next_part_type = agents_out[agent_id].body[part_index + 1u].part_type;
             }
-        } else {
-            // Not draining - color based on agent's total energy (cyan = high energy, red = low)
-            let energy_ratio = clamp(agent_energy / 1000.0, 0.0, 1.0);
-            let mouth_color = mix(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 1.0), energy_ratio);
-            draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
-        }
-    }
-
-    // Spike organs (organ 46) - radial thin greenish spikes
-    if (base_type == 46u) {
-        // Deterministic seed: vary by lineage generation so each generation looks slightly different.
-        var agent_generation: u32;
-        if (use_selected_buffer) {
-            agent_generation = selected_agent_buffer[0].generation;
-        } else {
-            agent_generation = agents_out[agent_id].generation;
+            let next_base = get_base_part_type(next_part_type);
+            r = param1_to_defense_radius(get_amino_acid_properties(next_base).parameter1);
         }
 
+        // Organ direction: approximate from local chain tangent.
+        var tangent_local = vec2<f32>(1.0, 0.0);
+        if (part_index > 0u) {
+            var prev_pos: vec2<f32>;
+            if (use_selected_buffer) {
+                prev_pos = selected_agent_buffer[0].body[part_index - 1u].pos;
+            } else {
+                prev_pos = agents_out[agent_id].body[part_index - 1u].pos;
+            }
+            let dv = part.pos - prev_pos;
+            if (dot(dv, dv) > 1e-6) { tangent_local = normalize(dv); }
+        } else if (part_index + 1u < body_count) {
+            var next_pos: vec2<f32>;
+            if (use_selected_buffer) {
+                next_pos = selected_agent_buffer[0].body[part_index + 1u].pos;
+            } else {
+                next_pos = agents_out[agent_id].body[part_index + 1u].pos;
+            }
+            let dv = next_pos - part.pos;
+            if (dot(dv, dv) > 1e-6) { tangent_local = normalize(dv); }
+        }
+
+        let tangent_world = normalize(apply_agent_rotation(tangent_local, agent_rotation));
+        let organ_angle = atan2(tangent_world.y, tangent_world.x);
+
+        // Always draw a fixed count for readability.
         let spike_count = 12u;
-        let base_radius = 18.0;
-        let spike_color = vec3<f32>(0.3, 0.8, 0.4);
-        let seed0 = (agent_generation + 1u) * 2654435761u + part_index * 2246822519u;
+        let spread = open * 6.28318530718;
+        let base_len = r;
 
-        for (var i = 0u; i < spike_count; i++) {
-            // Two stable random values per spike.
-            let h1 = hash_f32(seed0 + (i + 1u) * 1597334677u);
-            let h2 = hash_f32(seed0 + (i + 1u) * 3812015801u);
+        // Colors: vampire mouths inherit their red-ish amino color, spikes use green-ish.
+        let spike_color = select(vec3<f32>(0.3, 0.8, 0.4), amino_props.color, base_type == 33u);
 
-            // Evenly spaced angle + small jitter.
-            let base_angle = (f32(i) / f32(spike_count)) * 6.28318530718;
-            let angle = base_angle + (h2 - 0.5) * 0.55;
+        // Deterministic per-ray jitter in organ-local space.
+        // IMPORTANT: seed uses only generation + part_index so it doesn't flicker if agents get reindexed.
+        let generation = select(agents_out[agent_id].generation, selected_agent_buffer[0].generation, use_selected_buffer);
+        let seed = ((generation + 1u) * 2654435761u) ^ ((part_index + 1u) * 3266489917u);
 
-            // Randomize length a bit.
-            let len = base_radius * (0.65 + 0.75 * h1);
+        for (var k = 0u; k < spike_count; k++) {
+            let t = (f32(k) + 0.5) / f32(spike_count);
+
+            // Two stable randoms in [0,1].
+            let h1 = hash_f32(seed * (k + 1u) * 2654435761u);
+            let h2 = hash_f32(seed * (k + 1u) * 1103515245u);
+
+            // Angular jitter (in radians). Increased for more organic look.
+            let angle_jitter = (h2 - 0.5) * 0.8;
+            let angle = organ_angle + (t - 0.5) * spread + angle_jitter;
+
+            // Length jitter.
+            let len = base_len * (0.6 + 0.8 * h1);
+
             let spike_end = world_pos + vec2<f32>(cos(angle), sin(angle)) * len;
 
-            draw_thick_line_ctx(world_pos, spike_end, 0.5, vec4<f32>(spike_color, 0.9), ctx);
+            // Main view: 1px screen-space line for low-zoom visibility.
+            // Inspector: keep ctx-aware thick-line drawing.
+            if (ctx.use_inspector_coords.x >= 0.0) {
+                draw_thick_line_ctx(world_pos, spike_end, 0.5, vec4<f32>(spike_color, 0.9), ctx);
+            } else {
+                draw_screen_line(world_to_screen(world_pos), world_to_screen(spike_end), vec4<f32>(spike_color, 0.9));
+            }
         }
     }
 

@@ -484,7 +484,7 @@ fn spatial_epoch_index(cell: u32) -> u32 {
 // Spatial grid special markers
 const SPATIAL_GRID_EMPTY: u32 = 0xFFFFFFFFu;     // No agent in this cell
 const SPATIAL_GRID_CLAIMED: u32 = 0xFFFFFFFEu;   // Cell claimed by vampire (victim being drained)
-const VAMPIRE_MOUTH_COOLDOWN: f32 = 12.0;          // Frames between drains
+const VAMPIRE_MOUTH_COOLDOWN: f32 = 2.0;          // Frames between drains
 const VAMPIRE_NEWBORN_GRACE_FRAMES: u32 = 60u;    // Newborn agents ignore/are immune to vampire drain for 1 second
 
 // Fluid constants
@@ -530,6 +530,29 @@ struct AminoAcidProperties {
     is_mutation_protection: bool,
     parameter1: f32,
     fluid_wind_coupling: f32,
+}
+
+const MIN_PART_AREA_ESTIMATE: f32 = 1e-3;
+
+// Map a generic parameter1 value into a defense organ radius.
+// Parameter1 is often in [-1, 1] across parts; we remap to [0, 1] then to [10, 80].
+fn param1_to_defense_radius(param1: f32) -> f32 {
+    let t = clamp(0.5 + 0.5 * param1, 0.0, 1.0);
+    return 10.0 + t * 70.0;
+}
+
+fn part_area_estimate_from_props(props: AminoAcidProperties) -> f32 {
+    // Very rough 2D proxy: surface area ~ length * width.
+    // This intentionally ignores curvature and segment-to-segment overlap.
+    let len = max(props.segment_length, 0.0);
+    let w = max(props.thickness, 0.0);
+    return max(len * w, MIN_PART_AREA_ESTIMATE);
+}
+
+fn get_part_area_estimate(part_type: u32) -> f32 {
+    let base_type = get_base_part_type(part_type);
+    let props = get_amino_acid_properties(base_type);
+    return part_area_estimate_from_props(props);
 }
 
 // ============================================================================
@@ -1742,6 +1765,18 @@ fn translate_codon_step(packed: array<u32, GENOME_PACKED_WORDS>, pos_b: u32, off
 
             if (organ_base_type >= 20u) {
                     var param_value = u32((f32(modifier) / 19.0) * 255.0);
+
+                    // For some organs we also encode promoter kind into the top bit of param.
+                    // In the K/C organ family (mouths/vampires/spikes), we need to distinguish
+                    // whether the promoter was K (8) or C (1).
+                    if (organ_base_type == 33u || organ_base_type == 46u) {
+                        // Keep modifier-derived value in low bits; top bit encodes C promoter.
+                        param_value = param_value & 127u;
+                        if (amino_type == 1u) {
+                            param_value = param_value | 128u;
+                        }
+                    }
+
                     if (organ_base_type == 31u || organ_base_type == 32u || organ_base_type == 36u || organ_base_type == 37u || organ_base_type == 42u) {
                         param_value = param_value & 127u;
                         // For some organs we encode promoter kind (alpha/beta) into the top bit of param.

@@ -59,6 +59,29 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Hybrid Re blend - kept conservative thresholds
     let mass = agents_out[agent_id].total_mass;
+
+    // Rough surface-area estimate from part geometry (length * thickness).
+    // Used to scale response by area/mass (mass-per-area).
+    var total_area = 0.0;
+    for (var i = 0u; i < body_count_out; i++) {
+        let part = agents_out[agent_id].body[i];
+        let base_type = get_base_part_type(part.part_type);
+        total_area += get_part_area_estimate(part.part_type);
+
+        // Open vampire mouths (33) and spikes (46) add extra effective area.
+        if (base_type == 33u || base_type == 46u) {
+            let open = clamp(part._pad.y, 0.0, 1.0);
+            var r = 30.0;
+            if (i + 1u < body_count_out) {
+                let next_base = get_base_part_type(agents_out[agent_id].body[i + 1u].part_type);
+                r = param1_to_defense_radius(get_amino_acid_properties(next_base).parameter1);
+            }
+            total_area += open * (r * r) * 0.02;
+        }
+    }
+    total_area = max(total_area, 1e-3);
+    let area_response = clamp(total_area / max(mass, 1e-6), 0.25, 4.0);
+
     let mass_threshold_low = 1.0;
     let mass_threshold_high = 5.0;
     var re_blend = clamp((mass - mass_threshold_low) / (mass_threshold_high - mass_threshold_low), 0.0, 1.0);
@@ -157,13 +180,13 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     thrust_world /= total_weight;
 
     // Higher overall thrust scaling via morph_swim_strength (assume MSP_COUPLING = 2.0-3.0 in params)
-    var final_thrust = thrust_world * morph_swim_strength;
+    var final_thrust = thrust_world * morph_swim_strength * area_response;
 
     // Stronger but gated vortex
     if (total_deformation_sq > ms_f32(MSP_MIN_TOTAL_DEFORMATION_SQ) * 1.8) {
         let normalized_vortex = (vortex_bonus / total_weight) * re_blend * 1.5;  // Boosted
         let max_vortex = sqrt(total_deformation_sq) * 0.8;  // Higher cap
-        final_thrust += forward_dir * min(normalized_vortex, max_vortex);
+        final_thrust += forward_dir * min(normalized_vortex, max_vortex) * area_response;
     }
 
     // Higher thrust cap for faster peak speeds
@@ -196,7 +219,7 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Asymmetry torque (stable across regimes)
     if (inertia_estimate > 1e-6 && speed > 0.1) {
         let normalized_torque = torque_asymmetry / inertia_estimate;
-        let torque_scale = ms_f32(MSP_TORQUE_STRENGTH) * morph_swim_strength * dt_safe;
+        let torque_scale = ms_f32(MSP_TORQUE_STRENGTH) * morph_swim_strength * dt_safe * area_response;
 
         var delta_rot = normalized_torque * torque_scale * min(speed / 3.0, 1.0);
         delta_rot = clamp(delta_rot, -ANGVEL_MAX, ANGVEL_MAX);

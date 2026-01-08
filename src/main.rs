@@ -38,7 +38,7 @@ fn pack_f32_uniform(values: &[f32]) -> Vec<u8> {
 // Default resolution values - can be overridden via simulation_settings.json
 // Changes require restart to take effect as they affect shader compilation and buffer allocation
 const DEFAULT_ENV_GRID_RESOLUTION: u32 = 2048;
-const DEFAULT_FLUID_GRID_RESOLUTION: u32 = 512;
+const DEFAULT_FLUID_GRID_RESOLUTION: u32 = 1024;
 const DEFAULT_SPATIAL_GRID_RESOLUTION: u32 = 1024;
 
 // World size calibrated for DEFAULT_ENV_GRID_RESOLUTION.
@@ -3059,6 +3059,13 @@ fn default_dye_beta_color() -> [f32; 3] { [1.0, 0.0, 0.0] }
 fn default_dye_thinfilm_multiplier() -> f32 { 50.0 }
 fn default_dye_precipitation() -> f32 { 1.0 }
 
+fn default_fluid_chem_lift_mult_alpha() -> f32 { 1.0 }
+fn default_fluid_chem_lift_mult_beta() -> f32 { 1.0 }
+fn default_fluid_chem_lift_mult_gamma() -> f32 { 0.0 }
+fn default_fluid_chem_deposit_mult_alpha() -> f32 { 1.0 }
+fn default_fluid_chem_deposit_mult_beta() -> f32 { 1.0 }
+fn default_fluid_chem_deposit_mult_gamma() -> f32 { 0.0 }
+
 fn default_microswim_enabled() -> bool { true }
 fn default_propellers_enabled() -> bool { true }
 fn default_morphology_change_cost() -> f32 { 0.0 }
@@ -3239,6 +3246,22 @@ struct SimulationSettings {
     dye_diffusion: f32,  // Dye diffusion strength when fluid is enabled (blend fraction per step)
     #[serde(default = "default_dye_diffusion_no_fluid")]
     dye_diffusion_no_fluid: f32,  // Dye diffusion strength when fluid is disabled (per epoch)
+
+    // Per-channel multipliers for chem<->dye coupling.
+    // These scale lift/erosion (chem/gamma -> dye) and deposition/sedimentation (dye -> chem/gamma)
+    // independently for alpha, beta, and gamma.
+    #[serde(default = "default_fluid_chem_lift_mult_alpha")]
+    fluid_chem_lift_mult_alpha: f32,
+    #[serde(default = "default_fluid_chem_lift_mult_beta")]
+    fluid_chem_lift_mult_beta: f32,
+    #[serde(default = "default_fluid_chem_lift_mult_gamma")]
+    fluid_chem_lift_mult_gamma: f32,
+    #[serde(default = "default_fluid_chem_deposit_mult_alpha")]
+    fluid_chem_deposit_mult_alpha: f32,
+    #[serde(default = "default_fluid_chem_deposit_mult_beta")]
+    fluid_chem_deposit_mult_beta: f32,
+    #[serde(default = "default_fluid_chem_deposit_mult_gamma")]
+    fluid_chem_deposit_mult_gamma: f32,
     fluid_wind_push_strength: f32, // Global multiplier for how much fluid pushes agents
     vector_force_power: f32,  // Global force multiplier (0.0 = off)
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
@@ -3400,6 +3423,13 @@ impl Default for SimulationSettings {
             fluid_dye_escape_rate_beta: default_fluid_dye_escape_rate_beta_unset(),
             dye_diffusion: default_dye_diffusion(),
             dye_diffusion_no_fluid: default_dye_diffusion_no_fluid(),
+
+            fluid_chem_lift_mult_alpha: default_fluid_chem_lift_mult_alpha(),
+            fluid_chem_lift_mult_beta: default_fluid_chem_lift_mult_beta(),
+            fluid_chem_lift_mult_gamma: default_fluid_chem_lift_mult_gamma(),
+            fluid_chem_deposit_mult_alpha: default_fluid_chem_deposit_mult_alpha(),
+            fluid_chem_deposit_mult_beta: default_fluid_chem_deposit_mult_beta(),
+            fluid_chem_deposit_mult_gamma: default_fluid_chem_deposit_mult_gamma(),
             // Matches the previous hardcoded scale used in shaders/simulation.wgsl.
             fluid_wind_push_strength: 0.0005,
             fluid_slope_force_scale: 100.0,
@@ -3798,12 +3828,12 @@ impl SimulationSettings {
         self.fluid_grid_resolution = self.fluid_grid_resolution.clamp(64, 2048);
         self.spatial_grid_resolution = self.spatial_grid_resolution.clamp(64, 2048);
 
-        // Enforce ratio: fluid and spatial should be env_res / 4 (or maintain user's ratio if reasonable)
+        // Enforce ratio: fluid and spatial should be ~env_res / 2 (or maintain user's ratio if reasonable)
         let ratio = self.env_grid_resolution / self.fluid_grid_resolution.max(1);
         if ratio < 2 || ratio > 16 {
-            // Force 4:1 ratio if current ratio is unreasonable
-            self.fluid_grid_resolution = self.env_grid_resolution / 4;
-            self.spatial_grid_resolution = self.env_grid_resolution / 4;
+            // Force 2:1 ratio if current ratio is unreasonable
+            self.fluid_grid_resolution = self.env_grid_resolution / 2;
+            self.spatial_grid_resolution = self.env_grid_resolution / 2;
         }
 
         // Back-compat: older settings files won't have beta thresholds.
@@ -3839,6 +3869,13 @@ impl SimulationSettings {
         self.fluid_wind_push_strength = self.fluid_wind_push_strength.clamp(0.0, 2.0);
         self.fluid_slope_force_scale = self.fluid_slope_force_scale.clamp(0.0, 500.0);
         self.fluid_obstacle_strength = self.fluid_obstacle_strength.clamp(0.0, 1000.0);
+
+        self.fluid_chem_lift_mult_alpha = self.fluid_chem_lift_mult_alpha.clamp(0.0, 1000.0);
+        self.fluid_chem_lift_mult_beta = self.fluid_chem_lift_mult_beta.clamp(0.0, 1000.0);
+        self.fluid_chem_lift_mult_gamma = self.fluid_chem_lift_mult_gamma.clamp(0.0, 1000.0);
+        self.fluid_chem_deposit_mult_alpha = self.fluid_chem_deposit_mult_alpha.clamp(0.0, 1000.0);
+        self.fluid_chem_deposit_mult_beta = self.fluid_chem_deposit_mult_beta.clamp(0.0, 1000.0);
+        self.fluid_chem_deposit_mult_gamma = self.fluid_chem_deposit_mult_gamma.clamp(0.0, 1000.0);
 
         if self.fumaroles.len() > MAX_FUMAROLES {
             self.fumaroles.truncate(MAX_FUMAROLES);
@@ -4257,6 +4294,12 @@ struct GpuState {
     fluid_dye_escape_rate_beta: f32,
     dye_diffusion: f32,
     dye_diffusion_no_fluid: f32,
+    fluid_chem_lift_mult_alpha: f32,
+    fluid_chem_lift_mult_beta: f32,
+    fluid_chem_lift_mult_gamma: f32,
+    fluid_chem_deposit_mult_alpha: f32,
+    fluid_chem_deposit_mult_beta: f32,
+    fluid_chem_deposit_mult_gamma: f32,
     fluid_wind_push_strength: f32,
     fluid_slope_force_scale: f32,
     fluid_obstacle_strength: f32,
@@ -4486,6 +4529,12 @@ impl GpuState {
         self.fluid_dye_escape_rate_beta = settings.fluid_dye_escape_rate_beta;
         self.dye_diffusion = settings.dye_diffusion;
         self.dye_diffusion_no_fluid = settings.dye_diffusion_no_fluid;
+        self.fluid_chem_lift_mult_alpha = settings.fluid_chem_lift_mult_alpha;
+        self.fluid_chem_lift_mult_beta = settings.fluid_chem_lift_mult_beta;
+        self.fluid_chem_lift_mult_gamma = settings.fluid_chem_lift_mult_gamma;
+        self.fluid_chem_deposit_mult_alpha = settings.fluid_chem_deposit_mult_alpha;
+        self.fluid_chem_deposit_mult_beta = settings.fluid_chem_deposit_mult_beta;
+        self.fluid_chem_deposit_mult_gamma = settings.fluid_chem_deposit_mult_gamma;
         self.fluid_wind_push_strength = settings.fluid_wind_push_strength;
 
         self.fumaroles = settings.fumaroles;
@@ -6857,7 +6906,7 @@ impl GpuState {
 
         // Fluid params buffer (flat f32 array, packed as vec4<f32> array in WGSL).
         // Indices must match shaders/fluid.wgsl FP_* constants.
-        let fluid_params_f32: [f32; 32] = [
+        let fluid_params_f32: [f32; 40] = [
             0.0,                       // time
             0.016,                     // dt
             0.995,                     // decay
@@ -6879,7 +6928,10 @@ impl GpuState {
             0.0,                       // (unused / legacy)
             0.01,                      // dye_diffusion (fluid on)
             0.15,                      // dye_diffusion_no_fluid (fluid off)
-            100.0, 0.0, 0.0, 0.0, 0.0, // reserved (slope_steer_rate, _, _, _, _)
+            100.0,                     // slope_steer_rate
+            1.0, 1.0, 0.0, 0.0,        // chem_lift_mult (alpha, beta, gamma, pad)
+            1.0, 1.0, 0.0, 0.0,        // chem_deposit_mult (alpha, beta, gamma, pad)
+            0.0, 0.0, 0.0, 0.0,        // padding
         ];
         let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
 
@@ -7766,6 +7818,12 @@ impl GpuState {
             fluid_dye_escape_rate_beta: settings.fluid_dye_escape_rate_beta,
             dye_diffusion: settings.dye_diffusion,
             dye_diffusion_no_fluid: settings.dye_diffusion_no_fluid,
+            fluid_chem_lift_mult_alpha: settings.fluid_chem_lift_mult_alpha,
+            fluid_chem_lift_mult_beta: settings.fluid_chem_lift_mult_beta,
+            fluid_chem_lift_mult_gamma: settings.fluid_chem_lift_mult_gamma,
+            fluid_chem_deposit_mult_alpha: settings.fluid_chem_deposit_mult_alpha,
+            fluid_chem_deposit_mult_beta: settings.fluid_chem_deposit_mult_beta,
+            fluid_chem_deposit_mult_gamma: settings.fluid_chem_deposit_mult_gamma,
             fluid_wind_push_strength: settings.fluid_wind_push_strength,
             fluid_slope_force_scale: settings.fluid_slope_force_scale,
             fluid_obstacle_strength: settings.fluid_obstacle_strength,
@@ -8664,6 +8722,12 @@ impl GpuState {
             fluid_dye_escape_rate_beta: self.fluid_dye_escape_rate_beta,
             dye_diffusion: self.dye_diffusion,
             dye_diffusion_no_fluid: self.dye_diffusion_no_fluid,
+            fluid_chem_lift_mult_alpha: self.fluid_chem_lift_mult_alpha,
+            fluid_chem_lift_mult_beta: self.fluid_chem_lift_mult_beta,
+            fluid_chem_lift_mult_gamma: self.fluid_chem_lift_mult_gamma,
+            fluid_chem_deposit_mult_alpha: self.fluid_chem_deposit_mult_alpha,
+            fluid_chem_deposit_mult_beta: self.fluid_chem_deposit_mult_beta,
+            fluid_chem_deposit_mult_gamma: self.fluid_chem_deposit_mult_gamma,
             fluid_wind_push_strength: self.fluid_wind_push_strength,
             vector_force_power: self.vector_force_power,
             vector_force_x: self.vector_force_x,
@@ -9596,7 +9660,7 @@ impl GpuState {
 
         // Update fluid params (dt is the user-controlled fluid solver dt)
         {
-            let fluid_params_f32: [f32; 32] = [
+            let fluid_params_f32: [f32; 40] = [
                 self.epoch as f32,         // time
                 self.fluid_dt,             // dt
                 self.fluid_decay,          // decay
@@ -9622,7 +9686,18 @@ impl GpuState {
                 self.fluid_ooze_fade_rate_gamma,
                 self.dye_diffusion,
                 self.dye_diffusion_no_fluid,
-                0.0, 0.0, 0.0, 0.0, 0.0,  // padding
+                // Slope-steering rate (FP_SLOPE_STEER_RATE). The WGSL slope-steering path is enabled,
+                // but requires a non-zero runtime rate; use the existing slope-force-scale knob.
+                self.fluid_slope_force_scale,
+                self.fluid_chem_lift_mult_alpha,
+                self.fluid_chem_lift_mult_beta,
+                self.fluid_chem_lift_mult_gamma,
+                0.0,
+                self.fluid_chem_deposit_mult_alpha,
+                self.fluid_chem_deposit_mult_beta,
+                self.fluid_chem_deposit_mult_gamma,
+                0.0,
+                0.0, 0.0, 0.0, 0.0,
             ];
             let fluid_params_bytes = pack_f32_uniform(&fluid_params_f32);
             self.queue

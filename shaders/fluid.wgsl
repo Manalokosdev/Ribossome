@@ -45,6 +45,11 @@ const MAX_DT: f32 = 0.02;         // Clamp dt spikes (e.g., window stalls)
 const MAX_FORCE: f32 = 200000.0;  // Clamp injected force magnitude per cell
 const MAX_VEL: f32 = 2000.0;      // Clamp velocity magnitude per cell
 
+// Light smoothing of externally injected forces (agent wash/prop wash) to reduce
+// grid-aligned fixed points (lattice clumping) when particles follow the flow.
+// 0 = no smoothing, 1 = full 4-neighbor blur.
+const FORCE_SMOOTH_MIX: f32 = 0.25;
+
 // Fumaroles are configured at runtime from the UI / settings.
 // They are supplied via a flat f32 storage buffer (no struct mirroring).
 // Layout:
@@ -208,8 +213,12 @@ const CHEM_MAX_STEP_FRAC: f32 = 0.25; // hard clamp per tick to avoid instabilit
 //  22 dye_deposit_scale (0..1) - scales dye -> chem deposition
 //  23 (unused / legacy)
 //  24 (unused / legacy)
-//  25 slope_steer_rate (1/sec)
-// (padded to 7 vec4s / 28 floats)
+//  25 dye_diffusion (fluid on)
+//  26 dye_diffusion_no_fluid (fluid off)
+//  27 slope_steer_rate (1/sec)
+//  28..31 chem_lift_mult (x=alpha, y=beta, z=gamma, w=pad)
+//  32..35 chem_deposit_mult (x=alpha, y=beta, z=gamma, w=pad)
+// (padded to 10 vec4s / 40 floats)
 const FP_TIME: u32 = 0u;
 const FP_DT: u32 = 1u;
 const FP_DECAY: u32 = 2u;
@@ -232,7 +241,9 @@ const FP_CHEM_SPEED_MAX_LIFT_GAMMA: u32 = 24u;
 const FP_DYE_DIFFUSION: u32 = 25u;
 const FP_DYE_DIFFUSION_NO_FLUID: u32 = 26u;
 const FP_SLOPE_STEER_RATE: u32 = 27u;
-const FP_VEC4_COUNT: u32 = 8u;
+const FP_CHEM_LIFT_MULT: u32 = 28u;
+const FP_CHEM_DEPOSIT_MULT: u32 = 32u;
+const FP_VEC4_COUNT: u32 = 10u;
 
 // Precomputed grid-scale conversions.
 const DYE_TO_FLUID_SCALE: f32 = f32(FLUID_GRID_SIZE) / f32(GAMMA_GRID_DIM);
@@ -698,6 +709,12 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var chem = clamp(chem_full_in.xy, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
     var gamma_height = max(gamma_grid[env_idx], 0.0);
 
+    // Per-channel lift/deposit multipliers.
+    // These scale the chem<->dye exchange strengths per channel (alpha/beta/gamma).
+    // NOTE: Setting gamma multipliers to 0 effectively freezes gamma terrain against fluid-driven erosion.
+    let lift_mult = clamp(fp_vec4(FP_CHEM_LIFT_MULT).xyz, vec3<f32>(0.0), vec3<f32>(1000.0));
+    let deposit_mult = clamp(fp_vec4(FP_CHEM_DEPOSIT_MULT).xyz, vec3<f32>(0.0), vec3<f32>(1000.0));
+
     // Baseline chem→dye ooze in still water, so sensors can detect signals without flow.
     // Mass-conserving transfer: depletes chem/gamma as dye is added.
     let ooze_rate = max(fp_f32(FP_CHEM_OOZE_STILL_RATE), 0.0);
@@ -706,9 +723,9 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let stillness_alpha = stillness;
     let stillness_beta = stillness;
     let stillness_gamma = stillness;
-    let ooze_frac_alpha = clamp(ooze_rate * stillness_alpha * dt, 0.0, CHEM_MAX_STEP_FRAC);
-    let ooze_frac_beta = clamp(ooze_rate * stillness_beta * dt, 0.0, CHEM_MAX_STEP_FRAC);
-    let ooze_frac_gamma = clamp(ooze_rate * stillness_gamma * dt, 0.0, CHEM_MAX_STEP_FRAC);
+    let ooze_frac_alpha = clamp(ooze_rate * stillness_alpha * dt * lift_mult.x, 0.0, CHEM_MAX_STEP_FRAC);
+    let ooze_frac_beta = clamp(ooze_rate * stillness_beta * dt * lift_mult.y, 0.0, CHEM_MAX_STEP_FRAC);
+    let ooze_frac_gamma = clamp(ooze_rate * stillness_gamma * dt * lift_mult.z, 0.0, CHEM_MAX_STEP_FRAC);
     if (ooze_frac_alpha > 0.0) {
         // Alpha: chem.x -> dye.y (mass-conserving)
         let alpha_headroom = max(1.0 - dye_val.y, 0.0);
@@ -731,11 +748,11 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
         gamma_height = max(gamma_height - ooze_gamma, 0.0);
     }
 
-    // Shared lift/sedimentation model for alpha & beta.
-    let pickup_strength_alpha = lift_strength;
-    let pickup_strength_beta = lift_strength;
-    let deposit_strength_alpha_pos = sediment_strength;
-    let deposit_strength_beta_pos = sediment_strength;
+    // Shared lift/sedimentation model for alpha & beta (scaled per-channel).
+    let pickup_strength_alpha = lift_strength * lift_mult.x;
+    let pickup_strength_beta = lift_strength * lift_mult.y;
+    let deposit_strength_alpha_pos = sediment_strength * deposit_mult.x;
+    let deposit_strength_beta_pos = sediment_strength * deposit_mult.y;
 
     // Pickup (chem -> dye)
     let pickup_frac_alpha = clamp(CHEM_TRANSFER_RATE * pickup_strength_alpha * dt, 0.0, CHEM_MAX_STEP_FRAC);
@@ -786,8 +803,8 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // === Gamma lift/deposition coupling (mass-conserving) ===
     // Treat gamma height as the "bed" reservoir and dye_val.z as the carried reservoir.
     // Uses the same shared lift/sedimentation strengths.
-    let pickup_strength_gamma = lift_strength;
-    let deposit_strength_gamma_pos = sediment_strength;
+    let pickup_strength_gamma = lift_strength * lift_mult.z;
+    let deposit_strength_gamma_pos = sediment_strength * deposit_mult.z;
 
     let pickup_frac_gamma = clamp(CHEM_TRANSFER_RATE * pickup_strength_gamma * dt, 0.0, CHEM_MAX_STEP_FRAC);
     let deposit_frac_gamma = clamp(CHEM_TRANSFER_RATE * deposit_strength_gamma_pos * dt, 0.0, CHEM_MAX_STEP_FRAC);
@@ -2193,7 +2210,18 @@ fn add_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Add user forces (clamped) scaled by dt (clamped to avoid instability on dt spikes)
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let v0 = sanitize_vec2(velocity_in[idx]);
-    let f_user = clamp_vec2_len(sanitize_vec2(fluid_forces[idx]), MAX_FORCE);
+
+    // Tiny 4-neighbor blur of the injected force field to reduce cell-centered
+    // attractors when coupling is strong.
+    let f_c = sanitize_vec2(fluid_forces[idx]);
+    let f_l = sanitize_vec2(fluid_forces[grid_index(select(x, x - 1u, x > 0u), y)]);
+    let f_r = sanitize_vec2(fluid_forces[grid_index(select(x, x + 1u, x + 1u < FLUID_GRID_SIZE), y)]);
+    let f_b = sanitize_vec2(fluid_forces[grid_index(x, select(y, y - 1u, y > 0u))]);
+    let f_t = sanitize_vec2(fluid_forces[grid_index(x, select(y, y + 1u, y + 1u < FLUID_GRID_SIZE))]);
+    let f_avg = (f_c + f_l + f_r + f_b + f_t) * 0.2;
+    let f_blur = mix(f_c, f_avg, FORCE_SMOOTH_MIX);
+
+    let f_user = clamp_vec2_len(f_blur, MAX_FORCE);
     var v = sanitize_vec2(v0 + f_user * dt);
 
     // Then apply slope steering as a pure direction change (preserve |v|).
