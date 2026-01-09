@@ -1967,7 +1967,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Hard collision (minimum inter-agent separation).
     // Note: this uses the pre-collected neighbor list (max 64, one per spatial cell).
     // It's intended as a robust anti-clumping constraint even when repulsion is disabled.
-    let HARD_COLLISION_RADIUS: f32 = 10.0;
+    // Mass-dependent: larger (heavier) agents keep a larger minimum separation.
+    let HARD_COLLISION_RADIUS_BASE: f32 = 10.0;
     let HARD_COLLISION_EPS: f32 = 1e-3;
     var hard_collision_vel = vec2<f32>(0.0);
 
@@ -1987,10 +1988,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let delta = agent_pos - neighbor_pos;
         let dist = length(delta);
 
+        // Mass-dependent separation scale based on the pair's average mass.
+        // Using sqrt keeps growth sublinear (area/diameter proxy) and clamping avoids extremes.
+        let pair_mass_avg = 0.5 * (total_mass + neighbor_mass);
+        let mass_scale = clamp(sqrt(clamp(pair_mass_avg, 0.05, 50.0)), 0.6, 2.5);
+        let hard_collision_radius = HARD_COLLISION_RADIUS_BASE * mass_scale;
+
         // Hard minimum distance: accumulate a per-tick positional correction as an
         // extra velocity term (applied after smoothing later).
-        if (dist < HARD_COLLISION_RADIUS) {
-            let penetration = HARD_COLLISION_RADIUS - dist;
+        if (dist < hard_collision_radius) {
+            let penetration = hard_collision_radius - dist;
             var direction = vec2<f32>(0.0);
             if (dist > HARD_COLLISION_EPS) {
                 direction = delta / dist;
@@ -2006,11 +2013,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         // Distance-based repulsion force (inverse square law with cutoff)
-        let max_repulsion_distance = 500.0;
+        let max_repulsion_distance = 500.0 * mass_scale;
 
         if (dist < max_repulsion_distance && dist > 0.1) {
             // Inverse square repulsion: F = k / (d^2)
-            let base_strength = params.agent_repulsion_strength * 100000.0;
+            let strength_scale = clamp(pair_mass_avg, 0.5, 3.0);
+            let base_strength = params.agent_repulsion_strength * 100000.0 * strength_scale;
             let force_magnitude = base_strength / (dist * dist);
 
             // Clamp to prevent extreme forces at very small distances

@@ -397,6 +397,14 @@ fn render_body_part_ctx(
         // Colors: vampire mouths inherit their red-ish amino color, spikes use green-ish.
         let spike_color = select(vec3<f32>(0.3, 0.8, 0.4), amino_props.color, base_type == 33u);
 
+        // Flash on recent drain/kill events.
+        // Both vampire mouths and spikes use part._pad.x as a short cooldown timer.
+        // When cooldown is freshly set (≈2 frames), brighten toward white.
+        let cooldown = max(part._pad.x, 0.0);
+        let flash = clamp(cooldown / 2.0, 0.0, 1.0);
+        let spike_color_flash = mix(spike_color, vec3<f32>(1.0, 1.0, 1.0), flash);
+        let spike_alpha = 0.9 + 0.1 * flash;
+
         // Deterministic per-ray jitter in organ-local space.
         // IMPORTANT: seed uses only generation + part_index so it doesn't flicker if agents get reindexed.
         let generation = select(agents_out[agent_id].generation, selected_agent_buffer[0].generation, use_selected_buffer);
@@ -421,9 +429,9 @@ fn render_body_part_ctx(
             // Main view: 1px screen-space line for low-zoom visibility.
             // Inspector: keep ctx-aware thick-line drawing.
             if (ctx.use_inspector_coords.x >= 0.0) {
-                draw_thick_line_ctx(world_pos, spike_end, 0.5, vec4<f32>(spike_color, 0.9), ctx);
+                draw_thick_line_ctx(world_pos, spike_end, 0.5, vec4<f32>(spike_color_flash, spike_alpha), ctx);
             } else {
-                draw_screen_line(world_to_screen(world_pos), world_to_screen(spike_end), vec4<f32>(spike_color, 0.9));
+                draw_screen_line(world_to_screen(world_pos), world_to_screen(spike_end), vec4<f32>(spike_color_flash, spike_alpha));
             }
         }
     }
@@ -554,7 +562,8 @@ fn render_body_part_ctx(
         // Scale visual marker based on sensor radius (normalized to typical range)
         // Typical range: 0-300, so normalize and scale for visibility
         let visual_scale = clamp(sensor_radius / 200.0, 0.3, 4.0);
-        let marker_size = get_part_visual_size(part.part_type) * 3.0 * visual_scale; // Increased from 1.5x to 3.0x for better visibility
+        // Shrink sensor marker circles (requested): 4x smaller than previous.
+        let marker_size = get_part_visual_size(part.part_type) * 0.75 * visual_scale;
 
         // Check if this is a magnitude sensor (organs 38-41)
         let is_magnitude_sensor = (base_type >= 38u && base_type <= 41u);
@@ -582,6 +591,26 @@ fn render_body_part_ctx(
 
         // Draw circle marker with high opacity to ensure visibility
         draw_filled_circle_ctx(world_pos, marker_size, vec4<f32>(blended_sensor_color, 1.0), ctx);
+
+        // Directional sensor sampling visualization:
+        // Draw two short lines along the sensor's perpendicular direction to show the
+        // two-sided sampling direction.
+        if (!is_magnitude_sensor) {
+            let seg_vec = world_pos - segment_start_world;
+            let seg_len = length(seg_vec);
+            let axis = select(seg_vec / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-5);
+            let dir = normalize(vec2<f32>(-axis.y, axis.x));
+
+            // Visual-only: fixed sampling distance in world units.
+            let sample_dist = 10.0;
+            let pos_left = world_pos + dir * sample_dist;
+            let pos_right = world_pos - dir * sample_dist;
+
+            // Thick organ-colored guides for visibility.
+            let guide_thickness = 2.0;
+            draw_thick_line_ctx(world_pos, pos_left, guide_thickness, vec4<f32>(blended_sensor_color, 0.95), ctx);
+            draw_thick_line_ctx(world_pos, pos_right, guide_thickness, vec4<f32>(blended_sensor_color, 0.95), ctx);
+        }
 
         // Magnitude sensors get a distinctive white outline
         if (is_magnitude_sensor) {
@@ -829,13 +858,23 @@ fn draw_thick_line_ctx(p0: vec2<f32>, p1: vec2<f32>, thickness: f32, color: vec4
         // Inspector mode: direct coordinate mapping
         screen_p0 = vec2<i32>(i32(ctx.center.x + p0.x * ctx.scale), i32(ctx.center.y + p0.y * ctx.scale));
         screen_p1 = vec2<i32>(i32(ctx.center.x + p1.x * ctx.scale), i32(ctx.center.y + p1.y * ctx.scale));
-        screen_thickness = clamp(i32(thickness * ctx.scale), 0, 50);  // Clamp to prevent overflow
+        // Avoid quantizing to 0px (common at small inspector scales), which makes lines invisible.
+        let t = clamp(i32(thickness * ctx.scale), 0, 50);
+        screen_thickness = select(0, max(t, 1), thickness > 0.0);
     } else {
         // World mode: use world-to-screen conversion
         screen_p0 = world_to_screen(p0);
         screen_p1 = world_to_screen(p1);
         let world_to_screen_scale = params.window_width / (params.grid_size / params.camera_zoom);
-        screen_thickness = clamp(i32(thickness * world_to_screen_scale), 0, 50);  // Clamp to prevent overflow
+        // In world mode we allow quantization to 0px at low zoom to avoid making
+        // distant geometry look artificially fat.
+        screen_thickness = clamp(i32(thickness * world_to_screen_scale), 0, 50);
+    }
+
+    // If the computed thickness is 0px, skip drawing entirely.
+    // This prevents tiny filled circles from appearing due to the degenerate-line path.
+    if (screen_thickness <= 0) {
+        return;
     }
 
     // Optimized capsule drawing: rectangle + endpoint circles
