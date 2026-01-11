@@ -1902,6 +1902,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var anchor_mass_extra = 0.0;
     // Rough surface-area estimate from part geometry (length * thickness).
     var total_area = 0.0;
+    // Extra drag boost from wide/open appendages (vamp mouths, spikes).
+    // This intentionally affects locomotion by increasing effective drag, without changing
+    // the base thrust model for normal microswimming.
+    var vamp_spike_drag_boost = 0.0;
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part_out = agents_out[agent_id].body[i];
         let base_type_out = get_base_part_type(part_out.part_type);
@@ -1918,7 +1922,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 r = param1_to_defense_radius(get_amino_acid_properties(next_base).parameter1);
             }
             // Empirical 2D proxy: opened fan area scales ~r^2.
-            total_area += open * (r * r) * 0.02;
+            let open_area_proxy = open * (r * r);
+            total_area += open_area_proxy * 0.02;
+            // Strong additional drag for open mouths/spikes to prevent huge vamps from
+            // "flying" faster than smaller agents.
+            vamp_spike_drag_boost += open_area_proxy;
         }
 
         if (base_type_out == 42u) {
@@ -1946,7 +1954,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    let drag_coefficient = total_mass * 0.5;
+    // Drag coefficient: base on mass, but scale by area response.
+    // Open vampire mouths/spikes increase total_area, which increases drag and slows locomotion.
+    // Apply a *much stronger* drag multiplier from open mouths/spikes, clamped for stability.
+    let vamp_spike_drag_mult = clamp(1.0 + vamp_spike_drag_boost * 0.05, 1.0, 30.0);
+    let drag_coefficient = total_mass * 0.5 * area_response * vamp_spike_drag_mult;
     let dt_safe = max(params.dt, 1e-3);
 
     // Strength for real-fluid two-way coupling (reuses existing UI knob).
