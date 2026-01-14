@@ -286,6 +286,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Mouth-centered spiral search over spatial grid.
                 // We break early on the first in-range victim to save compute.
                 var closest_victim_id = 0xFFFFFFFFu;
+                let vamp_size = max(f32(body_count), 1.0);
 
                 let mouth_grid_x = u32(clamp(mouth_world_pos.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
                 let mouth_grid_y = u32(clamp(mouth_world_pos.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
@@ -309,8 +310,21 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                     let dist = length(mouth_world_pos - neighbor.position);
                                     if (dist < reach) {
-                                        closest_victim_id = neighbor_id;
-                                        found_victim = true;
+                                        // Size-based attack probability: small victims can slip through.
+                                        // Same size => 100%, half size => 50%.
+                                        let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                        let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
+                                        let attack_seed = (agent_id * 747796405u)
+                                            ^ (neighbor_id * 2891336453u)
+                                            ^ (params.epoch * 196613u)
+                                            ^ (params.random_seed * 83492791u)
+                                            ^ (i * 374761393u)
+                                            ^ (check_cell * 668265263u);
+                                        let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
+                                        if (attack_rnd <= attack_prob) {
+                                            closest_victim_id = neighbor_id;
+                                            found_victim = true;
+                                        }
                                     }
                                 }
                             }
@@ -335,8 +349,19 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                             let dist = length(mouth_world_pos - neighbor.position);
                                             if (dist < reach) {
-                                                closest_victim_id = neighbor_id;
-                                                found_victim = true;
+                                                let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                                let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
+                                                let attack_seed = (agent_id * 747796405u)
+                                                    ^ (neighbor_id * 2891336453u)
+                                                    ^ (params.epoch * 196613u)
+                                                    ^ (params.random_seed * 83492791u)
+                                                    ^ (i * 374761393u)
+                                                    ^ (check_cell * 668265263u);
+                                                let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
+                                                if (attack_rnd <= attack_prob) {
+                                                    closest_victim_id = neighbor_id;
+                                                    found_victim = true;
+                                                }
                                             }
                                         }
                                     }
@@ -358,8 +383,19 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                             if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                                 let dist = length(mouth_world_pos - neighbor.position);
                                                 if (dist < reach) {
-                                                    closest_victim_id = neighbor_id;
-                                                    found_victim = true;
+                                                    let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                                    let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
+                                                    let attack_seed = (agent_id * 747796405u)
+                                                        ^ (neighbor_id * 2891336453u)
+                                                        ^ (params.epoch * 196613u)
+                                                        ^ (params.random_seed * 83492791u)
+                                                        ^ (i * 374761393u)
+                                                        ^ (check_cell * 668265263u);
+                                                    let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
+                                                    if (attack_rnd <= attack_prob) {
+                                                        closest_victim_id = neighbor_id;
+                                                        found_victim = true;
+                                                    }
                                                 }
                                             }
                                         }
@@ -387,8 +423,19 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                             let dist = length(mouth_world_pos - neighbor.position);
                                             if (dist < reach) {
-                                                closest_victim_id = neighbor_id;
-                                                found_victim = true;
+                                                let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                                let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
+                                                let attack_seed = (agent_id * 747796405u)
+                                                    ^ (neighbor_id * 2891336453u)
+                                                    ^ (params.epoch * 196613u)
+                                                    ^ (params.random_seed * 83492791u)
+                                                    ^ (i * 374761393u)
+                                                    ^ (check_cell * 668265263u);
+                                                let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
+                                                if (attack_rnd <= attack_prob) {
+                                                    closest_victim_id = neighbor_id;
+                                                    found_victim = true;
+                                                }
                                             }
                                         }
                                     }
@@ -410,8 +457,19 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                             if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                                 let dist = length(mouth_world_pos - neighbor.position);
                                                 if (dist < reach) {
-                                                    closest_victim_id = neighbor_id;
-                                                    found_victim = true;
+                                                    let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                                    let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
+                                                    let attack_seed = (agent_id * 747796405u)
+                                                        ^ (neighbor_id * 2891336453u)
+                                                        ^ (params.epoch * 196613u)
+                                                        ^ (params.random_seed * 83492791u)
+                                                        ^ (i * 374761393u)
+                                                        ^ (check_cell * 668265263u);
+                                                    let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
+                                                    if (attack_rnd <= attack_prob) {
+                                                        closest_victim_id = neighbor_id;
+                                                        found_victim = true;
+                                                    }
                                                 }
                                             }
                                         }
@@ -457,6 +515,37 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (can_drain && current_cooldown <= 0.0) {
                         let victim_energy = agents_out[closest_victim_id].energy;
                         if (victim_energy > 0.0001) {
+                            // IMPORTANT: Avoid draining a vampire victim that currently has any
+                            // vampire mouths OPEN.
+                            // Rationale: if the victim is actively draining this frame, it will
+                            // also RMW its own energy in this kernel, which can race with us
+                            // writing victim energy (mutual-drain exploit).
+                            // If the victim vampire mouths are CLOSED, it won't add energy to
+                            // itself here, so draining it is safe enough.
+                            var victim_has_open_vamp_mouth = false;
+                            let victim_body_count = min(agents_out[closest_victim_id].body_count, MAX_BODY_PARTS);
+                            for (var vi = 0u; vi < victim_body_count; vi++) {
+                                let v_part = agents_out[closest_victim_id].body[vi];
+                                let v_base = get_base_part_type(v_part.part_type);
+                                if (v_base == 33u) {
+                                    let v_open = clamp(v_part._pad.y, 0.0, 1.0);
+                                    if (v_open >= 0.5) {
+                                        victim_has_open_vamp_mouth = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (victim_has_open_vamp_mouth) {
+                                // Release the spatial-grid claim so later passes don't treat the victim as claimed.
+                                let claimed_victim_id = closest_victim_id | 0x80000000u;
+                                _ = atomicCompareExchangeWeak(
+                                    &agent_spatial_grid[spatial_id_index(victim_cell)],
+                                    claimed_victim_id,
+                                    closest_victim_id
+                                );
+                                continue;
+                            }
+
                             // VAMPIRE DRAIN: Gradually drain energy from victim
                             // Distance-based falloff: full power at 0 distance, 0 power at max reach
                             let victim_pos = agents_out[closest_victim_id].position;
@@ -615,6 +704,22 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 let dist = length(spike_world_pos - agents_out[neighbor_id].position);
                 if (dist < reach) {
+                    // Size-based spike hit probability: small victims can slip past.
+                    // Same size => 100%, half size => 50%, etc.
+                    let spike_owner_size = max(f32(min(body_count, MAX_BODY_PARTS)), 1.0);
+                    let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
+                    let hit_prob = clamp(victim_size / spike_owner_size, 0.0, 1.0);
+                    let hit_seed = (agent_id * 747796405u)
+                        ^ (neighbor_id * 2891336453u)
+                        ^ (params.epoch * 196613u)
+                        ^ (params.random_seed * 83492791u)
+                        ^ (i * 374761393u)
+                        ^ (check_cell * 668265263u);
+                    let hit_rnd = f32(hash(hit_seed)) / 4294967295.0;
+                    if (hit_rnd > hit_prob) {
+                        continue;
+                    }
+
                     // Claim this victim cell (same pattern as vampire mouths) to avoid
                     // cross-invocation races where multiple spikes kill the same victim.
                     let victim_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);

@@ -1,8 +1,8 @@
 {
-  "camera_zoom": 0.434085,
+  "camera_zoom": 1.3262563,
   "spawn_probability": 0.5,
-  "death_probability": 0.01,
-  "mutation_rate": 0.001,
+  "death_probability": 0.001,
+  "mutation_rate": 0.003,
   "auto_replenish": false,
   "diffusion_interval": 1,
   "slope_interval": 1,
@@ -11,30 +11,30 @@
   "gamma_diffuse": 0.0,
   "alpha_fluid_convolution": 0.0,
   "beta_fluid_convolution": 0.0,
-  "fluid_slope_force_scale": 10.0,
-  "fluid_obstacle_strength": 50.0,
+  "fluid_slope_force_scale": 50.0,
+  "fluid_obstacle_strength": 550.0,
   "gamma_blur": 1.0,
   "gamma_shift": 0.0,
   "alpha_slope_bias": 0.0,
   "beta_slope_bias": 0.0,
   "alpha_multiplier": 0.1,
-  "beta_multiplier": 0.01,
+  "beta_multiplier": 0.00001,
   "dye_precipitation": 1.0,
   "alpha_rain_map_path": null,
   "beta_rain_map_path": null,
   "chemical_slope_scale_alpha": 0.0,
   "chemical_slope_scale_beta": 0.0,
-  "food_power": 3.0,
+  "food_power": 5.0,
   "poison_power": 5.0,
   "amino_maintenance_cost": 0.0001,
-  "morphology_change_cost": 0.01,
-  "pairing_cost": 0.01,
-  "prop_wash_strength": 0.2,
+  "morphology_change_cost": 0.0001,
+  "pairing_cost": 0.0,
+  "prop_wash_strength": 1.0,
   "prop_wash_strength_fluid": 0.002,
   "propellers_enabled": false,
   "microswim_enabled": true,
   "microswim_coupling": 3.0,
-  "microswim_base_drag": 0.1,
+  "microswim_base_drag": 0.02,
   "microswim_anisotropy": 5.0,
   "microswim_max_frame_vel": 5.0,
   "microswim_torque_strength": 5.0,
@@ -42,8 +42,8 @@
   "microswim_min_total_deformation_sq": 0.0005,
   "microswim_min_length_ratio": 0.75,
   "microswim_max_length_ratio": 1.6,
-  "repulsion_strength": 20.0,
-  "agent_repulsion_strength": 0.02,
+  "repulsion_strength": 10.0,
+  "agent_repulsion_strength": 0.05,
   "limit_fps": false,
   "limit_fps_25": false,
   "render_interval": 100,
@@ -57,10 +57,10 @@
   "fluid_jacobi_iters": 40,
   "fluid_vorticity": 15.0,
   "fluid_viscosity": 3.1,
-  "fluid_ooze_rate": 5.0,
+  "fluid_ooze_rate": 1.0,
   "fluid_ooze_fade_rate": 50.0,
   "fluid_ooze_rate_beta": 0.1,
-  "fluid_ooze_fade_rate_beta": 0.0,
+  "fluid_ooze_fade_rate_beta": 1.0,
   "fluid_ooze_rate_gamma": 100.0,
   "fluid_ooze_fade_rate_gamma": 50.0,
   "fluid_ooze_still_rate": 0.0,
@@ -169,8 +169,8 @@
   "slope_blend_mode": 0,
   "alpha_color": [
     0.0,
-    0.22352941,
-    0.08235294
+    0.13725491,
+    0.039215688
   ],
   "beta_color": [
     0.2901961,
@@ -178,17 +178,17 @@
     0.0
   ],
   "gamma_color": [
-    0.14901961,
-    0.14901961,
-    0.14901961
+    0.0,
+    0.11372549,
+    0.22745098
   ],
   "dye_alpha_color": [
     0.0,
-    0.07450981,
-    0.039215688
+    0.15686275,
+    0.09803922
   ],
   "dye_beta_color": [
-    0.1254902,
+    0.22745098,
     0.0,
     0.0
   ],
@@ -200,23 +200,23 @@
     {
       "enabled": true,
       "x_frac": 0.37,
-      "y_frac": 0.38,
+      "y_frac": 0.48,
       "dir_degrees": 270.0,
-      "strength": 200.0,
+      "strength": 10000.0,
       "spread": 10.0,
       "alpha_dye_rate": 0.0,
       "beta_dye_rate": 0.0,
-      "variation": 0.98
+      "variation": 0.61
     },
     {
       "enabled": false,
       "x_frac": 0.53,
       "y_frac": 0.45,
       "dir_degrees": 0.0,
-      "strength": 2000.0,
+      "strength": 1000.0,
       "spread": 10.0,
       "alpha_dye_rate": 1.0,
-      "beta_dye_rate": 0.0,
+      "beta_dye_rate": 30.0,
       "variation": 1.0
     }
   ],
@@ -236,7 +236,7 @@
     1.0,
     1.0
   ],
-  "agent_color_blend": 0.37,
+  "agent_color_blend": 0.67,
   "alpha_noise_scale": 10.0,
   "beta_noise_scale": 1.0,
   "gamma_noise_scale": 10.0,

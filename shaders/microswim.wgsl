@@ -61,30 +61,40 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mass = agents_out[agent_id].total_mass;
 
     // Rough surface-area estimate from part geometry (length * thickness).
-    // Used to scale response by area/mass (mass-per-area).
+    // NOTE: In the main physics pass, this contributes to drag (higher area => slower).
     var total_area = 0.0;
+    // Extra drag boost from wide/open appendages (vamp mouths, spikes).
+    var vamp_spike_drag_boost = 0.0;
     for (var i = 0u; i < body_count_out; i++) {
         let part = agents_out[agent_id].body[i];
         let base_type = get_base_part_type(part.part_type);
         total_area += get_part_area_estimate(part.part_type);
 
-        // Open vampire mouths (33) and spikes (46) add extra effective area.
+        // Open vampire mouths (33) and spikes (46) add extra effective area and a strong
+        // drag multiplier (matches the main physics pass intent).
         if (base_type == 33u || base_type == 46u) {
             let open = clamp(part._pad.y, 0.0, 1.0);
-            var r = 30.0;
+            var r = DEFENSE_RADIUS_DEFAULT;
             if (i + 1u < body_count_out) {
                 let next_base = get_base_part_type(agents_out[agent_id].body[i + 1u].part_type);
                 r = param1_to_defense_radius(get_amino_acid_properties(next_base).parameter1);
             }
-            total_area += open * (r * r) * 0.02;
+            let open_area_proxy = open * (r * r);
+            total_area += open_area_proxy * 0.02;
+            vamp_spike_drag_boost += open_area_proxy;
         }
     }
     total_area = max(total_area, 1e-3);
     let area_response = clamp(total_area / max(mass, 1e-6), 0.25, 4.0);
+    let vamp_spike_drag_mult = clamp(1.0 + vamp_spike_drag_boost * 0.05, 1.0, 30.0);
 
-    let mass_threshold_low = 1.0;
+    // High/low Reynolds blend based on mass proxy.
+    // Keep thresholds conservative so heavier agents don't get an outsized propulsion advantage.
+    let mass_threshold_low = 2.0;
     let mass_threshold_high = 5.0;
-    var re_blend = clamp((mass - mass_threshold_low) / (mass_threshold_high - mass_threshold_low), 0.0, 1.0);
+    let re_blend_raw = clamp((mass - mass_threshold_low) / (mass_threshold_high - mass_threshold_low), 0.0, 1.0);
+    // Damp the influence of the high-Re branch (still present, just less dominant).
+    let re_blend = re_blend_raw * 0.5;
 
     // Lower base drag for overall faster motion from deformation
     let c_par_base  = ms_f32(MSP_BASE_DRAG) * 0.7;  // Reduced 30% - agents slip more = faster
@@ -179,47 +189,57 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     thrust_world /= total_weight;
 
-    // Higher overall thrust scaling via morph_swim_strength (assume MSP_COUPLING = 2.0-3.0 in params)
-    var final_thrust = thrust_world * morph_swim_strength * area_response;
+    // Higher overall thrust scaling via morph_swim_strength.
+    // Keep the original area_response behavior for all agents; only apply the
+    // extra vamp/spike drag penalty via vamp_spike_drag_mult (== 1.0 for others).
+    var final_thrust = thrust_world * morph_swim_strength * area_response / vamp_spike_drag_mult;
 
-    // Stronger but gated vortex
+    // Terrain coupling: attenuate microswim on steep gamma slope so the post-pass propulsion
+    // doesn't effectively bypass terrain/obstacle effects from the main physics pass.
+    let agent_pos = agents_out[agent_id].position;
+    let slope_mag = length(read_gamma_slope(grid_index(agent_pos)));
+    let terrain_perm = 1.0 / (1.0 + params.fluid_obstacle_strength * slope_mag);
+    let terrain_gate = sqrt(clamp(terrain_perm, 0.0, 1.0));
+    final_thrust *= terrain_gate;
+
+    // Stronger but gated vortex (reduced to avoid high-Re overpowering)
     if (total_deformation_sq > ms_f32(MSP_MIN_TOTAL_DEFORMATION_SQ) * 1.8) {
-        let normalized_vortex = (vortex_bonus / total_weight) * re_blend * 1.5;  // Boosted
-        let max_vortex = sqrt(total_deformation_sq) * 0.8;  // Higher cap
-        final_thrust += forward_dir * min(normalized_vortex, max_vortex) * area_response;
+        let normalized_vortex = (vortex_bonus / total_weight) * re_blend * 0.8;
+        let max_vortex = sqrt(total_deformation_sq) * 0.5;
+        final_thrust += forward_dir * min(normalized_vortex, max_vortex) * area_response * terrain_gate / vamp_spike_drag_mult;
     }
 
-    // Higher thrust cap for faster peak speeds
+    // Keep the per-frame thrust cap consistent with the UI param.
     let tl = length(final_thrust);
-    if (tl > ms_f32(MSP_MAX_FRAME_VEL) * 1.2) {  // Raised cap
-        final_thrust *= (ms_f32(MSP_MAX_FRAME_VEL) * 1.2) / max(tl, 1e-6);
+    if (tl > ms_f32(MSP_MAX_FRAME_VEL)) {
+        final_thrust *= ms_f32(MSP_MAX_FRAME_VEL) / max(tl, 1e-6);
     }
 
     var agent_vel = agents_out[agent_id].velocity + final_thrust;
 
-    // Reduced quadratic drag for higher sustained speeds
-    let quad_drag_coeff = 0.002 * re_blend;  // Halved - less speed limiting
+    // Quadratic drag: keep some high-Re behavior but avoid runaway sustained speed.
+    let quad_drag_coeff = 0.004 * re_blend;
     let quad_drag = speed * speed * quad_drag_coeff;
     if (speed > 0.01) {
         agent_vel -= normalize(agent_vel) * quad_drag;
     }
 
-    // Lighter damping for snappier motion
-    let base_damping = 0.92;  // Was 0.95 - 8% loss vs 5%
-    let damping = mix(base_damping, 0.98, re_blend);
+    // Damping: reduce the high-Re "free ride" a bit.
+    let base_damping = 0.95;
+    let damping = mix(base_damping, 0.97, re_blend);
     agent_vel *= damping;
 
-    // Higher global velocity cap
+    // Keep global velocity cap consistent with the main physics.
     let v_len = length(agent_vel);
-    if (v_len > VEL_MAX * 1.1) {  // Raised from 0.85
-        agent_vel *= (VEL_MAX * 1.1) / max(v_len, 1e-6);
+    if (v_len > VEL_MAX) {
+        agent_vel *= VEL_MAX / max(v_len, 1e-6);
     }
     agents_out[agent_id].velocity = agent_vel;
 
     // Asymmetry torque (stable across regimes)
     if (inertia_estimate > 1e-6 && speed > 0.1) {
         let normalized_torque = torque_asymmetry / inertia_estimate;
-        let torque_scale = ms_f32(MSP_TORQUE_STRENGTH) * morph_swim_strength * dt_safe * area_response;
+        let torque_scale = ms_f32(MSP_TORQUE_STRENGTH) * morph_swim_strength * dt_safe * area_response / vamp_spike_drag_mult;
 
         var delta_rot = normalized_torque * torque_scale * min(speed / 3.0, 1.0);
         delta_rot = clamp(delta_rot, -ANGVEL_MAX, ANGVEL_MAX);
