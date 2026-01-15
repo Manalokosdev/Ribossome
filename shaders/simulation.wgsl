@@ -205,22 +205,24 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // NOTE: This pass is intended to run after process_agents so that it can
     // operate on the fully materialized per-agent state in agents_out.
-    let agent = agents_out[agent_id];
+    let agent_ptr = &agents_out[agent_id];
+    let agent_alive = (*agent_ptr).alive;
+    let agent_energy = energy_from_u32(atomicLoad(&(*agent_ptr).energy));
 
     // Skip dead agents and pending-kill agents.
     // alive==2u is a kill signal (agent will decompose itself next tick in process_agents).
-    if (agent.alive != 1u || agent.energy <= 0.0) {
+    if (agent_alive != 1u || agent_energy <= 0.0) {
         return;
     }
 
     // Newborn grace: don't attack or get attacked in the first few frames after spawning
-    if (agent.age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
+    if ((*agent_ptr).age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
         return;
     }
 
     // Collect vampire mouth organ indices (type 33).
     // This lets us iterate only vampire mouths later, instead of scanning every body part.
-    let body_count = min(agent.body_count, MAX_BODY_PARTS);
+    let body_count = min((*agent_ptr).body_count, MAX_BODY_PARTS);
     var total_energy_gained = 0.0;
     var vampire_mouth_indices: array<u32, MAX_BODY_PARTS>;
     var vampire_mouth_count = 0u;
@@ -265,8 +267,8 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // World position for this mouth. Keep this computed regardless of enable state so
         // we can always update the tracking data.
-        let rotated_pos = apply_agent_rotation(mouth_local_pos, agent.rotation);
-        let mouth_world_pos = agent.position + rotated_pos;
+        let rotated_pos = apply_agent_rotation(mouth_local_pos, (*agent_ptr).rotation);
+        let mouth_world_pos = (*agent_ptr).position + rotated_pos;
 
             // Cooldown timer (stored in _pad.x)
             var current_cooldown = agents_out[agent_id].body[i]._pad.x;
@@ -306,13 +308,15 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
                             let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                             if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                let neighbor = agents_out[neighbor_id];
-                                if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                    let dist = length(mouth_world_pos - neighbor.position);
+                                let neighbor_alive = agents_out[neighbor_id].alive;
+                                let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
+                                let neighbor_age = agents_out[neighbor_id].age;
+                                if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                    let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
                                     if (dist < reach) {
                                         // Size-based attack probability: small victims can slip through.
                                         // Same size => 100%, half size => 50%.
-                                        let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                        let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
                                         let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
                                         let attack_seed = (agent_id * 747796405u)
                                             ^ (neighbor_id * 2891336453u)
@@ -345,11 +349,13 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                     let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
                                     let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                                     if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                        let neighbor = agents_out[neighbor_id];
-                                        if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                            let dist = length(mouth_world_pos - neighbor.position);
+                                        let neighbor_alive = agents_out[neighbor_id].alive;
+                                        let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
+                                        let neighbor_age = agents_out[neighbor_id].age;
+                                        if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                            let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
                                             if (dist < reach) {
-                                                let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                                let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
                                                 let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
                                                 let attack_seed = (agent_id * 747796405u)
                                                     ^ (neighbor_id * 2891336453u)
@@ -379,11 +385,13 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
                                         let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                            let neighbor = agents_out[neighbor_id];
-                                            if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                                let dist = length(mouth_world_pos - neighbor.position);
+                                            let neighbor_alive = agents_out[neighbor_id].alive;
+                                            let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
+                                            let neighbor_age = agents_out[neighbor_id].age;
+                                            if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                                let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
                                                 if (dist < reach) {
-                                                    let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                                    let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
                                                     let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
                                                     let attack_seed = (agent_id * 747796405u)
                                                         ^ (neighbor_id * 2891336453u)
@@ -419,11 +427,13 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                     let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
                                     let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                                     if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                        let neighbor = agents_out[neighbor_id];
-                                        if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                            let dist = length(mouth_world_pos - neighbor.position);
+                                        let neighbor_alive = agents_out[neighbor_id].alive;
+                                        let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
+                                        let neighbor_age = agents_out[neighbor_id].age;
+                                        if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                            let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
                                             if (dist < reach) {
-                                                let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                                let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
                                                 let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
                                                 let attack_seed = (agent_id * 747796405u)
                                                     ^ (neighbor_id * 2891336453u)
@@ -453,11 +463,13 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                         let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
                                         let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
                                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                            let neighbor = agents_out[neighbor_id];
-                                            if (neighbor.alive == 1u && neighbor.energy > 0.0 && neighbor.age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                                let dist = length(mouth_world_pos - neighbor.position);
+                                            let neighbor_alive = agents_out[neighbor_id].alive;
+                                            let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
+                                            let neighbor_age = agents_out[neighbor_id].age;
+                                            if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
+                                                let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
                                                 if (dist < reach) {
-                                                    let victim_size = max(f32(min(neighbor.body_count, MAX_BODY_PARTS)), 1.0);
+                                                    let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
                                                     let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
                                                     let attack_seed = (agent_id * 747796405u)
                                                         ^ (neighbor_id * 2891336453u)
@@ -481,71 +493,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 // Drain from closest victim only
                 if (closest_victim_id != 0xFFFFFFFFu) {
-                    // Try to claim the victim's spatial grid cell atomically
-                    // This prevents multiple DIFFERENT vampires from draining the same victim simultaneously
-                    // But allows the same vampire to drain with multiple mouths
-                    let victim_pos = agents_out[closest_victim_id].position;
-                    let victim_scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
-                    let victim_grid_x = u32(clamp(victim_pos.x * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-                    let victim_grid_y = u32(clamp(victim_pos.y * victim_scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-                    let victim_cell = victim_grid_y * SPATIAL_GRID_SIZE + victim_grid_x;
-
-                    // Atomic claim: mark victim with high bit to indicate it's being drained this frame.
-                    // The high bit preserves the victim ID for physics (unmask with & 0x7FFFFFFF).
-                    // IMPORTANT: this claim must be exclusive across vampires to avoid
-                    // cross-invocation RMW races on victim energy.
-                    let victim_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(victim_cell)]);
-                    var can_drain = false;
-                    if (victim_stamp == current_stamp) {
-                        let current_cell = atomicLoad(&agent_spatial_grid[spatial_id_index(victim_cell)]);
-
-                        // Check if cell contains the victim (with or without high bit)
-                        let cell_agent_id = current_cell & 0x7FFFFFFFu;
-                        let is_claimed = (current_cell & 0x80000000u) != 0u;
-
-                        if (cell_agent_id == closest_victim_id && !is_claimed) {
-                            // Victim is unclaimed - try to mark with high bit
-                            let claimed_victim_id = closest_victim_id | 0x80000000u;
-                            let claim_result = atomicCompareExchangeWeak(&agent_spatial_grid[spatial_id_index(victim_cell)], closest_victim_id, claimed_victim_id);
-                            can_drain = claim_result.exchanged;
-                        }
-                    }
-
-                    // Only proceed if we can drain this victim AND cooldown is ready
-                    if (can_drain && current_cooldown <= 0.0) {
-                        let victim_energy = agents_out[closest_victim_id].energy;
+                    // Energy is updated atomically, so we don't need a per-victim lock.
+                    // Allow multiple vampires to drain concurrently; the victim loss is saturating.
+                    if (current_cooldown <= 0.0) {
+                        let victim_energy = energy_from_u32(atomicLoad(&agents_out[closest_victim_id].energy));
                         if (victim_energy > 0.0001) {
-                            // IMPORTANT: Avoid draining a vampire victim that currently has any
-                            // vampire mouths OPEN.
-                            // Rationale: if the victim is actively draining this frame, it will
-                            // also RMW its own energy in this kernel, which can race with us
-                            // writing victim energy (mutual-drain exploit).
-                            // If the victim vampire mouths are CLOSED, it won't add energy to
-                            // itself here, so draining it is safe enough.
-                            var victim_has_open_vamp_mouth = false;
-                            let victim_body_count = min(agents_out[closest_victim_id].body_count, MAX_BODY_PARTS);
-                            for (var vi = 0u; vi < victim_body_count; vi++) {
-                                let v_part = agents_out[closest_victim_id].body[vi];
-                                let v_base = get_base_part_type(v_part.part_type);
-                                if (v_base == 33u) {
-                                    let v_open = clamp(v_part._pad.y, 0.0, 1.0);
-                                    if (v_open >= 0.5) {
-                                        victim_has_open_vamp_mouth = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (victim_has_open_vamp_mouth) {
-                                // Release the spatial-grid claim so later passes don't treat the victim as claimed.
-                                let claimed_victim_id = closest_victim_id | 0x80000000u;
-                                _ = atomicCompareExchangeWeak(
-                                    &agent_spatial_grid[spatial_id_index(victim_cell)],
-                                    claimed_victim_id,
-                                    closest_victim_id
-                                );
-                                continue;
-                            }
-
                             // VAMPIRE DRAIN: Gradually drain energy from victim
                             // Distance-based falloff: full power at 0 distance, 0 power at max reach
                             let victim_pos = agents_out[closest_victim_id].position;
@@ -568,10 +520,32 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                             // Minimum drain threshold
                             if (drain_amount >= 0.01) {
-                                // Drain energy from victim
-                                agents_out[closest_victim_id].energy = max(0.0, victim_energy - drain_amount);
-                                // Vampire gains the drained energy
-                                total_energy_gained += drain_amount;
+                                // Victim loses 2x the amount drained (harsh penalty), atomically.
+                                // Compute vampire gain from the actual amount removed so we never mint energy via races.
+                                let victim_energy_loss = drain_amount * 2.0;
+
+                                // Saturating atomic subtract (CAS loop). Returns actual loss in f32.
+                                let victim_loss_u = energy_to_u32(victim_energy_loss);
+                                var actual_loss_u = 0u;
+                                if (victim_loss_u != 0u) {
+                                    loop {
+                                        let old_u = atomicLoad(&agents_out[closest_victim_id].energy);
+                                        if (old_u == 0u) {
+                                            break;
+                                        }
+                                        let sub_u = min(old_u, victim_loss_u);
+                                        let new_u = old_u - sub_u;
+                                        let res = atomicCompareExchangeWeak(&agents_out[closest_victim_id].energy, old_u, new_u);
+                                        if (res.exchanged) {
+                                            actual_loss_u = sub_u;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                let actual_loss = energy_from_u32(actual_loss_u);
+                                let actual_gain = actual_loss * 0.5;
+                                total_energy_gained += actual_gain;
                                 // Set cooldown timer
                                 agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
                             }
@@ -586,7 +560,10 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Add gained energy to vampire
     if (total_energy_gained > 0.0) {
-        agents_out[agent_id].energy += total_energy_gained;
+        let gain_u = energy_to_u32(total_energy_gained);
+        if (gain_u != 0u) {
+            _ = atomicAdd(&(*agent_ptr).energy, gain_u);
+        }
     }
 }
 
@@ -603,7 +580,7 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Avoid copying full Agent (contains body arrays) into a local variable.
     let agent_alive = agents_out[agent_id].alive;
-    let agent_energy = agents_out[agent_id].energy;
+    let agent_energy = energy_from_u32(atomicLoad(&agents_out[agent_id].energy));
     let agent_age = agents_out[agent_id].age;
     let agent_position = agents_out[agent_id].position;
     let agent_rotation = agents_out[agent_id].rotation;
@@ -696,7 +673,7 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
 
                 let victim_alive = agents_out[neighbor_id].alive;
-                let victim_energy = agents_out[neighbor_id].energy;
+                let victim_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
                 let victim_age = agents_out[neighbor_id].age;
                 if (victim_alive != 1u || victim_energy <= 0.0 || victim_age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
                     continue;
@@ -720,27 +697,7 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
                         continue;
                     }
 
-                    // Claim this victim cell (same pattern as vampire mouths) to avoid
-                    // cross-invocation races where multiple spikes kill the same victim.
-                    let victim_stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                    if (victim_stamp != current_stamp) {
-                        continue;
-                    }
-                    let current_cell = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                    let cell_agent_id = current_cell & 0x7FFFFFFFu;
-                    let is_claimed = (current_cell & 0x80000000u) != 0u;
-                    if (cell_agent_id != neighbor_id || is_claimed) {
-                        continue;
-                    }
-                    let claimed_victim_id = neighbor_id | 0x80000000u;
-                    let claim_result = atomicCompareExchangeWeak(
-                        &agent_spatial_grid[spatial_id_index(check_cell)],
-                        neighbor_id,
-                        claimed_victim_id
-                    );
-                    if (!claim_result.exchanged) {
-                        continue;
-                    }
+                    // No per-victim lock required here; redundant kill signals are harmless.
 
                     // Send kill signal: victim will decompose itself next tick in process_agents.
                     // alive==2u means "pending kill".
@@ -749,7 +706,21 @@ fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                     // Pay an energy cost to prevent self-sustaining stationary spike blobs.
                     let cost = SPIKE_KILL_COST_BASE + SPIKE_KILL_COST_FRAC_OF_VICTIM * victim_energy;
-                    agents_out[agent_id].energy = max(agents_out[agent_id].energy - cost, 0.0);
+                    let cost_u = energy_to_u32(cost);
+                    if (cost_u != 0u) {
+                        loop {
+                            let old_u = atomicLoad(&agents_out[agent_id].energy);
+                            if (old_u == 0u) {
+                                break;
+                            }
+                            let sub_u = min(old_u, cost_u);
+                            let new_u = old_u - sub_u;
+                            let res = atomicCompareExchangeWeak(&agents_out[agent_id].energy, old_u, new_u);
+                            if (res.exchanged) {
+                                break;
+                            }
+                        }
+                    }
 
                     // Set cooldown and limit to one kill per agent per epoch.
                     agents_out[agent_id].body[i]._pad.x = SPIKE_COOLDOWN_FRAMES;
@@ -781,7 +752,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Avoid copying the full Agent payload for dead entries.
         agents_out[agent_id].alive = 0u;
         agents_out[agent_id].body_count = 0u;
-        agents_out[agent_id].energy = 0.0;
+        atomicStore(&agents_out[agent_id].energy, 0u);
         agents_out[agent_id].velocity = vec2<f32>(0.0);
         agents_out[agent_id].pairing_counter = 0u;
         agents_out[agent_id].is_selected = 0u;
@@ -845,7 +816,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Kill now.
         agents_out[agent_id].alive = 0u;
         agents_out[agent_id].body_count = 0u;
-        agents_out[agent_id].energy = 0.0;
+        atomicStore(&agents_out[agent_id].energy, 0u);
         agents_out[agent_id].velocity = vec2<f32>(0.0);
         agents_out[agent_id].pairing_counter = 0u;
         agents_out[agent_id].is_selected = 0u;
@@ -856,7 +827,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_position = agents_in[agent_id].position;
     let agent_velocity = agents_in[agent_id].velocity;
     let agent_rotation = agents_in[agent_id].rotation;
-    let agent_energy = agents_in[agent_id].energy;
+    let agent_energy = energy_from_u32(agents_in[agent_id].energy);
     let agent_energy_capacity = agents_in[agent_id].energy_capacity;
     let agent_torque_debug = agents_in[agent_id].torque_debug;
     let agent_morphology_origin = agents_in[agent_id].morphology_origin;
@@ -887,7 +858,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     agents_out[agent_id].position = agent_position;
     agents_out[agent_id].velocity = agent_velocity;
     agents_out[agent_id].rotation = agent_rotation;
-    agents_out[agent_id].energy = agent_energy;
+    atomicStore(&agents_out[agent_id].energy, energy_to_u32(max(agent_energy, 0.0)));
     agents_out[agent_id].energy_capacity = agent_energy_capacity;
     agents_out[agent_id].torque_debug = agent_torque_debug;
     agents_out[agent_id].morphology_origin = agent_morphology_origin;
@@ -1430,7 +1401,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                         let neighbor_alive = agents_in[neighbor_id].alive;
                         let neighbor_energy = agents_in[neighbor_id].energy;
-                        if (neighbor_alive == 1u && neighbor_energy > 0.0) {
+                        if (neighbor_alive == 1u && neighbor_energy != 0u) {
                             neighbor_seen++;
                             if (neighbor_count < 64u) {
                                 neighbor_ids[neighbor_count] = neighbor_id;
@@ -1462,7 +1433,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                             let neighbor_alive = agents_in[neighbor_id].alive;
                             let neighbor_energy = agents_in[neighbor_id].energy;
-                            if (neighbor_alive == 1u && neighbor_energy > 0.0) {
+                            if (neighbor_alive == 1u && neighbor_energy != 0u) {
                                 neighbor_seen++;
                                 if (neighbor_count < 64u) {
                                     neighbor_ids[neighbor_count] = neighbor_id;
@@ -1492,7 +1463,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                             let neighbor_alive = agents_in[neighbor_id].alive;
                             let neighbor_energy = agents_in[neighbor_id].energy;
-                            if (neighbor_alive == 1u && neighbor_energy > 0.0) {
+                            if (neighbor_alive == 1u && neighbor_energy != 0u) {
                                 neighbor_seen++;
                                 if (neighbor_count < 64u) {
                                     neighbor_ids[neighbor_count] = neighbor_id;
@@ -1525,7 +1496,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                             let neighbor_alive = agents_in[neighbor_id].alive;
                             let neighbor_energy = agents_in[neighbor_id].energy;
-                            if (neighbor_alive == 1u && neighbor_energy > 0.0) {
+                            if (neighbor_alive == 1u && neighbor_energy != 0u) {
                                 neighbor_seen++;
                                 if (neighbor_count < 64u) {
                                     neighbor_ids[neighbor_count] = neighbor_id;
@@ -1555,7 +1526,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
                             let neighbor_alive = agents_in[neighbor_id].alive;
                             let neighbor_energy = agents_in[neighbor_id].energy;
-                            if (neighbor_alive == 1u && neighbor_energy > 0.0) {
+                            if (neighbor_alive == 1u && neighbor_energy != 0u) {
                                 neighbor_seen++;
                                 if (neighbor_count < 64u) {
                                     neighbor_ids[neighbor_count] = neighbor_id;
@@ -3269,11 +3240,26 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Also immediately invalidate the inspector buffer so it can't keep rendering a stale
         // "alive" snapshot when readbacks are throttled.
         if (agent_is_selected == 1u) {
-            var dead_snapshot = agents_out[agent_id];
-            dead_snapshot.alive = 0u;
-            dead_snapshot.is_selected = 0u;
-            dead_snapshot.rotation = 0.0;
-            selected_agent_buffer[0] = dead_snapshot;
+            // NOTE: agents_out uses AgentAtomic (non-copyable due to atomic energy), so copy fields explicitly.
+            selected_agent_buffer[0].position = agents_out[agent_id].position;
+            selected_agent_buffer[0].velocity = agents_out[agent_id].velocity;
+            selected_agent_buffer[0].rotation = 0.0;
+            selected_agent_buffer[0].energy = atomicLoad(&agents_out[agent_id].energy);
+            selected_agent_buffer[0].energy_capacity = agents_out[agent_id].energy_capacity;
+            selected_agent_buffer[0].torque_debug = agents_out[agent_id].torque_debug;
+            selected_agent_buffer[0].morphology_origin = agents_out[agent_id].morphology_origin;
+            selected_agent_buffer[0].alive = 0u;
+            selected_agent_buffer[0].body_count = agents_out[agent_id].body_count;
+            selected_agent_buffer[0].pairing_counter = agents_out[agent_id].pairing_counter;
+            selected_agent_buffer[0].is_selected = 0u;
+            selected_agent_buffer[0].generation = agents_out[agent_id].generation;
+            selected_agent_buffer[0].age = agents_out[agent_id].age;
+            selected_agent_buffer[0].total_mass = agents_out[agent_id].total_mass;
+            selected_agent_buffer[0].poison_resistant_count = agents_out[agent_id].poison_resistant_count;
+            selected_agent_buffer[0].gene_length = agents_out[agent_id].gene_length;
+            selected_agent_buffer[0].genome_offset = agents_out[agent_id].genome_offset;
+            selected_agent_buffer[0].genome_packed = agents_out[agent_id].genome_packed;
+            selected_agent_buffer[0].body = agents_out[agent_id].body;
 
             // Robust selection transfer:
             // - First, try a handful of hashed candidates.
@@ -3314,7 +3300,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Avoid copying the full Agent payload on death.
         agents_out[agent_id].alive = 0u;
         agents_out[agent_id].body_count = 0u;
-        agents_out[agent_id].energy = 0.0;
+        atomicStore(&agents_out[agent_id].energy, 0u);
         agents_out[agent_id].velocity = vec2<f32>(0.0);
         agents_out[agent_id].pairing_counter = 0u;
         agents_out[agent_id].is_selected = 0u;
@@ -3381,21 +3367,34 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Always write selected agent to readback buffer for inspector (even when drawing disabled)
     if (agent_is_selected == 1u) {
-        // Publish an unrotated copy for inspector preview
-        var unrotated_agent = agents_out[agent_id];
-        unrotated_agent.rotation = 0.0;
-        // Speed info now stored per-mouth in body[63].pos during loop above (for debugging)
-        // Store the calculated gene_length (we already computed it above for reproduction)
-        unrotated_agent.gene_length = agent_gene_length;
-        // Copy generation/age/total_mass (already in agents_out) unchanged
-        selected_agent_buffer[0] = unrotated_agent;
+        // Publish an unrotated copy for inspector preview.
+        // NOTE: agents_out uses AgentAtomic (non-copyable due to atomic energy), so copy fields explicitly.
+        selected_agent_buffer[0].position = agents_out[agent_id].position;
+        selected_agent_buffer[0].velocity = agents_out[agent_id].velocity;
+        selected_agent_buffer[0].rotation = 0.0;
+        selected_agent_buffer[0].energy = atomicLoad(&agents_out[agent_id].energy);
+        selected_agent_buffer[0].energy_capacity = agents_out[agent_id].energy_capacity;
+        selected_agent_buffer[0].torque_debug = agents_out[agent_id].torque_debug;
+        selected_agent_buffer[0].morphology_origin = agents_out[agent_id].morphology_origin;
+        selected_agent_buffer[0].alive = agents_out[agent_id].alive;
+        selected_agent_buffer[0].body_count = agents_out[agent_id].body_count;
+        selected_agent_buffer[0].pairing_counter = agents_out[agent_id].pairing_counter;
+        selected_agent_buffer[0].is_selected = agents_out[agent_id].is_selected;
+        selected_agent_buffer[0].generation = agents_out[agent_id].generation;
+        selected_agent_buffer[0].age = agents_out[agent_id].age;
+        selected_agent_buffer[0].total_mass = agents_out[agent_id].total_mass;
+        selected_agent_buffer[0].poison_resistant_count = agents_out[agent_id].poison_resistant_count;
+        selected_agent_buffer[0].gene_length = agent_gene_length;
+        selected_agent_buffer[0].genome_offset = agents_out[agent_id].genome_offset;
+        selected_agent_buffer[0].genome_packed = agents_out[agent_id].genome_packed;
+        selected_agent_buffer[0].body = agents_out[agent_id].body;
     }
 
     // Always write output state (simulation must continue even when not drawing)
     agents_out[agent_id].position = agent_pos;
     agents_out[agent_id].velocity = agent_vel;
     agents_out[agent_id].rotation = agent_rot;
-    agents_out[agent_id].energy = agent_energy_cur;
+    atomicStore(&agents_out[agent_id].energy, energy_to_u32(max(agent_energy_cur, 0.0)));
     agents_out[agent_id].gene_length = agent_gene_length;
     // Increment age for living agents
     if (agents_out[agent_id].alive == 1u) {
@@ -4196,44 +4195,44 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
         rotation = hash_f32(base_seed ^ 0xDEADBEEFu) * 6.28318530718;
     }
 
-    var agent: Agent;
-    agent.position = clamp_position(spawn_pos);
-    agent.velocity = vec2<f32>(0.0);
-    agent.rotation = rotation;
-    agent.energy = max(request.energy, 0.0);
-    agent.energy_capacity = 0.0; // Will be calculated after morphology builds
-    agent.torque_debug = 0.0;
-    agent.alive = 1u;
-    agent.body_count = 0u;
-    agent.pairing_counter = 0u;
-    agent.is_selected = 0u;
-    agent.generation = 0u;
-    agent.age = 0u;
-    agent.total_mass = 0.0;
-    agent.poison_resistant_count = 0u;
+    let dst = &new_agents[spawn_index];
+    (*dst).position = clamp_position(spawn_pos);
+    (*dst).velocity = vec2<f32>(0.0);
+    (*dst).rotation = rotation;
+    atomicStore(&(*dst).energy, energy_to_u32(max(request.energy, 0.0)));
+    (*dst).energy_capacity = 0.0; // Will be calculated after morphology builds
+    (*dst).torque_debug = 0.0;
+    (*dst).alive = 1u;
+    (*dst).body_count = 0u;
+    (*dst).pairing_counter = 0u;
+    (*dst).is_selected = 0u;
+    (*dst).generation = 0u;
+    (*dst).age = 0u;
+    (*dst).total_mass = 0.0;
+    (*dst).poison_resistant_count = 0u;
 
     // If flags bit 0 set, use provided genome override (packed)
     if ((request.flags & 1u) != 0u) {
-        agent.gene_length = request.genome_override_len;
-        agent.genome_offset = request.genome_override_offset;
+        (*dst).gene_length = request.genome_override_len;
+        (*dst).genome_offset = request.genome_override_offset;
         // Manual unroll: some backends (via naga) require constant indexing into
         // fixed-size arrays inside storage-structs.
-        agent.genome_packed[0u] = request.genome_override_packed[0u];
-        agent.genome_packed[1u] = request.genome_override_packed[1u];
-        agent.genome_packed[2u] = request.genome_override_packed[2u];
-        agent.genome_packed[3u] = request.genome_override_packed[3u];
-        agent.genome_packed[4u] = request.genome_override_packed[4u];
-        agent.genome_packed[5u] = request.genome_override_packed[5u];
-        agent.genome_packed[6u] = request.genome_override_packed[6u];
-        agent.genome_packed[7u] = request.genome_override_packed[7u];
-        agent.genome_packed[8u] = request.genome_override_packed[8u];
-        agent.genome_packed[9u] = request.genome_override_packed[9u];
-        agent.genome_packed[10u] = request.genome_override_packed[10u];
-        agent.genome_packed[11u] = request.genome_override_packed[11u];
-        agent.genome_packed[12u] = request.genome_override_packed[12u];
-        agent.genome_packed[13u] = request.genome_override_packed[13u];
-        agent.genome_packed[14u] = request.genome_override_packed[14u];
-        agent.genome_packed[15u] = request.genome_override_packed[15u];
+        (*dst).genome_packed[0u] = request.genome_override_packed[0u];
+        (*dst).genome_packed[1u] = request.genome_override_packed[1u];
+        (*dst).genome_packed[2u] = request.genome_override_packed[2u];
+        (*dst).genome_packed[3u] = request.genome_override_packed[3u];
+        (*dst).genome_packed[4u] = request.genome_override_packed[4u];
+        (*dst).genome_packed[5u] = request.genome_override_packed[5u];
+        (*dst).genome_packed[6u] = request.genome_override_packed[6u];
+        (*dst).genome_packed[7u] = request.genome_override_packed[7u];
+        (*dst).genome_packed[8u] = request.genome_override_packed[8u];
+        (*dst).genome_packed[9u] = request.genome_override_packed[9u];
+        (*dst).genome_packed[10u] = request.genome_override_packed[10u];
+        (*dst).genome_packed[11u] = request.genome_override_packed[11u];
+        (*dst).genome_packed[12u] = request.genome_override_packed[12u];
+        (*dst).genome_packed[13u] = request.genome_override_packed[13u];
+        (*dst).genome_packed[14u] = request.genome_override_packed[14u];
+        (*dst).genome_packed[15u] = request.genome_override_packed[15u];
     } else {
     // Create centered variable-length genome with implicit 'X' padding on both sides.
     // Active region length in [MIN_GENE_LENGTH, GENOME_LENGTH].
@@ -4242,10 +4241,10 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
         let gene_len = MIN_GENE_LENGTH + (hash(genome_seed) % (gene_span + 1u));
         let left_pad = (GENOME_LENGTH - gene_len) / 2u;
 
-        agent.gene_length = gene_len;
-        agent.genome_offset = left_pad;
+        (*dst).gene_length = gene_len;
+        (*dst).genome_offset = left_pad;
         for (var w = 0u; w < GENOME_PACKED_WORDS; w++) {
-            agent.genome_packed[w] = 0u;
+            (*dst).genome_packed[w] = 0u;
         }
 
         for (var k = 0u; k < gene_len; k++) {
@@ -4255,21 +4254,18 @@ fn process_cpu_spawns(@builtin(global_invocation_id) gid: vec3<u32>) {
             let bi = left_pad + k;
             let wi = bi / GENOME_BASES_PER_PACKED_WORD;
             let bit_index = (bi % GENOME_BASES_PER_PACKED_WORD) * 2u;
-            agent.genome_packed[wi] = agent.genome_packed[wi] | (code << bit_index);
+            (*dst).genome_packed[wi] = (*dst).genome_packed[wi] | (code << bit_index);
         }
     }
 
     for (var i = 0u; i < MAX_BODY_PARTS; i++) {
-        agent.body[i].pos = vec2<f32>(0.0);
-        agent.body[i].data = 0.0;
-        agent.body[i].part_type = 0u;
-        agent.body[i].alpha_signal = 0.0;
-        agent.body[i].beta_signal = 0.0;
-        agent.body[i]._pad.x = bitcast<f32>(0u); // Packed prev_pos will be set on first morphology build
-        agent.body[i]._pad = vec2<f32>(0.0);
+        (*dst).body[i].pos = vec2<f32>(0.0);
+        (*dst).body[i].data = 0.0;
+        (*dst).body[i].part_type = 0u;
+        (*dst).body[i].alpha_signal = 0.0;
+        (*dst).body[i].beta_signal = 0.0;
+        (*dst).body[i]._pad = vec2<f32>(0.0);
     }
-
-    new_agents[spawn_index] = agent;
 }
 
 @compute @workgroup_size(256)
@@ -4290,7 +4286,7 @@ fn initialize_dead_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // We only need to ensure a few fields are reset for dead slots.
     agents_out[idx].alive = 0u;
     agents_out[idx].body_count = 0u;
-    agents_out[idx].energy = 0.0;
+    atomicStore(&agents_out[idx].energy, 0u);
     agents_out[idx].velocity = vec2<f32>(0.0);
     agents_out[idx].pairing_counter = 0u;
 }
@@ -4315,7 +4311,25 @@ fn compact_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (agent.alive != 0u) {
         let idx = atomicAdd(&spawn_debug_counters[2], 1u);
         if (idx < params.max_agents) {
-            agents_out[idx] = agent;
+            agents_out[idx].position = agent.position;
+            agents_out[idx].velocity = agent.velocity;
+            agents_out[idx].rotation = agent.rotation;
+            atomicStore(&agents_out[idx].energy, agent.energy);
+            agents_out[idx].energy_capacity = agent.energy_capacity;
+            agents_out[idx].torque_debug = agent.torque_debug;
+            agents_out[idx].morphology_origin = agent.morphology_origin;
+            agents_out[idx].alive = agent.alive;
+            agents_out[idx].body_count = agent.body_count;
+            agents_out[idx].pairing_counter = agent.pairing_counter;
+            agents_out[idx].is_selected = agent.is_selected;
+            agents_out[idx].generation = agent.generation;
+            agents_out[idx].age = agent.age;
+            agents_out[idx].total_mass = agent.total_mass;
+            agents_out[idx].poison_resistant_count = agent.poison_resistant_count;
+            agents_out[idx].gene_length = agent.gene_length;
+            agents_out[idx].genome_offset = agent.genome_offset;
+            agents_out[idx].genome_packed = agent.genome_packed;
+            agents_out[idx].body = agent.body;
         }
     }
 }
@@ -4478,7 +4492,7 @@ fn populate_agent_spatial_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent = agents_in[agent_id];
 
     // Skip dead agents
-    if (agent.alive == 0u || agent.energy <= 0.0) {
+    if (agent.alive == 0u || agent.energy == 0u) {
         return;
     }
 

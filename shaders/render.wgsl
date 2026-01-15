@@ -2744,6 +2744,7 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Render all body parts using the unified render function
     // Note: agent is unrotated (rotation=0) in selected_agent_buffer
     let in_debug_mode = params.debug_mode != 0u;
+    let selected_energy = energy_from_u32(selected_agent_buffer[0].energy);
     for (var i = 0u; i < MAX_BODY_PARTS; i++) {
         if (i >= body_count) { break; }
 
@@ -2756,7 +2757,7 @@ fn draw_inspector_agent(@builtin(global_invocation_id) gid: vec3<u32>) {
             0xFFFFFFFFu,  // special value to use selected_agent_buffer instead of agents_out
             vec2<f32>(0.0, 0.0),  // agent_position (will be offset by ctx)
             0.0,  // agent_rotation (already unrotated)
-            selected_agent_buffer[0].energy,
+            selected_energy,
             agent_color,
             body_count,
             morphology_origin,
@@ -2831,6 +2832,7 @@ fn render_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let morphology_origin = agents_out[agent_id].morphology_origin;
 
     // Draw all body parts using unified rendering function
+    let agent_energy = energy_from_u32(atomicLoad(&agents_out[agent_id].energy));
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
         // Calculate jet amplification for this part
@@ -2847,7 +2849,7 @@ fn render_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             agent_id,
             center,
             agents_out[agent_id].rotation,
-            agents_out[agent_id].energy,
+            agent_energy,
             agent_color,
             body_count,
             morphology_origin,

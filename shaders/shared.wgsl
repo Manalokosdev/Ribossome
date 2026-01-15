@@ -136,7 +136,7 @@ struct Agent {
     position: vec2<f32>,      // world position
     velocity: vec2<f32>,      // current velocity
     rotation: f32,            // current rotation angle
-    energy: f32,              // energy level
+    energy: u32,              // energy level (fixed-point; see ENERGY_SCALE)
     energy_capacity: f32,     // maximum energy storage (sum of all mouths * 10)
     torque_debug: f32,        // accumulated torque this frame (for inspector)
     morphology_origin: vec2<f32>, // Where the chain origin is in local space after CoM centering
@@ -155,6 +155,48 @@ struct Agent {
     genome_offset: u32,
     genome_packed: array<u32, GENOME_PACKED_WORDS>,
     body: array<BodyPart, MAX_BODY_PARTS>, // body parts array
+}
+
+// Same layout as Agent, but with atomic energy so multiple invocations can safely
+// modify a single victim's energy concurrently.
+struct AgentAtomic {
+    position: vec2<f32>,
+    velocity: vec2<f32>,
+    rotation: f32,
+    energy: atomic<u32>,
+    energy_capacity: f32,
+    torque_debug: f32,
+    morphology_origin: vec2<f32>,
+    alive: u32,
+    body_count: u32,
+    pairing_counter: u32,
+    is_selected: u32,
+    generation: u32,
+    age: u32,
+    total_mass: f32,
+    poison_resistant_count: u32,
+    gene_length: u32,
+    genome_offset: u32,
+    genome_packed: array<u32, GENOME_PACKED_WORDS>,
+    body: array<BodyPart, MAX_BODY_PARTS>,
+}
+
+// ============================================================================
+// ENERGY (fixed-point)
+// ============================================================================
+
+// Store energy as a fixed-point u32 in storage buffers so it can be updated atomically.
+// Choose a scale large enough to preserve small maintenance costs.
+const ENERGY_SCALE: f32 = 100000.0;
+const ENERGY_U32_MAX_F: f32 = 4294967040.0; // max u32 representable with f32 granularity
+
+fn energy_to_u32(e: f32) -> u32 {
+    let clamped = clamp(sanitize_f32(e), 0.0, ENERGY_U32_MAX_F / ENERGY_SCALE);
+    return u32(clamped * ENERGY_SCALE + 0.5);
+}
+
+fn energy_from_u32(e: u32) -> f32 {
+    return f32(e) / ENERGY_SCALE;
 }
 
 struct SpawnRequest {
@@ -343,7 +385,7 @@ struct EnvironmentInitParams {
 var<storage, read> agents_in: array<Agent>;
 
 @group(0) @binding(1)
-var<storage, read_write> agents_out: array<Agent>;
+var<storage, read_write> agents_out: array<AgentAtomic>;
 
 @group(0) @binding(2)
 // Environment chemistry grid:
@@ -435,7 +477,7 @@ var<storage, read_write> trail_grid_inject: array<vec4<f32>>;
 var<storage, read> fluid_velocity: array<vec2<f32>>; // Fluid velocity field (vec2 per cell)
 
 @group(0) @binding(9)
-var<storage, read_write> new_agents: array<Agent>;  // Buffer for spawned agents
+var<storage, read_write> new_agents: array<AgentAtomic>;  // Buffer for spawned agents
 
 @group(0) @binding(10)
 // [0]=spawn_counter, [1]=debug_counter, [2]=alive_counter.
@@ -1270,7 +1312,7 @@ fn sample_neighbors_energy(center: vec2<f32>, base_radius: f32, debug_mode: bool
             let weight = distance_weight * directional_alignment;
 
             // Direct neighbor energy (not from trail grid).
-            let energy_value = other_agent.energy;
+            let energy_value = energy_from_u32(other_agent.energy);
 
             if (debug_mode) {
                 let dot_val = directional_alignment;

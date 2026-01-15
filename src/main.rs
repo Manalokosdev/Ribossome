@@ -2759,7 +2759,7 @@ struct Agent {
     position: [f32; 2],                        // 8 bytes (0-7)
     velocity: [f32; 2],                        // 8 bytes (8-15)
     rotation: f32,                             // 4 bytes (16-19)
-    energy: f32,                               // 4 bytes (20-23)
+    energy: u32,                               // 4 bytes (20-23) - fixed-point ENERGY_SCALE (matches shader)
     energy_capacity: f32,                      // 4 bytes (24-27)
     torque_debug: f32,                         // 4 bytes (28-31) - accumulated torque (matches shader)
     morphology_origin: [f32; 2],               // 8 bytes (32-39) - chain origin after CoM centering
@@ -2779,6 +2779,25 @@ struct Agent {
 
 // SAFETY: Agent is repr(C) with explicit padding, matching shader layout exactly
 unsafe impl bytemuck::Pod for Agent {}
+
+const ENERGY_SCALE: f32 = 100_000.0;
+
+fn energy_to_u32(energy: f32) -> u32 {
+    if !energy.is_finite() {
+        return 0;
+    }
+    let clamped = energy.max(0.0);
+    let scaled = clamped * ENERGY_SCALE;
+    if scaled >= (u32::MAX as f32) {
+        u32::MAX
+    } else {
+        scaled.round() as u32
+    }
+}
+
+fn energy_from_u32(energy: u32) -> f32 {
+    (energy as f32) / ENERGY_SCALE
+}
 
 #[repr(C, align(16))]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -3608,7 +3627,7 @@ impl From<&Agent> for AgentSnapshot {
         Self {
             position: agent.position,
             rotation: agent.rotation,
-            energy: agent.energy,
+            energy: energy_from_u32(agent.energy),
             generation: agent.generation,
             genome: genome_bytes,
         }
@@ -12959,7 +12978,7 @@ impl GpuState {
             .wrapping_add(1442695040888963407u64);
         new_agent.rotation =
             ((self.rng_state >> 32) as f32 / u32::MAX as f32) * std::f32::consts::TAU;
-        new_agent.energy = 50.0;
+        new_agent.energy = energy_to_u32(50.0);
         new_agent.alive = 1;
         new_agent.body_count = 0; // GPU will build body
 
@@ -16535,8 +16554,9 @@ fn main() {
 
                                                 // Energy bar
                                                 ui.vertical(|ui| {
+                                                    let energy_value = energy_from_u32(agent.energy);
                                                     let energy_ratio = if agent.energy_capacity > 0.0 {
-                                                        (agent.energy / agent.energy_capacity).clamp(0.0, 1.0)
+                                                        (energy_value / agent.energy_capacity).clamp(0.0, 1.0)
                                                     } else {
                                                         0.0
                                                     };
@@ -16553,7 +16573,7 @@ fn main() {
                                                         .animate(false)
                                                         .text(format!(
                                                             "Energy: {:.1}/{:.1}",
-                                                            agent.energy, agent.energy_capacity
+                                                            energy_value, agent.energy_capacity
                                                         ));
                                                     ui.add(progress_bar);
                                                 });

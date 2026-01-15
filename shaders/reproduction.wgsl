@@ -7,19 +7,19 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    var agent = agents_out[agent_id];
+    let agent_ptr = &agents_out[agent_id];
 
-    if (agent.alive == 0u) {
+    if ((*agent_ptr).alive == 0u) {
         return;
     }
 
-    let gene_length = agent.gene_length;
-    let genome_offset = agent.genome_offset;
-    let agent_genome_packed = agent.genome_packed;
-    let pairing_counter = agent.pairing_counter;
-    var agent_energy_cur = agent.energy;
-    let agent_generation = agent.generation;
-    let agent_pos = agent.position;
+    let gene_length = (*agent_ptr).gene_length;
+    let genome_offset = (*agent_ptr).genome_offset;
+    let agent_genome_packed = (*agent_ptr).genome_packed;
+    let pairing_counter = (*agent_ptr).pairing_counter;
+    var agent_energy_cur = energy_from_u32(atomicLoad(&(*agent_ptr).energy));
+    let agent_generation = (*agent_ptr).generation;
+    let agent_pos = (*agent_ptr).position;
 
     let hash_base = (agent_id + params.random_seed) * 747796405u + 2891336453u;
     let hash2 = hash_base ^ (hash_base >> 13u);
@@ -100,7 +100,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 offspring.velocity = vec2<f32>(0.0);
 
-                offspring.energy = 0.0;
+                offspring.energy = 0u;
                 offspring.energy_capacity = 0.0;
                 offspring.torque_debug = 0.0;
                 offspring.morphology_origin = vec2<f32>(0.0);
@@ -145,9 +145,9 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
                 {
                     var mp_count = 0u;
-                    let bc = min(agent.body_count, MAX_BODY_PARTS);
+                    let bc = min((*agent_ptr).body_count, MAX_BODY_PARTS);
                     for (var i = 0u; i < bc; i++) {
-                        let base_type = get_base_part_type(agent.body[i].part_type);
+                        let base_type = get_base_part_type((*agent_ptr).body[i].part_type);
                         if (base_type == 43u) {
                             mp_count += 1u;
                         }
@@ -507,7 +507,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
 
                 let energy_per_offspring = inherited_energy / f32(num_offspring);
-                offspring.energy = energy_per_offspring;
+                offspring.energy = energy_to_u32(energy_per_offspring);
 
                 for (var bi = 0u; bi < MAX_BODY_PARTS; bi++) {
                     offspring.body[bi].pos = vec2<f32>(0.0);
@@ -519,7 +519,25 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     offspring.body[bi]._pad = vec2<f32>(0.0);
                 }
 
-                new_agents[current_spawn_index] = offspring;
+                let dst = &new_agents[current_spawn_index];
+                (*dst).position = offspring.position;
+                (*dst).velocity = offspring.velocity;
+                (*dst).rotation = offspring.rotation;
+                atomicStore(&(*dst).energy, offspring.energy);
+                (*dst).energy_capacity = offspring.energy_capacity;
+                (*dst).torque_debug = offspring.torque_debug;
+                (*dst).morphology_origin = offspring.morphology_origin;
+                (*dst).alive = offspring.alive;
+                (*dst).body_count = offspring.body_count;
+                (*dst).pairing_counter = offspring.pairing_counter;
+                (*dst).is_selected = offspring.is_selected;
+                (*dst).generation = offspring.generation;
+                (*dst).age = offspring.age;
+                (*dst).total_mass = offspring.total_mass;
+                (*dst).poison_resistant_count = offspring.poison_resistant_count;
+                (*dst).gene_length = offspring.gene_length;
+                (*dst).genome_offset = offspring.genome_offset;
+                (*dst).genome_packed = offspring.genome_packed;
             }
 
             agent_energy_cur -= inherited_energy;

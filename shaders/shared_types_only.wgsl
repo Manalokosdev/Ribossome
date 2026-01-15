@@ -33,7 +33,7 @@ struct Agent {
     position: vec2<f32>,
     velocity: vec2<f32>,
     rotation: f32,
-    energy: f32,
+    energy: u32,
     energy_capacity: f32,
     torque_debug: f32,
     morphology_origin: vec2<f32>,
