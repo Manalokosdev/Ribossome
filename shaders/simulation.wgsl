@@ -314,10 +314,10 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
                                     let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
                                     if (dist < reach) {
-                                        // Size-based attack probability: small victims can slip through.
-                                        // Same size => 100%, half size => 50%.
+                                        // Size-based attack probability: larger vampires better at catching small prey.
+                                        // Same size => 100%, vampire 2x bigger => 100%, victim 2x bigger => 50%.
                                         let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                                        let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
+                                        let attack_prob = clamp(vamp_size / victim_size, 0.0, 1.0);
                                         let attack_seed = (agent_id * 747796405u)
                                             ^ (neighbor_id * 2891336453u)
                                             ^ (params.epoch * 196613u)
@@ -392,7 +392,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                                 let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
                                                 if (dist < reach) {
                                                     let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                                                    let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
+                                                    let attack_prob = clamp(vamp_size / victim_size, 0.0, 1.0);
                                                     let attack_seed = (agent_id * 747796405u)
                                                         ^ (neighbor_id * 2891336453u)
                                                         ^ (params.epoch * 196613u)
@@ -434,7 +434,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                             let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
                                             if (dist < reach) {
                                                 let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                                                let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
+                                                let attack_prob = clamp(vamp_size / victim_size, 0.0, 1.0);
                                                 let attack_seed = (agent_id * 747796405u)
                                                     ^ (neighbor_id * 2891336453u)
                                                     ^ (params.epoch * 196613u)
@@ -470,7 +470,7 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                                 let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
                                                 if (dist < reach) {
                                                     let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                                                    let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
+                                                    let attack_prob = clamp(vamp_size / victim_size, 0.0, 1.0);
                                                     let attack_seed = (agent_id * 747796405u)
                                                         ^ (neighbor_id * 2891336453u)
                                                         ^ (params.epoch * 196613u)
@@ -2273,8 +2273,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let velocity_dir = agent_velocity / agent_speed;
                 // Project slope onto movement direction: negative = uphill, positive = downhill
                 let slope_alignment = dot(-slope_gradient, velocity_dir);
+                
+                // Linear mass scaling: mass=0.2 has 5× less effect than mass=1.0
+                let mass_factor = part_mass;
+                
                 // Apply force along velocity direction: slows when uphill, speeds when downhill
-                let slope_force = velocity_dir * slope_alignment * params.gamma_strength * part_mass;
+                let slope_force = velocity_dir * slope_alignment * params.gamma_strength * mass_factor;
                 force += slope_force;
                 torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
             }
@@ -3160,30 +3164,38 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // 4) Death check
+    // Immediate death if energy reaches exactly 0 (prevents "zombie agents")
+    var should_die = agent_energy_cur <= 0.0;
+    
+    // Otherwise, use probability-based death:
     // - Energy-based: death probability inversely proportional to energy (starvation)
     // - Genome-size-based: death probability proportional to sqrt(gene_length)
     //   (longer genes die more often, but sublinearly; GENOME_BYTES length keeps multiplier ~= 1)
-    let death_seed = agent_id * 2654435761u + params.random_seed * 1103515245u;
-    let death_rnd = f32(hash(death_seed)) / 4294967295.0;
+    if (!should_die) {
+        let death_seed = agent_id * 2654435761u + params.random_seed * 1103515245u;
+        let death_rnd = f32(hash(death_seed)) / 4294967295.0;
 
-    // Prevent division by zero and NaN: use max(energy, 0.01) as divisor
-    // At energy=10: probability / 10 = very low death chance
-    // At energy=1: probability / 1 = normal death chance
-    // At energy=0.01: probability / 0.01 = 100x higher death chance (starvation)
-    let energy_divisor = max(agent_energy_cur, 0.01);
-    let energy_adjusted_death_prob = params.death_probability / energy_divisor;
+        // Prevent division by zero and NaN: use max(energy, 0.01) as divisor
+        // At energy=10: probability / 10 = very low death chance
+        // At energy=1: probability / 1 = normal death chance
+        // At energy=0.01: probability / 0.01 = 100x higher death chance (starvation)
+        let energy_divisor = max(agent_energy_cur, 0.01);
+        let energy_adjusted_death_prob = params.death_probability / energy_divisor;
 
-    // Gene size modifier: scale death probability by sqrt(gene_length) / sqrt(GENOME_BYTES).
-    // gene_length is in bases (0..GENOME_BYTES). Clamp to avoid div-by-zero.
-    let gene_len = max(f32(agent_gene_length), 1.0);
-    let gene_size_mult = sqrt(gene_len) / sqrt(f32(GENOME_BYTES));
+        // Gene size modifier: scale death probability by sqrt(gene_length) / sqrt(GENOME_BYTES).
+        // gene_length is in bases (0..GENOME_BYTES). Clamp to avoid div-by-zero.
+        let gene_len = max(f32(agent_gene_length), 1.0);
+        let gene_size_mult = sqrt(gene_len) / sqrt(f32(GENOME_BYTES));
 
-    // Population pressure modifier (disabled for debugging):
-    // When enabled, this multiplies death probability by 2^(floor(population_count / 20000)).
-    let pop_mult = 1.0;
-    let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * gene_size_mult, 0.0, 1.0);
+        // Population pressure modifier (disabled for debugging):
+        // When enabled, this multiplies death probability by 2^(floor(population_count / 20000)).
+        let pop_mult = 1.0;
+        let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * gene_size_mult, 0.0, 1.0);
 
-    if (death_rnd < final_death_prob) {
+        should_die = death_rnd < final_death_prob;
+    }
+
+    if (should_die) {
         // Deposit remains: decomposition ratio based on mouth types
         // Rule (requested): decompose into the OPPOSITE chemical of the mouth types.
         // This discourages species from feeding on their own deaths:

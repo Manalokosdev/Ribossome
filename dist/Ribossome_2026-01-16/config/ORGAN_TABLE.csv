@@ -1,0 +1,21 @@
+Modifier,Modifier_AA,V_Valine,M_Methionine,L_Leucine,P_Proline,K_Lysine,C_Cysteine,H_Histidine,Q_Glutamine
+0,A,Alpha Sensor,Alpha Sensor,Propeller,Propeller,Mouth,Mouth,Mutation Protection,Mutation Protection
+1,C,Alpha Sensor,Alpha Sensor,,,Mouth,Mouth,Storage,Storage
+2,D,Alpha Sensor,Alpha Sensor,,,Beta Mouth,Beta Mouth,,Attractor/Repulsor
+3,E,Alpha Sensor,Alpha Sensor,,,Beta Mouth,Beta Mouth,,Attractor/Repulsor
+4,F,Alpha Sensor,Alpha Sensor,,,Vampire Mouth,Vampire Mouth,,
+5,G,Alpha Sensor,Alpha Sensor,,,Spike,Spike,,
+6,H,Alpha Sensor,Alpha Sensor,,,Vampire Mouth,Vampire Mouth,,
+7,I,Alpha Magnitude Sensor,Alpha Magnitude Sensor,,,Enabler,Enabler,Pairing Sensor,Pairing Sensor
+8,K,Alpha Magnitude Sensor (var),Alpha Magnitude Sensor (var),,,Enabler,Enabler,Pairing Sensor,Pairing Sensor
+9,L,Agent Alpha Sensor,Agent Alpha Sensor,,,Enabler,Enabler,Trail Energy Sensor (alpha),Trail Energy Sensor (beta)
+10,M,Beta Sensor,Beta Sensor,+Alpha Emitter,,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
+11,N,Beta Sensor,Beta Sensor,,,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
+12,P,Beta Sensor,Beta Sensor,-Alpha Emitter,,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
+13,Q,Beta Sensor,Beta Sensor,,,Slope Sensor (alpha),Slope Sensor (beta),,Poison Resistance
+14,R,Beta Sensor,Beta Sensor,,,Clock (alpha/green),Clock (beta/red),Chiral Flipper,
+15,S,Beta Sensor,Beta Sensor,,+Beta Emitter,Clock (alpha/green),Clock (beta/red),Chiral Flipper,
+16,T,Beta Magnitude Sensor,Beta Magnitude Sensor,,-Beta Emitter,Sine Gen (alpha/green),Sine Gen (beta/red),,
+17,V,Beta Magnitude Sensor (var),Beta Magnitude Sensor (var),,,Sine Gen (alpha/green),Sine Gen (beta/red),,
+18,W,Beta Sensor,Beta Sensor,Anchor,Anchor,Sine Gen (alpha/green),Sine Gen (beta/red),,
+19,Y,Agent Beta Sensor,Agent Beta Sensor,Anchor,Anchor,Sine Gen (alpha/green),Sine Gen (beta/red),,

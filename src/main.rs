@@ -3059,7 +3059,7 @@ fn default_alpha_fluid_convolution() -> f32 { 0.05 }
 fn default_beta_fluid_convolution() -> f32 { 0.05 }
 fn default_fluid_enabled() -> bool { true }
 fn default_fluid_slope_force_scale() -> f32 { 100.0 }
-fn default_fluid_obstacle_strength() -> f32 { 200.0 }
+fn default_fluid_obstacle_strength() -> f32 { 800.0 }
 fn default_fluid_ooze_still_rate() -> f32 { 1.0 }
 fn default_fluid_ooze_rate_beta_unset() -> f32 { -1.0 }
 fn default_fluid_ooze_fade_rate_beta_unset() -> f32 { -1.0 }
@@ -3387,8 +3387,8 @@ impl Default for SimulationSettings {
             dye_precipitation: 1.0,
             alpha_rain_map_path: None,
             beta_rain_map_path: None,
-            chemical_slope_scale_alpha: 0.1,
-            chemical_slope_scale_beta: 0.1,
+            chemical_slope_scale_alpha: 0.0,
+            chemical_slope_scale_beta: 0.0,
             food_power: 3.0,
             poison_power: 1.0,
             amino_maintenance_cost: 0.001,
@@ -3452,7 +3452,7 @@ impl Default for SimulationSettings {
             // Matches the previous hardcoded scale used in shaders/simulation.wgsl.
             fluid_wind_push_strength: 0.0005,
             fluid_slope_force_scale: 100.0,
-            fluid_obstacle_strength: 200.0,
+            fluid_obstacle_strength: 800.0,
             vector_force_power: 0.0,  // Disabled by default
             vector_force_x: 0.0,
             vector_force_y: -1.0,     // Downward gravity when enabled
@@ -3887,7 +3887,7 @@ impl SimulationSettings {
         self.fluid_dye_escape_rate_beta = self.fluid_dye_escape_rate_beta.clamp(0.0, 50.0);
         self.fluid_wind_push_strength = self.fluid_wind_push_strength.clamp(0.0, 2.0);
         self.fluid_slope_force_scale = self.fluid_slope_force_scale.clamp(0.0, 500.0);
-        self.fluid_obstacle_strength = self.fluid_obstacle_strength.clamp(0.0, 1000.0);
+        self.fluid_obstacle_strength = self.fluid_obstacle_strength.clamp(0.0, 2000.0);
 
         self.fluid_chem_lift_mult_alpha = self.fluid_chem_lift_mult_alpha.clamp(0.0, 1000.0);
         self.fluid_chem_lift_mult_beta = self.fluid_chem_lift_mult_beta.clamp(0.0, 1000.0);
@@ -5290,8 +5290,8 @@ impl GpuState {
             rain_drop_count: 0,
             alpha_rain_drop_count: 0,
             dye_precipitation: 1.0,
-            chemical_slope_scale_alpha: 0.1,
-            chemical_slope_scale_beta: 0.1,
+            chemical_slope_scale_alpha: 0.0,
+            chemical_slope_scale_beta: 0.0,
             mutation_rate: 0.005,
             food_power: 3.0,
             poison_power: 1.0,
@@ -5369,7 +5369,7 @@ impl GpuState {
             alpha_fluid_convolution: 0.05,
             beta_fluid_convolution: 0.05,
             fluid_slope_force_scale: 100.0,
-            fluid_obstacle_strength: 200.0,
+            fluid_obstacle_strength: 800.0,
             dye_alpha_color_r: 0.0,
             dye_alpha_color_g: 1.0,
             dye_alpha_color_b: 0.0,
@@ -6933,7 +6933,7 @@ impl GpuState {
             0.0, 0.0, 0.0, 0.0,        // mouse
             0.0, 0.0, 0.0, 0.0,        // splat
             100.0,                     // fluid_slope_force_scale
-            200.0,                     // fluid_obstacle_strength
+            800.0,                     // fluid_obstacle_strength
             0.0,                       // vector_force_x
             0.0,                       // vector_force_y
             0.0,                       // vector_force_power

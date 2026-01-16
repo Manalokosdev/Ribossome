@@ -91,7 +91,7 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // High/low Reynolds blend based on mass proxy.
     // Keep thresholds conservative so heavier agents don't get an outsized propulsion advantage.
     let mass_threshold_low = 2.0;
-    let mass_threshold_high = 5.0;
+    let mass_threshold_high = 10.0;
     let re_blend_raw = clamp((mass - mass_threshold_low) / (mass_threshold_high - mass_threshold_low), 0.0, 1.0);
     // Damp the influence of the high-Re branch (still present, just less dominant).
     let re_blend = re_blend_raw * 0.5;
@@ -196,10 +196,19 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Terrain coupling: attenuate microswim on steep gamma slope so the post-pass propulsion
     // doesn't effectively bypass terrain/obstacle effects from the main physics pass.
+    // Non-linear mass scaling: light swimmers nearly immune, heavy swimmers strongly blocked.
     let agent_pos = agents_out[agent_id].position;
     let slope_mag = length(read_gamma_slope(grid_index(agent_pos)));
-    let terrain_perm = 1.0 / (1.0 + params.fluid_obstacle_strength * slope_mag);
-    let terrain_gate = sqrt(clamp(terrain_perm, 0.0, 1.0));
+    
+    // Linear mass scaling: mass=0.2 has 5× less effect than mass=1.0
+    // Divide by mass to normalize, then multiply by mass to get linear response
+    let mass_scaled_obstacle = params.fluid_obstacle_strength * slope_mag * mass;
+    let terrain_perm = 1.0 / (1.0 + mass_scaled_obstacle);
+    
+    // Blend between sqrt (low-mass, gentle) and linear (high-mass, strong) for terrain gate
+    let terrain_gate_low = sqrt(clamp(terrain_perm, 0.0, 1.0));
+    let terrain_gate_high = clamp(terrain_perm, 0.0, 1.0);
+    let terrain_gate = mix(terrain_gate_low, terrain_gate_high, re_blend);
     final_thrust *= terrain_gate;
 
     // Stronger but gated vortex (reduced to avoid high-Re overpowering)

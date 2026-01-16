@@ -1,0 +1,31 @@
+Index,Code,Name,Used in Organ Creation,Notes
+0,A,Alanine,Modifier,Used in organ creation (modifiers 0-3 create alpha sensors, propellers, mouths, storage)
+1,C,Cysteine,"Promoter, Modifier","Promoter for mouths/slope/trail sensors; Modifier for same organs as A"
+2,D,Aspartic acid,Modifier,Used as modifier (same as A/C)
+3,E,Glutamic acid,Modifier,Used as modifier (same as A/C/D)
+4,F,Phenylalanine,Modifier,Used as modifier (creates vampire mouths with K/C promoters)
+5,G,Glycine,Modifier,Used as modifier (same as F - vampire mouths)
+6,H,Histidine,"Promoter, Modifier","Promoter for storage/chiral/poison organs; Modifier for vampire mouths"
+7,I,Isoleucine,Modifier,Used as modifier (alpha magnitude sensors with V/M; enablers with K/C; pairing sensors with H/Q)
+8,K,Lysine,"Promoter, Modifier","Promoter for mouths/enablers/clocks/sine generators (alpha/green variant); Modifier for same as I"
+9,L,Leucine,"Promoter, Modifier","Promoter for propellers/enablers/trail sensors; Modifier for agent sensors"
+10,M,Methionine,"Promoter, Modifier","Promoter for sensors/displacers/slope/trail (same as V); Modifier for beta sensors/displacers"
+11,N,Asparagine,Modifier,Used as modifier (same as M - beta sensors/displacers)
+12,P,Proline,"Promoter, Modifier","Promoter for propellers/enablers/trail sensors (same as L); Modifier as N"
+13,Q,Glutamine,"Promoter, Modifier","Promoter for storage/chiral/poison (same as H); Modifier as N"
+14,R,Arginine,Modifier,Used as modifier (beta sensors with V/M; clocks with K/C; chiral flippers with H/Q)
+15,S,Serine,Modifier,Used as modifier (same as R)
+16,T,Threonine,Modifier,Used as modifier (beta magnitude sensors with V/M; sine generators with K/C; chiral flippers with H/Q)
+17,V,Valine,"Promoter, Modifier","Promoter for sensors/displacers/slope/clock/sine (same as M); Modifier as T"
+18,W,Tryptophan,Modifier,Used as modifier (energy sensors with V/M; sine generators with K/C; chiral flippers with H/Q)
+19,Y,Tyrosine,Modifier,Used as modifier (agent beta sensors with V/M; sine generators with K/C; chiral flippers with H/Q)
+
+Summary:
+- All 20 amino acids are USED in the current system
+- 8 amino acids can act as PROMOTERS: V(17), M(10), L(9), P(12), K(8), C(1), H(6), Q(13)
+- All 20 amino acids can act as MODIFIERS (affect which specific organ is created)
+- NO FREE SLOTS available in the base amino acid set
+- To add new functionality, you would need to:
+  1. Add new organ types to the ORGAN_TABLE (currently has 42 defined organ types, many slots available)
+  2. Use different promoter+modifier combinations
+  3. Extend the organ creation logic in shader.wgsl
