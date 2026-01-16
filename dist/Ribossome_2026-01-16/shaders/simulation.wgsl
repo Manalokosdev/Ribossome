@@ -2548,6 +2548,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let clamped_force_mag = clamp(force_magnitude, -15000.0, 15000.0);
                             let magnet_force = direction * clamped_force_mag;
 
+                            // Energy sharing: when attractors are within 20 units, agents share energy (average their levels)
+                            if (dist_to_neighbor < 20.0) {
+                                let my_energy = agent_energy_cur;
+                                let neighbor_energy = energy_from_u32(agents_in[neighbor_id].energy);
+                                
+                                // Each agent transfers half the difference toward equilibrium
+                                // Both agents do this calculation independently, converging to average
+                                let energy_transfer = (neighbor_energy - my_energy) * 0.5f;
+                                agent_energy_cur += energy_transfer;
+                            }
+
                             // Apply force and torque
                             // Calculate lever arm from center of mass to organ position (not segment midpoint)
                             let organ_offset_from_com = part.pos - center_of_mass;
