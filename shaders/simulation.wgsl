@@ -2923,26 +2923,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Organ-specific energy costs
         var organ_extra = 0.0;
         if (props.is_mouth) {
-            // Mouth energy cost:
-            // - Base maintenance is always paid.
-            // - Activity cost scales with enabler amplification (mouth effectiveness).
-            // - Vampire mouths (type 33) pay 3x the activity cost.
-            let base_maintenance = select(props.energy_consumption, props.energy_consumption * 3.0, base_type == 33u);
-
-            // Deactivate normal mouths if any vampire mouth is present.
-            // Normal mouths are no longer disabled by vampire mouths
-            let normal_mouth_deactivated = false;
-            if (normal_mouth_deactivated) {
-                organ_extra = base_maintenance;
-            } else {
-
+            // Mouth energy cost (unified formula for all mouth types):
+            // - Base cost (always paid)
+            // - Activity cost scales with enabler amplification (mouth effectiveness)
+            // Same pattern as propellers: base + (base × amplification)
+            
             // 3) Feeding: mouths consume from alpha/beta grids
             // Get enabler amplification for this mouth
             let amplification = amplification_per_part[i];
 
-            let activity_mult = select(1.0, 3.0, base_type == 33u);
-            let activity_cost = props.energy_consumption * amplification * 1.5 * activity_mult;
-            organ_extra = base_maintenance + activity_cost;
+            let activity_cost = props.energy_consumption * amplification;
+            organ_extra = props.energy_consumption + activity_cost;
 
             // Consume alpha and beta based on per-amino absorption rates
             // and local availability, scaled by speed (slower = more absorption)
@@ -3021,9 +3012,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed effects and amplification to the rates themselves
-            // Vampire mouths absorb 50% of what a normal mouth would.
-            let mouth_absorption_multiplier = select(1.0, 0.5, base_type == 33u);
-
+            
             // Beta mouths (types 44-45) flip the energy/poison roles:
             // - beta becomes energy (uses energy_absorption_rate)
             // - alpha becomes poison (uses beta_absorption_rate)
@@ -3032,12 +3021,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 max(props.energy_absorption_rate, 0.0),
                 max(props.beta_absorption_rate, 0.0),
                 is_beta_mouth
-            ) * speed_absorption_multiplier * amplification * mouth_absorption_multiplier;
+            ) * speed_absorption_multiplier * amplification;
             let beta_rate = select(
                 max(props.beta_absorption_rate, 0.0),
                 max(props.energy_absorption_rate, 0.0),
                 is_beta_mouth
-            ) * speed_absorption_multiplier * amplification * mouth_absorption_multiplier;
+            ) * speed_absorption_multiplier * amplification;
 
             // Total capture budget for this mouth this frame
             let rate_total = alpha_rate + beta_rate;
@@ -3137,7 +3126,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                     total_consumed_beta += consumed_beta;
                 }
-            }
             }
         } else if (PROPELLERS_ENABLED && props.is_propeller) {
             // Propellers: base cost (always paid) + activity cost (linear with thrust)
