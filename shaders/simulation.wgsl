@@ -2273,10 +2273,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let velocity_dir = agent_velocity / agent_speed;
                 // Project slope onto movement direction: negative = uphill, positive = downhill
                 let slope_alignment = dot(-slope_gradient, velocity_dir);
-                
+
                 // Linear mass scaling: mass=0.2 has 5× less effect than mass=1.0
                 let mass_factor = part_mass;
-                
+
                 // Apply force along velocity direction: slows when uphill, speeds when downhill
                 let slope_force = velocity_dir * slope_alignment * params.gamma_strength * mass_factor;
                 force += slope_force;
@@ -2552,7 +2552,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             if (dist_to_neighbor < 20.0) {
                                 let my_energy = agent_energy_cur;
                                 let neighbor_energy = energy_from_u32(agents_in[neighbor_id].energy);
-                                
+
                                 // Each agent transfers half the difference toward equilibrium
                                 // Both agents do this calculation independently, converging to average
                                 let energy_transfer = (neighbor_energy - my_energy) * 0.5f;
@@ -2927,13 +2927,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // - Base cost (always paid)
             // - Activity cost scales with enabler amplification (mouth effectiveness)
             // Same pattern as propellers: base + (base × amplification)
-            
+
             // 3) Feeding: mouths consume from alpha/beta grids
             // Get enabler amplification for this mouth
             let amplification = amplification_per_part[i];
 
             let activity_cost = props.energy_consumption * amplification;
             organ_extra = props.energy_consumption + activity_cost;
+
+            // Vampire mouths (33) must only gain energy via their victim-drain logic.
+            // They should NOT absorb from chem grids or from the advected dye layer.
+            if (base_type != 33u) {
 
             // Consume alpha and beta based on per-amino absorption rates
             // and local availability, scaled by speed (slower = more absorption)
@@ -3012,7 +3016,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Per-amino capture rates let us tune bite size vs. poison uptake
             // Apply speed effects and amplification to the rates themselves
-            
+
             // Beta mouths (types 44-45) flip the energy/poison roles:
             // - beta becomes energy (uses energy_absorption_rate)
             // - alpha becomes poison (uses beta_absorption_rate)
@@ -3127,14 +3131,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     total_consumed_beta += consumed_beta;
                 }
             }
+
+            }
         } else if (PROPELLERS_ENABLED && props.is_propeller) {
-            // Propellers: base cost (always paid) + activity cost (linear with thrust)
-            // Since thrust already scales quadratically with amp, cost should scale linearly with thrust
-            let base_thrust = props.thrust_force * 3.0; // Max thrust with amp=1
-            let thrust_ratio = propeller_thrust_magnitude[i] / base_thrust;
-            // Reduce operational (thrust) cost by 1/3.
-            let activity_cost = props.energy_consumption * thrust_ratio * 1.0;
-            organ_extra = props.energy_consumption + activity_cost; // Base + activity
+            // Propellers: unified formula matching mouths
+            // Base cost + activity cost scaled by amplification
+            let amplification = amplification_per_part[i];
+            let activity_cost = props.energy_consumption * amplification;
+            organ_extra = props.energy_consumption + activity_cost;
         } else if (props.is_signal_emitter) {
             // Signal emitters: base cost + activity cost (linear with emission strength).
             // Use the stored normalized activity ratio (0..1) to avoid division by zero.
@@ -3165,7 +3169,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // 4) Death check
     // Immediate death if energy reaches exactly 0 (prevents "zombie agents")
     var should_die = agent_energy_cur <= 0.0;
-    
+
     // Otherwise, use probability-based death:
     // - Energy-based: death probability inversely proportional to energy (starvation)
     // - Genome-size-based: death probability proportional to sqrt(gene_length)

@@ -80,7 +80,10 @@ const TERRAIN_FORCE_SCALE: f32 = 250.0;
 const GAMMA_CORRECTION_EXPONENT: f32 = 2.2;
 const SETTINGS_FILE_NAME: &str = "simulation_settings.json";
 const AUTO_SNAPSHOT_FILE_NAME: &str = "autosave_snapshot.png";
-const AUTO_SNAPSHOT_INTERVAL: u64 = 10000; // Save every 10,000 epochs
+// Auto-snapshot is intentionally time-based.
+// In high-speed modes, the simulation can advance epochs far faster than wall-clock time,
+// so an epoch-based interval can accidentally trigger constant blocking readbacks.
+const AUTO_SNAPSHOT_MIN_INTERVAL_SECS: u64 = 5 * 60;
 const RAIN_THUMB_SIZE: usize = 128;
 
 // Microswim params are provided to shaders as a flat f32 list, packed into vec4-aligned uniform storage.
@@ -4112,6 +4115,7 @@ struct GpuState {
     agent_buffer_capacity: usize,
     // CPU-triggered spawns queued for next frame merge
     cpu_spawn_queue: Vec<SpawnRequest>,
+    cpu_spawn_queue_head: usize,
     spawn_request_count: u32,
     pending_spawn_upload: bool,
     spawn_probability: f32,
@@ -4168,7 +4172,7 @@ struct GpuState {
     epochs_per_second: f32,
 
     // Population statistics tracking
-    population_history: Vec<u32>, // Stores population at sample points
+    population_history: VecDeque<u32>, // Stores population at sample points (VecDeque for O(1) removal)
     population_plot_points: Vec<[f64; 2]>,
     alpha_rain_history: VecDeque<f32>,
     beta_rain_history: VecDeque<f32>,
@@ -4178,6 +4182,10 @@ struct GpuState {
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
+    last_autosave_time: std::time::Instant,
+
+    // Spawn diagnostics (throttle warnings to avoid IO stalls)
+    last_spawn_capacity_warning_time: std::time::Instant,
 
     // Debug: population scan for specific organ presence
     organ45_alive_with: u32,
@@ -7665,6 +7673,7 @@ impl GpuState {
             agents_cpu: agents,
             agent_buffer_capacity: max_agents,
             cpu_spawn_queue: Vec::new(),
+            cpu_spawn_queue_head: 0,
             spawn_request_count: 0,
             pending_spawn_upload: false,
             spawn_probability: settings.spawn_probability,
@@ -7713,14 +7722,17 @@ impl GpuState {
             inspector_frame_counter: 0,
             trail_energy_debug_next_epoch: 0,
             epochs_per_second: 0.0,
-            population_history: Vec::new(),
+            population_history: VecDeque::new(),
             population_plot_points: Vec::new(),
             alpha_rain_history: VecDeque::new(),
             beta_rain_history: VecDeque::new(),
             epoch_sample_interval: 1000,
             last_sample_epoch: 0,
-            max_history_points: 5000,
+            max_history_points: 10000,
             last_autosave_epoch: 0,
+            last_autosave_time: std::time::Instant::now(),
+
+            last_spawn_capacity_warning_time: std::time::Instant::now(),
 
             organ45_alive_with: 0,
             organ45_total_with: 0,
@@ -8092,7 +8104,7 @@ impl GpuState {
             self.cpu_spawn_queue.push(request);
         }
 
-        self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
+        self.spawn_request_count = self.cpu_spawn_queue_len() as u32;
         self.pending_spawn_upload = true;
         self.window.request_redraw();
     }
@@ -8273,7 +8285,7 @@ impl GpuState {
     // Replenish population - spawns random agents when population is low
     fn replenish_population(&mut self) {
         // Avoid stacking replenish batches while spawns are already queued.
-        if self.pending_spawn_upload || !self.cpu_spawn_queue.is_empty() {
+        if self.pending_spawn_upload || !self.cpu_spawn_queue_is_empty() {
             return;
         }
 
@@ -8322,12 +8334,12 @@ impl GpuState {
             }
         }
 
-        self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
+        self.spawn_request_count = self.cpu_spawn_queue_len() as u32;
         self.pending_spawn_upload = true;
         self.window.request_redraw();
 
-        if !self.cpu_spawn_queue.is_empty() {
-            self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
+        if !self.cpu_spawn_queue_is_empty() {
+            self.spawn_request_count = self.cpu_spawn_queue_len() as u32;
             self.pending_spawn_upload = true;
             self.window.request_redraw();
         }
@@ -8913,6 +8925,7 @@ impl GpuState {
         self.visual_texture.destroy();
 
         self.cpu_spawn_queue.clear();
+        self.cpu_spawn_queue_head = 0;
         self.pending_spawn_upload = false;
         self.spawn_request_count = 0;
         self.selected_agent_index = None;
@@ -9151,13 +9164,13 @@ impl GpuState {
         if cpu_spawn_count > 0 {
             encoder.clear_buffer(&self.spawn_debug_counters, 0, None);
 
-            // Upload spawn requests for this batch so GPU has per-request seeds/data
-            // Limit to the count actually being processed (capped at 2000 elsewhere)
+            // Upload spawn requests for this batch so GPU has per-request seeds/data.
+            // Limit to the count actually being processed (capped at 2000 elsewhere).
             let upload_len = (cpu_spawn_count as usize)
-                .min(self.cpu_spawn_queue.len())
+                .min(self.cpu_spawn_queue_len())
                 .min(MAX_CPU_SPAWNS_PER_BATCH as usize);
             if upload_len > 0 {
-                let slice = &self.cpu_spawn_queue[..upload_len];
+                let slice = self.cpu_spawn_queue_front_slice(upload_len);
                 self.queue.write_buffer(
                     &self.spawn_requests_buffer,
                     0,
@@ -9253,16 +9266,51 @@ impl GpuState {
 
         // Clear the processed spawn requests from the queue
         if cpu_spawn_count > 0 {
-            let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue.len());
-            self.cpu_spawn_queue.drain(0..drain_count);
-            self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
-            if self.cpu_spawn_queue.is_empty() {
+            let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue_len());
+            self.cpu_spawn_queue_drain_front(drain_count);
+            self.spawn_request_count = self.cpu_spawn_queue_len() as u32;
+            if self.cpu_spawn_queue_is_empty() {
                 self.pending_spawn_upload = false;
             }
 
             // We guarantee agents are materialized in buffer A by the end of this path.
             // Make that buffer the "current" ping-pong input for subsequent simulation frames.
             self.ping_pong = false;
+        }
+    }
+
+    fn cpu_spawn_queue_len(&self) -> usize {
+        self.cpu_spawn_queue
+            .len()
+            .saturating_sub(self.cpu_spawn_queue_head)
+    }
+
+    fn cpu_spawn_queue_is_empty(&self) -> bool {
+        self.cpu_spawn_queue_head >= self.cpu_spawn_queue.len()
+    }
+
+    fn cpu_spawn_queue_front_slice(&self, max_len: usize) -> &[SpawnRequest] {
+        if self.cpu_spawn_queue_is_empty() {
+            return &[];
+        }
+        let start = self.cpu_spawn_queue_head;
+        let end = (start + max_len).min(self.cpu_spawn_queue.len());
+        &self.cpu_spawn_queue[start..end]
+    }
+
+    fn cpu_spawn_queue_drain_front(&mut self, count: usize) {
+        if count == 0 || self.cpu_spawn_queue_is_empty() {
+            return;
+        }
+
+        self.cpu_spawn_queue_head = (self.cpu_spawn_queue_head + count).min(self.cpu_spawn_queue.len());
+
+        // Occasionally compact the underlying Vec to avoid unbounded front slack.
+        // Thresholds picked to keep this rare while preventing long-run O(n) behavior.
+        if self.cpu_spawn_queue_head >= 65_536 || self.cpu_spawn_queue_head * 2 >= self.cpu_spawn_queue.len() {
+            let head = self.cpu_spawn_queue_head;
+            self.cpu_spawn_queue.drain(0..head);
+            self.cpu_spawn_queue_head = 0;
         }
     }
 
@@ -9386,18 +9434,32 @@ impl GpuState {
         let capacity_left = self
             .agent_buffer_capacity
             .saturating_sub(self.agent_count as usize);
-        let mut cpu_spawn_count = self.cpu_spawn_queue.len().min(2000).min(capacity_left) as u32;
+        let mut cpu_spawn_count = self
+            .cpu_spawn_queue_len()
+            .min(2000)
+            .min(capacity_left) as u32;
         if cpu_spawn_count == 0
             && self.pending_spawn_upload
-            && !self.cpu_spawn_queue.is_empty()
+            && !self.cpu_spawn_queue_is_empty()
             && self.spawn_request_count > 0
         {
             cpu_spawn_count = self.spawn_request_count.min(2000).min(capacity_left as u32);
         }
 
-        if !self.cpu_spawn_queue.is_empty() && cpu_spawn_count == 0 {
-            println!("WARNING: Cannot spawn {} agents - no capacity left! (agent_count: {}, capacity: {}, capacity_left: {})",
-                self.cpu_spawn_queue.len(), self.agent_count, self.agent_buffer_capacity, capacity_left);
+        if !self.cpu_spawn_queue_is_empty() && cpu_spawn_count == 0 {
+            let now = std::time::Instant::now();
+            if now.duration_since(self.last_spawn_capacity_warning_time)
+                >= std::time::Duration::from_secs(5)
+            {
+                eprintln!(
+                    "WARNING: Cannot spawn {} agents - no capacity left! (agent_count: {}, capacity: {}, capacity_left: {})",
+                    self.cpu_spawn_queue_len(),
+                    self.agent_count,
+                    self.agent_buffer_capacity,
+                    capacity_left
+                );
+                self.last_spawn_capacity_warning_time = now;
+            }
         }
 
         // When paused or no living agents, freeze simulation side-effects.
@@ -10909,10 +10971,10 @@ impl GpuState {
             println!("  -> After spawn: {} agents alive", self.alive_count);
 
             // Clear the processed spawn requests from the queue
-            let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue.len());
-            self.cpu_spawn_queue.drain(0..drain_count);
-            self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
-            if self.cpu_spawn_queue.is_empty() {
+            let drain_count = (cpu_spawn_count as usize).min(self.cpu_spawn_queue_len());
+            self.cpu_spawn_queue_drain_front(drain_count);
+            self.spawn_request_count = self.cpu_spawn_queue_len() as u32;
+            if self.cpu_spawn_queue_is_empty() {
                 self.pending_spawn_upload = false;
             }
         }
@@ -11129,12 +11191,6 @@ impl GpuState {
             .write_ts_encoder(&mut encoder, TS_EGUI_ENC_START);
 
         let cpu_egui_start = std::time::Instant::now();
-
-        // Update buffers
-        for (id, image_delta) in &textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.device, &self.queue, *id, image_delta);
-        }
 
         self.egui_renderer.update_buffers(
             &self.device,
@@ -12778,6 +12834,7 @@ impl GpuState {
         // Clear CPU-side state
         self.agents_cpu.clear();
         self.cpu_spawn_queue.clear();
+        self.cpu_spawn_queue_head = 0;
         self.agent_count = 0;
         self.alive_count = 0;
         self.spawn_request_count = 0;
@@ -12842,7 +12899,7 @@ impl GpuState {
         }
 
         // Update spawn request count so they get processed
-        self.spawn_request_count = self.cpu_spawn_queue.len() as u32;
+        self.spawn_request_count = self.cpu_spawn_queue_len() as u32;
 
         println!(
             "Queued {} agents from snapshot for spawning",
@@ -12857,7 +12914,7 @@ impl GpuState {
 
         // Spawn queued snapshot agents immediately (in batches), so the restored state is fully
         // materialized on the GPU before we write an autosave.
-        while !self.cpu_spawn_queue.is_empty() {
+        while !self.cpu_spawn_queue_is_empty() {
             let capacity_left = self
                 .agent_buffer_capacity
                 .saturating_sub(self.agent_count as usize);
@@ -12866,19 +12923,19 @@ impl GpuState {
                     "WARNING: Snapshot contains more agents than current capacity (agent_count: {}, capacity: {}). Remaining queued: {}",
                     self.agent_count,
                     self.agent_buffer_capacity,
-                    self.cpu_spawn_queue.len()
+                    self.cpu_spawn_queue_len()
                 );
                 break;
             }
 
-            let batch = (self.cpu_spawn_queue.len() as u32)
+            let batch = (self.cpu_spawn_queue_len() as u32)
                 .min(MAX_CPU_SPAWNS_PER_BATCH)
                 .min(capacity_left as u32);
 
             println!(
                 "  -> spawning batch of {} (queued remaining before: {})",
                 batch,
-                self.cpu_spawn_queue.len()
+                self.cpu_spawn_queue_len()
             );
 
             // Use the reliable spawn-only path (works even when paused).
@@ -12888,7 +12945,7 @@ impl GpuState {
                 "  -> after batch: agent_count={}, alive_count={}, queued remaining={}",
                 self.agent_count,
                 self.alive_count,
-                self.cpu_spawn_queue.len()
+                self.cpu_spawn_queue_len()
             );
         }
 
@@ -12898,12 +12955,13 @@ impl GpuState {
         // DEFENSIVE: Ensure spawn queue and counters are completely clear after batch spawning.
         // This prevents phantom re-spawning on subsequent update() frames.
         self.cpu_spawn_queue.clear();
+        self.cpu_spawn_queue_head = 0;
         self.spawn_request_count = 0;
         self.pending_spawn_upload = false;
 
         println!(
             "After spawn loop: queue.len()={}, spawn_request_count={}, pending_spawn_upload={}",
-            self.cpu_spawn_queue.len(),
+            self.cpu_spawn_queue_len(),
             self.spawn_request_count,
             self.pending_spawn_upload
         );
@@ -13267,6 +13325,7 @@ impl GpuState {
         self.alive_count = 0;
         self.agents_cpu.clear();
         self.cpu_spawn_queue.clear();
+        self.cpu_spawn_queue_head = 0;
         self.spawn_request_count = 0;
         self.pending_spawn_upload = false;
 
@@ -13274,6 +13333,8 @@ impl GpuState {
         self.epoch = 0;
         self.last_sample_epoch = 0;
         self.last_autosave_epoch = 0;
+        self.last_autosave_time = std::time::Instant::now();
+        self.last_spawn_capacity_warning_time = std::time::Instant::now();
         self.last_epoch_count = 0;
         self.last_epoch_update = std::time::Instant::now();
 
@@ -14543,24 +14604,25 @@ fn main() {
 
                                     // Sample population for statistics graph
                                     if state.epoch - state.last_sample_epoch >= state.epoch_sample_interval {
-                                        state.population_history.push(state.alive_count);
-                                        // Keep only the last max_history_points
-                                        if state.population_history.len() > state.max_history_points {
-                                            state.population_history.remove(0);
+                                        state.population_history.push_back(state.alive_count);
+                                        // Keep only the last max_history_points (O(1) removal with VecDeque)
+                                        while state.population_history.len() > state.max_history_points {
+                                            state.population_history.pop_front();
                                         }
 
-                                        // Update cached plot points only when data changes (avoids per-frame allocs).
-                                        // Downsample to cap egui_plot CPU cost at high FPS.
-                                        const MAX_PLOT_POINTS: usize = 1024;
+                                        // Update cached plot points only when data changes.
+                                        // Reuse allocation to avoid per-sample allocs.
+                                        const MAX_PLOT_POINTS: usize = 2048;
                                         let len = state.population_history.len();
                                         let stride = ((len + MAX_PLOT_POINTS - 1) / MAX_PLOT_POINTS).max(1);
-                                        state.population_plot_points = state
-                                            .population_history
-                                            .iter()
-                                            .enumerate()
-                                            .step_by(stride)
-                                            .map(|(i, &pop)| [i as f64, pop as f64])
-                                            .collect();
+                                        state.population_plot_points.clear();
+                                        state.population_plot_points.extend(
+                                            state.population_history
+                                                .iter()
+                                                .enumerate()
+                                                .step_by(stride)
+                                                .map(|(i, &pop)| [i as f64, pop as f64])
+                                        );
 
                                         state.last_sample_epoch = state.epoch;
                                     }
@@ -14738,7 +14800,7 @@ fn main() {
                                                                 }
 
                                                                 state.spawn_request_count =
-                                                                    state.cpu_spawn_queue.len() as u32;
+                                                                    state.cpu_spawn_queue_len() as u32;
                                                                 state.pending_spawn_upload = true;
                                                                 state.window.request_redraw();
                                                                 println!("Queued 100 spawn requests");
@@ -15051,6 +15113,7 @@ fn main() {
                                                                 state.selected_agent_index = None;
                                                                 state.selected_agent_data = None;
                                                                 state.cpu_spawn_queue.clear();
+                                                                state.cpu_spawn_queue_head = 0;
                                                                 state.spawn_request_count = 0;
                                                                 state.pending_spawn_upload = false;
                                                                 // Clear pending alive readbacks to prevent GPU overwriting our 0 count
@@ -15163,7 +15226,7 @@ fn main() {
                                                                         }
 
                                                                         state.spawn_request_count =
-                                                                            state.cpu_spawn_queue.len() as u32;
+                                                                            state.cpu_spawn_queue_len() as u32;
                                                                         state.pending_spawn_upload = true;
                                                                         state.window.request_redraw();
                                                                         println!("Enqueued 100 spawn requests");
@@ -17197,21 +17260,25 @@ fn main() {
                                     screenshot_4k_requested = true;
                                 }
 
-                                // Auto-snapshot every AUTO_SNAPSHOT_INTERVAL epochs.
+                                // Auto-snapshot is time-based to stay stable across simulation speeds.
                                 // NOTE: this runs after egui has updated state from sliders, so the
                                 // autosave snapshot captures the latest control-panel values.
-                                if !gpu_state.is_paused
-                                    && gpu_state.alive_count > 0
-                                    && gpu_state.epoch > 0
-                                    && gpu_state.epoch % AUTO_SNAPSHOT_INTERVAL == 0
-                                    && gpu_state.epoch != gpu_state.last_autosave_epoch
-                                {
-                                    gpu_state.last_autosave_epoch = gpu_state.epoch;
-                                    let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
-                                    if let Err(e) = gpu_state.save_snapshot_to_file(autosave_path) {
-                                        eprintln!("G�� Auto-snapshot failed at epoch {}: {:?}", gpu_state.epoch, e);
-                                    } else {
-                                        println!("G�� Auto-snapshot saved at epoch {}", gpu_state.epoch);
+                                if !gpu_state.is_paused && gpu_state.alive_count > 0 && gpu_state.epoch > 0 {
+                                    let now = std::time::Instant::now();
+                                    if now.duration_since(gpu_state.last_autosave_time)
+                                        >= std::time::Duration::from_secs(AUTO_SNAPSHOT_MIN_INTERVAL_SECS)
+                                    {
+                                        gpu_state.last_autosave_time = now;
+                                        gpu_state.last_autosave_epoch = gpu_state.epoch;
+                                        let autosave_path = std::path::Path::new(AUTO_SNAPSHOT_FILE_NAME);
+                                        if let Err(e) = gpu_state.save_snapshot_to_file(autosave_path) {
+                                            eprintln!(
+                                                "Auto-snapshot failed at epoch {}: {:?}",
+                                                gpu_state.epoch, e
+                                            );
+                                        } else {
+                                            println!("Auto-snapshot saved at epoch {}", gpu_state.epoch);
+                                        }
                                     }
                                 }
 

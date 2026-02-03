@@ -199,12 +199,12 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Non-linear mass scaling: light swimmers nearly immune, heavy swimmers strongly blocked.
     let agent_pos = agents_out[agent_id].position;
     let slope_mag = length(read_gamma_slope(grid_index(agent_pos)));
-    
+
     // Linear mass scaling: mass=0.2 has 5× less effect than mass=1.0
     // Divide by mass to normalize, then multiply by mass to get linear response
     let mass_scaled_obstacle = params.fluid_obstacle_strength * slope_mag * mass;
     let terrain_perm = 1.0 / (1.0 + mass_scaled_obstacle);
-    
+
     // Blend between sqrt (low-mass, gentle) and linear (high-mass, strong) for terrain gate
     let terrain_gate_low = sqrt(clamp(terrain_perm, 0.0, 1.0));
     let terrain_gate_high = clamp(terrain_perm, 0.0, 1.0);
