@@ -34,3 +34,23 @@ screenshots/
 
 # Recordings folder (user-generated videos/gifs)
 recordings/
+
+# Distribution packages (should be generated, not tracked)
+dist/
+*.zip
+
+# Build outputs
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Large assets (use Git LFS or external hosting instead)
+*.png
+*.jpg
+*.jpeg
+*.bmp
+!maps/ribossome_splash_screen.png
+
+# Snapshots folder (user-generated saves)
+snapshots/
