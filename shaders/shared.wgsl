@@ -339,6 +339,10 @@ struct SimParams {
     dye_beta_color_g: f32,
     dye_beta_color_b: f32,
     _pad_dye_beta_color: f32,
+    species_heatmap: u32,
+    _pad_species_0: u32,
+    _pad_species_1: u32,
+    _pad_species_2: u32,
 }
 
 struct EnvironmentInitParams {
@@ -375,6 +379,9 @@ struct EnvironmentInitParams {
     // Packed as vec4<f32> (16-byte stride) with NaN sentinel = "use default".
     // Stored as numeric f32 (safe for small bitmasks), converted back to u32.
     part_flags_override: array<vec4<f32>, 12>,
+
+    // Microswimming parameters (was binding 19, merged here to free a slot).
+    microswim_params: array<vec4<f32>, 4>,
 }
 
 // ============================================================================
@@ -448,11 +455,8 @@ const MSP_MAX_LENGTH_RATIO: u32 = 9u;
 const MSP_PROPELLERS_ENABLED: u32 = 10u;
 const MSP_VEC4_COUNT: u32 = 4u;
 
-@group(0) @binding(19)
-var<uniform> microswim_params: array<vec4<f32>, MSP_VEC4_COUNT>;
-
 fn ms_f32(i: u32) -> f32 {
-    let v = microswim_params[i >> 2u];
+    let v = environment_init.microswim_params[i >> 2u];
     let lane = i & 3u;
     if (lane == 0u) { return v.x; }
     if (lane == 1u) { return v.y; }
@@ -673,7 +677,7 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     // 32 SLOPE SENSOR
     array<vec4<f32>,6>( vec4<f32>(9.0, 3.0, 0.1745329, 0.05), vec4<f32>(0.0, 0.0, 0.0, 0.00005), vec4<f32>(0.0, 0.8, 0.8, 0.0), vec4<f32>(0.0, 0.1, 0.6, 0.6), vec4<f32>(0.1, 0.5, 0.5, 0.5), vec4<f32>(0.5, 0.0, 0.0, 0.0) ),
     // 33 VAMPIRE MOUTH
-    array<vec4<f32>,6>( vec4<f32>(18.5, 8.0, 0.03, 0.015), vec4<f32>(0.0, 0.0, 0.0, 0.003), vec4<f32>(1.0, 0.0, 0.0, 20.0), vec4<f32>(0.0, 0.3, 0.17, 0.17), vec4<f32>(0.2, 1.4, -0.4, 1.3), vec4<f32>(-0.3, 0.0, 0.0, 0.0) ),
+    array<vec4<f32>,6>( vec4<f32>(18.5, 8.0, 0.03, 0.015), vec4<f32>(0.0, 0.0, 0.0, 0.003), vec4<f32>(1.0, 0.0, 0.0, 4.0), vec4<f32>(0.0, 0.3, 0.17, 0.17), vec4<f32>(0.2, 1.4, -0.4, 1.3), vec4<f32>(-0.3, 0.0, 0.0, 0.0) ),
     // 34 AGENT ALPHA SENSOR
     array<vec4<f32>,6>( vec4<f32>(13.0, 10.0, -0.24, 0.025), vec4<f32>(0.0, 0.0, 0.0, 0.0015), vec4<f32>(0.2, 0.0, 0.2, 0.0), vec4<f32>(0.0, 0.3, 0.95, 0.95), vec4<f32>(0.2, 0.35, 0.65, 0.4), vec4<f32>(0.6, 0.0, 0.0, 0.0) ),
     // 35 AGENT BETA SENSOR

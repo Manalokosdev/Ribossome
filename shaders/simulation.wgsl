@@ -1251,6 +1251,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // NOTE: When FLUID_TWO_WAY_COUPLING_ENABLED is on, we perform a more physically grounded two-way
     // coupling inside the physics pass (per-part slip + reaction force). Disable this older one-way
     // deformation->fluid injection to avoid double-counting.
+    // Deformation-based fluid injection: body shape changes stir the fluid.
     if (!FLUID_TWO_WAY_COUPLING_ENABLED && MORPHOLOGY_INJECT_FLUID_FORCE && !first_build && params.fluid_wind_push_strength != 0.0) {
         let strength = params.prop_wash_strength_fluid * MORPHOLOGY_FLUID_COUPLING;
         if (abs(strength) > 0.0) {

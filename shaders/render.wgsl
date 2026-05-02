@@ -2822,11 +2822,48 @@ fn render_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             color_sum += part_props.beta_damage;
         }
     }
-    let agent_color = vec3<f32>(
+    var agent_color = vec3<f32>(
         sin(color_sum * 3.0) * 0.5 + 0.5,
         sin(color_sum * 5.0) * 0.5 + 0.5,
         sin(color_sum * 7.0) * 0.5 + 0.5
     );
+
+    // Species heatmap: color agents by phenotype distance to selected agent
+    if (params.species_heatmap != 0u && params.selected_agent_index != 0xFFFFFFFFu) {
+        let sel_count = min(selected_agent_buffer[0].body_count, MAX_BODY_PARTS);
+        let my_count = min(body_count, MAX_BODY_PARTS);
+        let min_count = min(sel_count, my_count);
+        let max_count = max(sel_count, my_count);
+        var matches = 0u;
+        for (var i = 0u; i < min_count; i++) {
+            let sel_type = get_base_part_type(selected_agent_buffer[0].body[i].part_type);
+            let my_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
+            if (sel_type == my_type) {
+                matches += 1u;
+            }
+        }
+        // Distance: 0.0 = identical, 1.0 = completely different
+        let distance = 1.0 - f32(matches) / f32(max(max_count, 1u));
+        // Heatmap: green (identical) -> yellow -> red (distant) -> dim (very distant)
+        let t = clamp(distance, 0.0, 1.0);
+        var heatmap_color: vec3<f32>;
+        if (t < 0.5) {
+            heatmap_color = mix(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 1.0, 0.0), t * 2.0);
+        } else {
+            heatmap_color = mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(0.4, 0.0, 0.0), (t - 0.5) * 2.0);
+        }
+        agent_color = heatmap_color;
+
+        // Draw a large filled circle overlay at agent center
+        var max_extent = 0.0;
+        for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
+            let dist = length(agents_out[agent_id].body[i].pos);
+            max_extent = max(max_extent, dist + get_part_visual_size(agents_out[agent_id].body[i].part_type));
+        }
+        let circle_radius = max(max_extent, 5.0);
+        let alpha = 0.6 - t * 0.3; // More opaque for closer matches
+        draw_filled_circle(center, circle_radius, vec4<f32>(heatmap_color, alpha));
+    }
 
     // Get the morphology origin
     let morphology_origin = agents_out[agent_id].morphology_origin;

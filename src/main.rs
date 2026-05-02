@@ -2120,6 +2120,31 @@ fn genome_pack_ascii_words(
     (len, offset, packed)
 }
 
+
+/// Levenshtein edit distance between two phenotype sequences (part-type lists).
+/// Handles insertions, deletions, and substitutions so length differences don't
+/// cause false species splits. Bails early if distance exceeds `max_dist` for speed.
+fn phenotype_edit_distance(a: &[u8], b: &[u8]) -> u32 {
+    let (m, n) = (a.len(), b.len());
+
+    // Single-row Levenshtein
+    let mut prev: Vec<u32> = (0..=(n as u32)).collect();
+    let mut curr = vec![0u32; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i as u32;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)          // deletion
+                .min(curr[j - 1] + 1)        // insertion
+                .min(prev[j - 1] + cost);    // substitution
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[n]
+}
+
 #[inline]
 fn genome_base_color(base: u8) -> egui::Color32 {
     match base {
@@ -2730,6 +2755,13 @@ fn load_agent_via_dialog() -> anyhow::Result<[u32; GENOME_WORDS]> {
     }
 }
 
+/// Cached data for rendering species thumbnails in the UI.
+struct SpeciesInfo {
+    count: u32,                              // Number of agents in this species
+    percentage: f32,                         // Percentage of total living population
+    body_parts: Vec<([f32; 2], u32, f32)>,   // (pos, base_type, size) for thumbnail drawing
+}
+
 #[repr(C, align(16))]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct BodyPart {
@@ -2957,6 +2989,8 @@ struct SimParams {
     dye_beta_color_g: f32,
     dye_beta_color_b: f32,
     _pad_dye_beta_color: f32,
+    species_heatmap: u32,
+    _pad_species: [u32; 3],
 }
 
 #[repr(C)]
@@ -2995,12 +3029,15 @@ struct EnvironmentInitParams {
     // Optional override of AMINO_FLAGS bitmask.
     // Packed as vec4<f32> lanes with NaN sentinel = "use shader default".
     part_flags_override: [[f32; 4]; PART_FLAGS_OVERRIDE_VEC4S],
+
+    // Microswimming parameters (merged from former binding 19).
+    microswim_params: [[f32; 4]; 4],
 }
 
 // Keep host layout in sync with the WGSL uniform buffer (std140).
 // Keep this assertion updated if the uniform layout changes.
-// (47 parts × 6 vec4) = 282 vec4 overrides.
-const _: [(); 5344] = [(); std::mem::size_of::<EnvironmentInitParams>()];
+// (47 parts × 6 vec4) = 282 vec4 overrides + 4 vec4 microswim params.
+const _: [(); 5408] = [(); std::mem::size_of::<EnvironmentInitParams>()];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AutoDifficultyParam {
@@ -3955,7 +3992,6 @@ struct GpuState {
     visual_grid_buffer: wgpu::Buffer,
     agent_grid_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
-    microswim_params_buffer: wgpu::Buffer,
 
     // CPU-side mirror of the uniform params buffer.
     // Some compute paths (e.g. snapshot-load spawning) can run before `update()` has populated
@@ -4179,6 +4215,15 @@ struct GpuState {
     epoch_sample_interval: u64,   // Sample every N epochs (1000)
     last_sample_epoch: u64,       // Last epoch when we sampled
     max_history_points: usize,    // Maximum data points (5000)
+
+    // Species diversity tracking (genome Hamming-distance clustering)
+    species_history: VecDeque<u32>,
+    species_plot_points: Vec<[f64; 2]>,
+    species_sample_interval: u64,       // Sample every N epochs (10000)
+    last_species_sample_epoch: u64,
+    species_hamming_threshold: u32,     // Max edit distance to be "same species"
+    top_species: Vec<SpeciesInfo>,      // Top 10 species by population (updated with species count)
+    species_heatmap_enabled: bool,      // Show phenotype distance heatmap from selected agent
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
@@ -4684,6 +4729,8 @@ impl GpuState {
             part_props_override_head,
             part_props_override_tail,
             part_flags_override: pack_part_flags_override_vec4(&self.part_flags_override),
+            // Preserve current microswim params when regenerating map
+            microswim_params: self.environment_init_cpu.microswim_params,
         };
 
         self.environment_init_cpu = params;
@@ -5225,6 +5272,12 @@ impl GpuState {
             part_props_override_head: [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S_HEAD],
             part_props_override_tail: [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S_TAIL],
             part_flags_override: [[f32::NAN; 4]; PART_FLAGS_OVERRIDE_VEC4S],
+            microswim_params: [
+                [if default_microswim_enabled() { 1.0 } else { 0.0 }, default_microswim_coupling(), default_microswim_base_drag(), default_microswim_anisotropy()],
+                [default_microswim_max_frame_vel(), default_microswim_torque_strength(), default_microswim_min_seg_displacement(), default_microswim_min_total_deformation_sq()],
+                [default_microswim_min_length_ratio(), default_microswim_max_length_ratio(), 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
         };
 
         let environment_init_params_buffer =
@@ -5386,6 +5439,8 @@ impl GpuState {
             dye_beta_color_g: 0.0,
             dye_beta_color_b: 0.0,
             _pad_dye_beta_color: 0.0,
+            species_heatmap: 0,
+            _pad_species: [0; 3],
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -5394,36 +5449,7 @@ impl GpuState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Microswim params buffer must exist before settings load (bind groups reference it),
-        // so initialize with defaults and overwrite after `SimulationSettings` is loaded.
-        let microswim_params_f32_init: [f32; MICROSWIM_PARAM_FLOATS] = [
-            // vec4 0
-            if default_microswim_enabled() { 1.0 } else { 0.0 },
-            default_microswim_coupling(),
-            default_microswim_base_drag(),
-            default_microswim_anisotropy(),
-            // vec4 1
-            default_microswim_max_frame_vel(),
-            default_microswim_torque_strength(),
-            default_microswim_min_seg_displacement(),
-            default_microswim_min_total_deformation_sq(),
-            // vec4 2
-            default_microswim_min_length_ratio(),
-            default_microswim_max_length_ratio(),
-            0.0,
-            0.0,
-            // vec4 3 (reserved)
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ];
-        let microswim_params_bytes = pack_f32_uniform(&microswim_params_f32_init);
-        let microswim_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Microswim Params"),
-            contents: &microswim_params_bytes,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        // (Microswim params are now embedded in environment_init buffer — binding 19 freed.)
 
         let spawn_debug_counters = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spawn/Debug Counters"),
@@ -5979,16 +6005,6 @@ impl GpuState {
                         },
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 19,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
                 ],
             });
         profiler.mark("Compute bind layout");
@@ -6131,10 +6147,6 @@ impl GpuState {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: microswim_params_buffer.as_entire_binding(),
-                },
             ],
         });
 
@@ -6217,10 +6229,6 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: microswim_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -6309,10 +6317,6 @@ impl GpuState {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: microswim_params_buffer.as_entire_binding(),
-                },
             ],
         });
 
@@ -6395,10 +6399,6 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&rain_map_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: microswim_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -7543,8 +7543,12 @@ impl GpuState {
             0.0,
             0.0,
         ];
-        let microswim_params_bytes = pack_f32_uniform(&microswim_params_f32);
-        queue.write_buffer(&microswim_params_buffer, 0, &microswim_params_bytes);
+        // Write microswim params into environment_init buffer at the microswim_params field offset.
+        {
+            let ms_offset = std::mem::offset_of!(EnvironmentInitParams, microswim_params) as u64;
+            let microswim_params_bytes = pack_f32_uniform(&microswim_params_f32);
+            queue.write_buffer(&environment_init_params_buffer, ms_offset, &microswim_params_bytes);
+        }
 
         // Safe profiling/toggling for A/B cost measurements.
         // These do NOT use GPU timestamp queries (which can be unstable on some drivers).
@@ -7596,7 +7600,6 @@ impl GpuState {
             visual_grid_buffer,
             agent_grid_buffer,
             params_buffer,
-            microswim_params_buffer,
             environment_init_params_buffer,
             spawn_debug_counters,
             init_dead_dispatch_args,
@@ -7729,6 +7732,14 @@ impl GpuState {
             epoch_sample_interval: 1000,
             last_sample_epoch: 0,
             max_history_points: 10000,
+
+            species_history: VecDeque::new(),
+            species_plot_points: Vec::new(),
+            species_sample_interval: 10000,
+            last_species_sample_epoch: 0,
+            species_hamming_threshold: 6,
+            top_species: Vec::new(),
+            species_heatmap_enabled: false,
             last_autosave_epoch: 0,
             last_autosave_time: std::time::Instant::now(),
 
@@ -8482,10 +8493,6 @@ impl GpuState {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: self.microswim_params_buffer.as_entire_binding(),
-                },
             ],
         });
         self.compute_bind_group_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -8567,10 +8574,6 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: self.microswim_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -8930,6 +8933,7 @@ impl GpuState {
         self.spawn_request_count = 0;
         self.selected_agent_index = None;
         self.selected_agent_data = None;
+        self.species_heatmap_enabled = false;
         for inflight in &mut self.selected_agent_readback_inflight {
             *inflight = false;
         }
@@ -9699,6 +9703,8 @@ impl GpuState {
             } else {
                 0.0
             },
+            species_heatmap: if self.species_heatmap_enabled { 1 } else { 0 },
+            _pad_species: [0; 3],
         };
 
         // Keep CPU mirror in sync with the GPU uniform buffer.
@@ -9731,10 +9737,12 @@ impl GpuState {
                 0.0,
             ];
             self.microswim_params_cpu = microswim_params_f32;
+            // Write microswim params into the environment_init buffer at the microswim_params field offset.
+            let ms_offset = std::mem::offset_of!(EnvironmentInitParams, microswim_params) as u64;
             let microswim_params_bytes = pack_f32_uniform(&microswim_params_f32);
             self.queue.write_buffer(
-                &self.microswim_params_buffer,
-                0,
+                &self.environment_init_params_buffer,
+                ms_offset,
                 &microswim_params_bytes,
             );
         }
@@ -11553,6 +11561,7 @@ impl GpuState {
             } else {
                 self.selected_agent_index = None;
                 self.selected_agent_data = None;
+                self.species_heatmap_enabled = false;
 
                 for inflight in &mut self.selected_agent_readback_inflight {
                     *inflight = false;
@@ -11640,6 +11649,123 @@ impl GpuState {
         self.organ45_total_with = total_with;
         self.organ45_alive_with = alive_with;
         self.organ45_last_scan = Some(std::time::Instant::now());
+    }
+
+    /// Count distinct species by greedy clustering on expressed phenotype (body part types).
+    /// Uses edit distance (insertions, deletions, substitutions) between part-type sequences,
+    /// so a single added/removed/changed part doesn't create a new species.
+    /// Reads back agent data from GPU (blocking), so call infrequently.
+    fn count_species(&mut self) -> u32 {
+        let current_buffer = if self.ping_pong {
+            &self.agents_buffer_b
+        } else {
+            &self.agents_buffer_a
+        };
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Species Count Encoder"),
+            });
+
+        encoder.copy_buffer_to_buffer(
+            current_buffer,
+            0,
+            &self.agents_readback,
+            0,
+            (std::mem::size_of::<Agent>() * self.agent_buffer_capacity) as u64,
+        );
+
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = self.agents_readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::Maintain::Wait);
+
+        let species_count;
+        {
+            let data = slice.get_mapped_range();
+            let agents: &[Agent] = bytemuck::cast_slice(&data);
+
+            let take_len = (self.agent_count as usize).min(agents.len());
+
+            // Extract phenotype + body data for each living agent
+            struct AgentPheno {
+                pheno: Vec<u8>,
+                body_parts: Vec<([f32; 2], u32, f32)>, // (pos, base_type, size)
+            }
+
+            // Collect indices of living agents with enough body parts
+            let mut living_indices: Vec<usize> = Vec::new();
+            for (idx, agent) in agents.iter().enumerate().take(take_len) {
+                if agent.alive != 0 && agent.body_count >= 3 {
+                    living_indices.push(idx);
+                }
+            }
+
+            // Sample up to 2000 agents for performance (deterministic stride sampling)
+            const MAX_SPECIES_SAMPLE: usize = 2000;
+            let sample_stride = if living_indices.len() > MAX_SPECIES_SAMPLE {
+                living_indices.len() / MAX_SPECIES_SAMPLE
+            } else {
+                1
+            };
+            let mut living: Vec<AgentPheno> = Vec::new();
+            for &idx in living_indices.iter().step_by(sample_stride) {
+                let agent = &agents[idx];
+                let body_len = (agent.body_count as usize).min(MAX_BODY_PARTS);
+                let pheno: Vec<u8> = (0..body_len)
+                    .map(|i| agent.body[i].base_type() as u8)
+                    .collect();
+                let body_parts: Vec<([f32; 2], u32, f32)> = (0..body_len)
+                    .map(|i| (agent.body[i].pos, agent.body[i].base_type(), agent.body[i].size))
+                    .collect();
+                living.push(AgentPheno { pheno, body_parts });
+            }
+
+            // Greedy representative clustering using edit distance on part-type sequences.
+            // Track cluster index for each agent, plus representative body data.
+            let threshold = self.species_hamming_threshold;
+            let mut rep_phenos: Vec<Vec<u8>> = Vec::new();
+            let mut rep_bodies: Vec<Vec<([f32; 2], u32, f32)>> = Vec::new();
+            let mut cluster_counts: Vec<u32> = Vec::new();
+
+            for ap in &living {
+                let mut found = false;
+                for (ci, rep) in rep_phenos.iter().enumerate() {
+                    if phenotype_edit_distance(&ap.pheno, rep) <= threshold {
+                        cluster_counts[ci] += 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    rep_phenos.push(ap.pheno.clone());
+                    rep_bodies.push(ap.body_parts.clone());
+                    cluster_counts.push(1);
+                }
+            }
+
+            species_count = rep_phenos.len() as u32;
+            let total_sampled = living.len().max(1) as f32;
+
+            // Build top 10 species by count
+            let mut indices: Vec<usize> = (0..cluster_counts.len()).collect();
+            indices.sort_unstable_by(|&a, &b| cluster_counts[b].cmp(&cluster_counts[a]));
+            indices.truncate(10);
+
+            self.top_species.clear();
+            for &ci in &indices {
+                self.top_species.push(SpeciesInfo {
+                    count: cluster_counts[ci],
+                    percentage: cluster_counts[ci] as f32 / total_sampled * 100.0,
+                    body_parts: rep_bodies[ci].clone(),
+                });
+            }
+        }
+
+        self.agents_readback.unmap();
+        species_count
     }
 
     fn spawn_agent_at_cursor(&mut self, screen_pos: [f32; 2]) {
@@ -12490,10 +12616,6 @@ impl GpuState {
                             binding: 18,
                             resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
                         },
-                        wgpu::BindGroupEntry {
-                            binding: 19,
-                            resource: self.microswim_params_buffer.as_entire_binding(),
-                        },
                     ],
                 });
 
@@ -13185,10 +13307,6 @@ impl GpuState {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: self.microswim_params_buffer.as_entire_binding(),
-                },
             ],
         });
 
@@ -13273,10 +13391,6 @@ impl GpuState {
                     binding: 18,
                     resource: wgpu::BindingResource::TextureView(&self.rain_map_texture_view),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 19,
-                    resource: self.microswim_params_buffer.as_entire_binding(),
-                },
             ],
         });
 
@@ -13353,6 +13467,7 @@ impl GpuState {
         // Reset selection
         self.selected_agent_index = None;
         self.selected_agent_data = None;
+        self.species_heatmap_enabled = false;
         self.follow_selected_agent = false;
 
         // Reset async readback state.
@@ -13392,6 +13507,10 @@ impl GpuState {
         self.population_plot_points.clear();
         self.alpha_rain_history.clear();
         self.beta_rain_history.clear();
+        self.species_history.clear();
+        self.species_plot_points.clear();
+        self.last_species_sample_epoch = 0;
+        self.top_species.clear();
 
         // Reset difficulty levels
         self.difficulty.food_power.difficulty_level = 0;
@@ -14627,6 +14746,32 @@ fn main() {
                                         state.last_sample_epoch = state.epoch;
                                     }
 
+                                    // Species diversity sampling (every species_sample_interval epochs)
+                                    if state.epoch - state.last_species_sample_epoch >= state.species_sample_interval {
+                                        let species_count = state.count_species();
+                                        state.species_history.push_back(species_count);
+                                        while state.species_history.len() > state.max_history_points {
+                                            state.species_history.pop_front();
+                                        }
+
+                                        // Rebuild species plot points, stretched to align with population x-axis.
+                                        // Each species sample spans species_sample_interval/epoch_sample_interval pop samples.
+                                        let samples_per_species = (state.species_sample_interval / state.epoch_sample_interval).max(1) as f64;
+                                        const MAX_SPECIES_PLOT_POINTS: usize = 2048;
+                                        let slen = state.species_history.len();
+                                        let sstride = ((slen + MAX_SPECIES_PLOT_POINTS - 1) / MAX_SPECIES_PLOT_POINTS).max(1);
+                                        state.species_plot_points.clear();
+                                        state.species_plot_points.extend(
+                                            state.species_history
+                                                .iter()
+                                                .enumerate()
+                                                .step_by(sstride)
+                                                .map(|(i, &count)| [i as f64 * samples_per_species, count as f64])
+                                        );
+
+                                        state.last_species_sample_epoch = state.epoch;
+                                    }
+
                                     // Update epochs per second counter
                                     let now = std::time::Instant::now();
                                     let elapsed = now.duration_since(state.last_epoch_update).as_secs_f32();
@@ -14985,22 +15130,126 @@ fn main() {
                                                 if !state.population_plot_points.is_empty() {
                                                     use egui_plot::{Line, Plot};
 
-                                                    let line = Line::new(state.population_plot_points.clone())
+                                                    let pop_line = Line::new(state.population_plot_points.clone())
                                                         .color(egui::Color32::from_rgb(100, 200, 100))
                                                         .name("Population");
+
+                                                    // Vertically stretch species count to match population scale
+                                                    let species_line = if !state.species_plot_points.is_empty() {
+                                                        let max_pop = state.population_plot_points.iter()
+                                                            .map(|p| p[1])
+                                                            .fold(1.0f64, f64::max);
+                                                        let max_species = state.species_plot_points.iter()
+                                                            .map(|p| p[1])
+                                                            .fold(1.0f64, f64::max);
+                                                        let scale = max_pop / max_species;
+                                                        let stretched: Vec<[f64; 2]> = state.species_plot_points.iter()
+                                                            .map(|p| [p[0], p[1] * scale])
+                                                            .collect();
+                                                        Some(Line::new(stretched)
+                                                            .color(egui::Color32::from_rgb(200, 100, 200))
+                                                            .name(format!("Species (×{:.0})", scale)))
+                                                    } else {
+                                                        None
+                                                    };
 
                                                     Plot::new("population_plot")
                                                         .height(150.0)
                                                         .show_axes(true)
                                                         .show_grid(true)
+                                                        .legend(egui_plot::Legend::default())
                                                         .allow_drag(true)
                                                         .allow_zoom([true, false])
                                                         .allow_scroll(false)
                                                         .show(ui, |plot_ui| {
-                                                            plot_ui.line(line);
+                                                            plot_ui.line(pop_line);
+                                                            if let Some(sl) = species_line {
+                                                                plot_ui.line(sl);
+                                                            }
                                                         });
                                                 } else {
                                                     ui.label("No data yet (waiting for first sample)");
+                                                }
+
+                                                // Species thumbnails (top 10)
+                                                if !state.top_species.is_empty() {
+                                                    ui.add_space(4.0);
+                                                    ui.label(format!("Top {} species:", state.top_species.len()));
+                                                    let thumb_size = 48.0f32;
+                                                    // Lay out thumbnails in a horizontal wrap
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        for species in &state.top_species {
+                                                            let (rect, _response) = ui.allocate_exact_size(
+                                                                egui::vec2(thumb_size, thumb_size + 14.0),
+                                                                egui::Sense::hover(),
+                                                            );
+                                                            let painter = ui.painter_at(rect);
+
+                                                            // Background
+                                                            let thumb_rect = egui::Rect::from_min_size(
+                                                                rect.min,
+                                                                egui::vec2(thumb_size, thumb_size),
+                                                            );
+                                                            painter.rect_filled(thumb_rect, 2.0, egui::Color32::from_rgb(20, 20, 25));
+
+                                                            if !species.body_parts.is_empty() {
+                                                                // Find bounding box of body parts to auto-scale
+                                                                let mut min_x = f32::MAX;
+                                                                let mut max_x = f32::MIN;
+                                                                let mut min_y = f32::MAX;
+                                                                let mut max_y = f32::MIN;
+                                                                for &(pos, _, size) in &species.body_parts {
+                                                                    min_x = min_x.min(pos[0] - size);
+                                                                    max_x = max_x.max(pos[0] + size);
+                                                                    min_y = min_y.min(pos[1] - size);
+                                                                    max_y = max_y.max(pos[1] + size);
+                                                                }
+                                                                let extent_x = (max_x - min_x).max(1.0);
+                                                                let extent_y = (max_y - min_y).max(1.0);
+                                                                let scale = (thumb_size - 6.0) / extent_x.max(extent_y);
+                                                                let cx = (min_x + max_x) * 0.5;
+                                                                let cy = (min_y + max_y) * 0.5;
+                                                                let thumb_cx = thumb_rect.center().x;
+                                                                let thumb_cy = thumb_rect.center().y;
+
+                                                                // Draw line segments between consecutive parts
+                                                                for i in 1..species.body_parts.len() {
+                                                                    let (p0, _, _) = species.body_parts[i - 1];
+                                                                    let (p1, _, _) = species.body_parts[i];
+                                                                    let sx0 = thumb_cx + (p0[0] - cx) * scale;
+                                                                    let sy0 = thumb_cy + (p0[1] - cy) * scale;
+                                                                    let sx1 = thumb_cx + (p1[0] - cx) * scale;
+                                                                    let sy1 = thumb_cy + (p1[1] - cy) * scale;
+                                                                    painter.line_segment(
+                                                                        [egui::pos2(sx0, sy0), egui::pos2(sx1, sy1)],
+                                                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 80, 80)),
+                                                                    );
+                                                                }
+
+                                                                // Draw circles at each body part
+                                                                for &(pos, base_type, size) in &species.body_parts {
+                                                                    let sx = thumb_cx + (pos[0] - cx) * scale;
+                                                                    let sy = thumb_cy + (pos[1] - cy) * scale;
+                                                                    let r = (size * scale * 0.3).clamp(1.5, 4.0);
+                                                                    let color = part_base_color32(base_type);
+                                                                    painter.circle_filled(egui::pos2(sx, sy), r, color);
+                                                                }
+                                                            }
+
+                                                            // Percentage label below thumbnail
+                                                            let label_pos = egui::pos2(
+                                                                rect.min.x + thumb_size * 0.5,
+                                                                rect.min.y + thumb_size + 2.0,
+                                                            );
+                                                            painter.text(
+                                                                label_pos,
+                                                                egui::Align2::CENTER_TOP,
+                                                                format!("{:.0}%", species.percentage),
+                                                                egui::FontId::proportional(10.0),
+                                                                egui::Color32::from_rgb(180, 180, 180),
+                                                            );
+                                                        }
+                                                    });
                                                 }
                                             });
 
@@ -16570,11 +16819,12 @@ fn main() {
                                                 ui.colored_label(
                                                     egui::Color32::WHITE,
                                                     format!(
-                                                        "{}  |  Epoch {}  |  {:.1} eps  |  Agents {}  |  Cap {}",
+                                                        "{}  |  Epoch {}  |  {:.1} eps  |  Agents {}  |  Species {}  |  Cap {}",
                                                         state.run_name,
                                                         state.epoch,
                                                         state.epochs_per_second,
                                                         state.alive_count,
+                                                        state.species_history.back().copied().unwrap_or(0),
                                                         state.agent_buffer_capacity
                                                     ),
                                                 );
@@ -16612,6 +16862,7 @@ fn main() {
                                                     (agent.body_count as usize).min(MAX_BODY_PARTS),
                                                     agent.total_mass
                                                 ));
+                                                ui.checkbox(&mut state.species_heatmap_enabled, "Species heatmap");
 
                                                 ui.add_space(6.0);
 
