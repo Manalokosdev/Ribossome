@@ -15906,6 +15906,12 @@ fn main() {
                                                             if ui.button("Set Flat 0.0").clicked() {
                                                                 state.generate_map(1, 0, 0.0, 0);
                                                             }
+                                                            if ui.button("Set Flat 0.05").clicked() {
+                                                                state.generate_map(1, 0, 0.05, 0);
+                                                            }
+                                                            if ui.button("Set Flat 0.1").clicked() {
+                                                                state.generate_map(1, 0, 0.1, 0);
+                                                            }
                                                             if ui.button("Set Flat 0.5").clicked() {
                                                                 state.generate_map(1, 0, 0.5, 0);
                                                             }
@@ -15982,6 +15988,12 @@ fn main() {
                                                         ui.horizontal(|ui| {
                                                             if ui.button("Set Flat 0.0").clicked() {
                                                                 state.generate_map(2, 0, 0.0, 0);
+                                                            }
+                                                            if ui.button("Set Flat 0.05").clicked() {
+                                                                state.generate_map(2, 0, 0.05, 0);
+                                                            }
+                                                            if ui.button("Set Flat 0.1").clicked() {
+                                                                state.generate_map(2, 0, 0.1, 0);
                                                             }
                                                             if ui.button("Set Flat 0.5").clicked() {
                                                                 state.generate_map(2, 0, 0.5, 0);
