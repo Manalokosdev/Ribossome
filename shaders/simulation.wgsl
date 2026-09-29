@@ -2757,6 +2757,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 total_consumed_alpha += consumed.x + consumed.y;
                 total_consumed_beta += consumed.z + consumed.w;
                 consumed_frame += consumed;
+                // Visual feedback: bite the dye tracer by the same fraction so
+                // absorption is visible in the plumes (display-only, no mass).
+                let dv = fluid_dye[idx];
+                fluid_dye[idx] = vec4<f32>(dv.x * (1.0 - frac), dv.y * (1.0 - frac), dv.z, dv.w);
             }
         }
 
@@ -3168,6 +3172,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // it is returned on death if replication never completes).
                     cell[comp_ch] = max(avail - PAIRING_MONOMER_COST, 0.0);
                     chem_grid[pos_idx] = cell;
+                    // Visual feedback: bite the matching dye pool proportionally.
+                    let bite = clamp(PAIRING_MONOMER_COST / max(avail, 1e-6), 0.0, 1.0);
+                    var dv = fluid_dye[pos_idx];
+                    if (comp_ch < 2u) {
+                        dv.y = dv.y * (1.0 - bite);
+                    } else {
+                        dv.x = dv.x * (1.0 - bite);
+                    }
+                    fluid_dye[pos_idx] = dv;
                     // Closed world: the pairing energy cost is excreted as matter.
                     if (pairing_cost > 0.0 && params.food_power > 0.0) {
                         let pmass = pairing_cost / max(params.food_power * food_power_multiplier, 1e-6);
