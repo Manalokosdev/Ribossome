@@ -677,8 +677,19 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // - the gamma <-> dye erosion cycle was removed too: semi-Lagrangian dye
     //   advection does not conserve mass, so routing terrain through it made
     //   heights drift.
-    // The dye just advects, blurs and decays; fumarole dye rates can inject a
-    // visual tracer to show the currents.
+    // Tracer injection: the dye continuously picks up a NON-DEPLETING image of
+    // the suspended (levitated) monomer pools, so currents visibly carry
+    // colored plumes. Thresholds mirror the simulation's suspension_factor
+    // (FP_SPLAT.x = levitation full speed, FP slot 18 = precipitation speed).
+    let full_speed = max(fp_vec4(FP_SPLAT).x, 1e-6);
+    let zero_speed = clamp(fp_f32(FP_CHEM_SPEED_EQUIL_BETA), 0.0, full_speed);
+    let susp = clamp((length(vel_fluid) - zero_speed) / max(full_speed - zero_speed, 1e-6), 0.0, 1.0);
+    let env_idx = gamma_index(x, y);
+    let chem_c = chem_grid[env_idx];
+    let tracer_gain = susp * 0.08;
+    dye_val.y = min(dye_val.y + clamp(chem_c.x + chem_c.y, 0.0, 1.0) * tracer_gain, 1.0);
+    dye_val.x = min(dye_val.x + clamp(chem_c.z + chem_c.w, 0.0, 1.0) * tracer_gain, 1.0);
+
     let escape_rate_alpha = max(fp_f32(FP_DYE_ESCAPE_RATE_ALPHA), 0.0);
     let escape_rate_beta = max(fp_f32(FP_DYE_ESCAPE_RATE_BETA), 0.0);
     let escape_factor_alpha = exp(-escape_rate_alpha * dt);
