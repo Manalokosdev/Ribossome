@@ -3127,9 +3127,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             else if (next_base == 71u) { comp_ch = 3u; } // G pairs a free C
             else if (next_base == 67u) { comp_ch = 2u; } // C pairs a free G
 
-            // Sample the cell under a rotating body part so replication drains
-            // the whole body footprint instead of a single cell.
-            let site_part = agents_out[agent_id].body[pairing_counter % max(body_count, 1u)];
+            // Replication happens at the body part ENCODED by the genome
+            // position being paired: map the gene position linearly onto the
+            // body chain, so the replication site walks head->tail with the
+            // counter and absorbs the complement where that part sits.
+            let site_index = min(
+                (pairing_counter * body_count) / max(agent_gene_length, 1u),
+                max(body_count, 1u) - 1u
+            );
+            let site_part = agents_out[agent_id].body[site_index];
             let site_pos = agent_pos + apply_agent_rotation(site_part.pos, agent_rot);
             let pos_idx = grid_index(site_pos);
             var cell = chem_grid[pos_idx];

@@ -3403,7 +3403,7 @@ impl Default for SimulationSettings {
             gamma_shift: 0.0,
             alpha_slope_bias: -5.0,
             beta_slope_bias: 5.0,
-            alpha_multiplier: 0.0001,
+            alpha_multiplier: 0.0, // Closed world: no monomer rain by default
             beta_multiplier: 0.0,
             dye_precipitation: 1.0,
             alpha_rain_map_path: None,
@@ -5342,8 +5342,8 @@ impl GpuState {
             gamma_shift: 0.0,
             alpha_slope_bias: -5.0,
             beta_slope_bias: 5.0,
-            alpha_multiplier: 0.0001, // Rain probability: 0.01% per cell per frame
-            beta_multiplier: 0.0,     // Poison rain disabled
+            alpha_multiplier: 0.0, // Closed world: no monomer rain by default
+            beta_multiplier: 0.0,
             // NOTE: Repurposed padding: used by shaders as a boolean flag.
             // 0 = fluid simulation disabled (dye layer is visual/sensing only)
             // 1 = fluid simulation enabled
