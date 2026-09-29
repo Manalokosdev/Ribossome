@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.8648719,
+  "camera_zoom": 2.9559715,
   "spawn_probability": 0.5,
   "death_probability": 0.001,
   "mutation_rate": 0.005,
@@ -54,7 +54,7 @@
   "fluid_show": true,
   "fluid_dt": 0.015,
   "fluid_decay": 0.98,
-  "fluid_jacobi_iters": 40,
+  "fluid_jacobi_iters": 10,
   "fluid_vorticity": 40.0,
   "fluid_viscosity": 3.7,
   "fluid_ooze_rate": 1.0,
@@ -74,7 +74,7 @@
   "fluid_chem_deposit_mult_alpha": 1.0,
   "fluid_chem_deposit_mult_beta": 1.0,
   "fluid_chem_deposit_mult_gamma": 0.0,
-  "fluid_wind_push_strength": 1.2,
+  "fluid_wind_push_strength": 0.01,
   "vector_force_power": 0.0,
   "vector_force_x": 0.0,
   "vector_force_y": 0.01,
@@ -136,8 +136,8 @@
       "max_threshold": 55000.0,
       "adjustment_percent": 20.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 50860,
-      "difficulty_level": -5
+      "last_adjustment_epoch": 49992,
+      "difficulty_level": 5
     },
     "alpha_rain": {
       "enabled": false,

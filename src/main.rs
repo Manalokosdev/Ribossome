@@ -4218,6 +4218,7 @@ struct GpuState {
     species_heatmap_enabled: bool,      // Show phenotype distance heatmap from selected agent
     species_bucket_size: u32,           // Quantization bucket for species hash (higher = fewer species, more tolerance)
     nucleotide_debug_mask: u32,         // Keys 1-4 toggle RGBW view of A/U/G/C concentrations
+    env_gen_level: f32,                 // Amplitude for env Generate (flat value / noise peak)
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
@@ -7850,6 +7851,7 @@ impl GpuState {
             species_heatmap_enabled: false,
             species_bucket_size: 3,
             nucleotide_debug_mask: 0,
+            env_gen_level: 0.02,
             last_autosave_epoch: 0,
             last_autosave_time: std::time::Instant::now(),
 
@@ -15892,22 +15894,22 @@ fn main() {
 
                                                         ui.separator();
                                                         ui.heading("Alpha Controls");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.env_gen_level, 0.001..=0.5)
+                                                                .logarithmic(true)
+                                                                .text("Level (flat value / noise peak)")
+                                                                .custom_formatter(|n, _| format!("{:.3}", n)),
+                                                        );
                                                         ui.horizontal(|ui| {
-                                                            if ui.button("Set Flat 0.0").clicked() {
+                                                            if ui.button("Clear").clicked() {
                                                                 state.generate_map(1, 0, 0.0, 0);
                                                             }
-                                                            if ui.button("Set Flat 0.05").clicked() {
-                                                                state.generate_map(1, 0, 0.05, 0);
+                                                            if ui.button("Set Flat (level)").clicked() {
+                                                                state.generate_map(1, 0, state.env_gen_level, 0);
                                                             }
-                                                            if ui.button("Set Flat 0.1").clicked() {
-                                                                state.generate_map(1, 0, 0.1, 0);
-                                                            }
-                                                            if ui.button("Set Flat 0.5").clicked() {
-                                                                state.generate_map(1, 0, 0.5, 0);
-                                                            }
-                                                            if ui.button("Generate Noise").clicked() {
+                                                            if ui.button("Noise (level)").clicked() {
                                                                 let seed = rand::random::<u32>();
-                                                                state.generate_map(1, 1, 0.0, seed);
+                                                                state.generate_map(1, 1, state.env_gen_level, seed);
                                                             }
                                                         });
                                                         ui.add(
@@ -15979,18 +15981,12 @@ fn main() {
                                                             if ui.button("Set Flat 0.0").clicked() {
                                                                 state.generate_map(2, 0, 0.0, 0);
                                                             }
-                                                            if ui.button("Set Flat 0.05").clicked() {
-                                                                state.generate_map(2, 0, 0.05, 0);
+                                                            if ui.button("Set Flat (level)").clicked() {
+                                                                state.generate_map(2, 0, state.env_gen_level, 0);
                                                             }
-                                                            if ui.button("Set Flat 0.1").clicked() {
-                                                                state.generate_map(2, 0, 0.1, 0);
-                                                            }
-                                                            if ui.button("Set Flat 0.5").clicked() {
-                                                                state.generate_map(2, 0, 0.5, 0);
-                                                            }
-                                                            if ui.button("Generate Noise").clicked() {
+                                                            if ui.button("Noise (level)").clicked() {
                                                                 let seed = rand::random::<u32>();
-                                                                state.generate_map(2, 1, 0.0, seed);
+                                                                state.generate_map(2, 1, state.env_gen_level, seed);
                                                             }
                                                         });
                                                         ui.add(

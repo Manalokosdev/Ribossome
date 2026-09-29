@@ -4358,6 +4358,11 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
         let coord = vec2<f32>(f32(x), f32(y)) / f32(GRID_SIZE);
         output_value = layered_noise(coord, seed, octaves, scale, contrast);
         output_value = pow(clamp(output_value, 0.0, 1.0), power);
+        // Amplitude scaling: when a level (> 0) is passed with noise, the
+        // noise peaks at that level instead of 1.0 (scarce patchy worlds).
+        if (value > 0.0) {
+            output_value *= value;
+        }
     }
 
     if (mode == 1u) {
