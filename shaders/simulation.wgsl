@@ -3358,6 +3358,9 @@ fn diffuse_grids_pair(gid: vec3<u32>, pair: u32) {
 // everything is available (legacy behavior).
 fn suspension_factor(world_pos: vec2<f32>) -> f32 {
     if (params._pad_rain0 == 0u) { return 1.0; }
+    // Levitation speed <= 0 disables the gate entirely (everything is
+    // bio-available) — fail-safe so weak currents can't starve the world.
+    if (params.suspend_full_speed <= 0.0) { return 1.0; }
     let p = clamp_position(world_pos);
     let fx = min(u32(p.x * f32(FLUID_GRID_SIZE) / f32(SIM_SIZE)), FLUID_GRID_SIZE - 1u);
     let fy = min(u32(p.y * f32(FLUID_GRID_SIZE) / f32(SIM_SIZE)), FLUID_GRID_SIZE - 1u);

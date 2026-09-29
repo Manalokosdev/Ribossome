@@ -187,6 +187,11 @@ var<uniform> params: SimParams;
 // - z = gamma (blue)
 var<storage, read> fluid_dye: array<vec4<f32>>;
 
+@group(0) @binding(4)
+// Monomer field (x=A, y=U, z=G, w=C) — used to tint the dye with the same
+// palette as the deposit render.
+var<storage, read> chem_grid: array<vec4<f32>>;
+
 @compute @workgroup_size(16, 16)
 fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (params.draw_enabled == 0u) { return; }
@@ -250,17 +255,26 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Simple Reinhard tone map per-channel: x / (1 + x)
             let dye_tm = dye_lin / (vec2<f32>(1.0, 1.0) + dye_lin);
 
-            // Composite dye using independent dye colors, but reusing alpha/beta blend mode + gamma controls.
-            var alpha_color = vec3<f32>(
-                clamp(params.dye_alpha_color_r, 0.0, 1.0),
-                clamp(params.dye_alpha_color_g, 0.0, 1.0),
-                clamp(params.dye_alpha_color_b, 0.0, 1.0)
+            // Unified palette: the dye uses the SAME colors as the deposit —
+            // the pool colors (alpha_color for A+U, beta_color for G+C),
+            // tinted by the local monomer ratio exactly like the env render.
+            let cc = chem_grid[dye_idx];
+            let pool_au = cc.x + cc.y;
+            let pool_gc = cc.z + cc.w;
+            let ratio_u = select(0.5, cc.y / max(pool_au, 1e-6), pool_au > 1e-6);
+            let ratio_c = select(0.5, cc.w / max(pool_gc, 1e-6), pool_gc > 1e-6);
+            let alpha_base = vec3<f32>(
+                clamp(params.alpha_color_r, 0.0, 1.0),
+                clamp(params.alpha_color_g, 0.0, 1.0),
+                clamp(params.alpha_color_b, 0.0, 1.0)
             );
-            var beta_color = vec3<f32>(
-                clamp(params.dye_beta_color_r, 0.0, 1.0),
-                clamp(params.dye_beta_color_g, 0.0, 1.0),
-                clamp(params.dye_beta_color_b, 0.0, 1.0)
+            let beta_base = vec3<f32>(
+                clamp(params.beta_color_r, 0.0, 1.0),
+                clamp(params.beta_color_g, 0.0, 1.0),
+                clamp(params.beta_color_b, 0.0, 1.0)
             );
+            var alpha_color = mix(alpha_base, alpha_base.brg, ratio_u);
+            var beta_color = mix(beta_base, beta_base.gbr, ratio_c);
 
             // Thin-film mode: reuse padding float as (enable + phase multiplier).
             // If multiplier > 0, dye is colored by thin-film palette; otherwise uses flat tint.

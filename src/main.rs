@@ -5811,6 +5811,17 @@ impl GpuState {
                     },
                     count: None,
                 },
+                // Monomer field for unified dye tinting
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -6424,6 +6435,7 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 1, resource: agent_grid_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: fluid_dye_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: chem_grid.as_entire_binding() },
             ],
         });
         profiler.mark("Composite bind group");
@@ -8697,6 +8709,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.fluid_dye_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.chem_grid.as_entire_binding(),
                 },
             ],
         });
@@ -12769,6 +12785,10 @@ impl GpuState {
                             binding: 3,
                             resource: self.fluid_dye_a.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.chem_grid.as_entire_binding(),
+                        },
                     ],
                 });
 
@@ -15814,7 +15834,7 @@ fn main() {
                                                         // above full-speed. Reuse legacy ooze-rate settings fields.
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_ooze_rate, 0.0..=20.0)
-                                                                .text("Levitation Speed (fully suspended)")
+                                                                .text("Levitation Speed (0 = gate off)")
                                                                 .custom_formatter(|n, _| format!("{:.2}", n)),
                                                         );
                                                         ui.add(
@@ -16549,9 +16569,30 @@ fn main() {
                                                         ui.checkbox(&mut state.fluid_show, "Show Fluid Overlay")
                                                             .on_hover_text("Visualize propeller-driven fluid simulation (experimental)");
 
+                                                        // Quick view modes: deposit (settled chem), dye (suspended
+                                                        // tracer), or both — all with the same monomer palette.
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("View:");
+                                                            if ui.button("Deposit").clicked() {
+                                                                state.alpha_show = true;
+                                                                state.beta_show = true;
+                                                                state.fluid_show = false;
+                                                            }
+                                                            if ui.button("Dye").clicked() {
+                                                                state.alpha_show = false;
+                                                                state.beta_show = false;
+                                                                state.fluid_show = true;
+                                                            }
+                                                            if ui.button("Both").clicked() {
+                                                                state.alpha_show = true;
+                                                                state.beta_show = true;
+                                                                state.fluid_show = true;
+                                                            }
+                                                        });
+
                                                         ui.add_space(4.0);
                                                         ui.label("Fluid Dye Compositing");
-                                                        ui.label("Note: dye uses independent colors, but reuses Alpha/Beta blend + gamma controls.");
+                                                        ui.label("Dye now uses the SAME monomer palette as the deposit (alpha/beta colors + ratio tint).");
 
                                                         ui.separator();
                                                         ui.label("Dye Alpha");
