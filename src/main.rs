@@ -2856,7 +2856,7 @@ struct SimParams {
     alpha_multiplier: f32,
     beta_multiplier: f32,
     _pad_rain0: u32,
-    _pad_rain1: u32,
+    suspend_full_speed: f32,
     // Targeted rain dispatch: number of rain drops to spawn this frame
     rain_drop_count: u32,
     alpha_rain_drop_count: u32,
@@ -2969,7 +2969,7 @@ struct SimParams {
     species_heatmap: u32,
     species_bucket_size: u32,
     nucleotide_debug_mask: u32,
-    _pad_species: u32,
+    suspend_zero_speed: f32,
 }
 
 #[repr(C)]
@@ -5355,7 +5355,7 @@ impl GpuState {
             // 1 = fluid simulation enabled
             // This is just the initial value; the per-frame uniform upload overrides it.
             _pad_rain0: 1,
-            _pad_rain1: 0,
+            suspend_full_speed: 2.0,
             rain_drop_count: 0,
             alpha_rain_drop_count: 0,
             dye_precipitation: 1.0,
@@ -5450,7 +5450,7 @@ impl GpuState {
             species_heatmap: 0,
             species_bucket_size: 3,
             nucleotide_debug_mask: 0,
-            _pad_species: 0,
+            suspend_zero_speed: 0.2,
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -9647,7 +9647,9 @@ impl GpuState {
             // 0 = fluid simulation disabled (dye layer is visual/sensing only)
             // 1 = fluid simulation enabled
             _pad_rain0: if self.fluid_enabled { 1 } else { 0 },
-            _pad_rain1: 0,
+            // Monomer levitation thresholds (reuse legacy ooze-rate settings
+            // fields): fully suspended at/above full, fully settled at/below zero.
+            suspend_full_speed: self.fluid_ooze_rate.max(0.0),
             // Calculate expected rain drops for targeted dispatch
             // Expected drops = grid_cells * multiplier * 0.00005 * avg_rain_map
             // For simplicity, assume avg_rain_map ~= 1.0 (can refine later)
@@ -9804,7 +9806,7 @@ impl GpuState {
             species_heatmap: if self.species_heatmap_enabled { 1 } else { 0 },
             species_bucket_size: self.species_bucket_size.max(1),
             nucleotide_debug_mask: self.nucleotide_debug_mask,
-            _pad_species: 0,
+            suspend_zero_speed: self.fluid_ooze_rate_beta.max(0.0),
         };
 
         // Keep CPU mirror in sync with the GPU uniform buffer.
@@ -15807,10 +15809,19 @@ fn main() {
                                                                 .text("Env Persistence"),
                                                         );
 
-                                                        // Legacy lift/sedimentation controls removed: the dye layer is
-                                                        // purely visual now — no matter (monomers or gamma) passes
-                                                        // through it. Monomer suspension is speed-based in
-                                                        // simulation.wgsl (suspension_factor).
+                                                        // Monomer levitation thresholds (drive suspension_factor in
+                                                        // simulation.wgsl): settled below zero-speed, fully suspended
+                                                        // above full-speed. Reuse legacy ooze-rate settings fields.
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.fluid_ooze_rate, 0.0..=20.0)
+                                                                .text("Levitation Speed (fully suspended)")
+                                                                .custom_formatter(|n, _| format!("{:.2}", n)),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.fluid_ooze_rate_beta, 0.0..=20.0)
+                                                                .text("Precipitation Speed (fully settled)")
+                                                                .custom_formatter(|n, _| format!("{:.2}", n)),
+                                                        );
 
                                                         ui.add(
                                                             egui::Slider::new(

@@ -73,7 +73,7 @@ struct SimParams {
     alpha_multiplier: f32,
     beta_multiplier: f32,
     _pad_rain0: u32,
-    _pad_rain1: u32,
+    suspend_full_speed: f32,
     rain_drop_count: u32,
     alpha_rain_drop_count: u32,
     dye_precipitation: f32,
@@ -168,7 +168,7 @@ struct SimParams {
     species_heatmap: u32,
     species_bucket_size: u32,
     nucleotide_debug_mask: u32,
-    _pad_species_1: u32,
+    suspend_zero_speed: f32,
 }
 
 @group(0) @binding(0)

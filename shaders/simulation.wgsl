@@ -3352,18 +3352,19 @@ fn diffuse_grids_pair(gid: vec3<u32>, pair: u32) {
 // Strength = params.alpha_fluid_convolution (0 = off).
 
 // "Levitated vs precipitated": monomers are bio-available only where the
-// fluid locally suspends them — 0 in still water (settled bed), 1 at full
-// suspension (local speed >= SUSPEND_FULL_SPEED). With fluids disabled,
+// fluid locally suspends them — fully settled (0) at/below
+// params.suspend_zero_speed, fully levitated (1) at/above
+// params.suspend_full_speed, linear ramp in between. With fluids disabled,
 // everything is available (legacy behavior).
-const SUSPEND_FULL_SPEED: f32 = 2.0;
-
 fn suspension_factor(world_pos: vec2<f32>) -> f32 {
     if (params._pad_rain0 == 0u) { return 1.0; }
     let p = clamp_position(world_pos);
     let fx = min(u32(p.x * f32(FLUID_GRID_SIZE) / f32(SIM_SIZE)), FLUID_GRID_SIZE - 1u);
     let fy = min(u32(p.y * f32(FLUID_GRID_SIZE) / f32(SIM_SIZE)), FLUID_GRID_SIZE - 1u);
     let v = fluid_velocity[fy * FLUID_GRID_SIZE + fx];
-    return clamp(length(v) / SUSPEND_FULL_SPEED, 0.0, 1.0);
+    let full = max(params.suspend_full_speed, 1e-6);
+    let zero = clamp(params.suspend_zero_speed, 0.0, full);
+    return clamp((length(v) - zero) / max(full - zero, 1e-6), 0.0, 1.0);
 }
 
 fn chem_advect_frac(x: u32, y: u32) -> vec2<f32> {
