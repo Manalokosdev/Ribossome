@@ -188,9 +188,11 @@ const SPIKE_KILL_COST_BASE: f32 = 0.02;
 const SPIKE_KILL_COST_FRAC_OF_VICTIM: f32 = 0.00;
 
 // Decomposition tuning:
-// RNA-world whole-body uptake: max monomer mass a part of mass 1.0 can absorb
-// from the cell under it per frame (scaled by part mass and agent stillness).
-const PART_UPTAKE_RATE: f32 = 0.01;
+// RNA-world whole-body uptake: FRACTION of the local cell's monomers a part
+// of mass 1.0 absorbs per frame (first-order kinetics — absorption rate is
+// proportional to local abundance, so rich zones feed fast and poor zones
+// feed slowly). Scaled by part mass and agent stillness.
+const PART_UPTAKE_FRAC: f32 = 0.02;
 
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -2743,12 +2745,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Only suspended (levitated) monomers are absorbable; settled
                 // matter in still water is inert until a current stirs it.
                 let susp = suspension_factor(world_pos);
-                var rate = PART_UPTAKE_RATE * max(props.mass, 0.1) * speed_mult * susp;
+                // First-order kinetics: absorb a FRACTION of what is locally
+                // present, so uptake rate tracks abundance directly.
+                var frac = clamp(PART_UPTAKE_FRAC * max(props.mass, 0.1) * speed_mult * susp, 0.0, 1.0);
                 // Closed world: never absorb more than the energy capacity can
                 // hold (overflow would be clamped away = destroyed mass).
                 let yield_per_mass = max(params.food_power * food_power_multiplier, 1e-6);
-                rate = min(rate, max(capacity - agent_energy_cur, 0.0) / yield_per_mass);
-                let frac = clamp(rate / total_avail, 0.0, 1.0);
+                let headroom_mass = max(capacity - agent_energy_cur, 0.0) / yield_per_mass;
+                let would_consume = total_avail * frac;
+                if (would_consume > headroom_mass) {
+                    frac = headroom_mass / max(total_avail, 1e-6);
+                }
                 let consumed = cell * frac;
                 cell -= consumed;
                 chem_grid[idx] = cell;
