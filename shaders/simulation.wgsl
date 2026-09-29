@@ -2740,7 +2740,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Stiller bodies absorb more (same foraging tradeoff mouths had).
                 let speed_norm = clamp(length(agent_velocity) / VEL_MAX, 0.0, 1.0);
                 let speed_mult = exp(-4.0 * speed_norm);
-                var rate = PART_UPTAKE_RATE * max(props.mass, 0.1) * speed_mult;
+                // Only suspended (levitated) monomers are absorbable; settled
+                // matter in still water is inert until a current stirs it.
+                let susp = suspension_factor(world_pos);
+                var rate = PART_UPTAKE_RATE * max(props.mass, 0.1) * speed_mult * susp;
                 // Closed world: never absorb more than the energy capacity can
                 // hold (overflow would be clamped away = destroyed mass).
                 let yield_per_mass = max(params.food_power * food_power_multiplier, 1e-6);
@@ -3147,8 +3150,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let energy_scaled = sqrt(energy_for_pair);
 
             // Pairing speed scales with local complement abundance; matter is a
-            // hard requirement — at least one monomer's worth must be present.
-            let pairing_drive = clamp(avail / (PAIRING_MONOMER_COST * 4.0), 0.0, 1.0);
+            // hard requirement — at least one monomer's worth must be present,
+            // and only suspended (levitated) monomers can be captured.
+            let pairing_drive = clamp(avail / (PAIRING_MONOMER_COST * 4.0), 0.0, 1.0)
+                * suspension_factor(site_pos);
 
             let base_p = params.spawn_probability * energy_scaled * 0.1;
             let pair_p = clamp(base_p * pairing_drive, 0.0, 1.0);
@@ -3343,6 +3348,21 @@ fn diffuse_grids_pair(gid: vec3<u32>, pair: u32) {
 // fluid velocity field. Mass-conserving by construction: every outflow is a
 // neighbor's inflow, and no flux crosses the world boundary.
 // Strength = params.alpha_fluid_convolution (0 = off).
+
+// "Levitated vs precipitated": monomers are bio-available only where the
+// fluid locally suspends them — 0 in still water (settled bed), 1 at full
+// suspension (local speed >= SUSPEND_FULL_SPEED). With fluids disabled,
+// everything is available (legacy behavior).
+const SUSPEND_FULL_SPEED: f32 = 2.0;
+
+fn suspension_factor(world_pos: vec2<f32>) -> f32 {
+    if (params._pad_rain0 == 0u) { return 1.0; }
+    let p = clamp_position(world_pos);
+    let fx = min(u32(p.x * f32(FLUID_GRID_SIZE) / f32(SIM_SIZE)), FLUID_GRID_SIZE - 1u);
+    let fy = min(u32(p.y * f32(FLUID_GRID_SIZE) / f32(SIM_SIZE)), FLUID_GRID_SIZE - 1u);
+    let v = fluid_velocity[fy * FLUID_GRID_SIZE + fx];
+    return clamp(length(v) / SUSPEND_FULL_SPEED, 0.0, 1.0);
+}
 
 fn chem_advect_frac(x: u32, y: u32) -> vec2<f32> {
     // Sample fluid velocity (FLUID_GRID_SIZE) at this env cell (GRID_SIZE).
@@ -4067,15 +4087,12 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Use constant values for fast startup (can be overridden by loading terrain images)
     // Initialize with chemistry values and rain maps from texture
-    // Monomer channels: split each legacy pool evenly between its two bases.
+    // Primordial soup: equal amounts of all four monomers. The universe's
+    // budget is (alpha_range + beta_range); each element gets a quarter.
     // Rain map multipliers stay in rain_map_tex (read directly at use sites).
     let _unused_rain = vec2<f32>(alpha_rain_map, beta_rain_map);
-    chem_grid[idx] = vec4<f32>(
-        environment_init.alpha_range.x * 0.5,
-        environment_init.alpha_range.x * 0.5,
-        environment_init.beta_range.x * 0.5,
-        environment_init.beta_range.x * 0.5
-    );
+    let total_init = environment_init.alpha_range.x + environment_init.beta_range.x;
+    chem_grid[idx] = vec4<f32>(total_init * 0.25);
     gamma_grid[idx] = 0.0;
 
     gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = environment_init.slope_pair.x;

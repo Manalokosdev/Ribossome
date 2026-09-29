@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 5.804542,
+  "camera_zoom": 2.4048553,
   "spawn_probability": 0.5,
   "death_probability": 0.001,
   "mutation_rate": 0.005,
@@ -50,7 +50,7 @@
   "gamma_debug_visual": false,
   "slope_debug_visual": false,
   "rain_debug_visual": false,
-  "fluid_enabled": false,
+  "fluid_enabled": true,
   "fluid_show": true,
   "fluid_dt": 0.015,
   "fluid_decay": 0.79,
@@ -136,8 +136,8 @@
       "max_threshold": 55000.0,
       "adjustment_percent": 20.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 2047432,
-      "difficulty_level": 18
+      "last_adjustment_epoch": 0,
+      "difficulty_level": 0
     },
     "alpha_rain": {
       "enabled": false,
