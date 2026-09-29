@@ -2266,22 +2266,38 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 slope_gradient += gravity_vector;
             }
 
-            // Slope acts as a modifier to existing motion, not as a direct force
-            // Only affects agents that are already moving
-            let agent_speed = length(agent_velocity);
-            if (agent_speed > 0.01) {
-                // Direction of movement
-                let velocity_dir = agent_velocity / agent_speed;
-                // Project slope onto movement direction: negative = uphill, positive = downhill
-                let slope_alignment = dot(-slope_gradient, velocity_dir);
+            let slope_mag = length(slope_gradient);
 
-                // Linear mass scaling: mass=0.2 has 5× less effect than mass=1.0
-                let mass_factor = part_mass;
+            // Dead zone: ignore slopes below a minimum magnitude to prevent
+            // floating-point noise on flat terrain from creating phantom drag.
+            let SLOPE_DEAD_ZONE: f32 = 0.01;
 
-                // Apply force along velocity direction: slows when uphill, speeds when downhill
-                let slope_force = velocity_dir * slope_alignment * params.gamma_strength * mass_factor;
-                force += slope_force;
-                torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
+            if (slope_mag > SLOPE_DEAD_ZONE) {
+                // Velocity-aligned slope force (slows uphill, speeds downhill)
+                let agent_speed = length(agent_velocity);
+                if (agent_speed > 0.01) {
+                    let velocity_dir = agent_velocity / agent_speed;
+                    let slope_alignment = dot(-slope_gradient, velocity_dir);
+                    let mass_factor = part_mass;
+                    let slope_force = velocity_dir * slope_alignment * params.gamma_strength * mass_factor;
+                    force += slope_force;
+                    torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
+                }
+
+                // Obstacle barrier: push agents away from steep terrain.
+                // Acts as a direct repulsion force perpendicular to the slope (downhill),
+                // preventing agents from crossing ridges and obstacles.
+                let obstacle_k = params.fluid_obstacle_strength;
+                if (obstacle_k > 0.0 && slope_mag > SLOPE_DEAD_ZONE * 10.0) {
+                    // Force points downhill (opposite to gradient = uphill direction)
+                    let downhill = -slope_gradient / slope_mag;
+                    // Strength scales with slope steepness and obstacle_strength parameter.
+                    // Use a soft threshold so gentle slopes don't block, but steep ones do.
+                    let steepness = clamp((slope_mag - SLOPE_DEAD_ZONE * 10.0) * 2.0, 0.0, 1.0);
+                    let barrier_force = downhill * steepness * obstacle_k * part_mass * 0.5;
+                    force += barrier_force;
+                    torque += (r_com.x * barrier_force.y - r_com.y * barrier_force.x);
+                }
             }
         }
 
@@ -3173,8 +3189,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Otherwise, use probability-based death:
     // - Energy-based: death probability inversely proportional to energy (starvation)
-    // - Genome-size-based: death probability proportional to sqrt(gene_length)
-    //   (longer genes die more often, but sublinearly; GENOME_BYTES length keeps multiplier ~= 1)
+    // Complexity is paid through energy (per-part maintenance + slower replication:
+    // pairing_counter must reach gene_length), NOT through a death lottery — no
+    // gene-length multiplier here.
     if (!should_die) {
         let death_seed = agent_id * 2654435761u + params.random_seed * 1103515245u;
         let death_rnd = f32(hash(death_seed)) / 4294967295.0;
@@ -3186,15 +3203,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let energy_divisor = max(agent_energy_cur, 0.01);
         let energy_adjusted_death_prob = params.death_probability / energy_divisor;
 
-        // Gene size modifier: scale death probability by sqrt(gene_length) / sqrt(GENOME_BYTES).
-        // gene_length is in bases (0..GENOME_BYTES). Clamp to avoid div-by-zero.
-        let gene_len = max(f32(agent_gene_length), 1.0);
-        let gene_size_mult = sqrt(gene_len) / sqrt(f32(GENOME_BYTES));
-
         // Population pressure modifier (disabled for debugging):
         // When enabled, this multiplies death probability by 2^(floor(population_count / 20000)).
         let pop_mult = 1.0;
-        let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * gene_size_mult, 0.0, 1.0);
+        let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult, 0.0, 1.0);
 
         should_die = death_rnd < final_death_prob;
     }
@@ -4110,6 +4122,84 @@ fn fs_inspector_overlay(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<
     let local_x = x - start_x;
 
     return inspector_panel_pixel(local_x, y);
+}
+
+// ============================================================================
+// SPECIES HASH (phenotype fingerprint for fast species counting)
+// ============================================================================
+
+// Species hash buffer lives in group 1 to stay within the 16 storage buffer limit on group 0.
+@group(1) @binding(0)
+var<storage, read_write> species_hash_buffer: array<u32>;
+
+@compute @workgroup_size(256)
+fn compute_species_hash(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let agent_id = gid.x;
+    if (agent_id >= params.max_agents) {
+        return;
+    }
+
+    let alive = agents_out[agent_id].alive;
+    let body_count = agents_out[agent_id].body_count;
+
+    if (alive == 0u || body_count < 3u) {
+        species_hash_buffer[agent_id] = 0u;
+        return;
+    }
+
+    // Two-layer species hash with quantized tolerance:
+    // 1) Bag-of-parts: counts of each part type (order-independent composition)
+    // 2) Bigrams: counts of consecutive part-type pairs (captures local structure/order)
+    // Both layers are quantized by bucket_size for distance tolerance.
+    let bucket = max(params.species_bucket_size, 1u);
+    let bc = min(body_count, MAX_BODY_PARTS);
+
+    // Layer 1: part-type histogram
+    var counts: array<u32, 48>;
+    for (var i = 0u; i < 48u; i++) {
+        counts[i] = 0u;
+    }
+    for (var i = 0u; i < bc; i++) {
+        let pt = get_base_part_type(agents_out[agent_id].body[i].part_type);
+        if (pt < 48u) {
+            counts[pt] += 1u;
+        }
+    }
+
+    // Layer 2: bigram histogram (consecutive part-type pairs)
+    // Hash bigrams directly into h to avoid a huge 48x48 array.
+    // Use a rolling hash: for each consecutive pair, mix the pair identity into h.
+    let quantized_bc = ((body_count + bucket / 2u) / bucket) * bucket;
+
+    var h = 2166136261u;
+    h = h ^ quantized_bc;
+    h = h * 16777619u;
+
+    // Mix in quantized unigram counts (composition)
+    for (var i = 0u; i < 48u; i++) {
+        let q = ((counts[i] + bucket / 2u) / bucket) * bucket;
+        if (q > 0u) {
+            h = h ^ (i | (q << 8u));
+            h = h * 16777619u;
+        }
+    }
+
+    // Mix in bigrams (structure/order) — quantized by skipping every `bucket` parts
+    // so small insertions don't shift all bigrams
+    var prev_pt = get_base_part_type(agents_out[agent_id].body[0u].part_type);
+    for (var i = 1u; i < bc; i++) {
+        let cur_pt = get_base_part_type(agents_out[agent_id].body[i].part_type);
+        // Quantize position: only include bigram at bucket boundaries
+        // This makes the bigram set stable under small insertions/deletions
+        if ((i % bucket) == 0u) {
+            let bigram = prev_pt | (cur_pt << 8u);
+            h = h ^ bigram;
+            h = h * 16777619u;
+        }
+        prev_pt = cur_pt;
+    }
+
+    species_hash_buffer[agent_id] = select(h, 1u, h == 0u);
 }
 
 // ============================================================================

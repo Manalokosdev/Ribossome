@@ -2121,29 +2121,6 @@ fn genome_pack_ascii_words(
 }
 
 
-/// Levenshtein edit distance between two phenotype sequences (part-type lists).
-/// Handles insertions, deletions, and substitutions so length differences don't
-/// cause false species splits. Bails early if distance exceeds `max_dist` for speed.
-fn phenotype_edit_distance(a: &[u8], b: &[u8]) -> u32 {
-    let (m, n) = (a.len(), b.len());
-
-    // Single-row Levenshtein
-    let mut prev: Vec<u32> = (0..=(n as u32)).collect();
-    let mut curr = vec![0u32; n + 1];
-
-    for i in 1..=m {
-        curr[0] = i as u32;
-        for j in 1..=n {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)          // deletion
-                .min(curr[j - 1] + 1)        // insertion
-                .min(prev[j - 1] + cost);    // substitution
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-
-    prev[n]
-}
 
 #[inline]
 fn genome_base_color(base: u8) -> egui::Color32 {
@@ -2990,7 +2967,8 @@ struct SimParams {
     dye_beta_color_b: f32,
     _pad_dye_beta_color: f32,
     species_heatmap: u32,
-    _pad_species: [u32; 3],
+    species_bucket_size: u32,
+    _pad_species: [u32; 2],
 }
 
 #[repr(C)]
@@ -3124,6 +3102,7 @@ fn default_fluid_chem_lift_mult_gamma() -> f32 { 0.0 }
 fn default_fluid_chem_deposit_mult_alpha() -> f32 { 1.0 }
 fn default_fluid_chem_deposit_mult_beta() -> f32 { 1.0 }
 fn default_fluid_chem_deposit_mult_gamma() -> f32 { 0.0 }
+fn default_fluid_wind_push_strength() -> f32 { 0.0005 }
 
 fn default_microswim_enabled() -> bool { true }
 fn default_propellers_enabled() -> bool { true }
@@ -3321,6 +3300,7 @@ struct SimulationSettings {
     fluid_chem_deposit_mult_beta: f32,
     #[serde(default = "default_fluid_chem_deposit_mult_gamma")]
     fluid_chem_deposit_mult_gamma: f32,
+    #[serde(default = "default_fluid_wind_push_strength")]
     fluid_wind_push_strength: f32, // Global multiplier for how much fluid pushes agents
     vector_force_power: f32,  // Global force multiplier (0.0 = off)
     vector_force_x: f32,      // Force direction X (-1.0 to 1.0)
@@ -3835,8 +3815,9 @@ impl SimulationSettings {
         self.pairing_cost = self.pairing_cost.clamp(0.0, 1.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         // Back-compat: older settings files won't have the fluid prop-wash strength.
-        // Use -1 sentinel default to mean "inherit direct wash".
-        if self.prop_wash_strength_fluid < 0.0 {
+        // Use the exact sentinel value -1.0 to mean "inherit direct wash".
+        // Negative values other than the sentinel are intentional (e.g. reverse coupling).
+        if self.prop_wash_strength_fluid == default_prop_wash_strength_fluid_unset() {
             self.prop_wash_strength_fluid = self.prop_wash_strength;
         }
         self.prop_wash_strength_fluid = self.prop_wash_strength_fluid.clamp(-5.0, 5.0);
@@ -4000,6 +3981,10 @@ struct GpuState {
     microswim_params_cpu: [f32; MICROSWIM_PARAM_FLOATS],
     environment_init_cpu: EnvironmentInitParams,
     environment_init_params_buffer: wgpu::Buffer,
+    species_hash_buffer: wgpu::Buffer,
+    species_hash_readback: wgpu::Buffer,
+    species_hash_bind_group: wgpu::BindGroup,
+    compute_species_hash_pipeline: wgpu::ComputePipeline,
     spawn_debug_counters: wgpu::Buffer, // [spawn_counter, debug_counter, alive_counter]
     init_dead_dispatch_args: wgpu::Buffer, // Indirect dispatch args buffer for init-dead (x,y,z)
     init_dead_params_buffer: wgpu::Buffer, // 16-byte uniform: [max_agents, 0, 0, 0]
@@ -4219,11 +4204,10 @@ struct GpuState {
     // Species diversity tracking (genome Hamming-distance clustering)
     species_history: VecDeque<u32>,
     species_plot_points: Vec<[f64; 2]>,
-    species_sample_interval: u64,       // Sample every N epochs (10000)
     last_species_sample_epoch: u64,
-    species_hamming_threshold: u32,     // Max edit distance to be "same species"
     top_species: Vec<SpeciesInfo>,      // Top 10 species by population (updated with species count)
     species_heatmap_enabled: bool,      // Show phenotype distance heatmap from selected agent
+    species_bucket_size: u32,           // Quantization bucket for species hash (higher = fewer species, more tolerance)
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
@@ -5287,6 +5271,20 @@ impl GpuState {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
 
+        // Species hash buffer: one u32 per agent slot for GPU-computed phenotype hashes.
+        let species_hash_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Species Hash Buffer"),
+            size: (max_agents * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let species_hash_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Species Hash Readback"),
+            size: (max_agents * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Create visual grid buffer with 256-byte aligned row stride
         let bytes_per_pixel: u32 = 16; // Rgba32Float
         let align: u32 = 256;
@@ -5440,7 +5438,8 @@ impl GpuState {
             dye_beta_color_b: 0.0,
             _pad_dye_beta_color: 0.0,
             species_heatmap: 0,
-            _pad_species: [0; 3],
+            species_bucket_size: 3,
+            _pad_species: [0; 2],
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -6516,6 +6515,47 @@ impl GpuState {
                 cache: None,
             });
         profiler.mark("gamma slope pipeline");
+
+        // Species hash uses a separate bind group (group 1) for its output buffer
+        // to stay within the 16 storage buffer limit on group 0.
+        let species_hash_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Species Hash Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let species_hash_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Species Hash Bind Group"),
+            layout: &species_hash_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: species_hash_buffer.as_entire_binding(),
+            }],
+        });
+        let species_hash_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Species Hash Pipeline Layout"),
+                bind_group_layouts: &[&compute_bind_group_layout, &species_hash_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let compute_species_hash_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Compute Species Hash Pipeline"),
+                layout: Some(&species_hash_pipeline_layout),
+                module: &shader,
+                entry_point: "compute_species_hash",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        profiler.mark("species hash pipeline");
 
         let clear_visual_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -7601,6 +7641,10 @@ impl GpuState {
             agent_grid_buffer,
             params_buffer,
             environment_init_params_buffer,
+            species_hash_buffer,
+            species_hash_readback,
+            species_hash_bind_group,
+            compute_species_hash_pipeline,
             spawn_debug_counters,
             init_dead_dispatch_args,
             init_dead_params_buffer,
@@ -7735,11 +7779,10 @@ impl GpuState {
 
             species_history: VecDeque::new(),
             species_plot_points: Vec::new(),
-            species_sample_interval: 10000,
             last_species_sample_epoch: 0,
-            species_hamming_threshold: 6,
             top_species: Vec::new(),
             species_heatmap_enabled: false,
+            species_bucket_size: 3,
             last_autosave_epoch: 0,
             last_autosave_time: std::time::Instant::now(),
 
@@ -9704,7 +9747,8 @@ impl GpuState {
                 0.0
             },
             species_heatmap: if self.species_heatmap_enabled { 1 } else { 0 },
-            _pad_species: [0; 3],
+            species_bucket_size: self.species_bucket_size.max(1),
+            _pad_species: [0; 2],
         };
 
         // Keep CPU mirror in sync with the GPU uniform buffer.
@@ -11656,18 +11700,40 @@ impl GpuState {
     /// so a single added/removed/changed part doesn't create a new species.
     /// Reads back agent data from GPU (blocking), so call infrequently.
     fn count_species(&mut self) -> u32 {
-        let current_buffer = if self.ping_pong {
-            &self.agents_buffer_b
+        // Step 1: Dispatch GPU compute to hash each agent's phenotype.
+        let bg = if self.ping_pong {
+            &self.compute_bind_group_b
         } else {
-            &self.agents_buffer_a
+            &self.compute_bind_group_a
         };
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Species Count Encoder"),
+                label: Some("Species Hash Encoder"),
             });
 
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Species Hash Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.compute_species_hash_pipeline);
+            cpass.set_bind_group(0, bg, &[]);
+            cpass.set_bind_group(1, &self.species_hash_bind_group, &[]);
+            cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 255) / 256, 1, 1);
+        }
+
+        // Step 2: Copy hash buffer to readback.
+        let hash_size = (self.agent_buffer_capacity * std::mem::size_of::<u32>()) as u64;
+        encoder.copy_buffer_to_buffer(&self.species_hash_buffer, 0, &self.species_hash_readback, 0, hash_size);
+
+        // Also copy agents for thumbnail data (only needed for top 10 representatives).
+        let current_buffer = if self.ping_pong {
+            &self.agents_buffer_b
+        } else {
+            &self.agents_buffer_a
+        };
         encoder.copy_buffer_to_buffer(
             current_buffer,
             0,
@@ -11678,92 +11744,62 @@ impl GpuState {
 
         self.queue.submit(Some(encoder.finish()));
 
-        let slice = self.agents_readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
+        // Step 3: Read back hash buffer.
+        let hash_slice = self.species_hash_readback.slice(..);
+        let agents_slice = self.agents_readback.slice(..);
+        hash_slice.map_async(wgpu::MapMode::Read, |_| {});
+        agents_slice.map_async(wgpu::MapMode::Read, |_| {});
         self.device.poll(wgpu::Maintain::Wait);
 
         let species_count;
         {
-            let data = slice.get_mapped_range();
-            let agents: &[Agent] = bytemuck::cast_slice(&data);
+            let hash_data = hash_slice.get_mapped_range();
+            let hashes: &[u32] = bytemuck::cast_slice(&hash_data);
+            let agents_data = agents_slice.get_mapped_range();
+            let agents: &[Agent] = bytemuck::cast_slice(&agents_data);
+            let take_len = (self.agent_count as usize).min(hashes.len()).min(agents.len());
 
-            let take_len = (self.agent_count as usize).min(agents.len());
-
-            // Extract phenotype + body data for each living agent
-            struct AgentPheno {
-                pheno: Vec<u8>,
-                body_parts: Vec<([f32; 2], u32, f32)>, // (pos, base_type, size)
-            }
-
-            // Collect indices of living agents with enough body parts
-            let mut living_indices: Vec<usize> = Vec::new();
-            for (idx, agent) in agents.iter().enumerate().take(take_len) {
-                if agent.alive != 0 && agent.body_count >= 3 {
-                    living_indices.push(idx);
+            // Count occurrences of each hash (0 = dead/filtered, skip).
+            let mut hash_counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+            for &h in hashes.iter().take(take_len) {
+                if h != 0 {
+                    *hash_counts.entry(h).or_insert(0) += 1;
                 }
             }
 
-            // Sample up to 2000 agents for performance (deterministic stride sampling)
-            const MAX_SPECIES_SAMPLE: usize = 2000;
-            let sample_stride = if living_indices.len() > MAX_SPECIES_SAMPLE {
-                living_indices.len() / MAX_SPECIES_SAMPLE
-            } else {
-                1
-            };
-            let mut living: Vec<AgentPheno> = Vec::new();
-            for &idx in living_indices.iter().step_by(sample_stride) {
-                let agent = &agents[idx];
-                let body_len = (agent.body_count as usize).min(MAX_BODY_PARTS);
-                let pheno: Vec<u8> = (0..body_len)
-                    .map(|i| agent.body[i].base_type() as u8)
-                    .collect();
-                let body_parts: Vec<([f32; 2], u32, f32)> = (0..body_len)
-                    .map(|i| (agent.body[i].pos, agent.body[i].base_type(), agent.body[i].size))
-                    .collect();
-                living.push(AgentPheno { pheno, body_parts });
-            }
+            species_count = hash_counts.len() as u32;
+            let total_living: u32 = hash_counts.values().sum();
+            let total_living_f = total_living.max(1) as f32;
 
-            // Greedy representative clustering using edit distance on part-type sequences.
-            // Track cluster index for each agent, plus representative body data.
-            let threshold = self.species_hamming_threshold;
-            let mut rep_phenos: Vec<Vec<u8>> = Vec::new();
-            let mut rep_bodies: Vec<Vec<([f32; 2], u32, f32)>> = Vec::new();
-            let mut cluster_counts: Vec<u32> = Vec::new();
+            // Find top 10 hashes by count.
+            let mut sorted_hashes: Vec<(u32, u32)> = hash_counts.into_iter().collect();
+            sorted_hashes.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            sorted_hashes.truncate(10);
 
-            for ap in &living {
-                let mut found = false;
-                for (ci, rep) in rep_phenos.iter().enumerate() {
-                    if phenotype_edit_distance(&ap.pheno, rep) <= threshold {
-                        cluster_counts[ci] += 1;
-                        found = true;
+            // Find a representative agent for each top hash (first match).
+            self.top_species.clear();
+            for &(target_hash, count) in &sorted_hashes {
+                // Scan for first agent with this hash to get body data.
+                let mut found_body = Vec::new();
+                for (i, &h) in hashes.iter().enumerate().take(take_len) {
+                    if h == target_hash {
+                        let agent = &agents[i];
+                        let body_len = (agent.body_count as usize).min(MAX_BODY_PARTS);
+                        found_body = (0..body_len)
+                            .map(|j| (agent.body[j].pos, agent.body[j].base_type(), agent.body[j].size))
+                            .collect();
                         break;
                     }
                 }
-                if !found {
-                    rep_phenos.push(ap.pheno.clone());
-                    rep_bodies.push(ap.body_parts.clone());
-                    cluster_counts.push(1);
-                }
-            }
-
-            species_count = rep_phenos.len() as u32;
-            let total_sampled = living.len().max(1) as f32;
-
-            // Build top 10 species by count
-            let mut indices: Vec<usize> = (0..cluster_counts.len()).collect();
-            indices.sort_unstable_by(|&a, &b| cluster_counts[b].cmp(&cluster_counts[a]));
-            indices.truncate(10);
-
-            self.top_species.clear();
-            for &ci in &indices {
                 self.top_species.push(SpeciesInfo {
-                    count: cluster_counts[ci],
-                    percentage: cluster_counts[ci] as f32 / total_sampled * 100.0,
-                    body_parts: rep_bodies[ci].clone(),
+                    count,
+                    percentage: count as f32 / total_living_f * 100.0,
+                    body_parts: found_body,
                 });
             }
         }
 
+        self.species_hash_readback.unmap();
         self.agents_readback.unmap();
         species_count
     }
@@ -14723,53 +14759,57 @@ fn main() {
 
                                     // Sample population for statistics graph
                                     if state.epoch - state.last_sample_epoch >= state.epoch_sample_interval {
+                                        let epoch = state.epoch;
+
+                                        // Sample population
                                         state.population_history.push_back(state.alive_count);
-                                        // Keep only the last max_history_points (O(1) removal with VecDeque)
                                         while state.population_history.len() > state.max_history_points {
                                             state.population_history.pop_front();
                                         }
 
-                                        // Update cached plot points only when data changes.
-                                        // Reuse allocation to avoid per-sample allocs.
-                                        const MAX_PLOT_POINTS: usize = 2048;
-                                        let len = state.population_history.len();
-                                        let stride = ((len + MAX_PLOT_POINTS - 1) / MAX_PLOT_POINTS).max(1);
-                                        state.population_plot_points.clear();
-                                        state.population_plot_points.extend(
-                                            state.population_history
-                                                .iter()
-                                                .enumerate()
-                                                .step_by(stride)
-                                                .map(|(i, &pop)| [i as f64, pop as f64])
-                                        );
-
-                                        state.last_sample_epoch = state.epoch;
-                                    }
-
-                                    // Species diversity sampling (every species_sample_interval epochs)
-                                    if state.epoch - state.last_species_sample_epoch >= state.species_sample_interval {
+                                        // Sample species at the same rate (GPU hash is fast now)
                                         let species_count = state.count_species();
                                         state.species_history.push_back(species_count);
                                         while state.species_history.len() > state.max_history_points {
                                             state.species_history.pop_front();
                                         }
 
-                                        // Rebuild species plot points, stretched to align with population x-axis.
-                                        // Each species sample spans species_sample_interval/epoch_sample_interval pop samples.
-                                        let samples_per_species = (state.species_sample_interval / state.epoch_sample_interval).max(1) as f64;
-                                        const MAX_SPECIES_PLOT_POINTS: usize = 2048;
-                                        let slen = state.species_history.len();
-                                        let sstride = ((slen + MAX_SPECIES_PLOT_POINTS - 1) / MAX_SPECIES_PLOT_POINTS).max(1);
+                                        // Rebuild both plot point caches using epoch as X axis.
+                                        // Both histories have the same length and same X coordinates.
+                                        const MAX_PLOT_POINTS: usize = 2048;
+                                        let len = state.population_history.len();
+                                        let stride = ((len + MAX_PLOT_POINTS - 1) / MAX_PLOT_POINTS).max(1);
+                                        // X origin: epoch of the oldest sample still in the history
+                                        let x_origin = epoch.saturating_sub(
+                                            (len as u64).saturating_sub(1) * state.epoch_sample_interval
+                                        );
+
+                                        state.population_plot_points.clear();
+                                        state.population_plot_points.extend(
+                                            state.population_history
+                                                .iter()
+                                                .enumerate()
+                                                .step_by(stride)
+                                                .map(|(i, &pop)| {
+                                                    let x = (x_origin + i as u64 * state.epoch_sample_interval) as f64;
+                                                    [x, pop as f64]
+                                                })
+                                        );
+
                                         state.species_plot_points.clear();
                                         state.species_plot_points.extend(
                                             state.species_history
                                                 .iter()
                                                 .enumerate()
-                                                .step_by(sstride)
-                                                .map(|(i, &count)| [i as f64 * samples_per_species, count as f64])
+                                                .step_by(stride)
+                                                .map(|(i, &count)| {
+                                                    let x = (x_origin + i as u64 * state.epoch_sample_interval) as f64;
+                                                    [x, count as f64]
+                                                })
                                         );
 
-                                        state.last_species_sample_epoch = state.epoch;
+                                        state.last_sample_epoch = epoch;
+                                        state.last_species_sample_epoch = epoch;
                                     }
 
                                     // Update epochs per second counter

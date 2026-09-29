@@ -73,6 +73,9 @@ fn get_part_visual_size(part_type: u32) -> f32 {
     if (props.is_condenser) {
         size *= 0.5;
     }
+    if (props.is_mouth) {
+        size *= 2.0;
+    }
     return size;
 }
 
@@ -340,9 +343,9 @@ struct SimParams {
     dye_beta_color_b: f32,
     _pad_dye_beta_color: f32,
     species_heatmap: u32,
+    species_bucket_size: u32,
     _pad_species_0: u32,
     _pad_species_1: u32,
-    _pad_species_2: u32,
 }
 
 struct EnvironmentInitParams {
@@ -513,6 +516,9 @@ var<storage, read_write> fluid_forces: array<atomic<u32>>;
 @group(0) @binding(17)
 var<storage, read_write> agent_spatial_grid: array<atomic<u32>>; // Agent index per grid cell (atomic for vampire victim claiming)
 
+// species_hash_buffer is in a separate bind group (group 1) to stay within 16 storage buffer limit.
+// Declared in simulation.wgsl only, not here.
+
 // Spatial grid layout (stored in agent_spatial_grid):
 // Each cell uses 2x u32 entries:
 //   [cell*2 + 0] = agent id (with optional vampire-claim high bit)
@@ -669,7 +675,7 @@ var<private> AMINO_DATA: array<array<vec4<f32>, 6>, AMINO_COUNT> = array<array<v
     // 28 STORAGE
     array<vec4<f32>,6>( vec4<f32>(20.0, 22.0, 0.1349066, 1.3), vec4<f32>(0.0, 0.0, 0.0, 0.001), vec4<f32>(1.0, 0.5, 0.0, 10.0), vec4<f32>(0.0, 0.4, -0.84, -0.84), vec4<f32>(0.15, 0.55, 0.45, 0.6), vec4<f32>(0.4, 0.0, 0.0, 0.0) ),
     // 29 POISON RESISTANCE
-    array<vec4<f32>,6>( vec4<f32>(16.0, 30.0, -0.47198, 0.02), vec4<f32>(0.0, 0.0, 0.0, 0.003), vec4<f32>(1.0, 0.4, 0.7, 0.0), vec4<f32>(0.0, 0.3, -0.58, -0.58), vec4<f32>(0.2, 0.6, 0.4, 0.55), vec4<f32>(0.45, 0.0, 0.0, 0.0) ),
+    array<vec4<f32>,6>( vec4<f32>(16.0, 30.0, -0.47198, 1.0), vec4<f32>(0.0, 0.0, 0.0, 0.003), vec4<f32>(1.0, 0.4, 0.7, 0.0), vec4<f32>(0.0, 0.3, -0.58, -0.58), vec4<f32>(0.2, 0.6, 0.4, 0.55), vec4<f32>(0.45, 0.0, 0.0, 0.0) ),
     // 30 CHIRAL FLIPPER
     array<vec4<f32>,6>( vec4<f32>(13.0, 10.0, -0.174533, 0.02), vec4<f32>(0.0, 0.0, 0.0, 0.001), vec4<f32>(1.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 0.3, 0.95, 0.95), vec4<f32>(0.2, -0.3, 1.3, -0.2), vec4<f32>(1.2, 0.0, 0.0, 0.0) ),
     // 31 CLOCK

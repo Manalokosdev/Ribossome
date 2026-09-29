@@ -787,18 +787,25 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     dye_val.y = max(dye_val.y - deposit_alpha, 0.0);
     dye_val.x = max(dye_val.x - deposit_beta, 0.0);
 
-    // === Dye escape/decay (non-precipitating sink) ===
-    // This counteracts still-water ooze by letting dye fade away without
-    // depositing back into the chem grids.
+    // === Dye escape/decay (mass-conserving: return escaped dye to chem) ===
+    // Dye decays over time; the escaped mass is deposited back into chem
+    // so the total chem+dye budget is preserved.
     let escape_rate_alpha = max(fp_f32(FP_DYE_ESCAPE_RATE_ALPHA), 0.0);
     let escape_rate_beta = max(fp_f32(FP_DYE_ESCAPE_RATE_BETA), 0.0);
     let escape_factor_alpha = exp(-escape_rate_alpha * dt);
     let escape_factor_beta = exp(-escape_rate_beta * dt);
-    dye_val.y = dye_val.y * escape_factor_alpha;
-    dye_val.x = dye_val.x * escape_factor_beta;
+    let escaped_alpha = dye_val.y * (1.0 - escape_factor_alpha);
+    let escaped_beta = dye_val.x * (1.0 - escape_factor_beta);
+    dye_val.y = dye_val.y - escaped_alpha;
+    dye_val.x = dye_val.x - escaped_beta;
+    // Return escaped dye mass to chem grid
+    chem.x = chem.x + escaped_alpha;
+    chem.y = chem.y + escaped_beta;
 
-    // Reuse alpha escape rate for gamma to counteract the still-water ooze.
-    dye_val.z = dye_val.z * escape_factor_alpha;
+    // Reuse alpha escape rate for gamma.
+    let escaped_gamma = dye_val.z * (1.0 - escape_factor_alpha);
+    dye_val.z = dye_val.z - escaped_gamma;
+    gamma_height = gamma_height + escaped_gamma;
 
     // === Gamma lift/deposition coupling (mass-conserving) ===
     // Treat gamma height as the "bed" reservoir and dye_val.z as the carried reservoir.
@@ -2211,14 +2218,20 @@ fn add_forces(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
     let v0 = sanitize_vec2(velocity_in[idx]);
 
-    // Tiny 4-neighbor blur of the injected force field to reduce cell-centered
-    // attractors when coupling is strong.
+    // 9-point isotropic blur of injected forces to reduce axis-aligned creases.
+    // Uses the same diagonal-weighted stencil as diffusion/pressure for isotropy.
     let f_c = sanitize_vec2(fluid_forces[idx]);
     let f_l = sanitize_vec2(fluid_forces[grid_index(select(x, x - 1u, x > 0u), y)]);
     let f_r = sanitize_vec2(fluid_forces[grid_index(select(x, x + 1u, x + 1u < FLUID_GRID_SIZE), y)]);
     let f_b = sanitize_vec2(fluid_forces[grid_index(x, select(y, y - 1u, y > 0u))]);
     let f_t = sanitize_vec2(fluid_forces[grid_index(x, select(y, y + 1u, y + 1u < FLUID_GRID_SIZE))]);
-    let f_avg = (f_c + f_l + f_r + f_b + f_t) * 0.2;
+    let f_bl = sanitize_vec2(fluid_forces[grid_index(select(x, x - 1u, x > 0u), select(y, y - 1u, y > 0u))]);
+    let f_br = sanitize_vec2(fluid_forces[grid_index(select(x, x + 1u, x + 1u < FLUID_GRID_SIZE), select(y, y - 1u, y > 0u))]);
+    let f_tl = sanitize_vec2(fluid_forces[grid_index(select(x, x - 1u, x > 0u), select(y, y + 1u, y + 1u < FLUID_GRID_SIZE))]);
+    let f_tr = sanitize_vec2(fluid_forces[grid_index(select(x, x + 1u, x + 1u < FLUID_GRID_SIZE), select(y, y + 1u, y + 1u < FLUID_GRID_SIZE))]);
+    // Weighted average: cardinal neighbors weight 4, diagonals weight 1, center weight 20 → total 36
+    // This matches the 9-point isotropic Laplacian kernel used by diffusion and pressure.
+    let f_avg = (4.0 * (f_l + f_r + f_b + f_t) + (f_bl + f_br + f_tl + f_tr) + 20.0 * f_c) * (1.0 / 36.0);
     let f_blur = mix(f_c, f_avg, FORCE_SMOOTH_MIX);
 
     let f_user = clamp_vec2_len(f_blur, MAX_FORCE);

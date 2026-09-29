@@ -286,6 +286,63 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
 
+                // Optional duplication mutation: copy a segment and insert it in
+                // tandem right after the original (classic gene-duplication engine:
+                // one copy keeps the function, the other is free to diverge).
+                // Segment length is a codon multiple (3/6/9/12) to preserve frame.
+                {
+                    let dup_seed = offspring_hash ^ 0x9E3779B9u;
+                    let dup_roll = hash_f32(dup_seed);
+                    let has_active = (active_end != 0xFFFFFFFFu);
+                    if (has_active && dup_roll < (effective_mutation_rate * 2.0)) {
+                        var seq: array<u32, GENOME_LENGTH>;
+                        var L: u32 = 0u;
+                        for (var bi = active_start; bi <= active_end; bi++) {
+                            if (L < GENOME_LENGTH) {
+                                let word = bi / 4u;
+                                let byte_offset = bi % 4u;
+                                seq[L] = (offspring_ascii[word] >> (byte_offset * 8u)) & 0xFFu;
+                                L += 1u;
+                            }
+                        }
+                        let max_dup = select(GENOME_LENGTH - L, 0u, L >= GENOME_LENGTH);
+                        var k = 3u * (1u + (hash(dup_seed ^ 0x7F4A7C15u) % 4u));
+                        k = min(k, L);
+                        k -= k % 3u;
+                        if (k >= 3u && max_dup >= k) {
+                            let pos = hash(dup_seed ^ 0x2C9F85A1u) % (L - k + 1u);
+                            // Shift right by k after the segment to make room for the copy.
+                            var j: u32 = L;
+                            loop {
+                                if (j == pos + k) { break; }
+                                j -= 1u;
+                                seq[j + k] = seq[j];
+                            }
+                            // Tandem copy: [pos, pos+k) duplicated immediately after itself.
+                            for (var t = 0u; t < k; t++) {
+                                seq[pos + k + t] = seq[pos + t];
+                            }
+                            L += k;
+                            var out_bytes: array<u32, GENOME_LENGTH>;
+                            for (var t = 0u; t < GENOME_LENGTH; t++) { out_bytes[t] = 88u; }
+                            let left_pad = (GENOME_LENGTH - L) / 2u;
+                            for (var t = 0u; t < L; t++) {
+                                out_bytes[left_pad + t] = seq[t];
+                            }
+                            for (var w = 0u; w < GENOME_ASCII_WORDS; w++) {
+                                let b0 = out_bytes[w * 4u + 0u] & 0xFFu;
+                                let b1 = out_bytes[w * 4u + 1u] & 0xFFu;
+                                let b2 = out_bytes[w * 4u + 2u] & 0xFFu;
+                                let b3 = out_bytes[w * 4u + 3u] & 0xFFu;
+                                let word_val = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
+                                offspring_ascii[w] = word_val;
+                            }
+                            active_start = left_pad;
+                            active_end = left_pad + L - 1u;
+                        }
+                    }
+                }
+
                 // Probabilistic point mutations
                 var mutated_count = 0u;
                 if (active_end != 0xFFFFFFFFu) {
