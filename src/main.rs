@@ -3097,11 +3097,13 @@ fn default_dye_beta_color() -> [f32; 3] { [1.0, 0.0, 0.0] }
 fn default_dye_thinfilm_multiplier() -> f32 { 50.0 }
 fn default_dye_precipitation() -> f32 { 1.0 }
 
-fn default_fluid_chem_lift_mult_alpha() -> f32 { 1.0 }
-fn default_fluid_chem_lift_mult_beta() -> f32 { 1.0 }
+// Default 0: monomers no longer transfer into the 2-channel dye layer (that
+// pooling would blur A/U and G/C identity). Advection moves chem directly.
+fn default_fluid_chem_lift_mult_alpha() -> f32 { 0.0 }
+fn default_fluid_chem_lift_mult_beta() -> f32 { 0.0 }
 fn default_fluid_chem_lift_mult_gamma() -> f32 { 0.0 }
-fn default_fluid_chem_deposit_mult_alpha() -> f32 { 1.0 }
-fn default_fluid_chem_deposit_mult_beta() -> f32 { 1.0 }
+fn default_fluid_chem_deposit_mult_alpha() -> f32 { 0.0 }
+fn default_fluid_chem_deposit_mult_beta() -> f32 { 0.0 }
 fn default_fluid_chem_deposit_mult_gamma() -> f32 { 0.0 }
 fn default_fluid_wind_push_strength() -> f32 { 0.0005 }
 
@@ -3797,15 +3799,17 @@ impl SimulationSettings {
         self.alpha_blur = self.alpha_blur.clamp(0.0, 1.0);
         self.beta_blur = self.beta_blur.clamp(0.0, 1.0);
         self.gamma_diffuse = self.gamma_diffuse.clamp(0.0, 1.0);
-        // Fluid convolution has been removed; keep fields for backward-compat/uniform layout but force them off.
-        self.alpha_fluid_convolution = 0.0;
+        // alpha_fluid_convolution is repurposed as the monomer advection
+        // strength (chem_grid advected by fluid velocity); beta variant unused.
+        self.alpha_fluid_convolution = self.alpha_fluid_convolution.clamp(0.0, 1.0);
         self.beta_fluid_convolution = 0.0;
         self.gamma_blur = self.gamma_blur.clamp(0.0, 1.0);
         self.gamma_shift = self.gamma_shift.clamp(0.0, 1.0);
         self.alpha_slope_bias = self.alpha_slope_bias.clamp(-10.0, 10.0);
         self.beta_slope_bias = self.beta_slope_bias.clamp(-10.0, 10.0);
-        self.alpha_multiplier = self.alpha_multiplier.clamp(0.00001, 2.0);
-        self.beta_multiplier = self.beta_multiplier.clamp(0.00001, 2.0);
+        // Closed world: 0.0 must be reachable (no rain at all).
+        self.alpha_multiplier = self.alpha_multiplier.clamp(0.0, 2.0);
+        self.beta_multiplier = self.beta_multiplier.clamp(0.0, 2.0);
         self.dye_precipitation = self.dye_precipitation.clamp(0.0, 1.0);
         self.chemical_slope_scale_alpha = self.chemical_slope_scale_alpha.clamp(0.0, 1.0);
         self.chemical_slope_scale_beta = self.chemical_slope_scale_beta.clamp(0.0, 1.0);
@@ -4094,6 +4098,8 @@ struct GpuState {
     diffuse_commit_pipeline: wgpu::ComputePipeline,
     diffuse_pipeline_b: wgpu::ComputePipeline,
     diffuse_commit_pipeline_b: wgpu::ComputePipeline,
+    advect_chem_pipeline: wgpu::ComputePipeline,
+    advect_chem_commit_pipeline: wgpu::ComputePipeline,
     diffuse_trails_pipeline: wgpu::ComputePipeline,
     rain_pipeline: wgpu::ComputePipeline,
     clear_visual_pipeline: wgpu::ComputePipeline,
@@ -6508,6 +6514,25 @@ impl GpuState {
         });
         profiler.mark("diffuse pipeline b");
 
+        // Monomer advection by the fluid velocity field (floating soup).
+        let advect_chem_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Advect Chem Pipeline (stage1)"),
+            layout: Some(&compute_pipeline_layout),
+            module: &shader,
+            entry_point: "advect_chem_stage1",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let advect_chem_commit_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Advect Chem Pipeline (stage2 commit)"),
+            layout: Some(&compute_pipeline_layout),
+            module: &shader,
+            entry_point: "advect_chem_stage2",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        profiler.mark("advect chem pipeline");
+
         let diffuse_trails_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Diffuse Trails Pipeline"),
@@ -7709,6 +7734,8 @@ impl GpuState {
             diffuse_commit_pipeline,
             diffuse_pipeline_b,
             diffuse_commit_pipeline_b,
+            advect_chem_pipeline,
+            advect_chem_commit_pipeline,
             diffuse_trails_pipeline,
             rain_pipeline,
             clear_visual_pipeline,
@@ -9986,6 +10013,16 @@ impl GpuState {
                     cpass.set_bind_group(0, bg_process, &[]);
                     cpass.dispatch_workgroups(groups_x, groups_y, 1);
 
+                    // Monomer advection by fluid currents (floating soup).
+                    if self.fluid_enabled && self.alpha_fluid_convolution > 0.0 {
+                        cpass.set_pipeline(&self.advect_chem_pipeline);
+                        cpass.set_bind_group(0, bg_process, &[]);
+                        cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                        cpass.set_pipeline(&self.advect_chem_commit_pipeline);
+                        cpass.set_bind_group(0, bg_process, &[]);
+                        cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                    }
+
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
 
@@ -10167,6 +10204,16 @@ impl GpuState {
                 cpass.set_pipeline(&self.diffuse_commit_pipeline_b);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
+
+                // Monomer advection by fluid currents (floating soup).
+                if self.fluid_enabled && self.alpha_fluid_convolution > 0.0 {
+                    cpass.set_pipeline(&self.advect_chem_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                    cpass.set_pipeline(&self.advect_chem_commit_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
@@ -16729,6 +16776,14 @@ fn main() {
                                                             egui::Slider::new(&mut state.fluid_vorticity, 0.0..=50.0)
                                                                 .text("Vorticity")
                                                                 .clamping(egui::SliderClamping::Always),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut state.alpha_fluid_convolution,
+                                                                0.0..=1.0,
+                                                            )
+                                                            .text("Monomer Advection (floating soup)")
+                                                            .clamping(egui::SliderClamping::Always),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_viscosity, 0.0..=5.0)

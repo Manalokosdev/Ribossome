@@ -3336,6 +3336,80 @@ fn diffuse_grids_pair(gid: vec3<u32>, pair: u32) {
     trail_grid_inject[idx] = vec4<f32>(final_a, final_b, final_gamma, 0.0);
 }
 
+// ============================================================================
+// MONOMER ADVECTION BY FLUID ("floating soup": no deposited variant)
+// ============================================================================
+// Conservative donor-cell (upwind) advection of the 4 monomer channels by the
+// fluid velocity field. Mass-conserving by construction: every outflow is a
+// neighbor's inflow, and no flux crosses the world boundary.
+// Strength = params.alpha_fluid_convolution (0 = off).
+
+fn chem_advect_frac(x: u32, y: u32) -> vec2<f32> {
+    // Sample fluid velocity (FLUID_GRID_SIZE) at this env cell (GRID_SIZE).
+    let fxi = min((x * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
+    let fyi = min((y * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
+    let v = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
+    let strength = max(params.alpha_fluid_convolution, 0.0);
+    // Per-axis transport fraction, CFL-limited so total outflow <= 0.5 * c.
+    return clamp(v * strength, vec2<f32>(-0.25), vec2<f32>(0.25));
+}
+
+@compute @workgroup_size(16, 16)
+fn advect_chem_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= GRID_SIZE || y >= GRID_SIZE) {
+        return;
+    }
+    let idx = y * GRID_SIZE + x;
+
+    let c = chem_grid[idx];
+    let f = chem_advect_frac(x, y);
+
+    // Outflows from this cell (blocked at world edges).
+    let can_e = x + 1u < GRID_SIZE;
+    let can_w = x > 0u;
+    let can_s = y + 1u < GRID_SIZE;
+    let can_n = y > 0u;
+    let out_e = select(0.0, max(f.x, 0.0), can_e);
+    let out_w = select(0.0, max(-f.x, 0.0), can_w);
+    let out_s = select(0.0, max(f.y, 0.0), can_s);
+    let out_n = select(0.0, max(-f.y, 0.0), can_n);
+    var staged = c * (1.0 - out_e - out_w - out_s - out_n);
+
+    // Inflows: each neighbor's outflow toward us, computed exactly as the
+    // neighbor computes it (same c, same velocity sample) => conservation.
+    if (can_w) {
+        let nf = chem_advect_frac(x - 1u, y);
+        staged += chem_grid[idx - 1u] * max(nf.x, 0.0);
+    }
+    if (can_e) {
+        let nf = chem_advect_frac(x + 1u, y);
+        staged += chem_grid[idx + 1u] * max(-nf.x, 0.0);
+    }
+    if (can_n) {
+        let nf = chem_advect_frac(x, y - 1u);
+        staged += chem_grid[idx - GRID_SIZE] * max(nf.y, 0.0);
+    }
+    if (can_s) {
+        let nf = chem_advect_frac(x, y + 1u);
+        staged += chem_grid[idx + GRID_SIZE] * max(-nf.y, 0.0);
+    }
+
+    trail_grid_inject[idx] = staged;
+}
+
+@compute @workgroup_size(16, 16)
+fn advect_chem_stage2(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= GRID_SIZE || y >= GRID_SIZE) {
+        return;
+    }
+    let idx = y * GRID_SIZE + x;
+    chem_grid[idx] = max(trail_grid_inject[idx], vec4<f32>(0.0));
+}
+
 @compute @workgroup_size(16, 16)
 fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
     diffuse_grids_pair(gid, 0u);
