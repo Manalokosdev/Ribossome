@@ -15636,7 +15636,7 @@ fn main() {
                                                         ui.heading("Energy & Costs");
                                                         ui.add(
                                                             egui::Slider::new(&mut state.food_power, 0.0..=10.0)
-                                                                .text("Food Power"),
+                                                                .text("NTP Energy Yield"),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(
@@ -15663,7 +15663,7 @@ fn main() {
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.poison_power, 0.0..=10.0)
-                                                                .text("Poison Power"),
+                                                                .text("Poison Power (inert — RNA-world has no poison)"),
                                                         );
 
                                                         ui.separator();

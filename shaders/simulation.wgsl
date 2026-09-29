@@ -3502,6 +3502,15 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         gamma = max(read_gamma_height(grid_index(world_pos)), 0.0);
     }
 
+    // Within-pool monomer ratios (nearest cell) tint the pool colors so the
+    // four monomers are visually distinguishable: A vs U and G vs C get the
+    // base color vs. a channel-swizzled variant of it.
+    let cc = chem_grid[grid_index(world_pos)];
+    let pool_au = cc.x + cc.y;
+    let pool_gc = cc.z + cc.w;
+    let ratio_u = select(0.5, cc.y / max(pool_au, 1e-6), pool_au > 1e-6);
+    let ratio_c = select(0.5, cc.w / max(pool_gc, 1e-6), pool_gc > 1e-6);
+
     // Hide gamma if requested (treat gamma exactly like alpha/beta, no normalization)
     var gamma_display = gamma;
     if (params.gamma_hidden != 0u) {
@@ -3537,13 +3546,14 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         // New visualization system: composite channels with blend modes
 
-        // Alpha channel
+        // A/U pool channel (A = base color, U = swizzled variant)
         if (params.alpha_show != 0u) {
-            let alpha_color = vec3<f32>(
+            let alpha_color_base = vec3<f32>(
                 clamp(params.alpha_color_r, 0.0, 1.0),
                 clamp(params.alpha_color_g, 0.0, 1.0),
                 clamp(params.alpha_color_b, 0.0, 1.0)
             );
+            let alpha_color = mix(alpha_color_base, alpha_color_base.brg, ratio_u);
 
             // Apply gamma correction to alpha value
             let alpha_corrected = pow(alpha, params.alpha_gamma_adjust);
@@ -3557,13 +3567,14 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        // Beta channel
+        // G/C pool channel (G = base color, C = swizzled variant)
         if (params.beta_show != 0u) {
-            let beta_color = vec3<f32>(
+            let beta_color_base = vec3<f32>(
                 clamp(params.beta_color_r, 0.0, 1.0),
                 clamp(params.beta_color_g, 0.0, 1.0),
                 clamp(params.beta_color_b, 0.0, 1.0)
             );
+            let beta_color = mix(beta_color_base, beta_color_base.gbr, ratio_c);
 
             // Apply gamma correction to beta value
             let beta_corrected = pow(beta, params.beta_gamma_adjust);
