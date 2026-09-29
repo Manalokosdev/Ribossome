@@ -3251,29 +3251,31 @@ fn diffuse_grids_pair(gid: vec3<u32>, pair: u32) {
     // Repurpose gamma_blur as a simple persistence/decay multiplier (1.0 = no decay).
     let persistence = clamp(params.gamma_blur, 0.0, 1.0);
 
-    // Classic isotropic blur (3x3) + slope-based flux shift.
-    var a_sum = 0.0;
-    var b_sum = 0.0;
-    var gamma_sum = 0.0;
+    // Classic isotropic blur (3x3) in pairwise-exchange (flux) form: every
+    // valid neighbor pair exchanges s*(c_n - c)/9, which is symmetric and
+    // therefore exactly mass-conserving — including at the borders. (The old
+    // clamped-index average double-counted edge cells and leaked mass there.)
+    var a_ex = 0.0;
+    var b_ex = 0.0;
+    var gamma_ex = 0.0;
     for (var i = 0u; i < 9u; i++) {
         let dx = i32(i % 3u) - 1;
         let dy = i32(i / 3u) - 1;
-        let nx_i = clamp(i32(x) + dx, 0, i32(GRID_SIZE) - 1);
-        let ny_i = clamp(i32(y) + dy, 0, i32(GRID_SIZE) - 1);
+        if (dx == 0 && dy == 0) { continue; }
+        let nx_i = i32(x) + dx;
+        let ny_i = i32(y) + dy;
+        if (nx_i < 0 || ny_i < 0 || nx_i >= i32(GRID_SIZE) || ny_i >= i32(GRID_SIZE)) { continue; }
         let nidx = u32(ny_i) * GRID_SIZE + u32(nx_i);
-        a_sum += chem_grid[nidx][ch0];
-        b_sum += chem_grid[nidx][ch1];
-        if (include_gamma) { gamma_sum += read_gamma_height(nidx); }
+        a_ex += chem_grid[nidx][ch0] - current_a;
+        b_ex += chem_grid[nidx][ch1] - current_b;
+        if (include_gamma) { gamma_ex += read_gamma_height(nidx) - current_gamma; }
     }
 
-    let a_avg = a_sum / 9.0;
-    let b_avg = b_sum / 9.0;
-    let gamma_avg = gamma_sum / 9.0;
-
-    // Apply blur factor (0 = no blur/keep current, 1 = full blur)
-    let a_iso = mix(current_a, a_avg, blur_strength);
-    let b_iso = mix(current_b, b_avg, blur_strength);
-    let gamma_iso = mix(current_gamma, gamma_avg, gamma_diffuse_strength);
+    // Apply blur factor (0 = no blur/keep current; interior result identical
+    // to the previous mix-with-average formulation).
+    let a_iso = current_a + blur_strength * a_ex / 9.0;
+    let b_iso = current_b + blur_strength * b_ex / 9.0;
+    let gamma_iso = current_gamma + gamma_diffuse_strength * gamma_ex / 9.0;
 
     // Slope-based flux shift (mass-conserving advection along slopes).
     let slope_flux_enabled = abs(slope_bias) > 0.01;

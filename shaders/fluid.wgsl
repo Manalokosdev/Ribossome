@@ -706,47 +706,29 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // Each dye cell maps 1:1 to the environment chem cell at the same resolution.
     let env_idx = gamma_index(x, y);
-    let chem_full_in = chem_grid[env_idx];
-    // Dye exchange works on pool totals (pool a = A+U, pool b = G+C), clamped
-    // to the legacy [0,1] working range; deltas are applied back to the
-    // monomer channels at the end (mass-conserving).
-    let p0_old = max(chem_full_in.x + chem_full_in.y, 0.0);
-    let p1_old = max(chem_full_in.z + chem_full_in.w, 0.0);
-    var chem = clamp(vec2<f32>(p0_old, p1_old), vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
-    let chem_start = chem;
     var gamma_height = max(gamma_grid[env_idx], 0.0);
 
     // Per-channel lift/deposit multipliers.
-    // These scale the chem<->dye exchange strengths per channel (alpha/beta/gamma).
     // NOTE: Setting gamma multipliers to 0 effectively freezes gamma terrain against fluid-driven erosion.
     let lift_mult = clamp(fp_vec4(FP_CHEM_LIFT_MULT).xyz, vec3<f32>(0.0), vec3<f32>(1000.0));
     let deposit_mult = clamp(fp_vec4(FP_CHEM_DEPOSIT_MULT).xyz, vec3<f32>(0.0), vec3<f32>(1000.0));
 
-    // Baseline chem→dye ooze in still water, so sensors can detect signals without flow.
-    // Mass-conserving transfer: depletes chem/gamma as dye is added.
+    // MONOMERS NEVER PASS THROUGH THE DYE.
+    // The dye advects semi-Lagrangian (interpolated backtrace), which does NOT
+    // conserve mass — matter routed through it drifts. Real monomer transport
+    // happens exclusively in the conservative donor-cell kernel
+    // (advect_chem_* in simulation.wgsl). The alpha/beta dye channels are
+    // purely visual: a small NON-DEPLETING glow from suspended (levitated)
+    // monomers lets the currents show what they carry.
+    let chem_vis = chem_grid[env_idx];
+    let vis_gain = lift_strength * 0.05;
+    dye_val.y = min(dye_val.y + clamp(chem_vis.x + chem_vis.y, 0.0, 1.0) * vis_gain, 1.0);
+    dye_val.x = min(dye_val.x + clamp(chem_vis.z + chem_vis.w, 0.0, 1.0) * vis_gain, 1.0);
+
+    // Still-water gamma ooze (mass-conserving, gamma only).
     let ooze_rate = max(fp_f32(FP_CHEM_OOZE_STILL_RATE), 0.0);
-    // Still-water ooze should fade out once sedimentation starts becoming weak.
     let stillness = 1.0 - smoothstep(0.0, max(sediment_min_speed, 1e-6), speed);
-    let stillness_alpha = stillness;
-    let stillness_beta = stillness;
-    let stillness_gamma = stillness;
-    let ooze_frac_alpha = clamp(ooze_rate * stillness_alpha * dt * lift_mult.x, 0.0, CHEM_MAX_STEP_FRAC);
-    let ooze_frac_beta = clamp(ooze_rate * stillness_beta * dt * lift_mult.y, 0.0, CHEM_MAX_STEP_FRAC);
-    let ooze_frac_gamma = clamp(ooze_rate * stillness_gamma * dt * lift_mult.z, 0.0, CHEM_MAX_STEP_FRAC);
-    if (ooze_frac_alpha > 0.0) {
-        // Alpha: chem.x -> dye.y (mass-conserving)
-        let alpha_headroom = max(1.0 - dye_val.y, 0.0);
-        let ooze_alpha = min(chem.x * ooze_frac_alpha, alpha_headroom);
-        dye_val.y = min(dye_val.y + ooze_alpha, 1.0);
-        chem.x = max(chem.x - ooze_alpha, 0.0);
-    }
-    if (ooze_frac_beta > 0.0) {
-        // Beta: chem.y -> dye.x (mass-conserving)
-        let beta_headroom = max(1.0 - dye_val.x, 0.0);
-        let ooze_beta = min(chem.y * ooze_frac_beta, beta_headroom);
-        dye_val.x = min(dye_val.x + ooze_beta, 1.0);
-        chem.y = max(chem.y - ooze_beta, 0.0);
-    }
+    let ooze_frac_gamma = clamp(ooze_rate * stillness * dt * lift_mult.z, 0.0, CHEM_MAX_STEP_FRAC);
     if (ooze_frac_gamma > 0.0) {
         // Gamma: gamma -> dye.z (mass-conserving)
         let gamma_headroom = max(1.0 - dye_val.z, 0.0);
@@ -755,64 +737,21 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
         gamma_height = max(gamma_height - ooze_gamma, 0.0);
     }
 
-    // Shared lift/sedimentation model for alpha & beta (scaled per-channel).
-    let pickup_strength_alpha = lift_strength * lift_mult.x;
-    let pickup_strength_beta = lift_strength * lift_mult.y;
-    let deposit_strength_alpha_pos = sediment_strength * deposit_mult.x;
-    let deposit_strength_beta_pos = sediment_strength * deposit_mult.y;
-
-    // Pickup (chem -> dye)
-    let pickup_frac_alpha = clamp(CHEM_TRANSFER_RATE * pickup_strength_alpha * dt, 0.0, CHEM_MAX_STEP_FRAC);
-    let pickup_frac_beta = clamp(CHEM_TRANSFER_RATE * pickup_strength_beta * dt, 0.0, CHEM_MAX_STEP_FRAC);
-
-    let pickup_alpha_raw = chem.x * pickup_frac_alpha;
-    let pickup_beta_raw = chem.y * pickup_frac_beta;
-
-    // Clamp by dye headroom to avoid losing mass due to saturation.
-    let dye_headroom_alpha = max(1.0 - dye_val.y, 0.0);
-    let dye_headroom_beta = max(1.0 - dye_val.x, 0.0);
-    let pickup_alpha = min(pickup_alpha_raw, dye_headroom_alpha);
-    let pickup_beta = min(pickup_beta_raw, dye_headroom_beta);
-
-    chem.x = max(chem.x - pickup_alpha, 0.0);
-    chem.y = max(chem.y - pickup_beta, 0.0);
-    dye_val.y = min(dye_val.y + pickup_alpha, 1.0);
-    dye_val.x = min(dye_val.x + pickup_beta, 1.0);
-
-    // Deposit (dye -> chem)
-    let deposit_frac_alpha = clamp(CHEM_TRANSFER_RATE * deposit_strength_alpha_pos * dt, 0.0, CHEM_MAX_STEP_FRAC);
-    let deposit_frac_beta = clamp(CHEM_TRANSFER_RATE * deposit_strength_beta_pos * dt, 0.0, CHEM_MAX_STEP_FRAC);
-
-    // Deposit only up to available headroom in chem to preserve mass.
-    let chem_headroom_alpha = max(1.0 - chem.x, 0.0);
-    let chem_headroom_beta = max(1.0 - chem.y, 0.0);
-    let dye_deposit_scale = clamp(fp_f32(FP_DYE_DEPOSIT_SCALE), 0.0, 1.0);
-    let deposit_alpha = min(dye_val.y * deposit_frac_alpha, chem_headroom_alpha) * dye_deposit_scale;
-    let deposit_beta = min(dye_val.x * deposit_frac_beta, chem_headroom_beta) * dye_deposit_scale;
-    chem.x = chem.x + deposit_alpha;
-    chem.y = chem.y + deposit_beta;
-    dye_val.y = max(dye_val.y - deposit_alpha, 0.0);
-    dye_val.x = max(dye_val.x - deposit_beta, 0.0);
-
-    // === Dye escape/decay (mass-conserving: return escaped dye to chem) ===
-    // Dye decays over time; the escaped mass is deposited back into chem
-    // so the total chem+dye budget is preserved.
+    // === Dye escape/decay ===
+    // Alpha/beta dye is visual-only: it simply decays (nothing to return).
     let escape_rate_alpha = max(fp_f32(FP_DYE_ESCAPE_RATE_ALPHA), 0.0);
     let escape_rate_beta = max(fp_f32(FP_DYE_ESCAPE_RATE_BETA), 0.0);
     let escape_factor_alpha = exp(-escape_rate_alpha * dt);
     let escape_factor_beta = exp(-escape_rate_beta * dt);
-    let escaped_alpha = dye_val.y * (1.0 - escape_factor_alpha);
-    let escaped_beta = dye_val.x * (1.0 - escape_factor_beta);
-    dye_val.y = dye_val.y - escaped_alpha;
-    dye_val.x = dye_val.x - escaped_beta;
-    // Return escaped dye mass to chem grid
-    chem.x = chem.x + escaped_alpha;
-    chem.y = chem.y + escaped_beta;
+    dye_val.y = dye_val.y * escape_factor_alpha;
+    dye_val.x = dye_val.x * escape_factor_beta;
 
-    // Reuse alpha escape rate for gamma.
+    // Gamma dye still carries real terrain mass: escaped gamma returns to the bed.
     let escaped_gamma = dye_val.z * (1.0 - escape_factor_alpha);
     dye_val.z = dye_val.z - escaped_gamma;
     gamma_height = gamma_height + escaped_gamma;
+
+    let dye_deposit_scale = clamp(fp_f32(FP_DYE_DEPOSIT_SCALE), 0.0, 1.0);
 
     // === Gamma lift/deposition coupling (mass-conserving) ===
     // Treat gamma height as the "bed" reservoir and dye_val.z as the carried reservoir.
@@ -839,28 +778,7 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     gamma_height = gamma_height + deposit_gamma;
     dye_val.z = max(dye_val.z - deposit_gamma, 0.0);
 
-    // Apply pool deltas back to the monomer channels: removals scale the two
-    // channels of the pool proportionally, additions split evenly.
-    var out_c = chem_full_in;
-    let d0 = chem.x - chem_start.x;
-    let d1 = chem.y - chem_start.y;
-    if (d0 < 0.0) {
-        let s0 = select(0.0, max(p0_old + d0, 0.0) / p0_old, p0_old > 1e-9);
-        out_c.x = chem_full_in.x * s0;
-        out_c.y = chem_full_in.y * s0;
-    } else {
-        out_c.x = chem_full_in.x + d0 * 0.5;
-        out_c.y = chem_full_in.y + d0 * 0.5;
-    }
-    if (d1 < 0.0) {
-        let s1 = select(0.0, max(p1_old + d1, 0.0) / p1_old, p1_old > 1e-9);
-        out_c.z = chem_full_in.z * s1;
-        out_c.w = chem_full_in.w * s1;
-    } else {
-        out_c.z = chem_full_in.z + d1 * 0.5;
-        out_c.w = chem_full_in.w + d1 * 0.5;
-    }
-    chem_grid[env_idx] = out_c;
+    // No chem write: the monomer channels are untouched by the dye pass.
     gamma_grid[env_idx] = gamma_height;
     dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
 }
