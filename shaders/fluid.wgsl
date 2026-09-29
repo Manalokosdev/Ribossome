@@ -681,9 +681,9 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // the suspended (levitated) monomer pools, so currents visibly carry
     // colored plumes. Thresholds mirror the simulation's suspension_factor
     // (FP_SPLAT.x = levitation full speed, FP slot 18 = precipitation speed).
-    let full_speed = max(fp_vec4(FP_SPLAT).x, 1e-6);
-    let zero_speed = clamp(fp_f32(FP_CHEM_SPEED_EQUIL_BETA), 0.0, full_speed);
-    let susp = clamp((length(vel_fluid) - zero_speed) / max(full_speed - zero_speed, 1e-6), 0.0, 1.0);
+    // Dye-exclusive simulation: no precipitation — all food is always
+    // suspended, so the dye shows the whole soup from frame 1.
+    let susp = 1.0;
     let env_idx = gamma_index(x, y);
     let chem_c = chem_grid[env_idx];
     let tracer_gain = susp * 0.08;

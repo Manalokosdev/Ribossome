@@ -15829,19 +15829,9 @@ fn main() {
                                                                 .text("Env Persistence"),
                                                         );
 
-                                                        // Monomer levitation thresholds (drive suspension_factor in
-                                                        // simulation.wgsl): settled below zero-speed, fully suspended
-                                                        // above full-speed. Reuse legacy ooze-rate settings fields.
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.fluid_ooze_rate, 0.0..=20.0)
-                                                                .text("Levitation Speed (0 = gate off)")
-                                                                .custom_formatter(|n, _| format!("{:.2}", n)),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.fluid_ooze_rate_beta, 0.0..=20.0)
-                                                                .text("Precipitation Speed (fully settled)")
-                                                                .custom_formatter(|n, _| format!("{:.2}", n)),
-                                                        );
+                                                        // Precipitation/levitation gate disabled for now: the
+                                                        // simulation is dye-exclusive (all monomers permanently
+                                                        // suspended). suspension_factor is a stub in simulation.wgsl.
 
                                                         ui.add(
                                                             egui::Slider::new(

@@ -3364,23 +3364,13 @@ fn diffuse_grids_pair(gid: vec3<u32>, pair: u32) {
 // neighbor's inflow, and no flux crosses the world boundary.
 // Strength = params.alpha_fluid_convolution (0 = off).
 
-// "Levitated vs precipitated": monomers are bio-available only where the
-// fluid locally suspends them — fully settled (0) at/below
-// params.suspend_zero_speed, fully levitated (1) at/above
-// params.suspend_full_speed, linear ramp in between. With fluids disabled,
-// everything is available (legacy behavior).
+// Dye-exclusive simulation: precipitation is disabled for now — all monomers
+// are permanently suspended and bio-available everywhere. This stub is kept
+// (and still called by uptake/pairing) so a settled/suspended model can be
+// reintroduced later via params.suspend_full_speed / suspend_zero_speed.
 fn suspension_factor(world_pos: vec2<f32>) -> f32 {
-    if (params._pad_rain0 == 0u) { return 1.0; }
-    // Levitation speed <= 0 disables the gate entirely (everything is
-    // bio-available) — fail-safe so weak currents can't starve the world.
-    if (params.suspend_full_speed <= 0.0) { return 1.0; }
-    let p = clamp_position(world_pos);
-    let fx = min(u32(p.x * f32(FLUID_GRID_SIZE) / f32(SIM_SIZE)), FLUID_GRID_SIZE - 1u);
-    let fy = min(u32(p.y * f32(FLUID_GRID_SIZE) / f32(SIM_SIZE)), FLUID_GRID_SIZE - 1u);
-    let v = fluid_velocity[fy * FLUID_GRID_SIZE + fx];
-    let full = max(params.suspend_full_speed, 1e-6);
-    let zero = clamp(params.suspend_zero_speed, 0.0, full);
-    return clamp((length(v) - zero) / max(full - zero, 1e-6), 0.0, 1.0);
+    let _unused = world_pos;
+    return 1.0;
 }
 
 fn chem_advect_frac(x: u32, y: u32) -> vec2<f32> {
