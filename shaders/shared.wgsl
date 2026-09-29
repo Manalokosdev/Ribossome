@@ -410,9 +410,11 @@ var<storage, read_write> chem_grid: array<vec4<f32>>;
 
 @group(0) @binding(3)
 // Fluid dye (advected):
-// - fluid_dye[idx].x = beta (red)
-// - fluid_dye[idx].y = alpha (green)
-// - fluid_dye[idx].z = gamma (blue)
+// Per-monomer visual tracer, mirroring chem_grid 1:1:
+// - fluid_dye[idx].x = A
+// - fluid_dye[idx].y = U
+// - fluid_dye[idx].z = G
+// - fluid_dye[idx].w = C
 var<storage, read_write> fluid_dye: array<vec4<f32>>;
 
 @group(0) @binding(18)
@@ -1043,14 +1045,14 @@ fn sample_env_gradient_sobel(center: vec2<f32>, grid_type: u32) -> vec2<f32> {
     let use_alpha = (grid_type == 0u);
     // No per-sample clamp here: let the downstream sensor nonlinearity clamp/saturate.
     // This reduces ALU and keeps the gradient faithful to the raw combined field.
-    let v00 = select(fluid_dye[idx00].x, fluid_dye[idx00].y, use_alpha) + chem_pool_of(chem_grid[idx00], use_alpha);
-    let v10 = select(fluid_dye[idx10].x, fluid_dye[idx10].y, use_alpha) + chem_pool_of(chem_grid[idx10], use_alpha);
-    let v20 = select(fluid_dye[idx20].x, fluid_dye[idx20].y, use_alpha) + chem_pool_of(chem_grid[idx20], use_alpha);
-    let v01 = select(fluid_dye[idx01].x, fluid_dye[idx01].y, use_alpha) + chem_pool_of(chem_grid[idx01], use_alpha);
-    let v21 = select(fluid_dye[idx21].x, fluid_dye[idx21].y, use_alpha) + chem_pool_of(chem_grid[idx21], use_alpha);
-    let v02 = select(fluid_dye[idx02].x, fluid_dye[idx02].y, use_alpha) + chem_pool_of(chem_grid[idx02], use_alpha);
-    let v12 = select(fluid_dye[idx12].x, fluid_dye[idx12].y, use_alpha) + chem_pool_of(chem_grid[idx12], use_alpha);
-    let v22 = select(fluid_dye[idx22].x, fluid_dye[idx22].y, use_alpha) + chem_pool_of(chem_grid[idx22], use_alpha);
+    let v00 = chem_pool_of(fluid_dye[idx00], use_alpha) + chem_pool_of(chem_grid[idx00], use_alpha);
+    let v10 = chem_pool_of(fluid_dye[idx10], use_alpha) + chem_pool_of(chem_grid[idx10], use_alpha);
+    let v20 = chem_pool_of(fluid_dye[idx20], use_alpha) + chem_pool_of(chem_grid[idx20], use_alpha);
+    let v01 = chem_pool_of(fluid_dye[idx01], use_alpha) + chem_pool_of(chem_grid[idx01], use_alpha);
+    let v21 = chem_pool_of(fluid_dye[idx21], use_alpha) + chem_pool_of(chem_grid[idx21], use_alpha);
+    let v02 = chem_pool_of(fluid_dye[idx02], use_alpha) + chem_pool_of(chem_grid[idx02], use_alpha);
+    let v12 = chem_pool_of(fluid_dye[idx12], use_alpha) + chem_pool_of(chem_grid[idx12], use_alpha);
+    let v22 = chem_pool_of(fluid_dye[idx22], use_alpha) + chem_pool_of(chem_grid[idx22], use_alpha);
 
     // Distance-aware (isotropic) weighting:
     // - axis neighbors are 1 cell away
@@ -1252,16 +1254,6 @@ fn genome_composition(packed: array<u32, GENOME_PACKED_WORDS>, offset: u32, len:
     return counts / total;
 }
 
-fn write_dye_alpha(idx: u32, alpha: f32) {
-    let prev = fluid_dye[idx];
-    fluid_dye[idx] = vec4<f32>(prev.x, alpha, prev.z, prev.w);
-}
-
-fn write_dye_beta(idx: u32, beta: f32) {
-    let prev = fluid_dye[idx];
-    fluid_dye[idx] = vec4<f32>(beta, prev.y, prev.z, prev.w);
-}
-
 fn read_rain_maps(idx: u32) -> vec2<f32> {
     // Rain map multipliers now come straight from the texture (chem_grid.zw
     // holds the G/C monomer channels).
@@ -1339,8 +1331,8 @@ fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_ty
     let d = fluid_dye[idx];
     let c = chem_grid[idx];
     var v = 0.0;
-    if (grid_type == 0u) { v = clamp(d.y + c.x + c.y, 0.0, 1.0); }
-    else if (grid_type == 1u) { v = clamp(d.x + c.z + c.w, 0.0, 1.0); }
+    if (grid_type == 0u) { v = clamp(d.x + d.y + c.x + c.y, 0.0, 1.0); }
+    else if (grid_type == 1u) { v = clamp(d.z + d.w + c.z + c.w, 0.0, 1.0); }
 
     if (debug_mode) {
         draw_filled_circle(center, 4.0, vec4<f32>(1.0, 0.7, 0.0, 0.7));

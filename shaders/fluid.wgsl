@@ -536,12 +536,14 @@ fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (add_alpha != 0.0 || add_beta != 0.0) {
+        // Dye layout: x=A, y=U, z=G, w=C. Alpha rate feeds the AU pair,
+        // beta rate the GC pair (even split).
         let current = dye_out[dye_idx];
         dye_out[dye_idx] = vec4<f32>(
-            min(current.x + add_beta, 1.0),
-            min(current.y + add_alpha, 1.0),
-            current.z,
-            current.w
+            min(current.x + add_alpha * 0.5, 1.0),
+            min(current.y + add_alpha * 0.5, 1.0),
+            min(current.z + add_beta * 0.5, 1.0),
+            min(current.w + add_beta * 0.5, 1.0)
         );
     }
 }
@@ -685,18 +687,20 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // suspended, so the dye shows the whole soup from frame 1.
     let susp = 1.0;
     let env_idx = gamma_index(x, y);
+    // Per-monomer tracer: dye channels mirror the chem channels 1:1
+    // (x=A, y=U, z=G, w=C) — full per-nucleotide identity in the flow.
     let chem_c = chem_grid[env_idx];
     let tracer_gain = susp * 0.08;
-    dye_val.y = min(dye_val.y + clamp(chem_c.x + chem_c.y, 0.0, 1.0) * tracer_gain, 1.0);
-    dye_val.x = min(dye_val.x + clamp(chem_c.z + chem_c.w, 0.0, 1.0) * tracer_gain, 1.0);
+    dye_val = min(dye_val + clamp(chem_c, vec4<f32>(0.0), vec4<f32>(1.0)) * tracer_gain, vec4<f32>(1.0));
 
     let escape_rate_alpha = max(fp_f32(FP_DYE_ESCAPE_RATE_ALPHA), 0.0);
     let escape_rate_beta = max(fp_f32(FP_DYE_ESCAPE_RATE_BETA), 0.0);
     let escape_factor_alpha = exp(-escape_rate_alpha * dt);
     let escape_factor_beta = exp(-escape_rate_beta * dt);
+    dye_val.x = dye_val.x * escape_factor_alpha;
     dye_val.y = dye_val.y * escape_factor_alpha;
-    dye_val.x = dye_val.x * escape_factor_beta;
-    dye_val.z = dye_val.z * escape_factor_alpha;
+    dye_val.z = dye_val.z * escape_factor_beta;
+    dye_val.w = dye_val.w * escape_factor_beta;
 
     dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
 }
@@ -748,37 +752,22 @@ fn diffuse_dye_no_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // In no-fluid mode, apply the fixed per-epoch decay.
     // (Escape sliders are ignored here to keep behavior epoch-stable.)
-    dye_val.x = dye_val.x * NO_FLUID_DYE_DECAY_PER_TICK;
-    dye_val.y = dye_val.y * NO_FLUID_DYE_DECAY_PER_TICK;
-    dye_val.z = dye_val.z * NO_FLUID_DYE_DECAY_PER_TICK;
+    dye_val = dye_val * NO_FLUID_DYE_DECAY_PER_TICK;
 
     // Non-depleting injection from chem and trail.
     // When fluids are off, dye acts like a visual/sensing diffusion layer and should not
     // drain the environment reservoirs.
     let env_idx = gamma_index(x, y);
-    let chem_c = chem_grid[env_idx];
-    // Pool sums (a = A+U, b = G+C); non-depleting read, so no redistribution needed.
-    let chem = clamp(vec2<f32>(chem_c.x + chem_c.y, chem_c.z + chem_c.w), vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
-    let gamma_height = max(gamma_grid[env_idx], 0.0);
+    // Per-monomer non-depleting injection (dye channels mirror chem 1:1).
+    let chem_c = clamp(chem_grid[env_idx], vec4<f32>(0.0), vec4<f32>(1.0));
 
-    // Non-depleting injection from chem and trail.
     // If ooze rate is 0, use a small default in no-fluid mode so dye gets replenished.
-    // Per-epoch non-depleting injection from chem and trail.
-    // Interpret the UI value as a per-epoch fraction in no-fluid mode; if it's 0, use default.
+    // Interpret the UI value as a per-epoch fraction in no-fluid mode.
     let ooze_ui = max(fp_f32(FP_CHEM_OOZE_STILL_RATE), 0.0);
     let ooze_frac = clamp(select(ooze_ui, NO_FLUID_DEFAULT_CHEM_OOZE_FRAC_PER_EPOCH, ooze_ui <= 0.0), 0.0, CHEM_MAX_STEP_FRAC);
     if (ooze_frac > 0.0) {
-        // Alpha: chem.x -> dye.y
-        let alpha_headroom = max(1.0 - dye_val.y, 0.0);
-        dye_val.y = min(dye_val.y + min(chem.x * ooze_frac, alpha_headroom), 1.0);
-
-        // Beta: chem.y -> dye.x
-        let beta_headroom = max(1.0 - dye_val.x, 0.0);
-        dye_val.x = min(dye_val.x + min(chem.y * ooze_frac, beta_headroom), 1.0);
-
-        // Gamma: gamma -> dye.z
-        let gamma_headroom = max(1.0 - dye_val.z, 0.0);
-        dye_val.z = min(dye_val.z + min(gamma_height * ooze_frac, gamma_headroom), 1.0);
+        let headroom = max(vec4<f32>(1.0) - dye_val, vec4<f32>(0.0));
+        dye_val = min(dye_val + min(chem_c * ooze_frac, headroom), vec4<f32>(1.0));
     }
 
     dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));

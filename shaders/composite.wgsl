@@ -248,30 +248,32 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let dye_y = u32(clamp(world_pos.y / ws * grid_f, 0.0, max_idx_f));
             let dye_idx = dye_y * GAMMA_GRID_DIM + dye_x;
 
-            // Sample dye (x = beta, y = alpha) directly from dye buffer.
+            // Sample the per-monomer dye (x=A, y=U, z=G, w=C).
             // Apply a visualization-only gain, then tone-map to avoid hard saturation.
-            let dye_raw = max(fluid_dye[dye_idx].xy, vec2<f32>(0.0, 0.0));
-            let dye_lin = dye_raw * DYE_VIS_GAIN;
+            let dye_raw4 = max(fluid_dye[dye_idx], vec4<f32>(0.0));
+            let dye_lin4 = dye_raw4 * DYE_VIS_GAIN;
             // Simple Reinhard tone map per-channel: x / (1 + x)
-            let dye_tm = dye_lin / (vec2<f32>(1.0, 1.0) + dye_lin);
+            let dye_tm4 = dye_lin4 / (vec4<f32>(1.0) + dye_lin4);
+            // Pool views for the 2-channel compositing below
+            // (dye_raw/dye_tm keep the legacy meaning: x = GC pool, y = AU pool).
+            let dye_raw = vec2<f32>(dye_raw4.z + dye_raw4.w, dye_raw4.x + dye_raw4.y);
+            let dye_tm = clamp(vec2<f32>(dye_tm4.z + dye_tm4.w, dye_tm4.x + dye_tm4.y), vec2<f32>(0.0), vec2<f32>(1.0));
 
-            // Unified palette: the dye uses the SAME colors as the deposit —
-            // the pool colors (alpha_color for A+U, beta_color for G+C),
-            // tinted by the local monomer ratio exactly like the env render.
-            let cc = chem_grid[dye_idx];
-            let pool_au = cc.x + cc.y;
-            let pool_gc = cc.z + cc.w;
-            let ratio_u = select(0.5, cc.y / max(pool_au, 1e-6), pool_au > 1e-6);
-            let ratio_c = select(0.5, cc.w / max(pool_gc, 1e-6), pool_gc > 1e-6);
+            // Unified palette: ratios come straight from the dye itself now —
+            // full per-nucleotide identity riding the currents.
+            let pool_au = dye_raw4.x + dye_raw4.y;
+            let pool_gc = dye_raw4.z + dye_raw4.w;
+            let ratio_u = select(0.5, dye_raw4.y / max(pool_au, 1e-6), pool_au > 1e-6);
+            let ratio_c = select(0.5, dye_raw4.w / max(pool_gc, 1e-6), pool_gc > 1e-6);
             if (params.nucleotide_debug_mask != 0u) {
                 // RGBW debug (keys 1-4) applies to the dye too: split each
                 // pool's tracer by the local monomer ratio — A=red, U=green,
                 // G=blue, C=white, matching the deposit debug view.
                 let m = params.nucleotide_debug_mask;
-                let a_dye = dye_tm.y * (1.0 - ratio_u);
-                let u_dye = dye_tm.y * ratio_u;
-                let g_dye = dye_tm.x * (1.0 - ratio_c);
-                let c_dye = dye_tm.x * ratio_c;
+                let a_dye = dye_tm4.x;
+                let u_dye = dye_tm4.y;
+                let g_dye = dye_tm4.z;
+                let c_dye = dye_tm4.w;
                 var dbg = vec3<f32>(0.0);
                 if ((m & 1u) != 0u) { dbg += vec3<f32>(1.0, 0.0, 0.0) * a_dye; }
                 if ((m & 2u) != 0u) { dbg += vec3<f32>(0.0, 1.0, 0.0) * u_dye; }
