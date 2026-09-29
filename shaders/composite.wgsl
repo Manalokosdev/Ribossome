@@ -263,6 +263,22 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let pool_gc = cc.z + cc.w;
             let ratio_u = select(0.5, cc.y / max(pool_au, 1e-6), pool_au > 1e-6);
             let ratio_c = select(0.5, cc.w / max(pool_gc, 1e-6), pool_gc > 1e-6);
+            if (params.nucleotide_debug_mask != 0u) {
+                // RGBW debug (keys 1-4) applies to the dye too: split each
+                // pool's tracer by the local monomer ratio — A=red, U=green,
+                // G=blue, C=white, matching the deposit debug view.
+                let m = params.nucleotide_debug_mask;
+                let a_dye = dye_tm.y * (1.0 - ratio_u);
+                let u_dye = dye_tm.y * ratio_u;
+                let g_dye = dye_tm.x * (1.0 - ratio_c);
+                let c_dye = dye_tm.x * ratio_c;
+                var dbg = vec3<f32>(0.0);
+                if ((m & 1u) != 0u) { dbg += vec3<f32>(1.0, 0.0, 0.0) * a_dye; }
+                if ((m & 2u) != 0u) { dbg += vec3<f32>(0.0, 1.0, 0.0) * u_dye; }
+                if ((m & 4u) != 0u) { dbg += vec3<f32>(0.2, 0.4, 1.0) * g_dye; }
+                if ((m & 8u) != 0u) { dbg += vec3<f32>(1.0, 1.0, 1.0) * c_dye; }
+                under_color = clamp(under_color + dbg, vec3<f32>(0.0), vec3<f32>(1.0));
+            } else {
             let alpha_base = vec3<f32>(
                 clamp(params.alpha_color_r, 0.0, 1.0),
                 clamp(params.alpha_color_g, 0.0, 1.0),
@@ -310,6 +326,7 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             under_color = clamp(under_color, vec3<f32>(0.0), vec3<f32>(1.0));
+            }
         }
     }
 
