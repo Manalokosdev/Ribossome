@@ -670,116 +670,23 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Final dye value after advection
     var dye_val = clamp(advected_dye, vec4<f32>(0.0), vec4<f32>(1.0));
 
-    // === Chem erosion/deposition coupling (mass-conserving) ===
-    // Use dye-grid velocity magnitude (in dye cells / sec) as the driver.
-    // IMPORTANT: We deliberately low-pass filter the fluid velocity magnitude here.
-    // The pressure-projection on a collocated grid can exhibit subtle cell-aligned
-    // checkerboarding/odd-even artifacts; using a small 2x2 box filter on |v| makes
-    // the lift/deposit thresholding much less likely to imprint the FLUID_GRID_SIZE
-    // lattice onto the (higher-res) dye/chem grids.
-    // Low-pass filter of velocity for the speed-driven chem<->dye transfer.
-    // Keep this cheap: 5-tap cross filter (center + axis taps).
-    // This still damps collocated-grid odd/even artifacts without the cost of a full 3x3.
-    let o = 0.5;
-    let v_c = vel_fluid;
-    let v_l = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>(-o,  0.0))), MAX_VEL);
-    let v_r = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( o,  0.0))), MAX_VEL);
-    let v_u = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0, -o))), MAX_VEL);
-    let v_d = clamp_vec2_len(sanitize_vec2(sample_velocity(fluid_pos + vec2<f32>( 0.0,  o))), MAX_VEL);
-
-    // Weights: center=4, axis=2 each (sum=12)
-    let avg_vel = (v_c * 4.0 + (v_l + v_r + v_u + v_d) * 2.0) * (1.0 / 12.0);
-    let speed_fluid = length(avg_vel);
-    let speed = speed_fluid * FLUID_TO_DYE_SCALE;
-
-    // Global lift + sedimentation controls (shared across alpha/beta/gamma).
-    let lift_min_speed = clamp(max(fp_vec4(FP_SPLAT).x, 0.0), 0.0, 1000.0);
-    let lift_multiplier = clamp(max(fp_vec4(FP_SPLAT).y, 0.0), 0.0, 1000.0);
-    let sediment_min_speed = clamp(max(fp_f32(FP_CHEM_SPEED_EQUIL_BETA), 0.0), 0.0, 1000.0);
-    let sediment_multiplier = clamp(max(fp_f32(FP_CHEM_SPEED_MAX_LIFT_BETA), 0.0), 0.0, 1000.0);
-
-    // Progressive strengths in [0, 1].
-    // - lift_strength = 0 below lift_min_speed, then increases with speed.
-    // - sediment_strength = 0 above sediment_min_speed, then increases as speed drops.
-    let lift_strength = clamp((speed - lift_min_speed) * lift_multiplier, 0.0, 1.0);
-    let sediment_strength = clamp((sediment_min_speed - speed) * sediment_multiplier, 0.0, 1.0);
-
-    // Each dye cell maps 1:1 to the environment chem cell at the same resolution.
-    let env_idx = gamma_index(x, y);
-    var gamma_height = max(gamma_grid[env_idx], 0.0);
-
-    // Per-channel lift/deposit multipliers.
-    // NOTE: Setting gamma multipliers to 0 effectively freezes gamma terrain against fluid-driven erosion.
-    let lift_mult = clamp(fp_vec4(FP_CHEM_LIFT_MULT).xyz, vec3<f32>(0.0), vec3<f32>(1000.0));
-    let deposit_mult = clamp(fp_vec4(FP_CHEM_DEPOSIT_MULT).xyz, vec3<f32>(0.0), vec3<f32>(1000.0));
-
-    // MONOMERS NEVER PASS THROUGH THE DYE.
-    // The dye advects semi-Lagrangian (interpolated backtrace), which does NOT
-    // conserve mass — matter routed through it drifts. Real monomer transport
-    // happens exclusively in the conservative donor-cell kernel
-    // (advect_chem_* in simulation.wgsl). The alpha/beta dye channels are
-    // purely visual: a small NON-DEPLETING glow from suspended (levitated)
-    // monomers lets the currents show what they carry.
-    let chem_vis = chem_grid[env_idx];
-    let vis_gain = lift_strength * 0.05;
-    dye_val.y = min(dye_val.y + clamp(chem_vis.x + chem_vis.y, 0.0, 1.0) * vis_gain, 1.0);
-    dye_val.x = min(dye_val.x + clamp(chem_vis.z + chem_vis.w, 0.0, 1.0) * vis_gain, 1.0);
-
-    // Still-water gamma ooze (mass-conserving, gamma only).
-    let ooze_rate = max(fp_f32(FP_CHEM_OOZE_STILL_RATE), 0.0);
-    let stillness = 1.0 - smoothstep(0.0, max(sediment_min_speed, 1e-6), speed);
-    let ooze_frac_gamma = clamp(ooze_rate * stillness * dt * lift_mult.z, 0.0, CHEM_MAX_STEP_FRAC);
-    if (ooze_frac_gamma > 0.0) {
-        // Gamma: gamma -> dye.z (mass-conserving)
-        let gamma_headroom = max(1.0 - dye_val.z, 0.0);
-        let ooze_gamma = min(gamma_height * ooze_frac_gamma, gamma_headroom);
-        dye_val.z = min(dye_val.z + ooze_gamma, 1.0);
-        gamma_height = max(gamma_height - ooze_gamma, 0.0);
-    }
-
-    // === Dye escape/decay ===
-    // Alpha/beta dye is visual-only: it simply decays (nothing to return).
+    // === Dye is purely visual ===
+    // Nothing material passes through the dye layer anymore:
+    // - monomers move ONLY via the conservative donor-cell advection kernel
+    //   (advect_chem_* in simulation.wgsl);
+    // - the gamma <-> dye erosion cycle was removed too: semi-Lagrangian dye
+    //   advection does not conserve mass, so routing terrain through it made
+    //   heights drift.
+    // The dye just advects, blurs and decays; fumarole dye rates can inject a
+    // visual tracer to show the currents.
     let escape_rate_alpha = max(fp_f32(FP_DYE_ESCAPE_RATE_ALPHA), 0.0);
     let escape_rate_beta = max(fp_f32(FP_DYE_ESCAPE_RATE_BETA), 0.0);
     let escape_factor_alpha = exp(-escape_rate_alpha * dt);
     let escape_factor_beta = exp(-escape_rate_beta * dt);
     dye_val.y = dye_val.y * escape_factor_alpha;
     dye_val.x = dye_val.x * escape_factor_beta;
+    dye_val.z = dye_val.z * escape_factor_alpha;
 
-    // Gamma dye still carries real terrain mass: escaped gamma returns to the bed.
-    let escaped_gamma = dye_val.z * (1.0 - escape_factor_alpha);
-    dye_val.z = dye_val.z - escaped_gamma;
-    gamma_height = gamma_height + escaped_gamma;
-
-    let dye_deposit_scale = clamp(fp_f32(FP_DYE_DEPOSIT_SCALE), 0.0, 1.0);
-
-    // === Gamma lift/deposition coupling (mass-conserving) ===
-    // Treat gamma height as the "bed" reservoir and dye_val.z as the carried reservoir.
-    // Uses the same shared lift/sedimentation strengths.
-    let pickup_strength_gamma = lift_strength * lift_mult.z;
-    let deposit_strength_gamma_pos = sediment_strength * deposit_mult.z;
-
-    let pickup_frac_gamma = clamp(CHEM_TRANSFER_RATE * pickup_strength_gamma * dt, 0.0, CHEM_MAX_STEP_FRAC);
-    let deposit_frac_gamma = clamp(CHEM_TRANSFER_RATE * deposit_strength_gamma_pos * dt, 0.0, CHEM_MAX_STEP_FRAC);
-
-    // Pickup (gamma -> dye.z)
-    // IMPORTANT: pickup is proportional-to-height, but capped to avoid over-eroding tall gamma.
-    // This also avoids hard frontiers near 0 height that absolute pickup can create.
-    let gamma_pickup_frac = min(pickup_frac_gamma, 0.05);
-    let pickup_gamma_raw = gamma_height * gamma_pickup_frac;
-    let dye_headroom_gamma = max(1.0 - dye_val.z, 0.0);
-    let pickup_gamma = min(min(pickup_gamma_raw, dye_headroom_gamma), gamma_height);
-    gamma_height = max(gamma_height - pickup_gamma, 0.0);
-    dye_val.z = min(dye_val.z + pickup_gamma, 1.0);
-
-    // Deposit (dye.z -> gamma)
-    // Gamma height is unbounded; do not limit deposition by a [0..1] headroom.
-    let deposit_gamma = (dye_val.z * deposit_frac_gamma) * dye_deposit_scale;
-    gamma_height = gamma_height + deposit_gamma;
-    dye_val.z = max(dye_val.z - deposit_gamma, 0.0);
-
-    // No chem write: the monomer channels are untouched by the dye pass.
-    gamma_grid[env_idx] = gamma_height;
     dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
 }
 

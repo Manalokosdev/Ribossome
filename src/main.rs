@@ -15807,38 +15807,17 @@ fn main() {
                                                                 .text("Env Persistence"),
                                                         );
 
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.fluid_ooze_rate, 0.0..=100.0)
-                                                                .text("Lift Min Speed"),
-                                                        );
-
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.fluid_ooze_fade_rate,
-                                                                0.0..=50.0,
-                                                            )
-                                                            .text("Lift Multiplier"),
-                                                        );
-
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.fluid_ooze_rate_beta, 0.0..=100.0)
-                                                                .text("Sedimentation Min Speed"),
-                                                        );
-
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.fluid_ooze_fade_rate_beta,
-                                                                0.0..=50.0,
-                                                            )
-                                                            .text("Sedimentation Multiplier"),
-                                                        );
+                                                        // Legacy lift/sedimentation controls removed: the dye layer is
+                                                        // purely visual now — no matter (monomers or gamma) passes
+                                                        // through it. Monomer suspension is speed-based in
+                                                        // simulation.wgsl (suspension_factor).
 
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.fluid_ooze_still_rate,
                                                                 0.0..=100.0,
                                                             )
-                                                            .text("Chem Ooze Rate (Still)"),
+                                                            .text("Dye Injection (Fluid Off, visual)"),
                                                         );
 
                                                         ui.add(
@@ -15914,16 +15893,11 @@ fn main() {
                                                                 .text("Noise Power (Contrast)"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.00001..=2.0)
+                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.0..=2.0)
                                                                 .text("Rain Probability")
                                                                 .logarithmic(true)
                                                                 .custom_formatter(|n, _| format!("{:.6}", n)),
                                                         );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.dye_precipitation, 0.0..=1.0)
-                                                                .text("Dye Precipitation"),
-                                                        )
-                                                        .on_hover_text("Scales rain/precipitation injection into the chem grids. 0 disables precipitation entirely.");
                                                         ui.checkbox(&mut state.rain_debug_visual, "=�Ŀ Show Rain Pattern");
                                                         if state.rain_debug_visual {
                                                             ui.label("=��� Green = Alpha (food) | =��� Red = Beta (poison)");
@@ -15992,7 +15966,7 @@ fn main() {
                                                                 .text("Beta Noise Scale"),
                                                         );
                                                         ui.add(
-                                                            egui::Slider::new(&mut state.beta_multiplier, 0.00001..=2.0)
+                                                            egui::Slider::new(&mut state.beta_multiplier, 0.0..=2.0)
                                                                 .text("Rain Probability")
                                                                 .logarithmic(true)
                                                                 .custom_formatter(|n, _| format!("{:.6}", n)),
