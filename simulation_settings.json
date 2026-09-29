@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 5.8625455,
+  "camera_zoom": 10.966902,
   "spawn_probability": 0.5,
   "death_probability": 0.001,
   "mutation_rate": 0.005,
@@ -136,8 +136,8 @@
       "max_threshold": 55000.0,
       "adjustment_percent": 20.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 0,
-      "difficulty_level": 0
+      "last_adjustment_epoch": 48594,
+      "difficulty_level": -2
     },
     "alpha_rain": {
       "enabled": false,

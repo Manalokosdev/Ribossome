@@ -4363,8 +4363,18 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (mode == 1u) {
         write_chem_alpha(idx, output_value);
+        // Dye-exclusive world: new matter shows in the dye immediately
+        // (per-monomer channels mirror chem; pool value splits evenly).
+        var dv = fluid_dye[idx];
+        dv.x = output_value * 0.5;
+        dv.y = output_value * 0.5;
+        fluid_dye[idx] = dv;
     } else if (mode == 2u) {
         write_chem_beta(idx, output_value);
+        var dv = fluid_dye[idx];
+        dv.z = output_value * 0.5;
+        dv.w = output_value * 0.5;
+        fluid_dye[idx] = dv;
     } else if (mode == 3u) {
         write_gamma_height(idx, output_value);
     }
