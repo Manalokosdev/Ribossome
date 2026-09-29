@@ -31,21 +31,25 @@ fn apply_rain_drops(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Determine which type of drop this is based on the drop_id range
     // CPU calculates: alpha_drops = [0, alpha_count), beta_drops = [alpha_count, alpha_count+beta_count)
     if (drop_id < params.alpha_rain_drop_count) {
-        // Alpha rain drop (food) - weighted by rain map
+        // Pool-0 rain drop - weighted by rain map
         // Use another RNG check to apply the rain_map probability
-        let accept_seed = seed * 1103515245u;
-        let accept_chance = hash_f32(accept_seed);
+        let accept_chance = hash_f32(seed * 1103515245u);
         if (accept_chance < alpha_rain_map) {
-            // Write saturated alpha
-            write_chem_alpha(idx, 1.0);
+            // Deposit a saturated drop of a single monomer: A or U (50/50).
+            var cell = chem_grid[idx];
+            let pick = hash(seed ^ 0x51ED270Bu) & 1u;
+            cell[pick] = 1.0;
+            chem_grid[idx] = cell;
         }
     } else {
-        // Beta rain drop (poison) - weighted by rain map
-        let accept_seed = seed * 2147483647u;
-        let accept_chance = hash_f32(accept_seed);
+        // Pool-1 rain drop - weighted by rain map
+        let accept_chance = hash_f32(seed * 2147483647u);
         if (accept_chance < beta_rain_map) {
-            // Write saturated beta
-            write_chem_beta(idx, 1.0);
+            // Deposit a saturated drop of a single monomer: G or C (50/50).
+            var cell = chem_grid[idx];
+            let pick = 2u + (hash(seed ^ 0x2545F491u) & 1u);
+            cell[pick] = 1.0;
+            chem_grid[idx] = cell;
         }
     }
 }

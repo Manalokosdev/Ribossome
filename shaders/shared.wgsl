@@ -399,10 +399,13 @@ var<storage, read_write> agents_out: array<AgentAtomic>;
 
 @group(0) @binding(2)
 // Environment chemistry grid:
-// - chem_grid[idx].x = alpha (food)
-// - chem_grid[idx].y = beta  (poison)
-// - chem_grid[idx].z = alpha_rain_map (food rain multiplier)
-// - chem_grid[idx].w = beta_rain_map (poison rain multiplier)
+// RNA-world monomer fields (free activated nucleotides):
+// - chem_grid[idx].x = A
+// - chem_grid[idx].y = U
+// - chem_grid[idx].z = G
+// - chem_grid[idx].w = C
+// "Pool 0" (legacy alpha) = A+U; "pool 1" (legacy beta) = G+C.
+// Rain map multipliers moved to rain_map_tex (sampled directly).
 var<storage, read_write> chem_grid: array<vec4<f32>>;
 
 @group(0) @binding(3)
@@ -988,9 +991,9 @@ fn sample_grid_bilinear(pos: vec2<f32>, grid_type: u32) -> f32 {
     var v11: f32;
 
     if (grid_type == 0u) {
-        v00 = chem_grid[idx00].x; v10 = chem_grid[idx10].x; v01 = chem_grid[idx01].x; v11 = chem_grid[idx11].x;
+        v00 = chem_grid[idx00].x + chem_grid[idx00].y; v10 = chem_grid[idx10].x + chem_grid[idx10].y; v01 = chem_grid[idx01].x + chem_grid[idx01].y; v11 = chem_grid[idx11].x + chem_grid[idx11].y;
     } else if (grid_type == 1u) {
-        v00 = chem_grid[idx00].y; v10 = chem_grid[idx10].y; v01 = chem_grid[idx01].y; v11 = chem_grid[idx11].y;
+        v00 = chem_grid[idx00].z + chem_grid[idx00].w; v10 = chem_grid[idx10].z + chem_grid[idx10].w; v01 = chem_grid[idx01].z + chem_grid[idx01].w; v11 = chem_grid[idx11].z + chem_grid[idx11].w;
     } else {
         v00 = read_gamma_height(idx00); v10 = read_gamma_height(idx10); v01 = read_gamma_height(idx01); v11 = read_gamma_height(idx11);
     }
@@ -1040,14 +1043,14 @@ fn sample_env_gradient_sobel(center: vec2<f32>, grid_type: u32) -> vec2<f32> {
     let use_alpha = (grid_type == 0u);
     // No per-sample clamp here: let the downstream sensor nonlinearity clamp/saturate.
     // This reduces ALU and keeps the gradient faithful to the raw combined field.
-    let v00 = select(fluid_dye[idx00].x + chem_grid[idx00].y, fluid_dye[idx00].y + chem_grid[idx00].x, use_alpha);
-    let v10 = select(fluid_dye[idx10].x + chem_grid[idx10].y, fluid_dye[idx10].y + chem_grid[idx10].x, use_alpha);
-    let v20 = select(fluid_dye[idx20].x + chem_grid[idx20].y, fluid_dye[idx20].y + chem_grid[idx20].x, use_alpha);
-    let v01 = select(fluid_dye[idx01].x + chem_grid[idx01].y, fluid_dye[idx01].y + chem_grid[idx01].x, use_alpha);
-    let v21 = select(fluid_dye[idx21].x + chem_grid[idx21].y, fluid_dye[idx21].y + chem_grid[idx21].x, use_alpha);
-    let v02 = select(fluid_dye[idx02].x + chem_grid[idx02].y, fluid_dye[idx02].y + chem_grid[idx02].x, use_alpha);
-    let v12 = select(fluid_dye[idx12].x + chem_grid[idx12].y, fluid_dye[idx12].y + chem_grid[idx12].x, use_alpha);
-    let v22 = select(fluid_dye[idx22].x + chem_grid[idx22].y, fluid_dye[idx22].y + chem_grid[idx22].x, use_alpha);
+    let v00 = select(fluid_dye[idx00].x, fluid_dye[idx00].y, use_alpha) + chem_pool_of(chem_grid[idx00], use_alpha);
+    let v10 = select(fluid_dye[idx10].x, fluid_dye[idx10].y, use_alpha) + chem_pool_of(chem_grid[idx10], use_alpha);
+    let v20 = select(fluid_dye[idx20].x, fluid_dye[idx20].y, use_alpha) + chem_pool_of(chem_grid[idx20], use_alpha);
+    let v01 = select(fluid_dye[idx01].x, fluid_dye[idx01].y, use_alpha) + chem_pool_of(chem_grid[idx01], use_alpha);
+    let v21 = select(fluid_dye[idx21].x, fluid_dye[idx21].y, use_alpha) + chem_pool_of(chem_grid[idx21], use_alpha);
+    let v02 = select(fluid_dye[idx02].x, fluid_dye[idx02].y, use_alpha) + chem_pool_of(chem_grid[idx02], use_alpha);
+    let v12 = select(fluid_dye[idx12].x, fluid_dye[idx12].y, use_alpha) + chem_pool_of(chem_grid[idx12], use_alpha);
+    let v22 = select(fluid_dye[idx22].x, fluid_dye[idx22].y, use_alpha) + chem_pool_of(chem_grid[idx22], use_alpha);
 
     // Distance-aware (isotropic) weighting:
     // - axis neighbors are 1 cell away
@@ -1091,9 +1094,9 @@ fn sample_grid_bicubic(pos: vec2<f32>, grid_type: u32) -> f32 {
             let idx = u32(sy) * GRID_SIZE + u32(sx);
 
             if (grid_type == 0u) {
-                values[(j + 1) * 4 + (i + 1)] = chem_grid[idx].x;
+                values[(j + 1) * 4 + (i + 1)] = chem_grid[idx].x + chem_grid[idx].y;
             } else if (grid_type == 1u) {
-                values[(j + 1) * 4 + (i + 1)] = chem_grid[idx].y;
+                values[(j + 1) * 4 + (i + 1)] = chem_grid[idx].z + chem_grid[idx].w;
             } else {
                 values[(j + 1) * 4 + (i + 1)] = read_gamma_height(idx);
             }
@@ -1145,25 +1148,108 @@ fn write_gamma_slope(idx: u32, slope: vec2<f32>) { gamma_grid[idx + GAMMA_SLOPE_
 fn read_combined_height(ix: i32, iy: i32) -> f32 {
     let idx = clamp_gamma_coords(ix, iy);
     var height = gamma_grid[idx];
-    if (params.chemical_slope_scale_alpha != 0.0) { height += chem_grid[idx].x * params.chemical_slope_scale_alpha; }
-    if (params.chemical_slope_scale_beta != 0.0) { height += chem_grid[idx].y * params.chemical_slope_scale_beta; }
+    if (params.chemical_slope_scale_alpha != 0.0) { height += (chem_grid[idx].x + chem_grid[idx].y) * params.chemical_slope_scale_alpha; }
+    if (params.chemical_slope_scale_beta != 0.0) { height += (chem_grid[idx].z + chem_grid[idx].w) * params.chemical_slope_scale_beta; }
     return height;
 }
 
-// Helper functions for chem_grid to preserve rain map data (.zw components)
-fn write_chem_alpha(idx: u32, alpha: f32) {
-    let prev = chem_grid[idx];
-    chem_grid[idx] = vec4<f32>(alpha, prev.y, prev.z, prev.w);
+// ---- Monomer pool helpers -------------------------------------------------
+// Pool 0 (legacy "alpha") = A+U (channels x,y); pool 1 (legacy "beta") = G+C (z,w).
+
+fn chem_pool_of(c: vec4<f32>, alpha_pool: bool) -> f32 {
+    return select(c.z + c.w, c.x + c.y, alpha_pool);
 }
 
-fn write_chem_beta(idx: u32, beta: f32) {
-    let prev = chem_grid[idx];
-    chem_grid[idx] = vec4<f32>(prev.x, beta, prev.z, prev.w);
+fn read_chem_pool(idx: u32, pool: u32) -> f32 {
+    let c = chem_grid[idx];
+    return select(c.z + c.w, c.x + c.y, pool == 0u);
 }
 
+// Set a pool to a new total. Removals scale the two monomer channels
+// proportionally (you can only take what is there); additions split evenly
+// (external sources are unbiased between the pool's two monomers).
+fn set_chem_pool(idx: u32, pool: u32, new_total: f32) {
+    var c = chem_grid[idx];
+    let i0 = select(2u, 0u, pool == 0u);
+    let i1 = i0 + 1u;
+    let old_total = c[i0] + c[i1];
+    let nt = max(new_total, 0.0);
+    if (nt <= old_total) {
+        if (old_total > 1e-9) {
+            let s = nt / old_total;
+            c[i0] *= s;
+            c[i1] *= s;
+        } else {
+            c[i0] = nt * 0.5;
+            c[i1] = nt * 0.5;
+        }
+    } else {
+        let add = (nt - old_total) * 0.5;
+        c[i0] += add;
+        c[i1] += add;
+    }
+    chem_grid[idx] = c;
+}
+
+// Legacy-named helpers: existing call sites keep working as pool operations.
+fn write_chem_alpha(idx: u32, alpha: f32) { set_chem_pool(idx, 0u, alpha); }
+fn write_chem_beta(idx: u32, beta: f32) { set_chem_pool(idx, 1u, beta); }
 fn write_chem_alpha_beta(idx: u32, alpha: f32, beta: f32) {
-    let prev = chem_grid[idx];
-    chem_grid[idx] = vec4<f32>(alpha, beta, prev.z, prev.w);
+    set_chem_pool(idx, 0u, alpha);
+    set_chem_pool(idx, 1u, beta);
+}
+
+// Mass-conserving per-channel transfer between two cells (used by prop/body
+// wash). Each channel is moved up to `amount`, capped by the target's
+// per-channel headroom (1.0).
+fn wash_transfer_chem(center_idx: u32, target_idx: u32, amount: f32) {
+    if (amount <= 0.0 || center_idx == target_idx) { return; }
+    var c = chem_grid[center_idx];
+    var t = chem_grid[target_idx];
+    for (var ch = 0u; ch < 4u; ch++) {
+        let cap = max(0.0, 1.0 - t[ch]);
+        let tr = min(min(c[ch], amount), cap);
+        c[ch] -= tr;
+        t[ch] += tr;
+    }
+    chem_grid[center_idx] = c;
+    chem_grid[target_idx] = t;
+}
+
+// Monomers consumed from the environment per paired base during
+// template-directed replication (and returned on death for unfinished strands).
+const PAIRING_MONOMER_COST: f32 = 0.02;
+
+// Raw complement counts (A/U/G/C channels) of the first `count` paired bases —
+// the partially built complementary strand a dying agent must return.
+fn genome_paired_complement_counts(packed: array<u32, GENOME_PACKED_WORDS>, offset: u32, len: u32, count: u32) -> vec4<f32> {
+    var counts = vec4<f32>(0.0);
+    let n = min(count, len);
+    for (var i = 0u; i < n; i++) {
+        let b = genome_get_base_ascii(packed, offset + i, offset, len);
+        if (b == 65u) { counts.y += 1.0; }      // A paired a free U
+        else if (b == 85u) { counts.x += 1.0; } // U paired a free A
+        else if (b == 71u) { counts.w += 1.0; } // G paired a free C
+        else if (b == 67u) { counts.z += 1.0; } // C paired a free G
+    }
+    return counts;
+}
+
+// Fraction of A/U/G/C in the active genome (for decomposition deposits).
+// Returns an even split when the genome is empty.
+fn genome_composition(packed: array<u32, GENOME_PACKED_WORDS>, offset: u32, len: u32) -> vec4<f32> {
+    var counts = vec4<f32>(0.0);
+    let end = min(offset + len, GENOME_LENGTH);
+    for (var i = offset; i < end; i++) {
+        let b = genome_get_base_ascii(packed, i, offset, len);
+        if (b == 65u) { counts.x += 1.0; }
+        else if (b == 85u) { counts.y += 1.0; }
+        else if (b == 71u) { counts.z += 1.0; }
+        else if (b == 67u) { counts.w += 1.0; }
+    }
+    let total = counts.x + counts.y + counts.z + counts.w;
+    if (total <= 0.0) { return vec4<f32>(0.25); }
+    return counts / total;
 }
 
 fn write_dye_alpha(idx: u32, alpha: f32) {
@@ -1177,7 +1263,11 @@ fn write_dye_beta(idx: u32, beta: f32) {
 }
 
 fn read_rain_maps(idx: u32) -> vec2<f32> {
-    return chem_grid[idx].zw;
+    // Rain map multipliers now come straight from the texture (chem_grid.zw
+    // holds the G/C monomer channels).
+    let x = idx % GRID_SIZE;
+    let y = idx / GRID_SIZE;
+    return textureLoad(rain_map_tex, vec2<u32>(x, y), 0).rg;
 }
 
 fn hash(v: u32) -> u32 {
@@ -1249,8 +1339,8 @@ fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_ty
     let d = fluid_dye[idx];
     let c = chem_grid[idx];
     var v = 0.0;
-    if (grid_type == 0u) { v = clamp(d.y + c.x, 0.0, 1.0); }
-    else if (grid_type == 1u) { v = clamp(d.x + c.y, 0.0, 1.0); }
+    if (grid_type == 0u) { v = clamp(d.y + c.x + c.y, 0.0, 1.0); }
+    else if (grid_type == 1u) { v = clamp(d.x + c.z + c.w, 0.0, 1.0); }
 
     if (debug_mode) {
         draw_filled_circle(center, 4.0, vec4<f32>(1.0, 0.7, 0.0, 0.7));

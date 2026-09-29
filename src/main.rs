@@ -4091,6 +4091,8 @@ struct GpuState {
     clear_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_commit_pipeline: wgpu::ComputePipeline,
+    diffuse_pipeline_b: wgpu::ComputePipeline,
+    diffuse_commit_pipeline_b: wgpu::ComputePipeline,
     diffuse_trails_pipeline: wgpu::ComputePipeline,
     rain_pipeline: wgpu::ComputePipeline,
     clear_visual_pipeline: wgpu::ComputePipeline,
@@ -5127,10 +5129,10 @@ impl GpuState {
         });
         let rain_map_texture_view = rain_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Initialize chem_grid with zeros for alpha/beta and uniform 1.0 for rain maps
-        // vec4: [alpha=0.0, beta=0.0, alpha_rain_map=1.0, beta_rain_map=1.0]
+        // Initialize chem_grid with zeros for the four monomer channels (A/U/G/C).
+        // Rain map multipliers live in rain_map_texture, not in chem_grid.zw.
         let initial_chem_data: Vec<f32> = (0..grid_size)
-            .flat_map(|_| [0.0f32, 0.0f32, 1.0f32, 1.0f32])
+            .flat_map(|_| [0.0f32, 0.0f32, 0.0f32, 0.0f32])
             .collect();
         queue.write_buffer(
             &chem_grid,
@@ -6483,6 +6485,26 @@ impl GpuState {
         });
         profiler.mark("diffuse pipeline stage2");
 
+        // Second diffusion round for the G/C monomer channels (staging buffer
+        // only fits two chem channels + gamma per round).
+        let diffuse_pipeline_b = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Diffuse Pipeline (stage1b G/C)"),
+            layout: Some(&compute_pipeline_layout),
+            module: &shader,
+            entry_point: "diffuse_grids_stage1b",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let diffuse_commit_pipeline_b = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Diffuse Pipeline (stage2b commit G/C)"),
+            layout: Some(&compute_pipeline_layout),
+            module: &shader,
+            entry_point: "diffuse_grids_stage2b",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        profiler.mark("diffuse pipeline b");
+
         let diffuse_trails_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Diffuse Trails Pipeline"),
@@ -7682,6 +7704,8 @@ impl GpuState {
             clear_fluid_force_vectors_pipeline,
             diffuse_pipeline,
             diffuse_commit_pipeline,
+            diffuse_pipeline_b,
+            diffuse_commit_pipeline_b,
             diffuse_trails_pipeline,
             rain_pipeline,
             clear_visual_pipeline,
@@ -9944,8 +9968,16 @@ impl GpuState {
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
 
-                    // Commit staged alpha/beta back into the environment grids.
+                    // Commit staged A/U + gamma back into the environment grids.
                     cpass.set_pipeline(&self.diffuse_commit_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+
+                    // Round B: diffuse + commit the G/C monomer channels.
+                    cpass.set_pipeline(&self.diffuse_pipeline_b);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                    cpass.set_pipeline(&self.diffuse_commit_pipeline_b);
                     cpass.set_bind_group(0, bg_process, &[]);
                     cpass.dispatch_workgroups(groups_x, groups_y, 1);
 
@@ -10113,7 +10145,7 @@ impl GpuState {
                 );
             }
 
-            // (a2) Commit
+            // (a2) Commit A/U + gamma, then round B for the G/C channels
             if run_diffusion && !self.perf_skip_diffusion {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Compute Pass (SimPre Diffuse Commit)"),
@@ -10121,6 +10153,13 @@ impl GpuState {
                 });
 
                 cpass.set_pipeline(&self.diffuse_commit_pipeline);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(groups_x, groups_y, 1);
+
+                cpass.set_pipeline(&self.diffuse_pipeline_b);
+                cpass.set_bind_group(0, bg_process, &[]);
+                cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                cpass.set_pipeline(&self.diffuse_commit_pipeline_b);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
 
@@ -11911,9 +11950,10 @@ impl GpuState {
             let mut alpha: Vec<f32> = Vec::with_capacity(chem.len());
             let mut beta: Vec<f32> = Vec::with_capacity(chem.len());
             for v in &chem {
-                alpha.push(v[0]);
-                beta.push(v[1]);
-                // v[2] and v[3] are rain_alpha and rain_beta, not saved in snapshot
+                // Snapshot stores legacy 2-channel pools: alpha = A+U, beta = G+C.
+                // (Per-base split is restored as an even split on load.)
+                alpha.push(v[0] + v[1]);
+                beta.push(v[2] + v[3]);
             }
             let gamma: Vec<f32> = bytemuck::cast_slice(&gamma_data).to_vec();
             let agents: Vec<Agent> = bytemuck::cast_slice(&agents_data).to_vec();
@@ -13034,18 +13074,14 @@ impl GpuState {
             );
         }
 
-        // Upload grids to GPU (alpha/beta plus current rain maps stored in chem_grid.zw)
+        // Upload grids to GPU. Snapshots store legacy 2-channel pools; split each
+        // pool evenly between its two monomers (A/U from alpha, G/C from beta).
+        // Rain map multipliers live in rain_map_texture, not chem_grid.zw.
         let mut chem_grid: Vec<[f32; 4]> = Vec::with_capacity(alpha_grid.len());
         for i in 0..alpha_grid.len() {
-            let rain_idx = i * 2;
-            // Fallback to uniform rain if CPU cache is unexpectedly missing values.
-            let rain_alpha = self.rain_map_data.get(rain_idx).copied().unwrap_or(1.0);
-            let rain_beta = self
-                .rain_map_data
-                .get(rain_idx + 1)
-                .copied()
-                .unwrap_or(1.0);
-            chem_grid.push([alpha_grid[i], beta_grid[i], rain_alpha, rain_beta]);
+            let a = alpha_grid[i] * 0.5;
+            let b = beta_grid[i] * 0.5;
+            chem_grid.push([a, a, b, b]);
         }
         self.queue.write_buffer(&self.chem_grid, 0, bytemuck::cast_slice(&chem_grid));
         self.queue.write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_grid));

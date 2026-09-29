@@ -192,6 +192,10 @@ const SPIKE_KILL_COST_FRAC_OF_VICTIM: f32 = 0.00;
 // Deterministic (no per-part randomness) to avoid run-to-run variation.
 const DECOMPOSE_DEPOSIT_PER_BODYPART: f32 = 0.2;
 
+// RNA-world whole-body uptake: max monomer mass a part of mass 1.0 can absorb
+// from the cell under it per frame (scaled by part mass and agent stillness).
+const PART_UPTAKE_RATE: f32 = 0.01;
+
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
@@ -765,51 +769,30 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (agent_alive == 2u) {
         let body_count = min(agents_in[agent_id].body_count, MAX_BODY_PARTS);
         if (body_count > 0u) {
-            // Count mouth types to calculate decomposition ratio.
-            // Rule (requested): decompose into the OPPOSITE chemical of the mouth types.
-            // This discourages species from feeding on their own deaths:
-            // - Normal mouths (type 20, alpha mouths) => deposit beta
-            // - Beta mouths (type 44)                => deposit alpha
-            var normal_mouth_count = 0u;
-            var beta_mouth_count = 0u;
+            // RNA-world decomposition: the body returns its actual monomer
+            // composition (A/U/G/C fractions of the genome) to the environment
+            // at each part's position — mass recycling, no food/poison rule.
+            let comp = genome_composition(
+                agents_in[agent_id].genome_packed,
+                agents_in[agent_id].genome_offset,
+                agents_in[agent_id].gene_length
+            );
+            // Also return the partially built complementary strand: each paired
+            // base captured one complementary monomer from the environment.
+            let paired_counts = genome_paired_complement_counts(
+                agents_in[agent_id].genome_packed,
+                agents_in[agent_id].genome_offset,
+                agents_in[agent_id].gene_length,
+                agents_in[agent_id].pairing_counter
+            );
+            let paired_per_part = paired_counts * (PAIRING_MONOMER_COST / f32(body_count));
+            let agent_pos = agents_in[agent_id].position;
+            let agent_rot = agents_in[agent_id].rotation;
             for (var i = 0u; i < body_count; i++) {
-                let base_type = get_base_part_type(agents_in[agent_id].body[i].part_type);
-                if (base_type == 20u) {
-                    normal_mouth_count += 1u;
-                } else if (base_type == 44u) {
-                    beta_mouth_count += 1u;
-                }
-            }
-
-            // Apply the same decomposition rule to amino segments + organs: deposit per bodypart.
-            let part_count = body_count;
-            if (part_count > 0u) {
-                let total_relevant_mouths = normal_mouth_count + beta_mouth_count;
-                var alpha_ratio = 0.5;
-                if (total_relevant_mouths > 0u) {
-                    // Opposite-matter mapping: alpha deposit ratio follows beta mouths.
-                    alpha_ratio = f32(beta_mouth_count) / f32(total_relevant_mouths);
-                }
-
-                // Deterministic split: first N parts deposit alpha, rest deposit beta.
-                let alpha_parts = min(u32(round(alpha_ratio * f32(part_count))), part_count);
-
-                let agent_pos = agents_in[agent_id].position;
-                let agent_rot = agents_in[agent_id].rotation;
-                var seen_parts = 0u;
-                for (var i = 0u; i < body_count; i++) {
-                    let part = agents_in[agent_id].body[i];
-                    let world_pos = agent_pos + apply_agent_rotation(part.pos, agent_rot);
-                    let idx = grid_index(world_pos);
-                    let prev = chem_grid[idx];
-
-                    if (seen_parts < alpha_parts) {
-                        write_chem_alpha(idx, min(prev.x + DECOMPOSE_DEPOSIT_PER_BODYPART, 1.0));
-                    } else {
-                        write_chem_beta(idx, min(prev.y + DECOMPOSE_DEPOSIT_PER_BODYPART, 1.0));
-                    }
-                    seen_parts += 1u;
-                }
+                let part = agents_in[agent_id].body[i];
+                let world_pos = agent_pos + apply_agent_rotation(part.pos, agent_rot);
+                let idx = grid_index(world_pos);
+                chem_grid[idx] = min(chem_grid[idx] + comp * DECOMPOSE_DEPOSIT_PER_BODYPART + paired_per_part, vec4<f32>(1.0));
             }
         }
 
@@ -2385,21 +2368,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (target_idx != center_idx) {
                         var center_gamma = read_gamma_height(center_idx);
                         var target_gamma = read_gamma_height(target_idx);
-                        var center_alpha = chem_grid[center_idx].x;
-                        var target_alpha = chem_grid[target_idx].x;
-                        var center_beta = chem_grid[center_idx].y;
-                        var target_beta = chem_grid[target_idx].y;
-
                         let transfer_amount = prop_strength * 0.05 * part_weight;
                         if (transfer_amount > 0.0) {
-                            // Capacities adjusted for 0..1 range
-                            let alpha_capacity = max(0.0, 1.0 - target_alpha);
-                            let beta_capacity = max(0.0, 1.0 - target_beta);
                             let gamma_capacity = max(0.0, 10.0 - target_gamma);
-
                             let gamma_transfer = min(min(center_gamma, transfer_amount), gamma_capacity);
-                            let alpha_transfer = min(min(center_alpha, transfer_amount), alpha_capacity);
-                            let beta_transfer = min(min(center_beta, transfer_amount), beta_capacity);
 
                             if (gamma_transfer > 0.0) {
                                 center_gamma = center_gamma - gamma_transfer;
@@ -2408,19 +2380,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 write_gamma_height(target_idx, target_gamma);
                             }
 
-                            if (alpha_transfer > 0.0) {
-                                center_alpha = clamp(center_alpha - alpha_transfer, 0.0, 1.0);
-                                target_alpha = clamp(target_alpha + alpha_transfer, 0.0, 1.0);
-                                write_chem_alpha(center_idx, center_alpha);
-                                write_chem_alpha(target_idx, target_alpha);
-                            }
-
-                            if (beta_transfer > 0.0) {
-                                center_beta = clamp(center_beta - beta_transfer, 0.0, 1.0);
-                                target_beta = clamp(target_beta + beta_transfer, 0.0, 1.0);
-                                write_chem_beta(center_idx, center_beta);
-                                write_chem_beta(target_idx, target_beta);
-                            }
+                            // Monomer channels: per-channel mass-conserving transfer.
+                            wash_transfer_chem(center_idx, target_idx, transfer_amount);
                         }
                     }
                 }
@@ -2755,10 +2716,31 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let world_pos = agent_pos + rotated_pos;
         let idx = grid_index(world_pos);
 
-        // Local chem accumulation for reproduction gating: sample at each part position.
-        // This includes amino acids and organs (mouths, etc.).
-        local_alpha += chem_grid[idx].x;
-        local_beta += chem_grid[idx].y;
+        // Local chem accumulation (pool sums) for sensors/telemetry.
+        local_alpha += chem_grid[idx].x + chem_grid[idx].y;
+        local_beta += chem_grid[idx].z + chem_grid[idx].w;
+
+        // RNA-world uptake: every part absorbs free monomers (activated
+        // nucleotides) from the cell under it. Absorption yields energy
+        // (phosphate hydrolysis). The whole body surface feeds — no mouths.
+        if (agent_energy_cur < capacity) {
+            var cell = chem_grid[idx];
+            let total_avail = cell.x + cell.y + cell.z + cell.w;
+            if (total_avail > 1e-6) {
+                // Stiller bodies absorb more (same foraging tradeoff mouths had).
+                let speed_norm = clamp(length(agent_velocity) / VEL_MAX, 0.0, 1.0);
+                let speed_mult = exp(-4.0 * speed_norm);
+                let rate = PART_UPTAKE_RATE * max(props.mass, 0.1) * speed_mult;
+                let frac = clamp(rate / total_avail, 0.0, 1.0);
+                let consumed = cell * frac;
+                cell -= consumed;
+                chem_grid[idx] = cell;
+                let consumed_total = consumed.x + consumed.y + consumed.z + consumed.w;
+                agent_energy_cur += consumed_total * params.food_power * food_power_multiplier;
+                total_consumed_alpha += consumed.x + consumed.y;
+                total_consumed_beta += consumed.z + consumed.w;
+            }
+        }
 
         // Organ-part wash: during microswimming, body motion stirs/displaces the chemistry layers.
         // This is a direct, fluidless transfer similar to prop wash, driven by per-part motion
@@ -2792,26 +2774,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (target_idx != center_idx) {
                         var center_gamma = read_gamma_height(center_idx);
                         var target_gamma = read_gamma_height(target_idx);
-                        var center_alpha = chem_grid[center_idx].x;
-                        var center_beta = chem_grid[center_idx].y;
-                        var target_alpha = chem_grid[target_idx].x;
-                        var target_beta = chem_grid[target_idx].y;
-
                         let part_mass = max(props.mass, 0.01);
                         let part_weight = part_mass / max(total_mass, 1e-6);
 
                         let transfer_amount = wash_strength * 0.02 * part_weight * clamp(norm_spd, 0.0, 1.0);
                         if (transfer_amount > 0.0) {
-                            // Capacity adjusted for 0..1 range.
-                            let alpha_capacity = max(0.0, 1.0 - target_alpha);
-                            let beta_capacity = max(0.0, 1.0 - target_beta);
                             // Gamma is positive-only and effectively unbounded, but we cap piling up per cell
                             // similarly to prop wash to keep things stable.
                             let gamma_capacity = max(0.0, 10.0 - target_gamma);
-
                             let gamma_transfer = min(min(center_gamma, transfer_amount), gamma_capacity);
-                            let alpha_transfer = min(min(center_alpha, transfer_amount), alpha_capacity);
-                            let beta_transfer = min(min(center_beta, transfer_amount), beta_capacity);
 
                             if (gamma_transfer > 0.0) {
                                 center_gamma = center_gamma - gamma_transfer;
@@ -2820,19 +2791,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 write_gamma_height(target_idx, target_gamma);
                             }
 
-                            if (alpha_transfer > 0.0) {
-                                center_alpha = clamp(center_alpha - alpha_transfer, 0.0, 1.0);
-                                target_alpha = clamp(target_alpha + alpha_transfer, 0.0, 1.0);
-                                write_chem_alpha(center_idx, center_alpha);
-                                write_chem_alpha(target_idx, target_alpha);
-                            }
-
-                            if (beta_transfer > 0.0) {
-                                center_beta = clamp(center_beta - beta_transfer, 0.0, 1.0);
-                                target_beta = clamp(target_beta + beta_transfer, 0.0, 1.0);
-                                write_chem_beta(center_idx, center_beta);
-                                write_chem_beta(target_idx, target_beta);
-                            }
+                            // Monomer channels: per-channel mass-conserving transfer.
+                            wash_transfer_chem(center_idx, target_idx, transfer_amount);
                         }
                     }
                 }
@@ -2952,204 +2912,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let activity_cost = props.energy_consumption * amplification;
             organ_extra = props.energy_consumption + activity_cost;
 
-            // Vampire mouths (33) must only gain energy via their victim-drain logic.
-            // They should NOT absorb from chem grids or from the advected dye layer.
-            if (base_type != 33u) {
-
-            // Consume alpha and beta based on per-amino absorption rates
-            // and local availability, scaled by speed (slower = more absorption)
-            // Bilinear availability sampling at the mouth position.
-            // NOTE: This is paired with bilinear (4-cell) absorption writes below.
-            let clamped_pos = clamp_position(world_pos);
-            let grid_scale = f32(SIM_SIZE) / f32(GRID_SIZE);
-            let gx = (clamped_pos.x / grid_scale) - 0.5;
-            let gy = (clamped_pos.y / grid_scale) - 0.5;
-
-            let x0 = i32(floor(gx));
-            let y0 = i32(floor(gy));
-            let x1 = min(x0 + 1, i32(GRID_SIZE) - 1);
-            let y1 = min(y0 + 1, i32(GRID_SIZE) - 1);
-
-            let fx = fract(gx);
-            let fy = fract(gy);
-
-            let w00 = (1.0 - fx) * (1.0 - fy);
-            let w10 = fx * (1.0 - fy);
-            let w01 = (1.0 - fx) * fy;
-            let w11 = fx * fy;
-
-            let idx00 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
-            let idx10 = u32(clamp(y0, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
-            let idx01 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x0, 0, i32(GRID_SIZE) - 1));
-            let idx11 = u32(clamp(y1, 0, i32(GRID_SIZE) - 1)) * GRID_SIZE + u32(clamp(x1, 0, i32(GRID_SIZE) - 1));
-
-            let c00 = chem_grid[idx00];
-            let c10 = chem_grid[idx10];
-            let c01 = chem_grid[idx01];
-            let c11 = chem_grid[idx11];
-
-            let available_alpha = w00 * c00.x + w10 * c10.x + w01 * c01.x + w11 * c11.x;
-            let available_beta  = w00 * c00.y + w10 * c10.y + w01 * c01.y + w11 * c11.y;
-
-            // Also allow mouths to absorb from the advected dye layer (fluid_dye).
-            // NOTE: This is an experimental direct write into fluid_dye (racy under contention).
-            let env_scale = f32(SIM_SIZE) / f32(ENV_GRID_SIZE);
-            let egx = (clamped_pos.x / env_scale) - 0.5;
-            let egy = (clamped_pos.y / env_scale) - 0.5;
-
-            let ex0 = i32(floor(egx));
-            let ey0 = i32(floor(egy));
-            let ex1 = min(ex0 + 1, i32(ENV_GRID_SIZE) - 1);
-            let ey1 = min(ey0 + 1, i32(ENV_GRID_SIZE) - 1);
-
-            let efx = fract(egx);
-            let efy = fract(egy);
-
-            let ew00 = (1.0 - efx) * (1.0 - efy);
-            let ew10 = efx * (1.0 - efy);
-            let ew01 = (1.0 - efx) * efy;
-            let ew11 = efx * efy;
-
-            let eidx00 = u32(clamp(ey0, 0, i32(ENV_GRID_SIZE) - 1)) * ENV_GRID_SIZE + u32(clamp(ex0, 0, i32(ENV_GRID_SIZE) - 1));
-            let eidx10 = u32(clamp(ey0, 0, i32(ENV_GRID_SIZE) - 1)) * ENV_GRID_SIZE + u32(clamp(ex1, 0, i32(ENV_GRID_SIZE) - 1));
-            let eidx01 = u32(clamp(ey1, 0, i32(ENV_GRID_SIZE) - 1)) * ENV_GRID_SIZE + u32(clamp(ex0, 0, i32(ENV_GRID_SIZE) - 1));
-            let eidx11 = u32(clamp(ey1, 0, i32(ENV_GRID_SIZE) - 1)) * ENV_GRID_SIZE + u32(clamp(ex1, 0, i32(ENV_GRID_SIZE) - 1));
-
-            let d00 = fluid_dye[eidx00];
-            let d10 = fluid_dye[eidx10];
-            let d01 = fluid_dye[eidx01];
-            let d11 = fluid_dye[eidx11];
-
-            // Fluids-enabled flag (Repurposed padding from SimParams).
-            // When fluids are disabled, fluid_dye is treated as a visual/sensing layer and is not edible.
-            let fluids_enabled = (params._pad_rain0 != 0u);
-
-            // fluid_dye mapping: beta=x, alpha=y
-            let available_alpha_dye = select(0.0, ew00 * d00.y + ew10 * d10.y + ew01 * d01.y + ew11 * d11.y, fluids_enabled);
-            let available_beta_dye  = select(0.0, ew00 * d00.x + ew10 * d10.x + ew01 * d01.x + ew11 * d11.x, fluids_enabled);
-
-            let total_available_alpha = available_alpha + available_alpha_dye;
-            let total_available_beta  = available_beta + available_beta_dye;
-
-            // Per-amino capture rates let us tune bite size vs. poison uptake
-            // Apply speed effects and amplification to the rates themselves
-
-            // Beta mouths (types 44-45) flip the energy/poison roles:
-            // - beta becomes energy (uses energy_absorption_rate)
-            // - alpha becomes poison (uses beta_absorption_rate)
-            let is_beta_mouth = (base_type >= 44u && base_type <= 45u);
-            let alpha_rate = select(
-                max(props.energy_absorption_rate, 0.0),
-                max(props.beta_absorption_rate, 0.0),
-                is_beta_mouth
-            ) * speed_absorption_multiplier * amplification;
-            let beta_rate = select(
-                max(props.beta_absorption_rate, 0.0),
-                max(props.energy_absorption_rate, 0.0),
-                is_beta_mouth
-            ) * speed_absorption_multiplier * amplification;
-
-            // Total capture budget for this mouth this frame
-            let rate_total = alpha_rate + beta_rate;
-            if (rate_total > 0.0 && (total_available_alpha > 0.0 || total_available_beta > 0.0)) {
-                let max_total = rate_total;
-
-                // Weight consumption toward whichever is present and allowed by its rate
-                let weighted_alpha = total_available_alpha * alpha_rate;
-                let weighted_beta  = total_available_beta * beta_rate;
-                let weighted_sum   = max(weighted_alpha + weighted_beta, 1e-6);
-                let alpha_weight   = weighted_alpha / weighted_sum;
-                let beta_weight    = 1.0 - alpha_weight;
-
-                let consumed_alpha = min(total_available_alpha, max_total * alpha_weight);
-                let consumed_beta  = min(total_available_beta,  max_total * beta_weight);
-
-                // Apply alpha consumption
-                // Normal mouths: alpha = energy gain
-                // Beta mouths: alpha = poison damage
-                if (consumed_alpha > 0.0) {
-                    // Split source: dye first, then chem.
-                    let take_alpha_dye = min(available_alpha_dye, consumed_alpha);
-                    let take_alpha_chem = consumed_alpha - take_alpha_dye;
-
-                    if (take_alpha_dye > 0.0) {
-                        let da00 = take_alpha_dye * ew00;
-                        let da10 = take_alpha_dye * ew10;
-                        let da01 = take_alpha_dye * ew01;
-                        let da11 = take_alpha_dye * ew11;
-
-                        if (da00 > 0.0) { let prev = fluid_dye[eidx00]; write_dye_alpha(eidx00, clamp(prev.y - da00, 0.0, prev.y)); }
-                        if (da10 > 0.0) { let prev = fluid_dye[eidx10]; write_dye_alpha(eidx10, clamp(prev.y - da10, 0.0, prev.y)); }
-                        if (da01 > 0.0) { let prev = fluid_dye[eidx01]; write_dye_alpha(eidx01, clamp(prev.y - da01, 0.0, prev.y)); }
-                        if (da11 > 0.0) { let prev = fluid_dye[eidx11]; write_dye_alpha(eidx11, clamp(prev.y - da11, 0.0, prev.y)); }
-                    }
-
-                    // Distribute absorption bilinearly into the 4 neighbor cells.
-                    // NOTE: This is intentionally non-atomic and can be racy under contention.
-                    let da00 = take_alpha_chem * w00;
-                    let da10 = take_alpha_chem * w10;
-                    let da01 = take_alpha_chem * w01;
-                    let da11 = take_alpha_chem * w11;
-
-                    if (da00 > 0.0) { let prev = chem_grid[idx00]; write_chem_alpha(idx00, clamp(prev.x - da00, 0.0, prev.x)); }
-                    if (da10 > 0.0) { let prev = chem_grid[idx10]; write_chem_alpha(idx10, clamp(prev.x - da10, 0.0, prev.x)); }
-                    if (da01 > 0.0) { let prev = chem_grid[idx01]; write_chem_alpha(idx01, clamp(prev.x - da01, 0.0, prev.x)); }
-                    if (da11 > 0.0) { let prev = chem_grid[idx11]; write_chem_alpha(idx11, clamp(prev.x - da11, 0.0, prev.x)); }
-
-                    if (is_beta_mouth) {
-                        // Beta mouth: alpha is poison
-                        agent_energy_cur -= consumed_alpha * params.poison_power * poison_multiplier;
-                    } else {
-                        // Normal mouth: alpha is energy
-                        agent_energy_cur += consumed_alpha * params.food_power * food_power_multiplier;
-                    }
-                    total_consumed_alpha += consumed_alpha;
-                }
-
-                // Apply beta consumption
-                // Normal mouths: beta = poison damage
-                // Beta mouths: beta = energy gain
-                if (consumed_beta > 0.0) {
-                    // Split source: dye first, then chem.
-                    let take_beta_dye = min(available_beta_dye, consumed_beta);
-                    let take_beta_chem = consumed_beta - take_beta_dye;
-
-                    if (take_beta_dye > 0.0) {
-                        let db00 = take_beta_dye * ew00;
-                        let db10 = take_beta_dye * ew10;
-                        let db01 = take_beta_dye * ew01;
-                        let db11 = take_beta_dye * ew11;
-
-                        if (db00 > 0.0) { let prev = fluid_dye[eidx00]; write_dye_beta(eidx00, clamp(prev.x - db00, 0.0, prev.x)); }
-                        if (db10 > 0.0) { let prev = fluid_dye[eidx10]; write_dye_beta(eidx10, clamp(prev.x - db10, 0.0, prev.x)); }
-                        if (db01 > 0.0) { let prev = fluid_dye[eidx01]; write_dye_beta(eidx01, clamp(prev.x - db01, 0.0, prev.x)); }
-                        if (db11 > 0.0) { let prev = fluid_dye[eidx11]; write_dye_beta(eidx11, clamp(prev.x - db11, 0.0, prev.x)); }
-                    }
-
-                    // Distribute absorption bilinearly into the 4 neighbor cells.
-                    // NOTE: This is intentionally non-atomic and can be racy under contention.
-                    let db00 = take_beta_chem * w00;
-                    let db10 = take_beta_chem * w10;
-                    let db01 = take_beta_chem * w01;
-                    let db11 = take_beta_chem * w11;
-
-                    if (db00 > 0.0) { let prev = chem_grid[idx00]; write_chem_beta(idx00, clamp(prev.y - db00, 0.0, prev.y)); }
-                    if (db10 > 0.0) { let prev = chem_grid[idx10]; write_chem_beta(idx10, clamp(prev.y - db10, 0.0, prev.y)); }
-                    if (db01 > 0.0) { let prev = chem_grid[idx01]; write_chem_beta(idx01, clamp(prev.y - db01, 0.0, prev.y)); }
-                    if (db11 > 0.0) { let prev = chem_grid[idx11]; write_chem_beta(idx11, clamp(prev.y - db11, 0.0, prev.y)); }
-
-                    if (is_beta_mouth) {
-                        // Beta mouth: beta is energy
-                        agent_energy_cur += consumed_beta * params.food_power * food_power_multiplier;
-                    } else {
-                        // Normal mouth: beta is poison
-                        agent_energy_cur -= consumed_beta * params.poison_power * poison_multiplier;
-                    }
-                    total_consumed_beta += consumed_beta;
-                }
-            }
-
-            }
+            // RNA-world: mouths no longer feed — uptake is whole-body (see the
+            // per-part monomer uptake above). Mouth parts remain as organs
+            // (costs, storage capacity) until contact chemistry repurposes them.
         } else if (PROPELLERS_ENABLED && props.is_propeller) {
             // Propellers: unified formula matching mouths
             // Base cost + activity cost scaled by amplification
@@ -3212,55 +2977,24 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (should_die) {
-        // Deposit remains: decomposition ratio based on mouth types
-        // Rule (requested): decompose into the OPPOSITE chemical of the mouth types.
-        // This discourages species from feeding on their own deaths:
-        // - Normal mouths (type 20, alpha mouths) => deposit beta
-        // - Beta mouths (type 44)                => deposit alpha
-        // If both exist, deposit ratio follows counts.
+        // RNA-world decomposition: return the genome's monomer composition
+        // (A/U/G/C fractions) to the environment at each part's position —
+        // pure mass recycling, no food/poison mapping.
         if (body_count > 0u) {
-            // Count mouth types to calculate decomposition ratio
-            var normal_mouth_count = 0u;
-            var vampire_mouth_count = 0u;
-            var beta_mouth_count = 0u;
+            let comp = genome_composition(agent_genome_packed, agent_genome_offset, agent_gene_length);
+            // Also return the partially built complementary strand: each paired
+            // base captured one complementary monomer from the environment.
+            let paired_counts = genome_paired_complement_counts(
+                agent_genome_packed, agent_genome_offset, agent_gene_length,
+                agents_in[agent_id].pairing_counter
+            );
+            let paired_per_part = paired_counts * (PAIRING_MONOMER_COST / f32(min(body_count, MAX_BODY_PARTS)));
             for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-                let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
-                if (base_type == 20u) {
-                    normal_mouth_count += 1u;
-                } else if (base_type == 33u) {
-                    vampire_mouth_count += 1u;
-                } else if (base_type == 44u) {
-                    beta_mouth_count += 1u;
-                }
-            }
-            // Calculate alpha/beta decomposition ratio.
-            // We only use normal vs beta mouths for this rule; vampire mouths do not participate.
-            let total_relevant_mouths = normal_mouth_count + beta_mouth_count;
-            var alpha_ratio = 0.5;
-            if (total_relevant_mouths > 0u) {
-                // Opposite-matter mapping: alpha deposit ratio follows beta mouths.
-                alpha_ratio = f32(beta_mouth_count) / f32(total_relevant_mouths);
-            }
-
-            // Fixed-per-bodypart deposit, deterministic (no randomness, no scaling by food_power or energy).
-            let part_count = min(body_count, MAX_BODY_PARTS);
-            if (part_count > 0u) {
-                let alpha_parts = min(u32(round(alpha_ratio * f32(part_count))), part_count);
-                var seen_parts = 0u;
-                for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-                    let part = agents_out[agent_id].body[i];
-                    let rotated_pos = apply_agent_rotation(part.pos, agent_rot);
-                    let world_pos = agent_pos + rotated_pos;
-                    let idx = grid_index(world_pos);
-                    let prev = chem_grid[idx];
-
-                    if (seen_parts < alpha_parts) {
-                        write_chem_alpha(idx, min(prev.x + DECOMPOSE_DEPOSIT_PER_BODYPART, 1.0));
-                    } else {
-                        write_chem_beta(idx, min(prev.y + DECOMPOSE_DEPOSIT_PER_BODYPART, 1.0));
-                    }
-                    seen_parts += 1u;
-                }
+                let part = agents_out[agent_id].body[i];
+                let rotated_pos = apply_agent_rotation(part.pos, agent_rot);
+                let world_pos = agent_pos + rotated_pos;
+                let idx = grid_index(world_pos);
+                chem_grid[idx] = min(chem_grid[idx] + comp * DECOMPOSE_DEPOSIT_PER_BODYPART + paired_per_part, vec4<f32>(1.0));
             }
         }
 
@@ -3352,41 +3086,47 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (agent_gene_length > 0u && pairing_counter < agent_gene_length) {
         // Pairing requires energy capacity (storage) and sufficient energy (> 1.0)
         if (agent_energy_capacity > 0.0 && agent_energy_cur > 1.0) {
-            // Average local chemical signals across all body parts
-            let local_alpha_avg = select(0.0, local_alpha / f32(body_count), body_count > 0u);
-            let local_beta_avg = select(0.0, local_beta / f32(body_count), body_count > 0u);
+            // Template-directed replication: position `pairing_counter` copies
+            // its base by capturing the complementary free monomer from the
+            // environment under the body. No complement available -> stalls.
+            let next_base = genome_get_base_ascii(agent_genome_packed, agent_genome_offset + pairing_counter, agent_genome_offset, agent_gene_length);
+            var comp_ch = 0u;
+            if (next_base == 65u) { comp_ch = 1u; }      // A pairs a free U
+            else if (next_base == 85u) { comp_ch = 0u; } // U pairs a free A
+            else if (next_base == 71u) { comp_ch = 3u; } // G pairs a free C
+            else if (next_base == 67u) { comp_ch = 2u; } // C pairs a free G
 
-            // Probability to increment/decrement counter based on conditions
-            let pos_idx = grid_index(agent_pos);
+            // Sample the cell under a rotating body part so replication drains
+            // the whole body footprint instead of a single cell.
+            let site_part = agents_out[agent_id].body[pairing_counter % max(body_count, 1u)];
+            let site_pos = agent_pos + apply_agent_rotation(site_part.pos, agent_rot);
+            let pos_idx = grid_index(site_pos);
+            var cell = chem_grid[pos_idx];
+            let avail = cell[comp_ch];
+
             let seed = ((agent_id + 1u) * 747796405u) ^ (pairing_counter * 2891336453u) ^ (params.random_seed * 196613u) ^ pos_idx;
             let rnd = f32(hash(seed)) / 4294967295.0;
             let energy_for_pair = max(agent_energy_cur, 0.0);
-
-            // Use averaged local signals for pairing drive
             let energy_scaled = sqrt(energy_for_pair);
-            let alpha_gate = clamp(local_alpha_avg, 0.0, 1.0);
-            let beta_gate = clamp(local_beta_avg, 0.0, 1.0);
-            // Pairing speed depends on local alpha+beta availability.
-            // If both are ~0, pairing is slowed to 1/5 speed (pairing_drive=0.2).
-            // As alpha+beta rises toward 1, pairing_drive rises toward 1.
-            let chem_gate = clamp(alpha_gate + beta_gate, 0.0, 1.0);
-            let pairing_drive = 0.2 + 0.8 * chem_gate;
+
+            // Pairing speed scales with local complement abundance; matter is a
+            // hard requirement — at least one monomer's worth must be present.
+            let pairing_drive = clamp(avail / (PAIRING_MONOMER_COST * 4.0), 0.0, 1.0);
 
             let base_p = params.spawn_probability * energy_scaled * 0.1;
-            let pair_p = clamp(base_p * max(pairing_drive, 0.0), 0.0, 1.0);
-            let unpair_p = clamp(base_p * max(-pairing_drive, 0.0), 0.0, 1.0);
+            let pair_p = clamp(base_p * pairing_drive, 0.0, 1.0);
 
-            // Pairing/un-pairing are mutually exclusive in a frame
-            if (rnd < pair_p) {
+            if (rnd < pair_p && avail >= PAIRING_MONOMER_COST) {
                 // Pairing cost per increment
                 let pairing_cost = params.pairing_cost;
                 if (agent_energy_cur >= pairing_cost) {
                     pairing_counter += 1u;
                     agent_energy_cur -= pairing_cost;
+                    // Capture the complementary monomer (mass leaves the grid;
+                    // it is returned on death if replication never completes).
+                    cell[comp_ch] = max(avail - PAIRING_MONOMER_COST, 0.0);
+                    chem_grid[pos_idx] = cell;
                 }
-            } else if (rnd < (pair_p + unpair_p)) {
-                // Un-pairing event: lose one paired base (no energy refund)
-                pairing_counter = select(pairing_counter - 1u, 0u, pairing_counter == 0u);
             }
         }
     }
@@ -3435,8 +3175,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 // ENVIRONMENT DIFFUSION & DECAY
 // ============================================================================
 
-@compute @workgroup_size(16, 16)
-fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
+// Diffusion now runs in TWO rounds over the 4 monomer channels because the
+// staging buffer (trail_grid_inject, vec4) can hold at most two chem channels
+// plus gamma per round:
+//   Round A (stage1 / stage2):  channels A,U (pool 0, alpha params) + gamma
+//   Round B (stage1b / stage2b): channels G,C (pool 1, beta params)
+fn diffuse_grids_pair(gid: vec3<u32>, pair: u32) {
     let x = gid.x;
     let y = gid.y;
 
@@ -3446,31 +3190,23 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * GRID_SIZE + x;
 
-    // Fluid-vector convolution (decoupled from dye):
-    // Instead of advecting (which tends to look like global translation), we do a
-    // directionally-skewed blur kernel similar to the previous slope-based convolution.
-    // The fluid force-vector field defines a preferred blur direction and magnitude.
-    let current_alpha = chem_grid[idx].x;
-    let current_beta = chem_grid[idx].y;
+    let ch0 = pair * 2u;
+    let ch1 = ch0 + 1u;
+    let include_gamma = (pair == 0u);
+
+    let current_a = chem_grid[idx][ch0];
+    let current_b = chem_grid[idx][ch1];
     let current_gamma = read_gamma_height(idx);
 
-    // Per-channel strengths.
-    // Classic isotropic blur uses alpha_blur/beta_blur.
-    // Fluid-directed convolution uses alpha_fluid_convolution/beta_fluid_convolution.
-    let alpha_diffuse_strength = clamp(params.alpha_blur, 0.0, 1.0);
-    let beta_diffuse_strength = clamp(params.beta_blur, 0.0, 1.0);
+    let blur_strength = clamp(select(params.beta_blur, params.alpha_blur, pair == 0u), 0.0, 1.0);
     let gamma_diffuse_strength = clamp(params.gamma_diffuse, 0.0, 1.0);
-    let alpha_conv_strength = clamp(params.alpha_fluid_convolution, 0.0, 1.0);
-    let beta_conv_strength = clamp(params.beta_fluid_convolution, 0.0, 1.0);
-    let gamma_strength = clamp(params.gamma_shift, 0.0, 1.0);
+    let slope_bias = select(params.beta_slope_bias, params.alpha_slope_bias, pair == 0u);
     // Repurpose gamma_blur as a simple persistence/decay multiplier (1.0 = no decay).
     let persistence = clamp(params.gamma_blur, 0.0, 1.0);
 
     // Classic isotropic blur (3x3) + slope-based flux shift.
-    // This restores the previous diffusion/blur + slope shift behavior, then we layer
-    // the fluid-directed convolution on top.
-    var alpha_sum = 0.0;
-    var beta_sum = 0.0;
+    var a_sum = 0.0;
+    var b_sum = 0.0;
     var gamma_sum = 0.0;
     for (var i = 0u; i < 9u; i++) {
         let dx = i32(i % 3u) - 1;
@@ -3478,29 +3214,28 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
         let nx_i = clamp(i32(x) + dx, 0, i32(GRID_SIZE) - 1);
         let ny_i = clamp(i32(y) + dy, 0, i32(GRID_SIZE) - 1);
         let nidx = u32(ny_i) * GRID_SIZE + u32(nx_i);
-        alpha_sum += chem_grid[nidx].x;
-        beta_sum += chem_grid[nidx].y;
-        gamma_sum += read_gamma_height(nidx);
+        a_sum += chem_grid[nidx][ch0];
+        b_sum += chem_grid[nidx][ch1];
+        if (include_gamma) { gamma_sum += read_gamma_height(nidx); }
     }
 
-    let alpha_avg = alpha_sum / 9.0;
-    let beta_avg = beta_sum / 9.0;
+    let a_avg = a_sum / 9.0;
+    let b_avg = b_sum / 9.0;
     let gamma_avg = gamma_sum / 9.0;
 
     // Apply blur factor (0 = no blur/keep current, 1 = full blur)
-    let alpha_iso = mix(current_alpha, alpha_avg, alpha_diffuse_strength);
-    let beta_iso = mix(current_beta, beta_avg, beta_diffuse_strength);
+    let a_iso = mix(current_a, a_avg, blur_strength);
+    let b_iso = mix(current_b, b_avg, blur_strength);
     let gamma_iso = mix(current_gamma, gamma_avg, gamma_diffuse_strength);
 
     // Slope-based flux shift (mass-conserving advection along slopes).
-    // Skip when both bias parameters are negligible to avoid expensive neighbor reads + branches.
-    let slope_flux_enabled = (abs(params.alpha_slope_bias) > 0.01) || (abs(params.beta_slope_bias) > 0.01);
+    let slope_flux_enabled = abs(slope_bias) > 0.01;
 
-    var alpha_flux = 0.0;
-    var beta_flux = 0.0;
+    var a_flux = 0.0;
+    var b_flux = 0.0;
 
     if (slope_flux_enabled) {
-        let slope_here = read_gamma_slope(idx);
+        let slope_here = read_gamma_slope(idx) * slope_bias;
         let xi = i32(x);
         let yi = i32(y);
         let max_index = i32(GRID_SIZE) - 1;
@@ -3514,105 +3249,60 @@ fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
         let up_idx = u32(up_y) * GRID_SIZE + x;
         let down_idx = u32(down_y) * GRID_SIZE + x;
 
-        let alpha_left = chem_grid[left_idx].x;
-        let alpha_right = chem_grid[right_idx].x;
-        let alpha_up = chem_grid[up_idx].x;
-        let alpha_down = chem_grid[down_idx].x;
-        let beta_left = chem_grid[left_idx].y;
-        let beta_right = chem_grid[right_idx].y;
-        let beta_up = chem_grid[up_idx].y;
-        let beta_down = chem_grid[down_idx].y;
-
-        let slope_left = read_gamma_slope(left_idx);
-        let slope_right = read_gamma_slope(right_idx);
-        let slope_up = read_gamma_slope(up_idx);
-        let slope_down = read_gamma_slope(down_idx);
+        let slope_left = read_gamma_slope(left_idx) * slope_bias;
+        let slope_right = read_gamma_slope(right_idx) * slope_bias;
+        let slope_up = read_gamma_slope(up_idx) * slope_bias;
+        let slope_down = read_gamma_slope(down_idx) * slope_bias;
 
         let kernel_scale = 1.0 / 8.0;
 
-        // Alpha flux
-        let slope_here_alpha = slope_here * params.alpha_slope_bias;
-        let slope_left_alpha = slope_left * params.alpha_slope_bias;
-        let slope_right_alpha = slope_right * params.alpha_slope_bias;
-        let slope_up_alpha = slope_up * params.alpha_slope_bias;
-        let slope_down_alpha = slope_down * params.alpha_slope_bias;
-
         if (right_x != xi) {
-            let flow_out = max(slope_here_alpha.x, 0.0) * current_alpha;
-            let flow_in = max(-slope_right_alpha.x, 0.0) * alpha_right;
-            alpha_flux += flow_out - flow_in;
+            a_flux += max(slope_here.x, 0.0) * current_a - max(-slope_right.x, 0.0) * chem_grid[right_idx][ch0];
+            b_flux += max(slope_here.x, 0.0) * current_b - max(-slope_right.x, 0.0) * chem_grid[right_idx][ch1];
         }
         if (left_x != xi) {
-            let flow_out = max(-slope_here_alpha.x, 0.0) * current_alpha;
-            let flow_in = max(slope_left_alpha.x, 0.0) * alpha_left;
-            alpha_flux += flow_out - flow_in;
+            a_flux += max(-slope_here.x, 0.0) * current_a - max(slope_left.x, 0.0) * chem_grid[left_idx][ch0];
+            b_flux += max(-slope_here.x, 0.0) * current_b - max(slope_left.x, 0.0) * chem_grid[left_idx][ch1];
         }
         if (down_y != yi) {
-            let flow_out = max(slope_here_alpha.y, 0.0) * current_alpha;
-            let flow_in = max(-slope_down_alpha.y, 0.0) * alpha_down;
-            alpha_flux += flow_out - flow_in;
+            a_flux += max(slope_here.y, 0.0) * current_a - max(-slope_down.y, 0.0) * chem_grid[down_idx][ch0];
+            b_flux += max(slope_here.y, 0.0) * current_b - max(-slope_down.y, 0.0) * chem_grid[down_idx][ch1];
         }
         if (up_y != yi) {
-            let flow_out = max(-slope_here_alpha.y, 0.0) * current_alpha;
-            let flow_in = max(slope_up_alpha.y, 0.0) * alpha_up;
-            alpha_flux += flow_out - flow_in;
+            a_flux += max(-slope_here.y, 0.0) * current_a - max(slope_up.y, 0.0) * chem_grid[up_idx][ch0];
+            b_flux += max(-slope_here.y, 0.0) * current_b - max(slope_up.y, 0.0) * chem_grid[up_idx][ch1];
         }
 
-        // Beta flux
-        let slope_here_beta = slope_here * params.beta_slope_bias;
-        let slope_left_beta = slope_left * params.beta_slope_bias;
-        let slope_right_beta = slope_right * params.beta_slope_bias;
-        let slope_up_beta = slope_up * params.beta_slope_bias;
-        let slope_down_beta = slope_down * params.beta_slope_bias;
-
-        if (right_x != xi) {
-            let flow_out = max(slope_here_beta.x, 0.0) * current_beta;
-            let flow_in = max(-slope_right_beta.x, 0.0) * beta_right;
-            beta_flux += flow_out - flow_in;
-        }
-        if (left_x != xi) {
-            let flow_out = max(-slope_here_beta.x, 0.0) * current_beta;
-            let flow_in = max(slope_left_beta.x, 0.0) * beta_left;
-            beta_flux += flow_out - flow_in;
-        }
-        if (down_y != yi) {
-            let flow_out = max(slope_here_beta.y, 0.0) * current_beta;
-            let flow_in = max(-slope_down_beta.y, 0.0) * beta_down;
-            beta_flux += flow_out - flow_in;
-        }
-        if (up_y != yi) {
-            let flow_out = max(-slope_here_beta.y, 0.0) * current_beta;
-            let flow_in = max(slope_up_beta.y, 0.0) * beta_up;
-            beta_flux += flow_out - flow_in;
-        }
-
-        alpha_flux *= kernel_scale;
-        beta_flux *= kernel_scale;
+        a_flux *= kernel_scale;
+        b_flux *= kernel_scale;
     }
 
     // Base result after classic blur + slope shift.
-    let alpha_base = clamp(alpha_iso - alpha_flux, 0.0, 1.0);
-    let beta_base = clamp(beta_iso - beta_flux, 0.0, 1.0);
+    let a_base = clamp(a_iso - a_flux, 0.0, 1.0);
+    let b_base = clamp(b_iso - b_flux, 0.0, 1.0);
 
-    // Persistence applies as decay to alpha/beta.
-    let final_alpha = clamp(alpha_base * persistence, 0.0, 1.0);
-    let final_beta = clamp(beta_base * persistence, 0.0, 1.0);
+    // Persistence applies as decay to the monomer channels.
+    let final_a = clamp(a_base * persistence, 0.0, 1.0);
+    let final_b = clamp(b_base * persistence, 0.0, 1.0);
     // Gamma: classic diffusion only (separate from Env Persistence).
     let final_gamma = max(gamma_iso, 0.0);
 
-    // NOTE: Rain is now applied via a separate targeted dispatch (apply_rain_drops)
-    // that only processes the expected number of rain drops instead of checking every cell.
-
-    // IMPORTANT: Do NOT write alpha/beta in-place.
-    // This kernel samples neighboring cells (via sample_grid_bilinear), so doing an in-place
-    // update introduces cross-invocation races and directionally-biased artifacts.
-    // We stage results into trail_grid_inject (a scratch buffer that is overwritten later
-    // by the trail preparation pass).
-    trail_grid_inject[idx] = vec4<f32>(final_alpha, final_beta, final_gamma, 0.0);
+    // IMPORTANT: Do NOT write chem in-place (cross-invocation races).
+    // Stage into trail_grid_inject; stage2 commits.
+    trail_grid_inject[idx] = vec4<f32>(final_a, final_b, final_gamma, 0.0);
 }
 
 @compute @workgroup_size(16, 16)
-fn diffuse_grids_stage2(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
+    diffuse_grids_pair(gid, 0u);
+}
+
+@compute @workgroup_size(16, 16)
+fn diffuse_grids_stage1b(@builtin(global_invocation_id) gid: vec3<u32>) {
+    diffuse_grids_pair(gid, 1u);
+}
+
+fn diffuse_commit_pair(gid: vec3<u32>, pair: u32) {
     let x = gid.x;
     let y = gid.y;
 
@@ -3622,8 +3312,23 @@ fn diffuse_grids_stage2(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * GRID_SIZE + x;
     let staged = trail_grid_inject[idx];
-    write_chem_alpha_beta(idx, staged.x, staged.y);
-    write_gamma_height(idx, staged.z);
+    var c = chem_grid[idx];
+    c[pair * 2u] = staged.x;
+    c[pair * 2u + 1u] = staged.y;
+    chem_grid[idx] = c;
+    if (pair == 0u) {
+        write_gamma_height(idx, staged.z);
+    }
+}
+
+@compute @workgroup_size(16, 16)
+fn diffuse_grids_stage2(@builtin(global_invocation_id) gid: vec3<u32>) {
+    diffuse_commit_pair(gid, 0u);
+}
+
+@compute @workgroup_size(16, 16)
+fn diffuse_grids_stage2b(@builtin(global_invocation_id) gid: vec3<u32>) {
+    diffuse_commit_pair(gid, 1u);
 }
 
 @compute @workgroup_size(16, 16)
@@ -3792,8 +3497,8 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         // Nearest neighbor (pixelated)
         let c = chem_grid[grid_index(world_pos)];
-        alpha = clamp(c.x, 0.0, 1.0);
-        beta = clamp(c.y, 0.0, 1.0);
+        alpha = clamp(c.x + c.y, 0.0, 1.0);
+        beta = clamp(c.z + c.w, 0.0, 1.0);
         gamma = max(read_gamma_height(grid_index(world_pos)), 0.0);
     }
 
@@ -4223,7 +3928,15 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Use constant values for fast startup (can be overridden by loading terrain images)
     // Initialize with chemistry values and rain maps from texture
-    chem_grid[idx] = vec4<f32>(environment_init.alpha_range.x, environment_init.beta_range.x, alpha_rain_map, beta_rain_map);
+    // Monomer channels: split each legacy pool evenly between its two bases.
+    // Rain map multipliers stay in rain_map_tex (read directly at use sites).
+    let _unused_rain = vec2<f32>(alpha_rain_map, beta_rain_map);
+    chem_grid[idx] = vec4<f32>(
+        environment_init.alpha_range.x * 0.5,
+        environment_init.alpha_range.x * 0.5,
+        environment_init.beta_range.x * 0.5,
+        environment_init.beta_range.x * 0.5
+    );
     gamma_grid[idx] = 0.0;
 
     gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = environment_init.slope_pair.x;

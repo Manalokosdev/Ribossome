@@ -133,10 +133,11 @@ const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.97;
 @group(0) @binding(2) var<storage, read_write> gamma_grid: array<f32>;
 
 // Environment chemistry grid (must match shaders/shared.wgsl layout):
-// - chem_grid[idx].x = alpha (food)
-// - chem_grid[idx].y = beta  (poison)
-// - chem_grid[idx].z = alpha_rain_map (food rain multiplier)
-// - chem_grid[idx].w = beta_rain_map (poison rain multiplier)
+// - chem_grid[idx].x = A monomer
+// - chem_grid[idx].y = U monomer
+// - chem_grid[idx].z = G monomer
+// - chem_grid[idx].w = C monomer
+// (dye exchange works on pool totals: a = A+U, b = G+C)
 @group(0) @binding(10) var<storage, read_write> chem_grid: array<vec4<f32>>;
 
 // Fluid-driven lift/deposition of the environment chem layers.
@@ -706,7 +707,13 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Each dye cell maps 1:1 to the environment chem cell at the same resolution.
     let env_idx = gamma_index(x, y);
     let chem_full_in = chem_grid[env_idx];
-    var chem = clamp(chem_full_in.xy, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    // Dye exchange works on pool totals (pool a = A+U, pool b = G+C), clamped
+    // to the legacy [0,1] working range; deltas are applied back to the
+    // monomer channels at the end (mass-conserving).
+    let p0_old = max(chem_full_in.x + chem_full_in.y, 0.0);
+    let p1_old = max(chem_full_in.z + chem_full_in.w, 0.0);
+    var chem = clamp(vec2<f32>(p0_old, p1_old), vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    let chem_start = chem;
     var gamma_height = max(gamma_grid[env_idx], 0.0);
 
     // Per-channel lift/deposit multipliers.
@@ -832,8 +839,28 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     gamma_height = gamma_height + deposit_gamma;
     dye_val.z = max(dye_val.z - deposit_gamma, 0.0);
 
-    // IMPORTANT: preserve the rain-map channels (.z/.w). Fluid only exchanges alpha/beta.
-    chem_grid[env_idx] = vec4<f32>(chem.x, chem.y, chem_full_in.z, chem_full_in.w);
+    // Apply pool deltas back to the monomer channels: removals scale the two
+    // channels of the pool proportionally, additions split evenly.
+    var out_c = chem_full_in;
+    let d0 = chem.x - chem_start.x;
+    let d1 = chem.y - chem_start.y;
+    if (d0 < 0.0) {
+        let s0 = select(0.0, max(p0_old + d0, 0.0) / p0_old, p0_old > 1e-9);
+        out_c.x = chem_full_in.x * s0;
+        out_c.y = chem_full_in.y * s0;
+    } else {
+        out_c.x = chem_full_in.x + d0 * 0.5;
+        out_c.y = chem_full_in.y + d0 * 0.5;
+    }
+    if (d1 < 0.0) {
+        let s1 = select(0.0, max(p1_old + d1, 0.0) / p1_old, p1_old > 1e-9);
+        out_c.z = chem_full_in.z * s1;
+        out_c.w = chem_full_in.w * s1;
+    } else {
+        out_c.z = chem_full_in.z + d1 * 0.5;
+        out_c.w = chem_full_in.w + d1 * 0.5;
+    }
+    chem_grid[env_idx] = out_c;
     gamma_grid[env_idx] = gamma_height;
     dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
 }
@@ -893,7 +920,9 @@ fn diffuse_dye_no_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
     // When fluids are off, dye acts like a visual/sensing diffusion layer and should not
     // drain the environment reservoirs.
     let env_idx = gamma_index(x, y);
-    let chem = clamp(chem_grid[env_idx].xy, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    let chem_c = chem_grid[env_idx];
+    // Pool sums (a = A+U, b = G+C); non-depleting read, so no redistribution needed.
+    let chem = clamp(vec2<f32>(chem_c.x + chem_c.y, chem_c.z + chem_c.w), vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
     let gamma_height = max(gamma_grid[env_idx], 0.0);
 
     // Non-depleting injection from chem and trail.
