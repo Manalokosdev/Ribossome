@@ -2968,7 +2968,8 @@ struct SimParams {
     _pad_dye_beta_color: f32,
     species_heatmap: u32,
     species_bucket_size: u32,
-    _pad_species: [u32; 2],
+    nucleotide_debug_mask: u32,
+    _pad_species: u32,
 }
 
 #[repr(C)]
@@ -4210,6 +4211,7 @@ struct GpuState {
     top_species: Vec<SpeciesInfo>,      // Top 10 species by population (updated with species count)
     species_heatmap_enabled: bool,      // Show phenotype distance heatmap from selected agent
     species_bucket_size: u32,           // Quantization bucket for species hash (higher = fewer species, more tolerance)
+    nucleotide_debug_mask: u32,         // Keys 1-4 toggle RGBW view of A/U/G/C concentrations
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
@@ -5441,7 +5443,8 @@ impl GpuState {
             _pad_dye_beta_color: 0.0,
             species_heatmap: 0,
             species_bucket_size: 3,
-            _pad_species: [0; 2],
+            nucleotide_debug_mask: 0,
+            _pad_species: 0,
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -7807,6 +7810,7 @@ impl GpuState {
             top_species: Vec::new(),
             species_heatmap_enabled: false,
             species_bucket_size: 3,
+            nucleotide_debug_mask: 0,
             last_autosave_epoch: 0,
             last_autosave_time: std::time::Instant::now(),
 
@@ -9772,7 +9776,8 @@ impl GpuState {
             },
             species_heatmap: if self.species_heatmap_enabled { 1 } else { 0 },
             species_bucket_size: self.species_bucket_size.max(1),
-            _pad_species: [0; 2],
+            nucleotide_debug_mask: self.nucleotide_debug_mask,
+            _pad_species: 0,
         };
 
         // Keep CPU mirror in sync with the GPU uniform buffer.
@@ -14558,6 +14563,20 @@ fn main() {
                                         }
                                         PhysicalKey::Code(KeyCode::F12) => {
                                             state.screenshot_4k_requested = true;
+                                        }
+                                        // Keys 1-4: toggle RGBW debug view of the
+                                        // A/U/G/C monomer concentrations.
+                                        PhysicalKey::Code(KeyCode::Digit1) => {
+                                            state.nucleotide_debug_mask ^= 1;
+                                        }
+                                        PhysicalKey::Code(KeyCode::Digit2) => {
+                                            state.nucleotide_debug_mask ^= 2;
+                                        }
+                                        PhysicalKey::Code(KeyCode::Digit3) => {
+                                            state.nucleotide_debug_mask ^= 4;
+                                        }
+                                        PhysicalKey::Code(KeyCode::Digit4) => {
+                                            state.nucleotide_debug_mask ^= 8;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyF) => {
                                             // Toggle follow mode

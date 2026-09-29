@@ -167,7 +167,7 @@ struct SimParams {
     _pad_dye_beta_color: f32,
     species_heatmap: u32,
     species_bucket_size: u32,
-    _pad_species_0: u32,
+    nucleotide_debug_mask: u32,
     _pad_species_1: u32,
 }
 

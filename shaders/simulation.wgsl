@@ -188,10 +188,6 @@ const SPIKE_KILL_COST_BASE: f32 = 0.02;
 const SPIKE_KILL_COST_FRAC_OF_VICTIM: f32 = 0.00;
 
 // Decomposition tuning:
-// Fixed deposit per BODYPART (amino segments + organs), with no scaling by food_power or remaining energy.
-// Deterministic (no per-part randomness) to avoid run-to-run variation.
-const DECOMPOSE_DEPOSIT_PER_BODYPART: f32 = 0.2;
-
 // RNA-world whole-body uptake: max monomer mass a part of mass 1.0 can absorb
 // from the cell under it per frame (scaled by part mass and agent stillness).
 const PART_UPTAKE_RATE: f32 = 0.01;
@@ -550,6 +546,13 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 let actual_loss = energy_from_u32(actual_loss_u);
                                 let actual_gain = actual_loss * 0.5;
                                 total_energy_gained += actual_gain;
+                                // Closed world: the destroyed half of the drain spills
+                                // back into the environment as monomers at the victim.
+                                if (params.food_power > 0.0) {
+                                    let spilled = (actual_loss - actual_gain) / params.food_power;
+                                    let vidx = grid_index(victim_pos);
+                                    chem_grid[vidx] = chem_grid[vidx] + vec4<f32>(spilled * 0.25);
+                                }
                                 // Set cooldown timer
                                 agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
                             }
@@ -769,30 +772,36 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (agent_alive == 2u) {
         let body_count = min(agents_in[agent_id].body_count, MAX_BODY_PARTS);
         if (body_count > 0u) {
-            // RNA-world decomposition: the body returns its actual monomer
-            // composition (A/U/G/C fractions of the genome) to the environment
-            // at each part's position — mass recycling, no food/poison rule.
+            // RNA-world decomposition (closed world): return exactly what the
+            // agent embodies — the strand's mass (gene_length bases, split by
+            // genome composition), the complements captured by the partial
+            // pairing strand, and the remaining energy converted to matter.
             let comp = genome_composition(
                 agents_in[agent_id].genome_packed,
                 agents_in[agent_id].genome_offset,
                 agents_in[agent_id].gene_length
             );
-            // Also return the partially built complementary strand: each paired
-            // base captured one complementary monomer from the environment.
             let paired_counts = genome_paired_complement_counts(
                 agents_in[agent_id].genome_packed,
                 agents_in[agent_id].genome_offset,
                 agents_in[agent_id].gene_length,
                 agents_in[agent_id].pairing_counter
             );
-            let paired_per_part = paired_counts * (PAIRING_MONOMER_COST / f32(body_count));
+            let strand_mass = f32(agents_in[agent_id].gene_length) * PAIRING_MONOMER_COST;
+            var energy_mass = 0.0;
+            if (params.food_power > 0.0) {
+                let fpm = pow(0.75, f32(agents_in[agent_id].poison_resistant_count));
+                energy_mass = energy_from_u32(agents_in[agent_id].energy) / max(params.food_power * fpm, 1e-6);
+            }
+            let per_part = (comp * (strand_mass + energy_mass)
+                + paired_counts * PAIRING_MONOMER_COST) * (1.0 / f32(body_count));
             let agent_pos = agents_in[agent_id].position;
             let agent_rot = agents_in[agent_id].rotation;
             for (var i = 0u; i < body_count; i++) {
                 let part = agents_in[agent_id].body[i];
                 let world_pos = agent_pos + apply_agent_rotation(part.pos, agent_rot);
                 let idx = grid_index(world_pos);
-                chem_grid[idx] = min(chem_grid[idx] + comp * DECOMPOSE_DEPOSIT_PER_BODYPART + paired_per_part, vec4<f32>(1.0));
+                chem_grid[idx] = chem_grid[idx] + per_part;
             }
         }
 
@@ -2701,6 +2710,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     energy_consumption += morphology_change_energy;
     var total_consumed_alpha = 0.0;
     var total_consumed_beta = 0.0;
+    var consumed_frame = vec4<f32>(0.0);
     var local_alpha = 0.0;
     var local_beta = 0.0;
 
@@ -2730,15 +2740,20 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Stiller bodies absorb more (same foraging tradeoff mouths had).
                 let speed_norm = clamp(length(agent_velocity) / VEL_MAX, 0.0, 1.0);
                 let speed_mult = exp(-4.0 * speed_norm);
-                let rate = PART_UPTAKE_RATE * max(props.mass, 0.1) * speed_mult;
+                var rate = PART_UPTAKE_RATE * max(props.mass, 0.1) * speed_mult;
+                // Closed world: never absorb more than the energy capacity can
+                // hold (overflow would be clamped away = destroyed mass).
+                let yield_per_mass = max(params.food_power * food_power_multiplier, 1e-6);
+                rate = min(rate, max(capacity - agent_energy_cur, 0.0) / yield_per_mass);
                 let frac = clamp(rate / total_avail, 0.0, 1.0);
                 let consumed = cell * frac;
                 cell -= consumed;
                 chem_grid[idx] = cell;
                 let consumed_total = consumed.x + consumed.y + consumed.z + consumed.w;
-                agent_energy_cur += consumed_total * params.food_power * food_power_multiplier;
+                agent_energy_cur += consumed_total * yield_per_mass;
                 total_consumed_alpha += consumed.x + consumed.y;
                 total_consumed_beta += consumed.z + consumed.w;
+                consumed_frame += consumed;
             }
         }
 
@@ -2939,8 +2954,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Always clamp to avoid energy > capacity, and to zero when capacity == 0
     agent_energy_cur = clamp(agent_energy_cur, 0.0, max(capacity, 0.0));
 
-    // 3) Maintenance: subtract consumption after feeding
+    // 3) Maintenance: subtract consumption after feeding.
+    // Closed world: spent energy is excreted back into the environment as
+    // monomers (matching this frame's uptake composition when available).
+    let excreted_energy = clamp(energy_consumption, 0.0, max(agent_energy_cur, 0.0));
     agent_energy_cur -= energy_consumption;
+    if (params.food_power > 0.0 && excreted_energy > 0.0) {
+        var ecomp = vec4<f32>(0.25);
+        let cf_total = consumed_frame.x + consumed_frame.y + consumed_frame.z + consumed_frame.w;
+        if (cf_total > 1e-6) { ecomp = consumed_frame / cf_total; }
+        let excrete_idx = grid_index(agent_pos);
+        let excrete_yield = max(params.food_power * food_power_multiplier, 1e-6);
+        chem_grid[excrete_idx] = chem_grid[excrete_idx] + ecomp * (excreted_energy / excrete_yield);
+    }
 
     // Defensive: avoid NaN propagation (can happen if any organ cost math goes unstable).
     // If energy becomes NaN, clamp it to 0 so the agent will simply starve rather than poisoning the sim state.
@@ -2977,24 +3003,29 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (should_die) {
-        // RNA-world decomposition: return the genome's monomer composition
-        // (A/U/G/C fractions) to the environment at each part's position —
-        // pure mass recycling, no food/poison mapping.
+        // RNA-world decomposition (closed world): return exactly what the agent
+        // embodies — strand mass split by genome composition, the complements
+        // captured by the partial pairing strand, and remaining energy as matter.
         if (body_count > 0u) {
             let comp = genome_composition(agent_genome_packed, agent_genome_offset, agent_gene_length);
-            // Also return the partially built complementary strand: each paired
-            // base captured one complementary monomer from the environment.
             let paired_counts = genome_paired_complement_counts(
                 agent_genome_packed, agent_genome_offset, agent_gene_length,
                 agents_in[agent_id].pairing_counter
             );
-            let paired_per_part = paired_counts * (PAIRING_MONOMER_COST / f32(min(body_count, MAX_BODY_PARTS)));
+            let strand_mass = f32(agent_gene_length) * PAIRING_MONOMER_COST;
+            var energy_mass = 0.0;
+            if (params.food_power > 0.0) {
+                energy_mass = max(agent_energy_cur, 0.0) / max(params.food_power * food_power_multiplier, 1e-6);
+            }
+            let pc = f32(min(body_count, MAX_BODY_PARTS));
+            let per_part = (comp * (strand_mass + energy_mass)
+                + paired_counts * PAIRING_MONOMER_COST) * (1.0 / pc);
             for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
                 let part = agents_out[agent_id].body[i];
                 let rotated_pos = apply_agent_rotation(part.pos, agent_rot);
                 let world_pos = agent_pos + rotated_pos;
                 let idx = grid_index(world_pos);
-                chem_grid[idx] = min(chem_grid[idx] + comp * DECOMPOSE_DEPOSIT_PER_BODYPART + paired_per_part, vec4<f32>(1.0));
+                chem_grid[idx] = chem_grid[idx] + per_part;
             }
         }
 
@@ -3126,6 +3157,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // it is returned on death if replication never completes).
                     cell[comp_ch] = max(avail - PAIRING_MONOMER_COST, 0.0);
                     chem_grid[pos_idx] = cell;
+                    // Closed world: the pairing energy cost is excreted as matter.
+                    if (pairing_cost > 0.0 && params.food_power > 0.0) {
+                        let pmass = pairing_cost / max(params.food_power * food_power_multiplier, 1e-6);
+                        chem_grid[pos_idx] = chem_grid[pos_idx] + vec4<f32>(pmass * 0.25);
+                    }
                 }
             }
         }
@@ -3278,12 +3314,14 @@ fn diffuse_grids_pair(gid: vec3<u32>, pair: u32) {
     }
 
     // Base result after classic blur + slope shift.
-    let a_base = clamp(a_iso - a_flux, 0.0, 1.0);
-    let b_base = clamp(b_iso - b_flux, 0.0, 1.0);
+    // Closed world: no upper clamp — concentrations may exceed 1.0 locally
+    // (total mass is finite, so this is bounded); clamping would destroy mass.
+    let a_base = max(a_iso - a_flux, 0.0);
+    let b_base = max(b_iso - b_flux, 0.0);
 
     // Persistence applies as decay to the monomer channels.
-    let final_a = clamp(a_base * persistence, 0.0, 1.0);
-    let final_b = clamp(b_base * persistence, 0.0, 1.0);
+    let final_a = max(a_base * persistence, 0.0);
+    let final_b = max(b_base * persistence, 0.0);
     // Gamma: classic diffusion only (separate from Env Persistence).
     let final_gamma = max(gamma_iso, 0.0);
 
@@ -3543,6 +3581,16 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             let green = slope.y * 100.0 + 0.5;
             base_color = vec3<f32>(red, green, 0.0);
         }
+    } else if (params.nucleotide_debug_mask != 0u) {
+        // Nucleotide debug view (keys 1-4): show raw per-monomer concentrations
+        // as RGBW — A=red, U=green, G=blue, C=white. Multiple channels stack.
+        let m = params.nucleotide_debug_mask;
+        var dbg = vec3<f32>(0.0);
+        if ((m & 1u) != 0u) { dbg += vec3<f32>(1.0, 0.0, 0.0) * clamp(cc.x, 0.0, 1.0); }
+        if ((m & 2u) != 0u) { dbg += vec3<f32>(0.0, 1.0, 0.0) * clamp(cc.y, 0.0, 1.0); }
+        if ((m & 4u) != 0u) { dbg += vec3<f32>(0.2, 0.4, 1.0) * clamp(cc.z, 0.0, 1.0); }
+        if ((m & 8u) != 0u) { dbg += vec3<f32>(1.0, 1.0, 1.0) * clamp(cc.w, 0.0, 1.0); }
+        base_color = dbg;
     } else {
         // New visualization system: composite channels with blend modes
 
