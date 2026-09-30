@@ -1,7 +1,7 @@
 {
-  "camera_zoom": 0.5559345,
-  "spawn_probability": 2.0,
-  "death_probability": 0.01,
+  "camera_zoom": 1.7388746,
+  "spawn_probability": 5.0,
+  "death_probability": 0.005,
   "mutation_rate": 0.005,
   "auto_replenish": false,
   "diffusion_interval": 1,
@@ -244,6 +244,6 @@
   "noise_power": 2.3,
   "agent_trail_decay": 1.0,
   "env_grid_resolution": 2048,
-  "fluid_grid_resolution": 512,
+  "fluid_grid_resolution": 1024,
   "spatial_grid_resolution": 1024
 }

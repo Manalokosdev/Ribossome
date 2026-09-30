@@ -3870,36 +3870,21 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         // New visualization system: composite channels with blend modes
 
-        // Deposit layer: crisp quantized monomer counts (A = base color,
-        // U = swizzled variant; same for G/C). Toggled by alpha/beta_show.
-        if (params.alpha_show != 0u) {
-            let alpha_color_base = vec3<f32>(
-                clamp(params.alpha_color_r, 0.0, 1.0),
-                clamp(params.alpha_color_g, 0.0, 1.0),
-                clamp(params.alpha_color_b, 0.0, 1.0)
-            );
-            let alpha_color = mix(alpha_color_base, alpha_color_base.brg, ratio_u);
-            let alpha_corrected = pow(alpha, params.alpha_gamma_adjust);
-            if (params.alpha_blend_mode == 0u) {
-                base_color = base_color + alpha_color * alpha_corrected;
-            } else {
-                base_color = base_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - alpha_color, alpha_corrected);
+        // Deposit layer: crisp quantized monomer counts with the
+        // per-nucleotide palette (matches the dye renderer): A=red,
+        // U=yellow, G=green, C=blue, dimmed to 50% so agents stay
+        // readable on top. alpha_show gates A/U, beta_show gates G/C.
+        {
+            var dep = vec3<f32>(0.0);
+            if (params.alpha_show != 0u) {
+                dep += vec3<f32>(1.0, 0.15, 0.1) * pow(clamp(cc.x, 0.0, 1.0), params.alpha_gamma_adjust);
+                dep += vec3<f32>(1.0, 0.85, 0.1) * pow(clamp(cc.y, 0.0, 1.0), params.alpha_gamma_adjust);
             }
-        }
-
-        if (params.beta_show != 0u) {
-            let beta_color_base = vec3<f32>(
-                clamp(params.beta_color_r, 0.0, 1.0),
-                clamp(params.beta_color_g, 0.0, 1.0),
-                clamp(params.beta_color_b, 0.0, 1.0)
-            );
-            let beta_color = mix(beta_color_base, beta_color_base.gbr, ratio_c);
-            let beta_corrected = pow(beta, params.beta_gamma_adjust);
-            if (params.beta_blend_mode == 0u) {
-                base_color = base_color + beta_color * beta_corrected;
-            } else {
-                base_color = base_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - beta_color, beta_corrected);
+            if (params.beta_show != 0u) {
+                dep += vec3<f32>(0.15, 0.9, 0.25) * pow(clamp(cc.z, 0.0, 1.0), params.beta_gamma_adjust);
+                dep += vec3<f32>(0.2, 0.45, 1.0) * pow(clamp(cc.w, 0.0, 1.0), params.beta_gamma_adjust);
             }
+            base_color = base_color + dep * 0.5;
         }
 
         // Gamma channel

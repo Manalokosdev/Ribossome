@@ -17,6 +17,14 @@ const SIM_SIZE: u32 = 61440u;
 // only how strongly the dye is displayed when params.fluid_show is enabled.
 // Keep this modest; the overlay also applies a tone-map to avoid blowout.
 const DYE_VIS_GAIN: f32 = 2.0;
+// Per-nucleotide display palette (shared idea with the deposit renderer):
+// A=red, U=yellow, G=green, C=blue; MONOMER_VIS dims the soup so agents
+// stay readable on top.
+const MONOMER_COLOR_A: vec3<f32> = vec3<f32>(1.0, 0.15, 0.1);
+const MONOMER_COLOR_U: vec3<f32> = vec3<f32>(1.0, 0.85, 0.1);
+const MONOMER_COLOR_G: vec3<f32> = vec3<f32>(0.15, 0.9, 0.25);
+const MONOMER_COLOR_C: vec3<f32> = vec3<f32>(0.2, 0.45, 1.0);
+const MONOMER_VIS: f32 = 0.5;
 
 const TAU: f32 = 6.2831853;
 
@@ -303,52 +311,20 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if ((m & 8u) != 0u) { dbg += vec3<f32>(1.0, 1.0, 1.0) * c_dye; }
                 under_color = clamp(under_color + dbg, vec3<f32>(0.0), vec3<f32>(1.0));
             } else {
-            let alpha_base = vec3<f32>(
-                clamp(params.alpha_color_r, 0.0, 1.0),
-                clamp(params.alpha_color_g, 0.0, 1.0),
-                clamp(params.alpha_color_b, 0.0, 1.0)
-            );
-            let beta_base = vec3<f32>(
-                clamp(params.beta_color_r, 0.0, 1.0),
-                clamp(params.beta_color_g, 0.0, 1.0),
-                clamp(params.beta_color_b, 0.0, 1.0)
-            );
-            var alpha_color = mix(alpha_base, alpha_base.brg, ratio_u);
-            var beta_color = mix(beta_base, beta_base.gbr, ratio_c);
-
-            // Thin-film mode: reuse padding float as (enable + phase multiplier).
-            // If multiplier > 0, dye is colored by thin-film palette; otherwise uses flat tint.
-            let alpha_thinfilm_mult = max(params._pad_dye_alpha_color, 0.0);
-            let beta_thinfilm_mult = max(params._pad_dye_beta_color, 0.0);
-            if (alpha_thinfilm_mult > 0.0) {
-                alpha_color = thin_film_rgb(dye_raw.y * alpha_thinfilm_mult);
-            }
-            if (beta_thinfilm_mult > 0.0) {
-                beta_color = thin_film_rgb(dye_raw.x * beta_thinfilm_mult);
-            }
-
-            // Apply gamma adjustment to dye intensities for consistent look.
-            let dye_alpha = pow(dye_tm.y, params.alpha_gamma_adjust);
-            let dye_beta = pow(dye_tm.x, params.beta_gamma_adjust);
-
-            // Alpha dye layer
-            if (params.alpha_blend_mode == 0u) {
-                // Additive
-                under_color = under_color + alpha_color * dye_alpha;
-            } else {
-                // Multiply with inverted channel
-                under_color = under_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - alpha_color, dye_alpha);
-            }
-
-            // Beta dye layer
-            if (params.beta_blend_mode == 0u) {
-                // Additive
-                under_color = under_color + beta_color * dye_beta;
-            } else {
-                // Multiply with inverted channel
-                under_color = under_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - beta_color, dye_beta);
-            }
-
+            // Per-nucleotide palette: A=red, U=yellow, G=green, C=blue —
+            // four hues spread around the color wheel so every channel is
+            // identifiable at a glance. MONOMER_VIS dims the whole layer so
+            // agents stay clearly readable on top of the soup.
+            let dye_gamma = max(params.alpha_gamma_adjust, 0.05);
+            let a_i = pow(dye_tm4.x, dye_gamma);
+            let u_i = pow(dye_tm4.y, dye_gamma);
+            let g_i = pow(dye_tm4.z, dye_gamma);
+            let c_i = pow(dye_tm4.w, dye_gamma);
+            let col = MONOMER_COLOR_A * a_i
+                + MONOMER_COLOR_U * u_i
+                + MONOMER_COLOR_G * g_i
+                + MONOMER_COLOR_C * c_i;
+            under_color = under_color + col * MONOMER_VIS;
             under_color = clamp(under_color, vec3<f32>(0.0), vec3<f32>(1.0));
             }
         }
