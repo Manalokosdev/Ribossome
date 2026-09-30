@@ -199,6 +199,7 @@ const DIG_P_PER_FRAME: f32 = 0.05;
 
 // Quantized terrain collision:
 const GAMMA_SOLID_THRESHOLD: u32 = 3u;
+const GAMMA_EXTRACT_STEP: f32 = 0.75;
 const GAMMA_EJECT_FORCE: f32 = 30.0;
 const GAMMA_WALL_FORCE: f32 = 10.0;
 const GAMMA_SOLID_BRAKE: f32 = 1.0;
@@ -2771,6 +2772,62 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             // Soft bounce; never enter.
             agent_vel = agent_vel * -0.2;
+        }
+    }
+
+    // PART EXTRACTION: no body part may sit inside solid terrain. Every part
+    // found in a solid cell contributes an escape push toward that cell's
+    // least-occupied neighbor; the whole agent is displaced a bounded step
+    // per frame. Long bodies overlapping walls, and agents buried by
+    // landslides or bulldozed spoil, get squeezed out over a few frames.
+    {
+        var escape = vec2<f32>(0.0);
+        var buried_parts = 0u;
+        let bc_x = min(body_count_val, MAX_BODY_PARTS);
+        for (var pi = 0u; pi < bc_x; pi++) {
+            let wp = agent_pos + apply_agent_rotation(agents_out[agent_id].body[pi].pos, agent_rot);
+            let ci = grid_index(wp);
+            if (gamma_count(ci) >= GAMMA_SOLID_THRESHOLD) {
+                buried_parts += 1u;
+                var cand = array<vec2<f32>, 4>(
+                    vec2<f32>(1.0, 0.0), vec2<f32>(-1.0, 0.0),
+                    vec2<f32>(0.0, 1.0), vec2<f32>(0.0, -1.0)
+                );
+                var best = vec2<f32>(0.0);
+                var best_c = gamma_count(ci);
+                for (var kk = 0u; kk < 4u; kk++) {
+                    let np = clamp_position(wp + cand[kk] * 1.2);
+                    let nc = gamma_count(grid_index(np));
+                    if (nc < best_c) {
+                        best_c = nc;
+                        best = cand[kk];
+                    }
+                }
+                if (dot(best, best) < 0.5) {
+                    // Fully surrounded: pull toward the agent's own center.
+                    let dctr = agent_pos - wp;
+                    if (dot(dctr, dctr) > 0.25) {
+                        best = normalize(dctr);
+                    } else {
+                        let eh2 = hash((agent_id + 1u) * 53u ^ (pi * 131u) ^ params.random_seed);
+                        let ea2 = hash_f32(eh2) * 6.2831853;
+                        best = vec2<f32>(cos(ea2), sin(ea2));
+                    }
+                }
+                escape += best;
+            }
+        }
+        if (buried_parts > 0u) {
+            var dirv = escape;
+            if (dot(dirv, dirv) < 1e-4) {
+                let eh3 = hash((agent_id + 1u) * 97u ^ params.random_seed * 193u);
+                let ea3 = hash_f32(eh3) * 6.2831853;
+                dirv = vec2<f32>(cos(ea3), sin(ea3));
+            }
+            dirv = normalize(dirv);
+            agent_pos = clamp_position(agent_pos + dirv * GAMMA_EXTRACT_STEP);
+            // Kill momentum so the extraction is not immediately undone.
+            agent_vel = agent_vel * 0.4;
         }
     }
 

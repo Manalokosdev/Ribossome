@@ -1,7 +1,7 @@
 {
-  "camera_zoom": 0.41449246,
+  "camera_zoom": 0.79269886,
   "spawn_probability": 2.1,
-  "death_probability": 0.01,
+  "death_probability": 0.001,
   "mutation_rate": 0.005,
   "auto_replenish": false,
   "diffusion_interval": 1,
@@ -136,7 +136,7 @@
       "max_threshold": 55000.0,
       "adjustment_percent": 20.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 51771,
+      "last_adjustment_epoch": 114777,
       "difficulty_level": -1
     },
     "alpha_rain": {
@@ -198,11 +198,11 @@
   "dye_beta_thinfilm_mult": 50.0,
   "fumaroles": [
     {
-      "enabled": true,
+      "enabled": false,
       "x_frac": 0.37,
       "y_frac": 0.48,
       "dir_degrees": 230.0,
-      "strength": 1000.0,
+      "strength": 50000.0,
       "spread": 2.0,
       "alpha_dye_rate": 0.0,
       "beta_dye_rate": 0.0,
@@ -220,7 +220,7 @@
       "variation": 0.5
     }
   ],
-  "grid_interpolation": 0,
+  "grid_interpolation": 1,
   "alpha_gamma_adjust": 0.5,
   "beta_gamma_adjust": 0.5,
   "gamma_gamma_adjust": 5.0,
