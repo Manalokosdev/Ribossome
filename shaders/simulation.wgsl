@@ -3301,8 +3301,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // AQUARIUM TEMPERATURE: shallow lit water is HOT — higher death
         // rate in the rich fast lane at the top; the deep is cold, slow,
         // safe and poor. Same light curve as photo-activation.
-        let light_a = exp(-LIGHT_ATTEN * (1.0 - clamp(agent_pos.y / f32(SIM_SIZE), 0.0, 1.0)));
-        let temp_mult = mix(1.0, TEMP_DEATH_MULT_TOP, light_a);
+        let light_a = exp(-max(params.dye_alpha_color_g, 0.5) * (1.0 - clamp(agent_pos.y / f32(SIM_SIZE), 0.0, 1.0)));
+        let temp_mult = mix(1.0, max(params.dye_alpha_color_b, 1.0), light_a);
         let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * temp_mult, 0.0, 1.0);
 
         should_die = death_rnd < final_death_prob;
@@ -3872,7 +3872,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
     // AQUARIUM LIGHT: UV enters at the TOP of the screen — empirically
     // HIGH world y (the present chain flips y once more than the
     // composite math suggests). Attenuates with depth.
-    let light_t = exp(-LIGHT_ATTEN * (1.0 - (f32(y) + 0.5) / f32(GRID_SIZE)));
+    let light_t = exp(-max(params.dye_alpha_color_g, 0.5) * (1.0 - (f32(y) + 0.5) / f32(GRID_SIZE)));
 
     for (var ch = 0u; ch < 4u; ch++) {
         let slot = idx * 4u + ch;
@@ -3885,7 +3885,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Together with feeding (act->spent) this closes the energy cycle:
         // light pumps, life and decay drain.
         if (spent_n > 0u) {
-            let exp_act = f32(min(spent_n, 8u)) * LIGHT_ACT_P * light_t;
+            let exp_act = f32(min(spent_n, 8u)) * LIGHT_ACT_P * max(params.dye_alpha_color_r, 0.0) * light_t;
             let wa = u32(floor(exp_act));
             var na = wa;
             if (hash_f32(slot ^ (params.random_seed * 1597334677u) ^ (params.epoch * 3812015801u)) < exp_act - f32(wa)) { na += 1u; }
@@ -4186,6 +4186,11 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         // grayscale (1 quantum = 0.25 grey step, 4+ = white). Combines
         // with keys 1-4 if both are toggled.
         if ((m & 16u) != 0u) { dbg += vec3<f32>(1.0, 1.0, 1.0) * clamp(gamma, 0.0, 1.0); }
+        // Key 8: UV radiation map (violet), scaled by the UV strength slider.
+        if ((m & 64u) != 0u) {
+            let uv_l = exp(-max(params.dye_alpha_color_g, 0.5) * (1.0 - clamp(world_pos.y / params.grid_size, 0.0, 1.0)));
+            dbg += vec3<f32>(0.7, 0.3, 1.0) * clamp(uv_l * max(params.dye_alpha_color_r, 0.0), 0.0, 1.0);
+        }
         base_color = dbg;
     } else {
         // New visualization system: composite channels with blend modes

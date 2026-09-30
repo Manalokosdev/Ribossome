@@ -3091,6 +3091,9 @@ fn default_fluid_grid_resolution() -> u32 { DEFAULT_FLUID_GRID_RESOLUTION }
 fn default_fluid_substep() -> u32 { 1 }
 fn default_monomer_brightness() -> f32 { 0.5 }
 fn default_dig_rate() -> f32 { 1.0 }
+fn default_uv_strength() -> f32 { 1.0 }
+fn default_uv_depth() -> f32 { 8.0 }
+fn default_uv_damage() -> f32 { 2.5 }
 fn default_spatial_grid_resolution() -> u32 { DEFAULT_SPATIAL_GRID_RESOLUTION }
 fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
@@ -3359,6 +3362,13 @@ struct SimulationSettings {
     // Multiplier on all terrain digging (bulldozing + wall grinding).
     #[serde(default = "default_dig_rate")]
     dig_rate: f32,
+    // UV light: activation strength multiplier, depth attenuation, surface damage.
+    #[serde(default = "default_uv_strength")]
+    uv_strength: f32,
+    #[serde(default = "default_uv_depth")]
+    uv_depth: f32,
+    #[serde(default = "default_uv_damage")]
+    uv_damage: f32,
     // When enabled, the dye is colored using a thin-film interference palette instead of a flat tint.
     #[serde(default)]
     dye_alpha_thinfilm: bool,
@@ -3528,6 +3538,9 @@ impl Default for SimulationSettings {
             dye_beta_color: default_dye_beta_color(),
             monomer_brightness: 0.5,
             dig_rate: 1.0,
+            uv_strength: 1.0,
+            uv_depth: 8.0,
+            uv_damage: 2.5,
             dye_alpha_thinfilm: false,
             dye_alpha_thinfilm_mult: default_dye_thinfilm_multiplier(),
             dye_beta_thinfilm: false,
@@ -3836,6 +3849,9 @@ impl SimulationSettings {
         self.pairing_cost = self.pairing_cost.clamp(0.0, 1.0);
         self.monomer_brightness = self.monomer_brightness.clamp(0.0, 1.0);
         self.dig_rate = self.dig_rate.clamp(0.0, 5.0);
+        self.uv_strength = self.uv_strength.clamp(0.0, 10.0);
+        self.uv_depth = self.uv_depth.clamp(0.5, 30.0);
+        self.uv_damage = self.uv_damage.clamp(1.0, 10.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         // Back-compat: older settings files won't have the fluid prop-wash strength.
         // Use the exact sentinel value -1.0 to mean "inherit direct wash".
@@ -4464,6 +4480,9 @@ struct GpuState {
     dye_beta_color: [f32; 3],
     monomer_brightness: f32,
     dig_rate: f32,
+    uv_strength: f32,
+    uv_depth: f32,
+    uv_damage: f32,
     dye_alpha_thinfilm: bool,
     dye_alpha_thinfilm_mult: f32,
     dye_beta_thinfilm: bool,
@@ -8262,6 +8281,9 @@ impl GpuState {
             dye_beta_color: settings.dye_beta_color,
             monomer_brightness: settings.monomer_brightness.clamp(0.0, 1.0),
             dig_rate: settings.dig_rate.clamp(0.0, 5.0),
+            uv_strength: settings.uv_strength.clamp(0.0, 10.0),
+            uv_depth: settings.uv_depth.clamp(0.5, 30.0),
+            uv_damage: settings.uv_damage.clamp(1.0, 10.0),
             dye_alpha_thinfilm: settings.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: settings.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: settings.dye_beta_thinfilm,
@@ -9123,6 +9145,9 @@ impl GpuState {
             dye_beta_color: self.dye_beta_color,
             monomer_brightness: self.monomer_brightness,
             dig_rate: self.dig_rate,
+            uv_strength: self.uv_strength,
+            uv_depth: self.uv_depth,
+            uv_damage: self.uv_damage,
             dye_alpha_thinfilm: self.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: self.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: self.dye_beta_thinfilm,
@@ -10030,9 +10055,11 @@ impl GpuState {
             },
             fluid_slope_force_scale: self.fluid_slope_force_scale,
             fluid_obstacle_strength: self.fluid_obstacle_strength,
-            dye_alpha_color_r: self.dye_alpha_color[0],
-            dye_alpha_color_g: self.dye_alpha_color[1],
-            dye_alpha_color_b: self.dye_alpha_color[2],
+            // REPURPOSED slots (dye colors are dead since the unified palette):
+            // r = UV strength, g = UV depth attenuation, b = UV surface damage.
+            dye_alpha_color_r: self.uv_strength,
+            dye_alpha_color_g: self.uv_depth,
+            dye_alpha_color_b: self.uv_damage,
             // REPURPOSED: this slot now carries the monomer display
             // brightness (the thin-film mode died with the per-nucleotide
             // palette).
@@ -15023,6 +15050,10 @@ fn main() {
                                         PhysicalKey::Code(KeyCode::Digit7) => {
                                             state.nucleotide_debug_mask ^= 32;
                                         }
+                                        // Key 8: UV radiation map.
+                                        PhysicalKey::Code(KeyCode::Digit8) => {
+                                            state.nucleotide_debug_mask ^= 64;
+                                        }
                                         PhysicalKey::Code(KeyCode::KeyF) => {
                                             // Toggle follow mode
                                             if state.selected_agent_index.is_some() {
@@ -15748,14 +15779,6 @@ fn main() {
                                                     {
                                                         state.recording_bar_visible = !state.recording_bar_visible;
                                                     }
-
-                                                    if ui
-                                                        .button("Overrides...")
-                                                        .on_hover_text("Edit part & organ property overrides")
-                                                        .clicked()
-                                                    {
-                                                        state.show_part_properties_editor = true;
-                                                    }
                                                 });
                                             });
 
@@ -15764,7 +15787,6 @@ fn main() {
                                             ui.horizontal(|ui| {
                                                 ui.checkbox(&mut state.fluid_enabled, "Fluids");
                                                 ui.checkbox(&mut state.microswim_enabled, "Microswimming");
-                                                ui.checkbox(&mut state.propellers_enabled, "Propellers");
                                             });
                                             ui.horizontal(|ui| {
                                                 if ui.button("Save Settings").clicked() {
@@ -16116,31 +16138,6 @@ fn main() {
                                                             state.agent_buffer_capacity
                                                         ));
                                                         ui.horizontal(|ui| {
-                                                            let denom = state.alive_count.max(1) as f32;
-                                                            let pct = (state.organ45_alive_with as f32 / denom) * 100.0;
-                                                            ui.label(format!(
-                                                                "Attractor/Repulsor (45): {}/{} ({:.2}%)",
-                                                                state.organ45_alive_with,
-                                                                state.alive_count,
-                                                                pct
-                                                            ));
-                                                            if ui.button("Scan").clicked() {
-                                                                state.scan_population_for_organ45();
-                                                            }
-                                                        });
-                                                        if let Some(t) = state.organ45_last_scan {
-                                                            ui.label(format!(
-                                                                "Last scan: {:.1}s ago",
-                                                                t.elapsed().as_secs_f32()
-                                                            ));
-                                                        }
-                                                        if let Some(err) = &state.organ45_last_scan_error {
-                                                            ui.colored_label(
-                                                                egui::Color32::from_rgb(255, 120, 120),
-                                                                err,
-                                                            );
-                                                        }
-                                                        ui.horizontal(|ui| {
                                                             if ui
                                                                 .button(if state.auto_replenish {
                                                                     "Auto Replenish: ON"
@@ -16467,6 +16464,21 @@ fn main() {
                                                         //  replaced them with stochastic transport, sandpile terrain
                                                         //  and count-tracking dye.)
 
+                                                        ui.separator();
+                                                        ui.heading("UV Light (key 8 = map)");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.uv_strength, 0.0..=10.0)
+                                                                .text("UV Strength (activation)"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.uv_depth, 0.5..=30.0)
+                                                                .logarithmic(true)
+                                                                .text("UV Attenuation (higher = shallower)"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.uv_damage, 1.0..=10.0)
+                                                                .text("UV Damage (death x at surface)"),
+                                                        );
                                                         ui.separator();
                                                         ui.heading("Monomers");
                                                         ui.add(
@@ -17347,24 +17359,6 @@ fn main() {
                                                             ui.checkbox(&mut state.fluid_enabled, "Enable Fluids");
                                                         });
 
-                                                        ui.separator();
-                                                        ui.heading("Propeller Wash");
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.prop_wash_strength, 0.0..=5.0)
-                                                                .text("Direct Wash Strength")
-                                                                .clamping(egui::SliderClamping::Always),
-                                                        )
-                                                        .on_hover_text(
-                                                            "Scales direct (non-fluid) propeller/displacer wash effects (e.g. chemical transport).",
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.prop_wash_strength_fluid, -5.0..=5.0)
-                                                                .text("Fluid Wash Strength")
-                                                                .clamping(egui::SliderClamping::Always),
-                                                        )
-                                                        .on_hover_text(
-                                                            "Scales how strongly propellers/displacers inject forces into the fluid. Negative values reverse the direction.",
-                                                        );
 
                                                         ui.separator();
                                                         ui.add(
@@ -18743,10 +18737,6 @@ fn main() {
                                                     });
                                             });
 
-                                            ui.separator();
-                                            ui.collapsing("Part Base-Angle Overrides", |ui| {
-                                                ui_part_base_angle_overrides(ui, state);
-                                            });
 
                                             ui.separator();
                                             ui.label("Controls:");
