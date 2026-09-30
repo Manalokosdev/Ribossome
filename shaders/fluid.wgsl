@@ -143,6 +143,10 @@ const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.97;
 
 const CHEM_QUANTA_REF_F: f32 = 3.0;
 
+// Per-frame rate at which the dye pursues the true monomer counts.
+// Higher = crisper/faster tracking, lower = longer comet trails.
+const DYE_TRACK_RATE: f32 = 0.15;
+
 // Float view of a cell's monomer counts (1.0 = REF quanta), for the dye tracer.
 fn chem_cell_f(idx: u32) -> vec4<f32> {
     return vec4<f32>(
@@ -685,35 +689,15 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Final dye value after advection
     var dye_val = clamp(advected_dye, vec4<f32>(0.0), vec4<f32>(1.0));
 
-    // === Dye is purely visual ===
-    // Nothing material passes through the dye layer anymore:
-    // - monomers move ONLY via the conservative donor-cell advection kernel
-    //   (advect_chem_* in simulation.wgsl);
-    // - the gamma <-> dye erosion cycle was removed too: semi-Lagrangian dye
-    //   advection does not conserve mass, so routing terrain through it made
-    //   heights drift.
-    // Tracer injection: the dye continuously picks up a NON-DEPLETING image of
-    // the suspended (levitated) monomer pools, so currents visibly carry
-    // colored plumes. Thresholds mirror the simulation's suspension_factor
-    // (FP_SPLAT.x = levitation full speed, FP slot 18 = precipitation speed).
-    // Dye-exclusive simulation: no precipitation — all food is always
-    // suspended, so the dye shows the whole soup from frame 1.
-    let susp = 1.0;
+    // === Dye is purely visual — it TRACKS the quantized counts ===
+    // Exponential pursuit of the true monomer counts (x=A, y=U, z=G, w=C):
+    // rises where monomers arrive, FALLS where they leave. Unlike additive
+    // injection + decay, this cannot saturate or accumulate history — the
+    // steady state IS the current count field, and the advected lag gives
+    // moving monomers comet-trail plumes.
     let env_idx = gamma_index(x, y);
-    // Per-monomer tracer: dye channels mirror the chem channels 1:1
-    // (x=A, y=U, z=G, w=C) — full per-nucleotide identity in the flow.
-    let chem_c = chem_cell_f(env_idx);
-    let tracer_gain = susp * 0.08;
-    dye_val = min(dye_val + clamp(chem_c, vec4<f32>(0.0), vec4<f32>(1.0)) * tracer_gain, vec4<f32>(1.0));
-
-    let escape_rate_alpha = max(fp_f32(FP_DYE_ESCAPE_RATE_ALPHA), 0.0);
-    let escape_rate_beta = max(fp_f32(FP_DYE_ESCAPE_RATE_BETA), 0.0);
-    let escape_factor_alpha = exp(-escape_rate_alpha * dt);
-    let escape_factor_beta = exp(-escape_rate_beta * dt);
-    dye_val.x = dye_val.x * escape_factor_alpha;
-    dye_val.y = dye_val.y * escape_factor_alpha;
-    dye_val.z = dye_val.z * escape_factor_beta;
-    dye_val.w = dye_val.w * escape_factor_beta;
+    let chem_c = clamp(chem_cell_f(env_idx), vec4<f32>(0.0), vec4<f32>(1.0));
+    dye_val = mix(dye_val, chem_c, DYE_TRACK_RATE);
 
     dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
 }
@@ -763,25 +747,11 @@ fn diffuse_dye_no_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dye_val = mix(d_c, neighbor_blur, diffuse_mix);
     dye_val = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
 
-    // In no-fluid mode, apply the fixed per-epoch decay.
-    // (Escape sliders are ignored here to keep behavior epoch-stable.)
-    dye_val = dye_val * NO_FLUID_DYE_DECAY_PER_TICK;
-
-    // Non-depleting injection from chem and trail.
-    // When fluids are off, dye acts like a visual/sensing diffusion layer and should not
-    // drain the environment reservoirs.
+    // Fluid-off mode: the dye simply TRACKS the quantized counts (same
+    // exponential pursuit as advect_dye — cannot saturate or accumulate).
     let env_idx = gamma_index(x, y);
-    // Per-monomer non-depleting injection (dye channels mirror chem 1:1).
     let chem_c = clamp(chem_cell_f(env_idx), vec4<f32>(0.0), vec4<f32>(1.0));
-
-    // If ooze rate is 0, use a small default in no-fluid mode so dye gets replenished.
-    // Interpret the UI value as a per-epoch fraction in no-fluid mode.
-    let ooze_ui = max(fp_f32(FP_CHEM_OOZE_STILL_RATE), 0.0);
-    let ooze_frac = clamp(select(ooze_ui, NO_FLUID_DEFAULT_CHEM_OOZE_FRAC_PER_EPOCH, ooze_ui <= 0.0), 0.0, CHEM_MAX_STEP_FRAC);
-    if (ooze_frac > 0.0) {
-        let headroom = max(vec4<f32>(1.0) - dye_val, vec4<f32>(0.0));
-        dye_val = min(dye_val + min(chem_c * ooze_frac, headroom), vec4<f32>(1.0));
-    }
+    dye_val = mix(dye_val, chem_c, DYE_TRACK_RATE);
 
     dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
 }

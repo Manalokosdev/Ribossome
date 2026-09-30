@@ -16514,7 +16514,26 @@ fn main() {
                                                         ui.checkbox(&mut state.fluid_show, "Show Fluid Overlay")
                                                             .on_hover_text("Visualize propeller-driven fluid simulation (experimental)");
 
-                                                        ui.label("Monomers render only via the dye (deposit layer disabled); keys 1-4 show raw counts.");
+                                                        // Deposit = crisp quantized counts; Dye = smeared tracker
+                                                        // riding the currents. Both use the same monomer palette.
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("View:");
+                                                            if ui.button("Deposit").clicked() {
+                                                                state.alpha_show = true;
+                                                                state.beta_show = true;
+                                                                state.fluid_show = false;
+                                                            }
+                                                            if ui.button("Dye").clicked() {
+                                                                state.alpha_show = false;
+                                                                state.beta_show = false;
+                                                                state.fluid_show = true;
+                                                            }
+                                                            if ui.button("Both").clicked() {
+                                                                state.alpha_show = true;
+                                                                state.beta_show = true;
+                                                                state.fluid_show = true;
+                                                            }
+                                                        });
 
                                                         ui.add_space(4.0);
                                                         ui.label("Fluid Dye Compositing");
