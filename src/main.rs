@@ -4223,7 +4223,13 @@ struct GpuState {
     env_gen_level: f32,                 // Amplitude for env Generate (flat value / noise peak)
     matter_free: [u32; 4],              // Free monomer counts (A/U/G/C) at last sample
     matter_locked_quanta: u64,          // Quanta locked in living strands + paired complements
+    matter_locked_per_ch: [u64; 4],     // Locked quanta broken down by channel (strand + paired)
     matter_energy: f64,                 // Total agent energy (energy units) at last sample
+    matter_energy_quanta: f64,          // Exact quanta-equivalent of agent energy (per-agent yield)
+    matter_total: f64,                  // free + locked + energy-equivalent at last sample
+    matter_baseline: Option<f64>,       // Reference TOTAL for conservation drift; None = capture next sample
+    matter_history: std::collections::VecDeque<f64>, // TOTAL per sample (same cadence as population_history)
+    matter_plot_points: Vec<[f64; 2]>,  // Cached plot points for the matter TOTAL line
     target_total_quanta: u64,           // God-mode target for total free monomers
 
     // Auto-snapshot tracking
@@ -4700,6 +4706,12 @@ impl GpuState {
     }
 
     fn generate_map(&mut self, mode: u32, gen_type: u32, value: f32, seed: u32) {
+        // Any mode that touches the monomer grids (1=flat, 2=noise, 4=scale)
+        // changes the world's matter content: re-capture the conservation
+        // baseline at the next sample. Gamma edits (mode 3) don't count.
+        if mode != 3 {
+            self.matter_baseline = None;
+        }
         let mut part_props_override_head = [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S_HEAD];
         let mut part_props_override_tail = [[f32::NAN; 4]; PART_PROPS_OVERRIDE_VEC4S_TAIL];
         part_props_override_head[..].copy_from_slice(&self.part_props_override[..PART_PROPS_OVERRIDE_VEC4S_HEAD]);
@@ -7875,7 +7887,13 @@ impl GpuState {
             env_gen_level: 0.02,
             matter_free: [0; 4],
             matter_locked_quanta: 0,
+            matter_locked_per_ch: [0; 4],
             matter_energy: 0.0,
+            matter_energy_quanta: 0.0,
+            matter_total: 0.0,
+            matter_baseline: None,
+            matter_history: std::collections::VecDeque::new(),
+            matter_plot_points: Vec::new(),
             target_total_quanta: 1_000_000,
             last_autosave_epoch: 0,
             last_autosave_time: std::time::Instant::now(),
@@ -11900,17 +11918,56 @@ impl GpuState {
             }
 
             // Matter telemetry: quanta locked in living agents (strand bases +
-            // captured pairing complements) and their total energy.
+            // captured pairing complements, per channel) and the exact
+            // quanta-equivalent of their energy. Energy converts back to
+            // matter at yield = food_power * 0.75^poison_resistant_count,
+            // so the equivalence must be computed per agent.
             let mut locked: u64 = 0;
+            let mut locked_ch = [0u64; 4];
             let mut energy_raw: u64 = 0;
+            let mut energy_quanta: f64 = 0.0;
+            let fp = self.food_power as f64;
             for agent in agents.iter().take(take_len) {
                 if agent.alive == 1 {
                     locked += (agent.gene_length + agent.pairing_counter) as u64;
                     energy_raw += agent.energy as u64;
+                    // Decode strand channels; pairing captured the complement
+                    // of the first `pairing_counter` bases (channel ^ 1: A<->U, G<->C).
+                    let off = agent.genome_offset as usize;
+                    let len = agent.gene_length as usize;
+                    let paired = (agent.pairing_counter as usize).min(len);
+                    for p in 0..len {
+                        let idx = off + p;
+                        if idx >= GENOME_BYTES {
+                            break;
+                        }
+                        let word = agent.genome_packed[idx / GENOME_BASES_PER_PACKED_WORD];
+                        let bit_index = (idx % GENOME_BASES_PER_PACKED_WORD) * 2;
+                        let ch = ((word >> bit_index) & 0x3) as usize;
+                        locked_ch[ch] += 1;
+                        if p < paired {
+                            locked_ch[ch ^ 1] += 1;
+                        }
+                    }
+                    if fp > 0.0 {
+                        let yield_per_q =
+                            (fp * 0.75f64.powi(agent.poison_resistant_count as i32)).max(1e-6);
+                        energy_quanta += (agent.energy as f64 / ENERGY_SCALE as f64) / yield_per_q;
+                    }
                 }
             }
             self.matter_locked_quanta = locked;
-            self.matter_energy = energy_raw as f64 / 100000.0; // ENERGY_SCALE
+            self.matter_locked_per_ch = locked_ch;
+            self.matter_energy = energy_raw as f64 / ENERGY_SCALE as f64;
+            self.matter_energy_quanta = energy_quanta;
+
+            // Conservation instrument: TOTAL must stay flat in a closed world.
+            let free_total: u64 = self.matter_free.iter().map(|&v| v as u64).sum();
+            self.matter_total =
+                free_total as f64 + self.matter_locked_quanta as f64 + self.matter_energy_quanta;
+            if self.matter_baseline.is_none() && self.matter_total > 0.0 {
+                self.matter_baseline = Some(self.matter_total);
+            }
 
             species_count = hash_counts.len() as u32;
             let total_living: u32 = hash_counts.values().sum();
@@ -13046,6 +13103,9 @@ impl GpuState {
     }
 
     fn load_snapshot_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
+        // A snapshot replaces the whole world: re-capture the matter
+        // conservation baseline at the next sample.
+        self.matter_baseline = None;
         // Snapshot load can race with in-flight async readbacks.
         // We must not submit commands that touch a buffer while it is mapped.
         // Don't call `unmap()` blindly (wgpu panics if the buffer isn't mapped);
@@ -13708,6 +13768,9 @@ impl GpuState {
         self.species_plot_points.clear();
         self.last_species_sample_epoch = 0;
         self.top_species.clear();
+        self.matter_history.clear();
+        self.matter_plot_points.clear();
+        self.matter_baseline = None;
 
         // Reset difficulty levels
         self.difficulty.food_power.difficulty_level = 0;
@@ -14949,6 +15012,12 @@ fn main() {
                                             state.species_history.pop_front();
                                         }
 
+                                        // Matter TOTAL sampled at the same cadence (fresh from count_species).
+                                        state.matter_history.push_back(state.matter_total);
+                                        while state.matter_history.len() > state.max_history_points {
+                                            state.matter_history.pop_front();
+                                        }
+
                                         // Rebuild both plot point caches using epoch as X axis.
                                         // Both histories have the same length and same X coordinates.
                                         const MAX_PLOT_POINTS: usize = 2048;
@@ -14980,6 +15049,18 @@ fn main() {
                                                 .map(|(i, &count)| {
                                                     let x = (x_origin + i as u64 * state.epoch_sample_interval) as f64;
                                                     [x, count as f64]
+                                                })
+                                        );
+
+                                        state.matter_plot_points.clear();
+                                        state.matter_plot_points.extend(
+                                            state.matter_history
+                                                .iter()
+                                                .enumerate()
+                                                .step_by(stride)
+                                                .map(|(i, &total)| {
+                                                    let x = (x_origin + i as u64 * state.epoch_sample_interval) as f64;
+                                                    [x, total]
                                                 })
                                         );
 
@@ -15342,31 +15423,55 @@ fn main() {
                                                     state.epoch_sample_interval
                                                 ));
 
-                                                // Matter conservation readout (sampled with species counting).
-                                                if state.matter_free.iter().any(|&v| v > 0)
-                                                    || state.matter_locked_quanta > 0
-                                                {
+                                                // Matter conservation instrument (sampled with species counting).
+                                                if state.matter_total > 0.0 {
                                                     let free_total: u64 =
                                                         state.matter_free.iter().map(|&v| v as u64).sum();
-                                                    let energy_q = if state.food_power > 0.0 {
-                                                        state.matter_energy / state.food_power as f64
-                                                    } else {
-                                                        0.0
-                                                    };
-                                                    let total = free_total as f64
-                                                        + state.matter_locked_quanta as f64
-                                                        + energy_q;
                                                     ui.label(format!(
-                                                        "Matter (quanta): TOTAL {:.0} = free {} (A {} · U {} · G {} · C {}) + locked {} + energy≈{:.0}",
-                                                        total,
+                                                        "Matter TOTAL {:.1} quanta = free {} + locked {} + energy {:.1}",
+                                                        state.matter_total,
                                                         free_total,
+                                                        state.matter_locked_quanta,
+                                                        state.matter_energy_quanta,
+                                                    ));
+                                                    ui.label(format!(
+                                                        "  free    A {} · U {} · G {} · C {}",
                                                         state.matter_free[0],
                                                         state.matter_free[1],
                                                         state.matter_free[2],
                                                         state.matter_free[3],
-                                                        state.matter_locked_quanta,
-                                                        energy_q,
                                                     ));
+                                                    ui.label(format!(
+                                                        "  locked  A {} · U {} · G {} · C {}",
+                                                        state.matter_locked_per_ch[0],
+                                                        state.matter_locked_per_ch[1],
+                                                        state.matter_locked_per_ch[2],
+                                                        state.matter_locked_per_ch[3],
+                                                    ));
+                                                    if let Some(base) = state.matter_baseline {
+                                                        let delta = state.matter_total - base;
+                                                        let pct = if base > 0.0 { delta / base * 100.0 } else { 0.0 };
+                                                        let color = if pct.abs() < 0.05 {
+                                                            egui::Color32::from_rgb(120, 220, 120)
+                                                        } else if pct.abs() < 1.0 {
+                                                            egui::Color32::from_rgb(230, 200, 90)
+                                                        } else {
+                                                            egui::Color32::from_rgb(240, 110, 110)
+                                                        };
+                                                        ui.horizontal(|ui| {
+                                                            ui.colored_label(
+                                                                color,
+                                                                format!(
+                                                                    "  Δ vs baseline: {:+.1} quanta ({:+.4}%)",
+                                                                    delta, pct
+                                                                ),
+                                                            );
+                                                            if ui.small_button("Rebase").clicked() {
+                                                                state.matter_baseline =
+                                                                    Some(state.matter_total);
+                                                            }
+                                                        });
+                                                    }
                                                 }
 
                                                 if !state.population_plot_points.is_empty() {
@@ -15395,6 +15500,26 @@ fn main() {
                                                         None
                                                     };
 
+                                                    // Matter TOTAL, rescaled onto the population axis; a
+                                                    // flat line = conservation holds.
+                                                    let matter_line = if !state.matter_plot_points.is_empty() {
+                                                        let max_pop = state.population_plot_points.iter()
+                                                            .map(|p| p[1])
+                                                            .fold(1.0f64, f64::max);
+                                                        let max_matter = state.matter_plot_points.iter()
+                                                            .map(|p| p[1])
+                                                            .fold(1.0f64, f64::max);
+                                                        let scale = max_pop / max_matter;
+                                                        let scaled: Vec<[f64; 2]> = state.matter_plot_points.iter()
+                                                            .map(|p| [p[0], p[1] * scale])
+                                                            .collect();
+                                                        Some(Line::new(scaled)
+                                                            .color(egui::Color32::from_rgb(240, 170, 60))
+                                                            .name("Matter TOTAL (scaled)"))
+                                                    } else {
+                                                        None
+                                                    };
+
                                                     Plot::new("population_plot")
                                                         .height(150.0)
                                                         .show_axes(true)
@@ -15407,6 +15532,9 @@ fn main() {
                                                             plot_ui.line(pop_line);
                                                             if let Some(sl) = species_line {
                                                                 plot_ui.line(sl);
+                                                            }
+                                                            if let Some(ml) = matter_line {
+                                                                plot_ui.line(ml);
                                                             }
                                                         });
                                                 } else {
