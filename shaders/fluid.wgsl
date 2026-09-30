@@ -996,7 +996,17 @@ fn permeability(x: u32, y: u32) -> f32 {
         return 1.0;
     }
     let slope_perm = clamp(slope_permeability(x, y), 0.0, 1.0);
-    let height_perm = 1.0 - gamma_solidity_at_fluid_cell(x, y);
+    let solidity = gamma_solidity_at_fluid_cell(x, y);
+    // MAJORITY-SOLID = SOLID. Requiring all samples solid meant thin
+    // features (a peninsula 1-2 fluid cells wide) always had mixed
+    // samples, never crossed the is_effectively_solid threshold, and
+    // stayed porous end to end — a fumarole could suck flow straight
+    // through a land bridge. At >= 2 of 4 solid samples the cell is a
+    // wall; below that, permeability falls off steeply.
+    if (solidity >= 0.5) {
+        return 0.0;
+    }
+    let height_perm = clamp(1.0 - solidity * 2.0, 0.0, 1.0);
     return min(slope_perm, height_perm);
 }
 
