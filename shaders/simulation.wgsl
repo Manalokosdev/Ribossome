@@ -2943,7 +2943,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let speed_norm = clamp(length(agent_velocity) / VEL_MAX, 0.0, 1.0);
                 let speed_mult = exp(-4.0 * speed_norm);
                 let susp = suspension_factor(world_pos);
-                let p_take = clamp(UPTAKE_P_PER_QUANTUM * max(props.mass, 0.1) * speed_mult * susp * f32(total_q) * food_power_multiplier, 0.0, 1.0);
+                // HUNGER GATE: uptake fades as the agent fills up. Without
+                // this, uptake (which runs before pairing in the frame and
+                // eats ANY channel) strip-mines the body's neighborhood for
+                // energy and starves its own replication of complements.
+                // Satiated agents leave the monomers alone; hungry newborns
+                // feed fast.
+                let hunger = clamp(1.0 - agent_energy_cur / max(capacity, 1e-3), 0.0, 1.0);
+                let p_take = clamp(UPTAKE_P_PER_QUANTUM * max(props.mass, 0.1) * speed_mult * susp * f32(total_q) * food_power_multiplier * hunger, 0.0, 1.0);
                 let useed = (agent_id + 1u) * 374761393u ^ (i * 668265263u) ^ (params.random_seed * 2246822519u);
                 if (hash_f32(useed) < p_take) {
                     // Pick one present monomer, weighted by counts.
