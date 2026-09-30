@@ -3823,7 +3823,7 @@ const MAX_HOPS_PER_CELL_CH: u32 = 8u;
 // NOTE: the renderer maps SCREEN TOP to LOW world y — light enters at y=0.
 const LIGHT_ACT_P: f32 = 0.006;
 const LIGHT_ATTEN: f32 = 8.0;
-const CHEM_DECAY_P: f32 = 0.002;
+const CHEM_DECAY_P: f32 = 0.0002;
 // Hot shallow water: death probability multiplier at full light (the fast
 // lane — rich but deadly; the deep is cold, slow, safe and poor).
 const TEMP_DEATH_MULT_TOP: f32 = 2.5;
