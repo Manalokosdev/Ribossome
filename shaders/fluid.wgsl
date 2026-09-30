@@ -140,13 +140,14 @@ const TEMP_HEAT_RATE: f32 = 0.01;  // T gain per fumarole-strength unit per seco
 const TEMP_COOL_RATE: f32 = 0.12;  // relaxation toward LOCAL AMBIENT (1/s) — plumes live ~8s
 const TEMP_MAX: f32 = 12.0;
 const TEMP_BUOYANCY: f32 = 12.0;   // force per unit of DEVIATION from ambient (screen-up = +y)
-// AMBIENT CLIMATE: the sun warms the surface layer (same attenuation curve
-// as the UV light); depths and edges are cold. Cooling relaxes toward this
-// profile, so the whole field shows a temperature landscape instead of one
-// plume on black. Buoyancy acts on the DEVIATION from local ambient:
-// stable stratification (warm above cold) is force-free, fumarole-heated
-// water rises, surface-chilled water sinks.
-const TEMP_AMBIENT_SURFACE: f32 = 1.5;
+// AMBIENT CLIMATE: the sun's role in this world is PHOTOCHEMISTRY (UV
+// activates monomers), not heating — water barely warms at the surface,
+// and the FUMAROLES are the thermal actors. The ambient profile keeps only
+// a faint surface warmth (readable on the key-7 map, dynamically
+// negligible); cooling relaxes toward it and buoyancy acts on the
+// DEVIATION, so the background is force-free and vents dominate
+// convection, as Filipe specified.
+const TEMP_AMBIENT_SURFACE: f32 = 0.15;
 const TEMP_AMBIENT_ATTEN: f32 = 4.0;
 
 fn temp_ambient_at(y: u32) -> f32 {
