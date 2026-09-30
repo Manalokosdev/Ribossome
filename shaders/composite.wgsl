@@ -196,9 +196,19 @@ var<uniform> params: SimParams;
 var<storage, read> fluid_dye: array<vec4<f32>>;
 
 @group(0) @binding(4)
-// Monomer field (x=A, y=U, z=G, w=C) — used to tint the dye with the same
-// palette as the deposit render.
-var<storage, read> chem_grid: array<vec4<f32>>;
+// Quantized monomer counts: one u32 per cell-channel packing ACTIVATED
+// (low 16 bits) and SPENT (high 16 bits). Read here to render spent
+// matter as grey under the colored (activated) dye.
+var<storage, read> chem_grid: array<u32>;
+
+fn chem_spent_total_f(cell_idx: u32) -> f32 {
+    let base = cell_idx * 4u;
+    let t = (chem_grid[base] >> 16u)
+        + (chem_grid[base + 1u] >> 16u)
+        + (chem_grid[base + 2u] >> 16u)
+        + (chem_grid[base + 3u] >> 16u);
+    return f32(t) / 3.0;
+}
 
 // Bilinear dye sampling (used when Grid Interpolation is smooth/bicubic so
 // the dye layer matches the deposit's smoothness).
@@ -324,9 +334,13 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 + MONOMER_COLOR_U * u_i
                 + MONOMER_COLOR_G * g_i
                 + MONOMER_COLOR_C * c_i;
+            // SPENT monomers render as grey: inert matter waiting for UV
+            // or a fumarole to re-activate it.
+            let spent_f = chem_spent_total_f(dye_idx);
+            let grey = vec3<f32>(0.55, 0.57, 0.6) * clamp(spent_f, 0.0, 1.0) * 0.6;
             // Brightness slider (repurposed _pad_dye_alpha_color slot).
             let monomer_vis = clamp(params._pad_dye_alpha_color, 0.0, 1.0);
-            under_color = under_color + col * monomer_vis;
+            under_color = under_color + (col + grey) * monomer_vis;
             under_color = clamp(under_color, vec3<f32>(0.0), vec3<f32>(1.0));
             }
         }

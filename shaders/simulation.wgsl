@@ -226,10 +226,10 @@ const GAMMA_RUBBLE_DRAG: f32 = 0.3;
 // failed mutation (this was a real, dominant mass leak).
 fn deposit_stillbirth(agent_id: u32, packed: array<u32, GENOME_PACKED_WORDS>, offset: u32, len: u32, energy: f32, pos: vec2<f32>) {
     let comp = genome_composition(packed, offset, len);
-    var quanta = f32(len);
-    if (params.food_power > 0.0) {
-        quanta += max(energy, 0.0) / params.food_power;
-    }
+    // Energy is harvested activation, not matter: it evaporates with the
+    // stillbirth. Only the strand's monomers return (as SPENT).
+    let _unused_energy = energy;
+    let quanta = f32(len);
     let idx = grid_index(pos);
     let seed = (agent_id + 1u) * 2654435761u ^ (params.random_seed * 668265263u);
     for (var c = 0u; c < 4u; c++) {
@@ -656,16 +656,9 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
                                 let actual_loss = energy_from_u32(actual_loss_u);
                                 let actual_gain = actual_loss * 0.5;
                                 total_energy_gained += actual_gain;
-                                // Closed world: the destroyed half of the drain spills
-                                // back into the environment as whole monomers at the victim.
-                                if (params.food_power > 0.0) {
-                                    let spilled_q = (actual_loss - actual_gain) / params.food_power;
-                                    let vidx = grid_index(victim_pos);
-                                    let sseed = (agent_id + 1u) * 747796405u ^ closest_victim_id * 196613u ^ params.random_seed;
-                                    for (var sc = 0u; sc < 4u; sc++) {
-                                        chem_deposit_prob(vidx, sc, spilled_q * 0.25, sseed ^ (sc * 0x9E3779B9u));
-                                    }
-                                }
+                                // Energy is harvested activation, not matter:
+                                // the destroyed half of the drain dissipates
+                                // as heat (depositing it would mint mass).
                                 // Set cooldown timer
                                 agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
                             }
@@ -909,14 +902,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // paired complements and energy DID come from the environment
             // and are returned normally.
             let strand_quanta = select(f32(agents_in[agent_id].gene_length), 0.0, agents_in[agent_id].generation == 0u);
-            var energy_quanta = 0.0;
-            if (params.food_power > 0.0) {
-                // GLOBAL yield: energy<->matter always converts at food_power
-                // for everyone. Per-agent yields leaked matter whenever
-                // energy crossed resistance classes (inheritance, drains).
-                energy_quanta = energy_from_u32(agents_in[agent_id].energy) / max(params.food_power, 1e-6);
-            }
-            let per_part = (comp * (strand_quanta + energy_quanta) + paired_counts) * (1.0 / f32(body_count));
+            // Energy = harvested activation, NOT matter: it evaporates on
+            // death. Only strand + captured complements return (SPENT).
+            let per_part = (comp * strand_quanta + paired_counts) * (1.0 / f32(body_count));
             let agent_pos = agents_in[agent_id].position;
             let agent_rot = agents_in[agent_id].rotation;
             for (var i = 0u; i < body_count; i++) {
@@ -2994,18 +2982,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // from the cell under it per frame. Attempt probability scales with
         // how many monomers are present (first-order, discrete events).
         {
-            let c0 = chem_count(idx, 0u);
-            let c1 = chem_count(idx, 1u);
-            let c2 = chem_count(idx, 2u);
-            let c3 = chem_count(idx, 3u);
+            // FEEDING = harvesting ACTIVATION: only charged monomers are
+            // food; the spent monomer stays in the cell (mass never leaves
+            // the world through feeding — energy is not matter).
+            let c0 = chem_act_count(idx, 0u);
+            let c1 = chem_act_count(idx, 1u);
+            let c2 = chem_act_count(idx, 2u);
+            let c3 = chem_act_count(idx, 3u);
             let total_q = c0 + c1 + c2 + c3;
-            // GLOBAL yield: every monomer is worth food_power energy for
-            // everyone (per-agent yields leaked matter across resistance
-            // classes). Resistance now taxes the CAPTURE PROBABILITY
-            // instead — same evolutionary tradeoff, exact conservation.
             let yield_per_q = max(params.food_power, 1e-6);
-            // Closed world: don't absorb what the storage can't hold (the
-            // clamp would destroy the captured monomer's mass).
             if (total_q > 0u && agent_energy_cur + yield_per_q <= capacity) {
                 // Stiller bodies absorb more (same foraging tradeoff mouths had).
                 let speed_norm = clamp(length(agent_velocity) / VEL_MAX, 0.0, 1.0);
@@ -3027,12 +3012,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (pick < c0) { ch = 0u; }
                     else if (pick < c0 + c1) { ch = 1u; }
                     else if (pick < c0 + c1 + c2) { ch = 2u; }
-                    if (chem_take_one(idx * 4u + ch)) {
+                    if (chem_spend_one(idx * 4u + ch)) {
                         agent_energy_cur += yield_per_q;
                         if (ch < 2u) { total_consumed_alpha += 1.0; } else { total_consumed_beta += 1.0; }
                         consumed_frame[ch] += 1.0;
-                        // Visual: bite the dye channel by one monomer's share.
-                        let after = chem_count(idx, ch);
+                        // Visual: the dye tracks ACTIVATED monomers — the
+                        // bite dims the color (the monomer greys out).
+                        let after = chem_act_count(idx, ch);
                         var dv = fluid_dye[idx];
                         dv[ch] = dv[ch] * f32(after) / f32(after + 1u);
                         fluid_dye[idx] = dv;
@@ -3252,37 +3238,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         energy_consumption += baseline + organ_extra;
     }
 
-    // Cap energy by storage capacity after feeding (use post-build capacity).
-    // Closed world: energy above capacity (e.g. vampire gains) is SPILLED
-    // back into the environment as monomers instead of clamped into nothing.
-    let overflow_e = max(agent_energy_cur - max(capacity, 0.0), 0.0);
-    if (overflow_e > 0.0 && params.food_power > 0.0) {
-        let spill_q = overflow_e / max(params.food_power, 1e-6);
-        let spill_idx = grid_index(agent_pos);
-        let spill_seed = (agent_id + 1u) * 1181u ^ (params.random_seed * 2129u);
-        for (var oc = 0u; oc < 4u; oc++) {
-            chem_deposit_prob(spill_idx, oc, spill_q * 0.25, spill_seed ^ (oc * 374761393u));
-        }
-    }
+    // Cap energy by storage capacity after feeding. Energy is harvested
+    // ACTIVATION, not matter: overflow and maintenance simply dissipate as
+    // heat (the old spill/excretion deposits would now MINT matter, since
+    // feeding no longer removes monomers from the world).
     agent_energy_cur = clamp(agent_energy_cur, 0.0, max(capacity, 0.0));
 
-    // 3) Maintenance: subtract consumption after feeding.
-    // Closed world: spent energy is excreted back into the environment as
-    // monomers (matching this frame's uptake composition when available).
-    let excreted_energy = clamp(energy_consumption, 0.0, max(agent_energy_cur, 0.0));
+    // 3) Maintenance: subtract consumption after feeding (dissipates).
     agent_energy_cur -= energy_consumption;
-    if (params.food_power > 0.0 && excreted_energy > 0.0) {
-        var ecomp = vec4<f32>(0.25);
-        let cf_total = consumed_frame.x + consumed_frame.y + consumed_frame.z + consumed_frame.w;
-        if (cf_total > 1e-6) { ecomp = consumed_frame / cf_total; }
-        let excrete_idx = grid_index(agent_pos);
-        let excrete_yield = max(params.food_power, 1e-6);
-        let excreted_q = excreted_energy / excrete_yield;
-        let eseed = (agent_id + 1u) * 2654435761u ^ (params.random_seed * 334214467u);
-        for (var ec = 0u; ec < 4u; ec++) {
-            chem_deposit_prob(excrete_idx, ec, excreted_q * ecomp[ec], eseed ^ (ec * 374761393u));
-        }
-    }
 
     // Defensive: avoid NaN propagation (can happen if any organ cost math goes unstable).
     // If energy becomes NaN, clamp it to 0 so the agent will simply starve rather than poisoning the sim state.
@@ -3313,7 +3276,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Population pressure modifier (disabled for debugging):
         // When enabled, this multiplies death probability by 2^(floor(population_count / 20000)).
         let pop_mult = 1.0;
-        let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult, 0.0, 1.0);
+        // AQUARIUM TEMPERATURE: shallow lit water is HOT — higher death
+        // rate in the rich fast lane at the top; the deep is cold, slow,
+        // safe and poor. Same light curve as photo-activation.
+        let light_a = exp(-LIGHT_ATTEN * (1.0 - clamp(agent_pos.y / f32(SIM_SIZE), 0.0, 1.0)));
+        let temp_mult = mix(1.0, TEMP_DEATH_MULT_TOP, light_a);
+        let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * temp_mult, 0.0, 1.0);
 
         should_die = death_rnd < final_death_prob;
     }
@@ -3334,12 +3302,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // death; paired complements + energy (environment-sourced)
             // deposit normally. See the pending-kill path for rationale.
             let strand_quanta = select(f32(agent_gene_length), 0.0, agents_out[agent_id].generation == 0u);
-            var energy_quanta = 0.0;
-            if (params.food_power > 0.0) {
-                energy_quanta = max(agent_energy_cur, 0.0) / max(params.food_power, 1e-6);
-            }
+            // Energy = harvested activation, NOT matter: it evaporates on
+            // death. Only strand + captured complements return (SPENT).
             let pc = f32(min(body_count, MAX_BODY_PARTS));
-            let per_part = (comp * (strand_quanta + energy_quanta) + paired_counts) * (1.0 / pc);
+            let per_part = (comp * strand_quanta + paired_counts) * (1.0 / pc);
             for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
                 let part = agents_out[agent_id].body[i];
                 let rotated_pos = apply_agent_rotation(part.pos, agent_rot);
@@ -3460,7 +3426,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             + vec2<f32>(cos(oa), sin(oa)) * orr
                     );
                     let gi2 = grid_index(wp2);
-                    if (atomicLoad(&chem_grid[gi2 * 4u + comp_ch]) > 0u) {
+                    // Polymerization needs an ACTIVATED complement — its
+                    // charge pays for the bond (spent monomers can't pair).
+                    if (chem_act_count(gi2, comp_ch) > 0u) {
                         cap_found = true;
                         cap_idx = gi2;
                         cap_pos = wp2;
@@ -3478,7 +3446,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     pairing_counter += 1u;
                     agent_energy_cur -= pairing_cost;
                     // Visual: bite the exact dye channel of the captured monomer.
-                    let after = chem_count(cap_idx, comp_ch);
+                    let after = chem_act_count(cap_idx, comp_ch);
                     var dv = fluid_dye[cap_idx];
                     dv[comp_ch] = dv[comp_ch] * f32(after) / f32(after + 1u);
                     fluid_dye[cap_idx] = dv;
@@ -3803,6 +3771,15 @@ const MONOMER_ADV_CAP: f32 = 0.9;
 // diffusion rate, further divided by local occupancy. They never advect.
 const BURIED_DIFF_FACTOR: f32 = 0.25;
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
+// Aquarium thermodynamics: UV activation at full light (per spent monomer
+// per epoch), light attenuation with depth (top of world = high y = lit;
+// bottom retains exp(-LIGHT_ATTEN) ~ 5%), and spontaneous activation decay.
+const LIGHT_ACT_P: f32 = 0.004;
+const LIGHT_ATTEN: f32 = 3.0;
+const CHEM_DECAY_P: f32 = 0.0004;
+// Hot shallow water: death probability multiplier at full light (the fast
+// lane — rich but deadly; the deep is cold, slow, safe and poor).
+const TEMP_DEATH_MULT_TOP: f32 = 2.5;
 
 @compute @workgroup_size(16, 16)
 fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -3836,9 +3813,37 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         p_diff_eff = DIFF_HOP_P * BURIED_DIFF_FACTOR / (1.0 + f32(g_src));
     }
 
+    // AQUARIUM LIGHT: UV enters at the TOP of the world (high y) and
+    // attenuates with depth — the vertical energy axis.
+    let light_t = exp(-LIGHT_ATTEN * (1.0 - (f32(y) + 0.5) / f32(GRID_SIZE)));
+
     for (var ch = 0u; ch < 4u; ch++) {
         let slot = idx * 4u + ch;
-        let n = min(atomicLoad(&chem_grid[slot]), MAX_HOPS_PER_CELL_CH);
+        let v_ch = atomicLoad(&chem_grid[slot]);
+        let act_n = v_ch & CHEM_STATE_MASK;
+        let spent_n = v_ch >> 16u;
+
+        // PHOTO-ACTIVATION: spent monomers recharge under UV, scaled by
+        // depth. DECAY: activation is slowly lost everywhere (hydrolysis).
+        // Together with feeding (act->spent) this closes the energy cycle:
+        // light pumps, life and decay drain.
+        if (spent_n > 0u) {
+            let exp_act = f32(min(spent_n, 8u)) * LIGHT_ACT_P * light_t;
+            let wa = u32(floor(exp_act));
+            var na = wa;
+            if (hash_f32(slot ^ (params.random_seed * 1597334677u) ^ (params.epoch * 3812015801u)) < exp_act - f32(wa)) { na += 1u; }
+            for (var ai = 0u; ai < min(na, 8u); ai++) {
+                if (!chem_activate_one(slot)) { break; }
+            }
+        }
+        if (act_n > 0u) {
+            let exp_dec = f32(min(act_n, 8u)) * CHEM_DECAY_P;
+            if (hash_f32(slot ^ (params.random_seed * 2654435761u) ^ (params.epoch * 668265263u)) < exp_dec) {
+                chem_spend_one(slot);
+            }
+        }
+
+        let n = min(act_n + spent_n, MAX_HOPS_PER_CELL_CH);
         for (var k = 0u; k < n; k++) {
             let h = hash(slot ^ (k * 668265263u) ^ (params.random_seed * 2246822519u) ^ (params.epoch * 374761393u));
             let r = f32(h) / 4294967295.0;
@@ -3876,8 +3881,11 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let gperm = 1.0 / (1.0 + f32(g_tgt));
                 if (hash_f32(h ^ 0x27D4EB2Fu) >= gperm) { continue; }
             }
-            if (chem_take_one(slot)) {
-                chem_add(t_idx, ch, 1u);
+            // Hops preserve the monomer's state (act or spent), chosen
+            // proportionally to the cell's mix.
+            let pick_spent = hash_f32(h ^ 0x51ED270Bu) < f32(spent_n) / f32(max(act_n + spent_n, 1u));
+            if (chem_take_state_one(slot, pick_spent)) {
+                chem_add_state(t_idx, ch, 1u, pick_spent);
             }
         }
     }
@@ -4058,12 +4066,17 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     // four monomers are visually distinguishable: A vs U and G vs C get the
     // base color vs. a channel-swizzled variant of it.
     let cc_idx = grid_index(world_pos);
+    // Colors show ACTIVATED monomers; spent matter renders as grey below.
     let cc = vec4<f32>(
-        f32(chem_count(cc_idx, 0u)),
-        f32(chem_count(cc_idx, 1u)),
-        f32(chem_count(cc_idx, 2u)),
-        f32(chem_count(cc_idx, 3u))
+        f32(chem_act_count(cc_idx, 0u)),
+        f32(chem_act_count(cc_idx, 1u)),
+        f32(chem_act_count(cc_idx, 2u)),
+        f32(chem_act_count(cc_idx, 3u))
     ) * QUANTA_VIS;
+    let cc_spent = (f32(chem_spent_count(cc_idx, 0u))
+        + f32(chem_spent_count(cc_idx, 1u))
+        + f32(chem_spent_count(cc_idx, 2u))
+        + f32(chem_spent_count(cc_idx, 3u))) * QUANTA_VIS;
     let pool_au = cc.x + cc.y;
     let pool_gc = cc.z + cc.w;
     let ratio_u = select(0.5, cc.y / max(pool_au, 1e-6), pool_au > 1e-6);
@@ -4132,6 +4145,8 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
                 dep += vec3<f32>(0.15, 0.9, 0.25) * pow(clamp(cc.z, 0.0, 1.0), params.beta_gamma_adjust);
                 dep += vec3<f32>(0.2, 0.45, 1.0) * pow(clamp(cc.w, 0.0, 1.0), params.beta_gamma_adjust);
             }
+            // SPENT monomers: inert grey matter awaiting re-activation.
+            dep += vec3<f32>(0.55, 0.57, 0.6) * clamp(cc_spent, 0.0, 1.0) * 0.6;
             // Brightness slider (repurposed _pad_dye_alpha_color slot).
             base_color = base_color + dep * clamp(params._pad_dye_alpha_color, 0.0, 1.0);
         }
@@ -4420,10 +4435,14 @@ fn reduce_matter_chem(@builtin(global_invocation_id) gid: vec3<u32>) {
     loop {
         if (c >= total_cells) { break; }
         let base = c * 4u;
-        s0 += atomicLoad(&chem_grid[base]);
-        s1 += atomicLoad(&chem_grid[base + 1u]);
-        s2 += atomicLoad(&chem_grid[base + 2u]);
-        s3 += atomicLoad(&chem_grid[base + 3u]);
+        let v0 = atomicLoad(&chem_grid[base]);
+        let v1 = atomicLoad(&chem_grid[base + 1u]);
+        let v2 = atomicLoad(&chem_grid[base + 2u]);
+        let v3 = atomicLoad(&chem_grid[base + 3u]);
+        s0 += (v0 & CHEM_STATE_MASK) + (v0 >> 16u);
+        s1 += (v1 & CHEM_STATE_MASK) + (v1 >> 16u);
+        s2 += (v2 & CHEM_STATE_MASK) + (v2 >> 16u);
+        s3 += (v3 & CHEM_STATE_MASK) + (v3 >> 16u);
         c += MATTER_REDUCE_THREADS;
     }
     atomicAdd(&matter_totals[0], s0);
@@ -4814,42 +4833,44 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
                 nq5 += 1u;
             }
             if (nq5 > 0u) {
+                // Rain adds FRESH (activated) monomers.
                 atomicAdd(&chem_grid[slot], nq5);
             }
-            dv5[mc] = f32(atomicLoad(&chem_grid[slot])) * QUANTA_VIS;
+            dv5[mc] = chem_act_f(idx, mc);
         }
         fluid_dye[idx] = dv5;
     } else if (mode == 4u) {
-        // GOD MODE — scale the total monomer amount: every channel count is
-        // multiplied by `value` (target/current) with probabilistic rounding.
+        // GOD MODE — scale the total monomer amount: activated and spent
+        // counts are each multiplied by `value` with probabilistic rounding.
         let factor = max(output_value, 0.0);
         var dv4 = fluid_dye[idx];
         for (var mc = 0u; mc < 4u; mc++) {
             let slot = idx * 4u + mc;
             let cur = atomicLoad(&chem_grid[slot]);
-            let scaled = f32(cur) * factor;
-            let whole = u32(floor(scaled));
-            let fr = scaled - f32(whole);
-            var nq = whole;
-            if (hash_f32(idx * 747796405u ^ (mc * 0x9E3779B9u) ^ (seed * 668265263u)) < fr) { nq += 1u; }
-            atomicStore(&chem_grid[slot], nq);
-            dv4[mc] = f32(nq) * QUANTA_VIS;
+            let cur_act = f32(cur & CHEM_STATE_MASK) * factor;
+            let cur_spent = f32(cur >> 16u) * factor;
+            let wa = u32(floor(cur_act));
+            let ws = u32(floor(cur_spent));
+            var na = wa;
+            var ns = ws;
+            if (hash_f32(idx * 747796405u ^ (mc * 0x9E3779B9u) ^ (seed * 668265263u)) < cur_act - f32(wa)) { na += 1u; }
+            if (hash_f32(idx * 668265263u ^ (mc * 0x85EBCA6Bu) ^ (seed * 374761393u)) < cur_spent - f32(ws)) { ns += 1u; }
+            atomicStore(&chem_grid[slot], na + (ns << 16u));
+            dv4[mc] = f32(na) * QUANTA_VIS;
         }
         fluid_dye[idx] = dv4;
     } else if (mode == 1u) {
         write_chem_alpha(idx, output_value);
-        // Mirror the ACTUAL quantized counts into the dye — mirroring the
-        // smooth float value would paint a uniform background under the
-        // discrete monomers.
+        // Mirror the ACTUAL quantized ACTIVATED counts into the dye.
         var dv = fluid_dye[idx];
-        dv.x = chem_channel_f(idx, 0u);
-        dv.y = chem_channel_f(idx, 1u);
+        dv.x = chem_act_f(idx, 0u);
+        dv.y = chem_act_f(idx, 1u);
         fluid_dye[idx] = dv;
     } else if (mode == 2u) {
         write_chem_beta(idx, output_value);
         var dv = fluid_dye[idx];
-        dv.z = chem_channel_f(idx, 2u);
-        dv.w = chem_channel_f(idx, 3u);
+        dv.z = chem_act_f(idx, 2u);
+        dv.w = chem_act_f(idx, 3u);
         fluid_dye[idx] = dv;
     } else if (mode == 3u) {
         write_gamma_height(idx, output_value);

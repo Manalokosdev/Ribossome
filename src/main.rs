@@ -12106,9 +12106,10 @@ impl GpuState {
             self.matter_energy_quanta = energy_quanta;
 
             // Conservation instrument: TOTAL must stay flat in a closed world.
+            // Energy is now pure harvested ACTIVATION, not matter — it is
+            // excluded from the total (matter = free act+spent + locked).
             let free_total: u64 = self.matter_free.iter().map(|&v| v as u64).sum();
-            self.matter_total =
-                free_total as f64 + self.matter_locked_quanta as f64 + self.matter_energy_quanta;
+            self.matter_total = free_total as f64 + self.matter_locked_quanta as f64;
             if self.matter_baseline.is_none() && self.matter_total > 0.0 {
                 self.matter_baseline = Some(self.matter_total);
             }
@@ -12259,9 +12260,13 @@ impl GpuState {
             let chem: Vec<[u32; 4]> = bytemuck::cast_slice(&chem_data).to_vec();
             let mut alpha: Vec<f32> = Vec::with_capacity(chem.len());
             let mut beta: Vec<f32> = Vec::with_capacity(chem.len());
+            // Each u32 packs activated (low 16) + spent (high 16); the
+            // snapshot keeps TOTAL matter (state split not preserved —
+            // everything re-loads as activated, i.e. a freshly charged world).
+            let tot = |v: u32| -> u32 { (v & 0xFFFF) + (v >> 16) };
             for v in &chem {
-                alpha.push((v[0] + v[1]) as f32 / 3.0);
-                beta.push((v[2] + v[3]) as f32 / 3.0);
+                alpha.push((tot(v[0]) + tot(v[1])) as f32 / 3.0);
+                beta.push((tot(v[2]) + tot(v[3])) as f32 / 3.0);
             }
             // Quantized gamma: GPU holds u32 quanta counts; snapshots keep
             // legacy float heights (count * 0.25).
@@ -15181,8 +15186,8 @@ fn main() {
                                                 state.matter_free.iter().map(|&v| v as u64).sum();
                                             let target = state.target_total_quanta as f64;
                                             if state.matter_total > target * 1.01 && free_now > 0 {
-                                                let embodied = state.matter_locked_quanta as f64
-                                                    + state.matter_energy_quanta;
+                                                // Energy is activation, not matter.
+                                                let embodied = state.matter_locked_quanta as f64;
                                                 let target_free = (target - embodied).max(0.0);
                                                 let factor =
                                                     (target_free / free_now as f64) as f32;
@@ -15650,7 +15655,7 @@ fn main() {
                                                             .map(|&v| v as u64)
                                                             .sum();
                                                         ui.label(format!(
-                                                            "TOTAL {:.1} quanta = free {} + locked {} + energy {:.1}",
+                                                            "TOTAL {:.0} quanta = free {} + locked {}  (activation energy ≈ {:.1}, not matter)",
                                                             state.matter_total,
                                                             free_total,
                                                             state.matter_locked_quanta,
@@ -16321,8 +16326,8 @@ fn main() {
                                                             {
                                                                 // set_chem_pool writes value*1.5 per channel; modes
                                                                 // 1+2 cover 4 channels => 6*value quanta per cell.
-                                                                let embodied_now = state.matter_locked_quanta as f64
-                                                                    + state.matter_energy_quanta;
+                                                                // Energy is activation, not matter.
+                                                                let embodied_now = state.matter_locked_quanta as f64;
                                                                 let target_free = ((state.target_total_quanta as f64)
                                                                     - embodied_now)
                                                                     .max(0.0);
@@ -16350,8 +16355,8 @@ fn main() {
                                                                 // Measure what the pattern produced, then scale it
                                                                 // onto the target (shape preserved).
                                                                 let produced = state.measure_free_quanta();
-                                                                let embodied_now = state.matter_locked_quanta as f64
-                                                                    + state.matter_energy_quanta;
+                                                                // Energy is activation, not matter.
+                                                                let embodied_now = state.matter_locked_quanta as f64;
                                                                 let target_free = ((state.target_total_quanta as f64)
                                                                     - embodied_now)
                                                                     .max(0.0);
@@ -16370,8 +16375,8 @@ fn main() {
                                                         // inside agents is never touched (it returns on death).
                                                         let free_total: u64 =
                                                             state.matter_free.iter().map(|&v| v as u64).sum();
-                                                        let embodied = state.matter_locked_quanta as f64
-                                                            + state.matter_energy_quanta;
+                                                        // Energy is activation, not matter.
+                                                        let embodied = state.matter_locked_quanta as f64;
                                                         ui.label(format!(
                                                             "TOTAL now: {:.0} = env {} + agents {:.0}",
                                                             state.matter_total, free_total, embodied,

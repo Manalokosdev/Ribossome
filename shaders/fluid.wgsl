@@ -152,14 +152,33 @@ const CHEM_QUANTA_REF_F: f32 = 3.0;
 const DYE_TRACK_RATE: f32 = 0.15;
 
 // Float view of a cell's monomer counts (1.0 = REF quanta), for the dye tracer.
+// chem_grid packs ACTIVATED (low 16 bits) and SPENT (high 16 bits) counts.
+// The dye tracks the ACTIVATED (colored, alive) monomers — spent grey
+// matter is rendered directly by the compositor from the counts.
 fn chem_cell_f(idx: u32) -> vec4<f32> {
     return vec4<f32>(
-        f32(atomicLoad(&chem_grid[idx * 4u + 0u])),
-        f32(atomicLoad(&chem_grid[idx * 4u + 1u])),
-        f32(atomicLoad(&chem_grid[idx * 4u + 2u])),
-        f32(atomicLoad(&chem_grid[idx * 4u + 3u]))
+        f32(atomicLoad(&chem_grid[idx * 4u + 0u]) & 0xFFFFu),
+        f32(atomicLoad(&chem_grid[idx * 4u + 1u]) & 0xFFFFu),
+        f32(atomicLoad(&chem_grid[idx * 4u + 2u]) & 0xFFFFu),
+        f32(atomicLoad(&chem_grid[idx * 4u + 3u]) & 0xFFFFu)
     ) * (1.0 / CHEM_QUANTA_REF_F);
 }
+
+// Fumarole re-activation: spent -> activated in place (CAS, conserving).
+fn fluid_chem_activate_one(slot: u32) -> bool {
+    var done = false;
+    loop {
+        let old = atomicLoad(&chem_grid[slot]);
+        if ((old >> 16u) == 0u) { break; }
+        let res = atomicCompareExchangeWeak(&chem_grid[slot], old, old + 1u - 0x10000u);
+        if (res.exchanged) { done = true; break; }
+    }
+    return done;
+}
+
+// Activation probability per spent monomer per solve pass at a fumarole's
+// center (falls off with the same squared-distance weight as the dye).
+const FUMAROLE_ACT_P: f32 = 0.06;
 
 // Fluid-driven lift/deposition of the environment chem layers.
 // Model: the advected dye field acts as the "carried" reservoir.
@@ -554,6 +573,23 @@ fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Frame-rate independent injection: amount = rate * dt.
         add_alpha = add_alpha + base_rate_alpha * jitter * dt * w;
         add_beta = add_beta + base_rate_beta * jitter * dt * w;
+
+        // GEOTHERMAL RE-ACTIVATION: the vent recharges SPENT monomers in
+        // its plume — the deep-world counterpart of surface UV. Energy
+        // enters the closed world only here and at the lit surface.
+        let p_act = clamp(FUMAROLE_ACT_P * w * jitter, 0.0, 0.9);
+        if (p_act > 0.0) {
+            for (var ac = 0u; ac < 4u; ac++) {
+                let slot = dye_idx * 4u + ac;
+                let spent_here = atomicLoad(&chem_grid[slot]) >> 16u;
+                if (spent_here > 0u) {
+                    let hseed = hash_u32(slot ^ (i * 0x9E3779B9u) ^ (time_bucket * 0x85EBCA6Bu) ^ 0x51ED270Bu);
+                    if (rand01(hseed) < p_act) {
+                        let _ok = fluid_chem_activate_one(slot);
+                    }
+                }
+            }
+        }
     }
 
     if (add_alpha != 0.0 || add_beta != 0.0) {

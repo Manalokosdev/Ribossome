@@ -414,26 +414,59 @@ var<storage, read_write> chem_grid: array<atomic<u32>>;
 const CHEM_QUANTA_REF: u32 = 3u;
 const QUANTA_VIS: f32 = 1.0 / 3.0;
 
+// ============================================================================
+// ACTIVATED / SPENT MONOMER STATES — the aquarium thermodynamics.
+// Each cell-channel u32 packs TWO counts: ACTIVATED monomers (low 16 bits —
+// energy-rich, they feed and they pair; ATP is literally an RNA monomer) and
+// SPENT monomers (high 16 bits — inert grey matter). Feeding harvests the
+// activation and leaves the spent monomer IN PLACE; UV light from the top of
+// the aquarium and fumaroles re-activate spent monomers; activation slowly
+// decays. Matter = act + spent is conserved exactly; agent "energy" is pure
+// harvested activation and EVAPORATES on death (it is not matter anymore —
+// converting it to quanta would mint mass).
+// ============================================================================
+const CHEM_STATE_MASK: u32 = 0xFFFFu;
+const CHEM_SPENT_ONE: u32 = 0x10000u;
+
+fn chem_act_count(idx: u32, ch: u32) -> u32 {
+    return atomicLoad(&chem_grid[idx * 4u + ch]) & CHEM_STATE_MASK;
+}
+
+fn chem_spent_count(idx: u32, ch: u32) -> u32 {
+    return atomicLoad(&chem_grid[idx * 4u + ch]) >> 16u;
+}
+
+// Total matter (activated + spent) in a cell channel.
 fn chem_count(idx: u32, ch: u32) -> u32 {
-    return atomicLoad(&chem_grid[idx * 4u + ch]);
+    let v = atomicLoad(&chem_grid[idx * 4u + ch]);
+    return (v & CHEM_STATE_MASK) + (v >> 16u);
 }
 
 fn chem_channel_f(idx: u32, ch: u32) -> f32 {
     return f32(chem_count(idx, ch)) * QUANTA_VIS;
 }
 
-// Pool sums in legacy float units (1.0 = REF quanta): pool 0 = A+U, 1 = G+C.
-fn chem_pool_count_f(idx: u32, pool: u32) -> f32 {
-    let base = idx * 4u + pool * 2u;
-    return f32(atomicLoad(&chem_grid[base]) + atomicLoad(&chem_grid[base + 1u])) * QUANTA_VIS;
+fn chem_act_f(idx: u32, ch: u32) -> f32 {
+    return f32(chem_act_count(idx, ch)) * QUANTA_VIS;
 }
 
-// Take exactly one monomer from a slot (CAS with floor at 0). Returns success.
+// Pool sums in legacy float units (1.0 = REF quanta): pool 0 = A+U, 1 = G+C.
+// Counts TOTAL matter (sensors smell monomers, charged or not).
+fn chem_pool_count_f(idx: u32, pool: u32) -> f32 {
+    let base = idx * 4u + pool * 2u;
+    let v0 = atomicLoad(&chem_grid[base]);
+    let v1 = atomicLoad(&chem_grid[base + 1u]);
+    let t = (v0 & CHEM_STATE_MASK) + (v0 >> 16u) + (v1 & CHEM_STATE_MASK) + (v1 >> 16u);
+    return f32(t) * QUANTA_VIS;
+}
+
+// Take one ACTIVATED monomer out of the world (pairing captures it into a
+// strand). Returns success.
 fn chem_take_one(slot: u32) -> bool {
     var taken = false;
     loop {
         let old = atomicLoad(&chem_grid[slot]);
-        if (old == 0u) { break; }
+        if ((old & CHEM_STATE_MASK) == 0u) { break; }
         let res = atomicCompareExchangeWeak(&chem_grid[slot], old, old - 1u);
         if (res.exchanged) {
             taken = true;
@@ -443,14 +476,72 @@ fn chem_take_one(slot: u32) -> bool {
     return taken;
 }
 
-fn chem_add(idx: u32, ch: u32, n: u32) {
+// FEEDING: harvest the activation of one monomer, leaving the spent monomer
+// in place (act-1, spent+1). Mass never leaves the cell.
+fn chem_spend_one(slot: u32) -> bool {
+    var done = false;
+    loop {
+        let old = atomicLoad(&chem_grid[slot]);
+        if ((old & CHEM_STATE_MASK) == 0u) { break; }
+        let res = atomicCompareExchangeWeak(&chem_grid[slot], old, old - 1u + CHEM_SPENT_ONE);
+        if (res.exchanged) {
+            done = true;
+            break;
+        }
+    }
+    return done;
+}
+
+// RE-ACTIVATION (UV light / fumaroles): spent -> activated in place.
+fn chem_activate_one(slot: u32) -> bool {
+    var done = false;
+    loop {
+        let old = atomicLoad(&chem_grid[slot]);
+        if ((old >> 16u) == 0u) { break; }
+        let res = atomicCompareExchangeWeak(&chem_grid[slot], old, old + 1u - CHEM_SPENT_ONE);
+        if (res.exchanged) {
+            done = true;
+            break;
+        }
+    }
+    return done;
+}
+
+// Transport: take/add one monomer of a SPECIFIC state (hops preserve state).
+fn chem_take_state_one(slot: u32, spent: bool) -> bool {
+    var taken = false;
+    loop {
+        let old = atomicLoad(&chem_grid[slot]);
+        if (spent) {
+            if ((old >> 16u) == 0u) { break; }
+            let res = atomicCompareExchangeWeak(&chem_grid[slot], old, old - CHEM_SPENT_ONE);
+            if (res.exchanged) { taken = true; break; }
+        } else {
+            if ((old & CHEM_STATE_MASK) == 0u) { break; }
+            let res = atomicCompareExchangeWeak(&chem_grid[slot], old, old - 1u);
+            if (res.exchanged) { taken = true; break; }
+        }
+    }
+    return taken;
+}
+
+fn chem_add_state(idx: u32, ch: u32, n: u32, spent: bool) {
     if (n > 0u) {
-        atomicAdd(&chem_grid[idx * 4u + ch], n);
+        let inc = select(n, n * CHEM_SPENT_ONE, spent);
+        atomicAdd(&chem_grid[idx * 4u + ch], inc);
     }
 }
 
-// Deposit a fractional expected amount (in quanta) as whole monomers using
-// probabilistic rounding — unbiased, conserves in expectation.
+// Deposits (death, refunds, stillbirths) return SPENT matter — the strand's
+// activation was consumed by polymerization.
+fn chem_add(idx: u32, ch: u32, n: u32) {
+    if (n > 0u) {
+        atomicAdd(&chem_grid[idx * 4u + ch], n * CHEM_SPENT_ONE);
+    }
+}
+
+// Deposit a fractional expected amount (in quanta, SPENT state) as whole
+// monomers using probabilistic rounding — unbiased, conserves in expectation.
 fn chem_deposit_prob(idx: u32, ch: u32, amount_quanta: f32, seed: u32) {
     if (amount_quanta <= 0.0) { return; }
     let whole = u32(floor(amount_quanta));
