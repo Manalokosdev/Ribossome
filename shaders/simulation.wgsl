@@ -282,7 +282,11 @@ fn gamma_shove(from_idx: u32, from_pos: vec2<f32>, back_dir: vec2<f32>, seed: u3
 // substep cadence, so the analytic conversion chain is ambiguous). Filipe
 // calibrated this by eye: with the factor at 1.0 the ride was ~6-7x the
 // visual flow; 0.15 matches it.
-const RIDE_VISUAL_MATCH: f32 = 0.15;
+// Recalibrated after the fluid-core rebuild: the old 0.15 was measured
+// against the inflated pre-rebuild velocity field; the clean solver runs
+// slower, and at 0.15 the ride fell below the marine-snow sink rate —
+// agents stopped being carried at all.
+const RIDE_VISUAL_MATCH: f32 = 0.6;
 
 fn fluid_ride_velocity(world_pos: vec2<f32>) -> vec2<f32> {
     let v = sample_fluid_velocity_bilinear(world_pos);
@@ -2737,8 +2741,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // food) is simply added on top — riding a current is the default
     // state, not a force that must win a fight.
     if (wind_k > 0.0) {
+        // Slider headroom up to 2x so the ride can be trimmed against the
+        // rebuilt (slower) velocity field without shader edits.
         let v_water = (wind_target / wind_k)
-            * clamp(params.fluid_wind_push_strength, 0.0, 1.0);
+            * clamp(params.fluid_wind_push_strength, 0.0, 2.0);
         // Baseline = water motion + slow gravitational settling (marine
         // snow): the medium carries you sideways, gravity pulls you down,
         // and everything else is relative motion you must pay for.
