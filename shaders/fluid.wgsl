@@ -475,7 +475,8 @@ fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
             side = (rand01(seed0) * 2.0 - 1.0) * variation * 0.6;
         }
 
-        added = added + vec2<f32>(side, -1.0) * heat;
+        // Up on screen = +y (empirical; the present chain flips once).
+        added = added + vec2<f32>(side, 1.0) * heat;
     }
 
     if (added.x != 0.0 || added.y != 0.0) {

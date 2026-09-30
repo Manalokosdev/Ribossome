@@ -3279,7 +3279,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // AQUARIUM TEMPERATURE: shallow lit water is HOT — higher death
         // rate in the rich fast lane at the top; the deep is cold, slow,
         // safe and poor. Same light curve as photo-activation.
-        let light_a = exp(-LIGHT_ATTEN * clamp(agent_pos.y / f32(SIM_SIZE), 0.0, 1.0));
+        let light_a = exp(-LIGHT_ATTEN * (1.0 - clamp(agent_pos.y / f32(SIM_SIZE), 0.0, 1.0)));
         let temp_mult = mix(1.0, TEMP_DEATH_MULT_TOP, light_a);
         let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * temp_mult, 0.0, 1.0);
 
@@ -3814,9 +3814,10 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         p_diff_eff = DIFF_HOP_P * BURIED_DIFF_FACTOR / (1.0 + f32(g_src));
     }
 
-    // AQUARIUM LIGHT: UV enters at the TOP of the screen (LOW world y in
-    // the renderer's mapping) and attenuates with depth.
-    let light_t = exp(-LIGHT_ATTEN * (f32(y) + 0.5) / f32(GRID_SIZE));
+    // AQUARIUM LIGHT: UV enters at the TOP of the screen — empirically
+    // HIGH world y (the present chain flips y once more than the
+    // composite math suggests). Attenuates with depth.
+    let light_t = exp(-LIGHT_ATTEN * (1.0 - (f32(y) + 0.5) / f32(GRID_SIZE)));
 
     for (var ch = 0u; ch < 4u; ch++) {
         let slot = idx * 4u + ch;
