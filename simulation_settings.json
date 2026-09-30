@@ -1,8 +1,8 @@
 {
-  "camera_zoom": 1.0,
+  "camera_zoom": 1.5215675,
   "spawn_probability": 5.0,
-  "death_probability": 0.005,
-  "mutation_rate": 0.005,
+  "death_probability": 0.01,
+  "mutation_rate": 0.003,
   "auto_replenish": false,
   "diffusion_interval": 1,
   "slope_interval": 1,

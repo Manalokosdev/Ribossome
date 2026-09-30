@@ -3549,6 +3549,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 // makes slides chunkier and terrain generally more rugged.
 const SANDPILE_DIFF: u32 = 3u;
 const GAMMA_RELAX_P: f32 = 0.12;
+// Cohesion rate for isolated fines (see GAMMA COHESION in relax_gamma_pass).
+// Geological timescale: at 0.01/pass x2 passes, a lone speck beside a rock
+// merges in ~50 epochs; a field of scattered debris consolidates over
+// thousands.
+const GAMMA_COHESION_P: f32 = 0.01;
 
 fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     let x = gid.x;
@@ -3558,6 +3563,43 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     }
     let idx = y * GRID_SIZE + x;
     let n = gamma_count(idx);
+
+    // GAMMA COHESION (Ostwald ripening): isolated fines (1-2 quanta) slowly
+    // migrate INTO a larger neighboring mass. This is the terrain's
+    // anti-entropy: digging spoil and landslide specks reconsolidate into
+    // rocks over geological timescales, scars self-heal, and abandoned
+    // tunnels close — instead of long runs grinding all terrain into a
+    // uniform speck field. Restricted to counts below the sandpile band so
+    // it never fights the slides; exact take/add conservation.
+    if (n >= 1u && n < SANDPILE_DIFF) {
+        var big_idx = idx;
+        var big_count = n;
+        if (x > 0u) {
+            let c = gamma_count(idx - 1u);
+            if (c > big_count) { big_count = c; big_idx = idx - 1u; }
+        }
+        if (x + 1u < GRID_SIZE) {
+            let c = gamma_count(idx + 1u);
+            if (c > big_count) { big_count = c; big_idx = idx + 1u; }
+        }
+        if (y > 0u) {
+            let c = gamma_count(idx - GRID_SIZE);
+            if (c > big_count) { big_count = c; big_idx = idx - GRID_SIZE; }
+        }
+        if (y + 1u < GRID_SIZE) {
+            let c = gamma_count(idx + GRID_SIZE);
+            if (c > big_count) { big_count = c; big_idx = idx + GRID_SIZE; }
+        }
+        if (big_idx != idx && big_count < GAMMA_PILE_MAX) {
+            let hc = hash(idx ^ (params.epoch * 2246822519u) ^ (phase * 3266489917u) ^ (params.random_seed * 668265263u));
+            if (f32(hc) / 4294967295.0 < GAMMA_COHESION_P) {
+                if (gamma_take_one(idx)) {
+                    gamma_add_one(big_idx);
+                }
+            }
+        }
+        return;
+    }
     if (n < SANDPILE_DIFF) {
         return;
     }
