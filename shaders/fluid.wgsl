@@ -140,7 +140,7 @@ const TEMP_HEAT_RATE: f32 = 0.01;  // T gain per fumarole-strength unit per seco
 const TEMP_COOL_RATE: f32 = 0.4;   // relaxation toward ambient (1/s)
 const TEMP_MAX: f32 = 8.0;
 const TEMP_BUOYANCY: f32 = 30.0;   // force per unit T (screen-up = +y)
-const TEMP_DIFFUSE: f32 = 0.15;    // 4-neighbor blend fraction per solve
+const TEMP_DIFFUSE: f32 = 0.08;    // 4-neighbor blend fraction per solve
 
 // Gamma grid (terrain) sampled as an obstacle field
 // QUANTIZED: height plane holds integer gamma-quanta counts (atomic u32);
@@ -449,13 +449,26 @@ fn update_temperature(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = grid_index(x, y);
     let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
 
-    // Advect: backtrace along the (fresh) velocity field.
+    // Advect: backtrace along the (fresh) velocity field with BILINEAR
+    // sampling — nearest-cell rounding froze the field solid, because
+    // sub-cell backtraces (|v|*dt < 0.5 cells per solve) always rounded
+    // back to the cell itself and the heat never moved.
     let vel = raw_velocity_cell(x, y);
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
     let src = pos - vel * dt;
-    let sx = clamp(i32(floor(src.x)), 0, i32(FLUID_GRID_SIZE) - 1);
-    let sy = clamp(i32(floor(src.y)), 0, i32(FLUID_GRID_SIZE) - 1);
-    var t = temp_in[grid_index(u32(sx), u32(sy))];
+    let sxf = clamp(src.x - 0.5, 0.0, f32(FLUID_GRID_SIZE - 1u));
+    let syf = clamp(src.y - 0.5, 0.0, f32(FLUID_GRID_SIZE - 1u));
+    let x0t = u32(floor(sxf));
+    let y0t = u32(floor(syf));
+    let x1t = min(x0t + 1u, FLUID_GRID_SIZE - 1u);
+    let y1t = min(y0t + 1u, FLUID_GRID_SIZE - 1u);
+    let fxt = sxf - floor(sxf);
+    let fyt = syf - floor(syf);
+    let t00 = temp_in[grid_index(x0t, y0t)];
+    let t10 = temp_in[grid_index(x1t, y0t)];
+    let t01 = temp_in[grid_index(x0t, y1t)];
+    let t11 = temp_in[grid_index(x1t, y1t)];
+    var t = mix(mix(t00, t10, fxt), mix(t01, t11, fxt), fyt);
 
     // Small diffusion (also smooths advection sampling noise).
     let tl = temp_in[grid_index(u32(max(i32(x) - 1, 0)), y)];
