@@ -2752,11 +2752,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Apply hard-collision correction after smoothing so it can't be damped away
-    // for heavy agents. Cap to avoid huge teleports in extreme pileups.
+    // for heavy agents. Cap LOW: in dense clone clusters the penetrations of
+    // several overlapping neighbors SUM, and the old 20-units/frame cap let
+    // agents get catapulted across the screen for several consecutive
+    // frames (visible as agents suddenly leaping). 5/frame still separates
+    // a full overlap within a few frames, without ballistics.
     if (!anchor_active_prev) {
         let hc_len = length(hard_collision_vel);
-        if (hc_len > 20.0) {
-            hard_collision_vel = hard_collision_vel * (20.0 / max(hc_len, 1e-6));
+        if (hc_len > 5.0) {
+            hard_collision_vel = hard_collision_vel * (5.0 / max(hc_len, 1e-6));
         }
         agent_vel += hard_collision_vel;
     }
