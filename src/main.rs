@@ -4232,7 +4232,8 @@ struct GpuState {
     matter_plot_points: Vec<[f64; 2]>,  // Cached plot points for the matter TOTAL line
     selection_log_enabled: bool,        // Debug: record every selected-agent readback
     selection_log: Vec<[f64; 8]>,       // age, generation, x, y, rot, vx, vy, alive
-    target_total_quanta: u64,           // God-mode target for total free monomers
+    target_total_quanta: u64,           // God-mode target for the WORLD total (env + agents)
+    enforce_world_total: bool,          // Drain env excess at every sample until TOTAL <= target
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
@@ -7899,6 +7900,7 @@ impl GpuState {
             selection_log_enabled: false,
             selection_log: Vec::new(),
             target_total_quanta: 1_000_000,
+            enforce_world_total: false,
             last_autosave_epoch: 0,
             last_autosave_time: std::time::Instant::now(),
 
@@ -15075,6 +15077,27 @@ fn main() {
                                             state.matter_history.pop_front();
                                         }
 
+                                        // World-total enforcement: while TOTAL exceeds the target,
+                                        // keep draining the environment (matter inside agents is
+                                        // untouched; it converges as they die/excrete). Closed
+                                        // world: death RETURNS matter, so a one-shot scale can
+                                        // never push the total below the embodied amount.
+                                        if state.enforce_world_total {
+                                            let free_now: u64 =
+                                                state.matter_free.iter().map(|&v| v as u64).sum();
+                                            let target = state.target_total_quanta as f64;
+                                            if state.matter_total > target * 1.01 && free_now > 0 {
+                                                let embodied = state.matter_locked_quanta as f64
+                                                    + state.matter_energy_quanta;
+                                                let target_free = (target - embodied).max(0.0);
+                                                let factor =
+                                                    (target_free / free_now as f64) as f32;
+                                                if factor < 0.999 {
+                                                    state.generate_map(4, 0, factor, rand::random::<u32>());
+                                                }
+                                            }
+                                        }
+
                                         // Rebuild both plot point caches using epoch as X axis.
                                         // Both histories have the same length and same X coordinates.
                                         const MAX_PLOT_POINTS: usize = 2048;
@@ -16195,13 +16218,26 @@ fn main() {
                                                                 state.generate_map(4, 0, factor, rand::random::<u32>());
                                                             }
                                                         });
+                                                        ui.checkbox(
+                                                            &mut state.enforce_world_total,
+                                                            "Enforce continuously",
+                                                        )
+                                                        .on_hover_text(
+                                                            "Closed world: death RETURNS matter to the environment, \
+                                                             so a single scale can't hold a target. With this on, \
+                                                             every matter sample drains the environment again while \
+                                                             TOTAL exceeds the target (matter inside agents is never \
+                                                             touched). Note: the conservation Δ readout is meaningless \
+                                                             while enforcement is actively draining.",
+                                                        );
                                                         if (state.target_total_quanta as f64) < embodied {
                                                             ui.colored_label(
                                                                 egui::Color32::from_rgb(230, 200, 90),
                                                                 format!(
                                                                     "Target below matter embodied in agents ({:.0}): \
-                                                                     the environment will be emptied and the total \
-                                                                     only reaches the target as agents die.",
+                                                                     the environment stays empty; deaths return matter, \
+                                                                     so the total can only reach the target with \
+                                                                     Enforce continuously on (drains the returns).",
                                                                     embodied,
                                                                 ),
                                                             );
