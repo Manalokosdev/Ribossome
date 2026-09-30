@@ -15304,6 +15304,55 @@ fn main() {
 
                                         if do_egui_update {
                                         let full_output = self.egui_state.egui_ctx().run(raw_input, |ctx| {
+                                        // Fumarole gizmos: heat-vent markers over the viewport
+                                        // (ring = spread radius, dot = core).
+                                        if state.ui_visible && state.fluid_enabled && !state.fumaroles.is_empty() {
+                                            let painter = ctx.layer_painter(egui::LayerId::new(
+                                                egui::Order::Background,
+                                                egui::Id::new("fumarole_gizmos"),
+                                            ));
+                                            let w = state.surface_config.width as f32;
+                                            let h = state.surface_config.height as f32;
+                                            if w > 1.0 && h > 1.0 {
+                                                let aspect = h / w;
+                                                let half_x = state.sim_size / (2.0 * state.camera_zoom);
+                                                let half_y = half_x * aspect;
+                                                let ppp = ctx.pixels_per_point();
+                                                for fum in &state.fumaroles {
+                                                    if !fum.enabled {
+                                                        continue;
+                                                    }
+                                                    let wx = fum.x_frac * state.sim_size;
+                                                    let wy = fum.y_frac * state.sim_size;
+                                                    let norm_x = (wx - state.camera_pan[0]) / (2.0 * half_x) + 0.5;
+                                                    let norm_y = 0.5 - (wy - state.camera_pan[1]) / (2.0 * half_y);
+                                                    if norm_x < -0.1 || norm_x > 1.1 || norm_y < -0.1 || norm_y > 1.1 {
+                                                        continue;
+                                                    }
+                                                    let sx = norm_x * w / ppp;
+                                                    let sy = norm_y * h / ppp;
+                                                    let center = egui::pos2(sx, sy);
+                                                    let r_world = fum.spread * state.sim_size
+                                                        / state.fluid_grid_resolution as f32;
+                                                    let r_px = (r_world / (2.0 * half_x)) * w / ppp;
+                                                    let col = egui::Color32::from_rgba_unmultiplied(255, 140, 40, 180);
+                                                    painter.circle_stroke(
+                                                        center,
+                                                        r_px.max(6.0),
+                                                        egui::Stroke::new(1.5, col),
+                                                    );
+                                                    painter.circle_filled(center, 3.0, col);
+                                                    painter.circle_stroke(
+                                                        center,
+                                                        (r_px * 0.55).max(4.0),
+                                                        egui::Stroke::new(
+                                                            1.0,
+                                                            egui::Color32::from_rgba_unmultiplied(255, 200, 80, 120),
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }
                                         // Left side panel for simulation controls (only show if ui_visible)
                                         if state.ui_visible {
                                         egui::SidePanel::left("simulation_controls")

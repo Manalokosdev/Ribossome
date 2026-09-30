@@ -335,15 +335,20 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // identifiable at a glance. MONOMER_VIS dims the whole layer so
             // agents stay clearly readable on top of the soup.
             let dye_gamma = max(params.alpha_gamma_adjust, 0.05);
-            // Two-tone: all activated monomers GOLD, all spent monomers
-            // the complementary cool BLUE.
-            let act_i = pow(clamp(dye_tm4.x + dye_tm4.y + dye_tm4.z + dye_tm4.w, 0.0, 1.0), dye_gamma);
-            let col = MONOMER_ACT_COLOR * act_i;
-            let spent_f = chem_spent_total_f(dye_idx);
-            let spent_col = MONOMER_SPENT_COLOR * clamp(spent_f, 0.0, 1.0) * 0.7;
+            // Two-tone by FRACTION, not addition: cells almost always hold
+            // BOTH states, and gold+blue added together washed out to grey
+            // (tone-on-tone). Hue = blue<->gold by activated fraction,
+            // brightness = total amount — every cell reads as one color on
+            // the cold<->hot axis.
+            let act_amt = clamp(dye_tm4.x + dye_tm4.y + dye_tm4.z + dye_tm4.w, 0.0, 1.5);
+            let spent_amt = clamp(chem_spent_total_f(dye_idx), 0.0, 1.5);
+            let total_amt = act_amt + spent_amt;
+            let act_frac = act_amt / max(total_amt, 1e-5);
+            let hue = mix(MONOMER_SPENT_COLOR, MONOMER_ACT_COLOR, act_frac);
+            let inten = pow(clamp(total_amt, 0.0, 1.0), dye_gamma);
             // Brightness slider (repurposed _pad_dye_alpha_color slot).
             let monomer_vis = clamp(params._pad_dye_alpha_color, 0.0, 1.0);
-            under_color = under_color + (col + spent_col) * monomer_vis;
+            under_color = under_color + hue * inten * monomer_vis;
             under_color = clamp(under_color, vec3<f32>(0.0), vec3<f32>(1.0));
             }
         }

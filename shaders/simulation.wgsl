@@ -2739,9 +2739,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (wind_k > 0.0) {
         let v_water = (wind_target / wind_k)
             * clamp(params.fluid_wind_push_strength, 0.0, 1.0);
-        var relv = agent_vel - v_water;
+        // Baseline = water motion + slow gravitational settling (marine
+        // snow): the medium carries you sideways, gravity pulls you down,
+        // and everything else is relative motion you must pay for.
+        let v_base = v_water
+            + vec2<f32>(0.0, -AGENT_SINK_RATE * clamp(total_mass, 0.1, 2.0));
+        var relv = agent_vel - v_base;
         relv = mix(relv, new_velocity, mass_smoothing);
-        agent_vel = v_water + relv;
+        agent_vel = v_base + relv;
     } else {
         agent_vel = mix(agent_vel, new_velocity, mass_smoothing);
     }
@@ -3781,6 +3786,10 @@ const CHEM_DECAY_P: f32 = 0.002;
 // Hot shallow water: death probability multiplier at full light (the fast
 // lane — rich but deadly; the deep is cold, slow, safe and poor).
 const TEMP_DEATH_MULT_TOP: f32 = 2.5;
+// MARINE SNOW: bodies are slightly denser than water and settle slowly
+// (world units/epoch per unit mass, downward = -y). Staying in the lit
+// zone costs swimming; passive drifters and carcass-feeders sink.
+const AGENT_SINK_RATE: f32 = 0.05;
 
 @compute @workgroup_size(16, 16)
 fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -4144,16 +4153,18 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             // ACTIVATED = gold, SPENT = complementary cool blue. Mixed
             // per-nucleotide hues averaged to grey and hid the spent
             // state; per-channel identity lives on debug keys 1-4.
-            var dep = vec3<f32>(0.0);
             var act_sum = 0.0;
             if (params.alpha_show != 0u) { act_sum += cc.x + cc.y; }
             if (params.beta_show != 0u) { act_sum += cc.z + cc.w; }
-            dep += vec3<f32>(1.0, 0.8, 0.3)
-                * pow(clamp(act_sum, 0.0, 1.0), params.alpha_gamma_adjust);
-            // SPENT monomers: discharged matter awaiting re-activation.
-            dep += vec3<f32>(0.3, 0.45, 0.9) * clamp(cc_spent, 0.0, 1.0) * 0.7;
+            // Hue by activated FRACTION (blue = spent, gold = charged),
+            // brightness by total amount — additive gold+blue washed to
+            // grey since cells hold both states.
+            let total_amt = act_sum + cc_spent;
+            let act_frac = act_sum / max(total_amt, 1e-5);
+            let hue = mix(vec3<f32>(0.3, 0.45, 0.9), vec3<f32>(1.0, 0.8, 0.3), act_frac);
+            let inten = pow(clamp(total_amt, 0.0, 1.0), params.alpha_gamma_adjust);
             // Brightness slider (repurposed _pad_dye_alpha_color slot).
-            base_color = base_color + dep * clamp(params._pad_dye_alpha_color, 0.0, 1.0);
+            base_color = base_color + hue * inten * clamp(params._pad_dye_alpha_color, 0.0, 1.0);
         }
 
         // Gamma channel
