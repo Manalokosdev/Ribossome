@@ -22,8 +22,10 @@ const DYE_VIS_GAIN: f32 = 2.0;
 // BLUE — mixed nucleotide hues averaged out to grey and became
 // indistinguishable from the spent tint. Per-channel identity remains
 // available on debug keys 1-4.
-const MONOMER_ACT_COLOR: vec3<f32> = vec3<f32>(1.0, 0.8, 0.3);
-const MONOMER_SPENT_COLOR: vec3<f32> = vec3<f32>(0.3, 0.45, 0.9);
+// Saturated poles with a LUMINANCE gap too (activated bright, spent dim),
+// so the state reads even for color-weak eyes.
+const MONOMER_ACT_COLOR: vec3<f32> = vec3<f32>(1.0, 0.62, 0.05);
+const MONOMER_SPENT_COLOR: vec3<f32> = vec3<f32>(0.05, 0.3, 0.85);
 const MONOMER_VIS: f32 = 0.5;
 
 const TAU: f32 = 6.2831853;
@@ -347,7 +349,10 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let act_amt = clamp(dye_tm4.x + dye_tm4.y + dye_tm4.z + dye_tm4.w, 0.0, 1.5);
             let spent_amt = clamp(chem_spent_total_f(dye_idx), 0.0, 1.5);
             let total_amt = act_amt + spent_amt;
-            let act_frac = act_amt / max(total_amt, 1e-5);
+            // Contrast-stretched fraction: a linear blend of complementary
+            // colors passes through muddy grey, so push cells toward one
+            // pole or the other.
+            let act_frac = smoothstep(0.25, 0.75, act_amt / max(total_amt, 1e-5));
             let hue = mix(MONOMER_SPENT_COLOR, MONOMER_ACT_COLOR, act_frac);
             let inten = pow(clamp(total_amt, 0.0, 1.0), dye_gamma);
             // Brightness slider (repurposed _pad_dye_alpha_color slot).

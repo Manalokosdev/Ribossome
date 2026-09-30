@@ -2193,10 +2193,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Inverse square repulsion: F = k / (d^2)
             let strength_scale = clamp(pair_mass_avg, 0.5, 3.0);
             let base_strength = params.agent_repulsion_strength * 100000.0 * strength_scale;
-            let force_magnitude = base_strength / (dist * dist);
+            // SOFTENED inverse square (Plummer, r0 = 10 = collision radius):
+            // the bare 1/d^2 hit the 5000 cap at birth distances, and a
+            // clump of newborns SUMMED several capped kicks into a leap.
+            // Newborns also ramp repulsion in over their first 60 frames.
+            let soft_d2 = dist * dist + 100.0;
+            let grace_r = clamp(f32(agents_in[agent_id].age) / 60.0, 0.1, 1.0);
+            let force_magnitude = grace_r * base_strength / soft_d2;
 
             // Clamp to prevent extreme forces at very small distances
-            let clamped_force = min(abs(force_magnitude), 5000.0) * sign(force_magnitude);
+            let clamped_force = min(abs(force_magnitude), 1000.0) * sign(force_magnitude);
 
             let direction = delta / dist; // Normalize
             force += direction * clamped_force;
@@ -4200,8 +4206,8 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             // brightness by total amount — additive gold+blue washed to
             // grey since cells hold both states.
             let total_amt = act_sum + cc_spent;
-            let act_frac = act_sum / max(total_amt, 1e-5);
-            let hue = mix(vec3<f32>(0.3, 0.45, 0.9), vec3<f32>(1.0, 0.8, 0.3), act_frac);
+            let act_frac = smoothstep(0.25, 0.75, act_sum / max(total_amt, 1e-5));
+            let hue = mix(vec3<f32>(0.05, 0.3, 0.85), vec3<f32>(1.0, 0.62, 0.05), act_frac);
             let inten = pow(clamp(total_amt, 0.0, 1.0), params.alpha_gamma_adjust);
             // Brightness slider (repurposed _pad_dye_alpha_color slot).
             base_color = base_color + hue * inten * clamp(params._pad_dye_alpha_color, 0.0, 1.0);
