@@ -11983,7 +11983,15 @@ impl GpuState {
             let fp = self.food_power as f64;
             for agent in agents.iter().take(take_len) {
                 if agent.alive == 1 {
-                    locked += (agent.gene_length + agent.pairing_counter) as u64;
+                    // PRIMORDIAL SEEDS (generation 0): their strand was
+                    // minted at world start and vanishes on death, so it is
+                    // NOT world matter — only their captured complements and
+                    // energy count (mirrors the death-deposit rule).
+                    let primordial = agent.generation == 0;
+                    if !primordial {
+                        locked += agent.gene_length as u64;
+                    }
+                    locked += agent.pairing_counter as u64;
                     energy_raw += agent.energy as u64;
                     // Decode strand channels; pairing captured the complement
                     // of the first `pairing_counter` bases (channel ^ 1: A<->U, G<->C).
@@ -11998,7 +12006,9 @@ impl GpuState {
                         let word = agent.genome_packed[idx / GENOME_BASES_PER_PACKED_WORD];
                         let bit_index = (idx % GENOME_BASES_PER_PACKED_WORD) * 2;
                         let ch = ((word >> bit_index) & 0x3) as usize;
-                        locked_ch[ch] += 1;
+                        if !primordial {
+                            locked_ch[ch] += 1;
+                        }
                         if p < paired {
                             locked_ch[ch ^ 1] += 1;
                         }

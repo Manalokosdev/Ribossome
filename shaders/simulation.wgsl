@@ -829,7 +829,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Quantized: 1 monomer per genome base; paired complements are
             // already whole monomer counts; stored energy converts back at
             // (food_power x resistance multiplier) energy per monomer.
-            let strand_quanta = f32(agents_in[agent_id].gene_length);
+            // PRIMORDIAL SEEDS (generation 0): their strand was minted from
+            // nothing at world start, so it vanishes on death instead of
+            // depositing (keeps world total = what generation set). Their
+            // paired complements and energy DID come from the environment
+            // and are returned normally.
+            let strand_quanta = select(f32(agents_in[agent_id].gene_length), 0.0, agents_in[agent_id].generation == 0u);
             var energy_quanta = 0.0;
             if (params.food_power > 0.0) {
                 let fpm = pow(0.75, f32(agents_in[agent_id].poison_resistant_count));
@@ -3245,7 +3250,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             );
             // Quantized: 1 monomer per genome base; paired complements are
             // whole monomer counts; stored energy converts back at yield.
-            let strand_quanta = f32(agent_gene_length);
+            // PRIMORDIAL SEEDS (generation 0): minted strand vanishes on
+            // death; paired complements + energy (environment-sourced)
+            // deposit normally. See the pending-kill path for rationale.
+            let strand_quanta = select(f32(agent_gene_length), 0.0, agents_out[agent_id].generation == 0u);
             var energy_quanta = 0.0;
             if (params.food_power > 0.0) {
                 energy_quanta = max(agent_energy_cur, 0.0) / max(params.food_power * food_power_multiplier, 1e-6);
