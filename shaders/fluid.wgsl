@@ -137,9 +137,22 @@ const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.97;
 @group(0) @binding(14) var<storage, read_write> temp_out: array<f32>;
 
 const TEMP_HEAT_RATE: f32 = 0.01;  // T gain per fumarole-strength unit per second at core
-const TEMP_COOL_RATE: f32 = 0.12;  // relaxation toward ambient (1/s) — plumes live ~8s
+const TEMP_COOL_RATE: f32 = 0.12;  // relaxation toward LOCAL AMBIENT (1/s) — plumes live ~8s
 const TEMP_MAX: f32 = 12.0;
-const TEMP_BUOYANCY: f32 = 12.0;   // force per unit T (screen-up = +y)
+const TEMP_BUOYANCY: f32 = 12.0;   // force per unit of DEVIATION from ambient (screen-up = +y)
+// AMBIENT CLIMATE: the sun warms the surface layer (same attenuation curve
+// as the UV light); depths and edges are cold. Cooling relaxes toward this
+// profile, so the whole field shows a temperature landscape instead of one
+// plume on black. Buoyancy acts on the DEVIATION from local ambient:
+// stable stratification (warm above cold) is force-free, fumarole-heated
+// water rises, surface-chilled water sinks.
+const TEMP_AMBIENT_SURFACE: f32 = 1.5;
+const TEMP_AMBIENT_ATTEN: f32 = 4.0;
+
+fn temp_ambient_at(y: u32) -> f32 {
+    return TEMP_AMBIENT_SURFACE
+        * exp(-TEMP_AMBIENT_ATTEN * (1.0 - (f32(y) + 0.5) / f32(FLUID_GRID_SIZE)));
+}
 const TEMP_DIFFUSE: f32 = 0.08;    // 4-neighbor blend fraction per solve
 
 // Gamma grid (terrain) sampled as an obstacle field
@@ -422,12 +435,15 @@ fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
     // with the plume — convection self-limits into finite cells instead of
     // the old ever-accelerating jet that swept the aquarium to the walls.
     // A small T-scaled lateral flicker keeps plumes wobbling naturally.
-    let t_here = temp_in[idx];
-    if (t_here > 1e-4) {
+    // Buoyancy on the DEVIATION from local ambient: hot anomalies rise,
+    // cold anomalies sink, the stable background stratification is
+    // force-free.
+    let dev = temp_in[idx] - temp_ambient_at(y);
+    if (abs(dev) > 1e-3) {
         if (xi > 0 && yi > 0 && xi < i32(FLUID_GRID_SIZE) - 1 && yi < i32(FLUID_GRID_SIZE) - 1) {
             let seed0 = hash_u32(idx ^ time_bucket * 0x85EBCA6Bu ^ 0xC2B2AE35u);
-            let side = (rand01(seed0) * 2.0 - 1.0) * 0.25;
-            let f = vec2<f32>(side, 1.0) * (TEMP_BUOYANCY * t_here);
+            let side = (rand01(seed0) * 2.0 - 1.0) * 0.25 * abs(dev) / max(abs(dev), 1.0);
+            let f = vec2<f32>(side * TEMP_BUOYANCY * abs(dev), TEMP_BUOYANCY * dev);
             let base = idx * 2u;
             atomic_add_f32(base + 0u, f.x);
             atomic_add_f32(base + 1u, f.y);
@@ -496,8 +512,9 @@ fn update_temperature(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // Cooling toward ambient.
-    t = t * exp(-TEMP_COOL_RATE * dt);
+    // Cooling toward the LOCAL ambient climate (warm surface, cold depths).
+    let amb = temp_ambient_at(y);
+    t = amb + (t - amb) * exp(-TEMP_COOL_RATE * dt);
     temp_out[idx] = clamp(t, 0.0, TEMP_MAX);
 }
 
