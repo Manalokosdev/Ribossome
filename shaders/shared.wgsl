@@ -1220,7 +1220,9 @@ fn wash_transfer_chem(center_idx: u32, target_idx: u32, amount: f32) {
 
 // Monomers consumed from the environment per paired base during
 // template-directed replication (and returned on death for unfinished strands).
-const PAIRING_MONOMER_COST: f32 = 0.02;
+// Calibrated for scarce worlds (channel concentrations ~0.01-0.05): one cell
+// channel at 0.015 affords ~7 pairings before depletion.
+const PAIRING_MONOMER_COST: f32 = 0.002;
 
 // Raw complement counts (A/U/G/C channels) of the first `count` paired bases —
 // the partially built complementary strand a dying agent must return.
