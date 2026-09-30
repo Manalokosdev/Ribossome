@@ -257,6 +257,26 @@ fn gamma_shove(from_idx: u32, from_pos: vec2<f32>, back_dir: vec2<f32>, seed: u3
     }
 }
 
+// The velocity at which suspended bodies RIDE the fluid, in world units
+// per tick — the same flow the dye visualizes. Agents at push strength 1
+// follow the currents (and orbit the vortices) at full visual speed.
+// Safety-capped below VEL_MAX so violent transients cannot launch agents
+// beyond the physics envelope. NOTE: monomer QUANTA still hop at their
+// capped law (max ~1 cell/epoch) — the soup pattern lags the flow in
+// violent currents; that is a known approximation of the quanta transport,
+// not of the agents.
+fn fluid_ride_velocity(world_pos: vec2<f32>) -> vec2<f32> {
+    let v = sample_fluid_velocity_bilinear(world_pos);
+    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+    var vw = v * (cell_to_world * max(params.dt, 1e-3));
+    let m = length(vw);
+    let ride_cap = VEL_MAX * 0.8;
+    if (m > ride_cap) {
+        vw *= ride_cap / m;
+    }
+    return vw;
+}
+
 // Unified "ionization" chemical sensors: stochastic collision sampling radius
 // (world units) and charge gained per monomer collision. Charge fades each
 // frame at the variant's falloff rate.
@@ -2393,19 +2413,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (wind_coupling != 0.0) {
                 // Avoid clamping OOB into edge cells (prevents artificial edge wind).
                 if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
-                    let v = sample_fluid_velocity_bilinear(world_pos);
-                    // CALIBRATION: the drift target is the MONOMER TRANSPORT
-                    // LAW — quanta hop downstream at min(|v|*coupling, 0.45)
-                    // cells/epoch — so at slider=1 agents drift at the same
-                    // speed as their food, never launched faster than the
-                    // soup. Raw fluid velocity (no cell_to_world, no dt),
-                    // exactly like transport_quanta, which also makes this
-                    // invariant under fluid-grid resolution changes.
-                    let spd_c = length(v);
-                    var v_frame = vec2<f32>(0.0);
-                    if (spd_c > 1e-5) {
-                        v_frame = (v / spd_c) * clamp(spd_c * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP);
-                    }
+                    // Full visual-flow riding (see fluid_ride_velocity).
+                    let v_frame = fluid_ride_velocity(world_pos);
 
                     // WATER FRAME: viscous drag toward the fluid's velocity.
                     // The torque keeps the explicit per-part form (angular
@@ -2799,12 +2808,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (params.fluid_wind_push_strength != 0.0) {
         let com_world = agent_pos;
         if (com_world.x >= 0.0 && com_world.x < f32(SIM_SIZE) && com_world.y >= 0.0 && com_world.y < f32(SIM_SIZE)) {
-            let vraw = sample_fluid_velocity_bilinear(com_world);
-            let sr = length(vraw);
-            var v_w = vec2<f32>(0.0);
-            if (sr > 1e-5) {
-                v_w = (vraw / sr) * clamp(sr * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP);
-            }
+            let v_w = fluid_ride_velocity(com_world);
             let v_rel_w = v_w - agent_vel;
             let rspd_w = length(v_rel_w);
             if (rspd_w > 0.02) {
