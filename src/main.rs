@@ -14858,6 +14858,10 @@ fn main() {
                                         PhysicalKey::Code(KeyCode::Digit4) => {
                                             state.nucleotide_debug_mask ^= 8;
                                         }
+                                        // Key 6: isolated gamma (terrain) view, grayscale.
+                                        PhysicalKey::Code(KeyCode::Digit6) => {
+                                            state.nucleotide_debug_mask ^= 16;
+                                        }
                                         PhysicalKey::Code(KeyCode::KeyF) => {
                                             // Toggle follow mode
                                             if state.selected_agent_index.is_some() {

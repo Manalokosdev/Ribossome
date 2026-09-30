@@ -3921,6 +3921,10 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         if ((m & 2u) != 0u) { dbg += vec3<f32>(0.0, 1.0, 0.0) * clamp(cc.y, 0.0, 1.0); }
         if ((m & 4u) != 0u) { dbg += vec3<f32>(0.2, 0.4, 1.0) * clamp(cc.z, 0.0, 1.0); }
         if ((m & 8u) != 0u) { dbg += vec3<f32>(1.0, 1.0, 1.0) * clamp(cc.w, 0.0, 1.0); }
+        // Key 6: isolated gamma view — raw quantized terrain height as
+        // grayscale (1 quantum = 0.25 grey step, 4+ = white). Combines
+        // with keys 1-4 if both are toggled.
+        if ((m & 16u) != 0u) { dbg += vec3<f32>(1.0, 1.0, 1.0) * clamp(gamma, 0.0, 1.0); }
         base_color = dbg;
     } else {
         // New visualization system: composite channels with blend modes
