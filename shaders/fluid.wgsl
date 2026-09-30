@@ -451,34 +451,31 @@ fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
-        var dir = vec2<f32>(fum_f32(base, FUM_DIR_X), fum_f32(base, FUM_DIR_Y));
-        let dir_len = length(dir);
-        dir = select(dir / max(dir_len, 1e-8), vec2<f32>(0.0, 1.0), dir_len < 1e-5);
-
-        let variation = clamp(fum_f32(base, FUM_VARIATION), 0.0, 1.0);
-        let seed_base = hash_u32(i * 0x9E3779B9u ^ time_bucket * 0x85EBCA6Bu ^ 0xC2B2AE35u);
-
-        var dir_j = dir;
-        var strength = base_strength;
-
-        if (variation > 1e-5) {
-            let seed0 = hash_u32(seed_base ^ idx);
-            let seed1 = hash_u32(seed0 ^ 0xA511E9B3u);
-            let seed2 = hash_u32(seed0 ^ 0x63D83595u);
-            let ang = (rand01(seed1) * 2.0 - 1.0) * 3.14159265 * variation;
-            let strength_jitter = 1.0 + (rand01(seed2) * 2.0 - 1.0) * variation;
-            dir_j = normalize(rotate2(dir, ang));
-            strength = base_strength * max(strength_jitter, 0.0);
-        }
-
+        // THERMAL BUOYANCY (non-directional): the fumarole is a HEAT
+        // source. Hot fluid is lighter and RISES toward the surface
+        // (screen top = LOW y in the renderer's mapping) — the pressure
+        // solve turns this into real convection: rising plume, mushroom
+        // head, return flow down the sides. The old directional jet
+        // (FUM_DIR_*) produced unnatural pinwheel swirls and is ignored;
+        // FUM_VARIATION now drives the lateral flicker that makes plumes
+        // wobble and bifurcate like real thermals.
         var w = 1.0;
         if (r > 0) {
             let dist = sqrt(f32(dx * dx + dy * dy));
             let w0 = clamp(1.0 - dist / (f32(r) + 0.001), 0.0, 1.0);
             w = w0 * w0;
         }
+        let heat = base_strength * w;
 
-        added = added + dir_j * (strength * w);
+        let variation = clamp(fum_f32(base, FUM_VARIATION), 0.0, 1.0);
+        let seed_base = hash_u32(i * 0x9E3779B9u ^ time_bucket * 0x85EBCA6Bu ^ 0xC2B2AE35u);
+        var side = 0.0;
+        if (variation > 1e-5) {
+            let seed0 = hash_u32(seed_base ^ idx);
+            side = (rand01(seed0) * 2.0 - 1.0) * variation * 0.6;
+        }
+
+        added = added + vec2<f32>(side, -1.0) * heat;
     }
 
     if (added.x != 0.0 || added.y != 0.0) {
