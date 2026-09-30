@@ -139,6 +139,9 @@ const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.97;
 const TEMP_HEAT_RATE: f32 = 0.01;  // T gain per fumarole-strength unit per second at core
 const TEMP_COOL_RATE: f32 = 0.12;  // relaxation toward LOCAL AMBIENT (1/s) — plumes live ~8s
 const TEMP_MAX: f32 = 12.0;
+// Water hotter than this re-activates spent monomers (keep in sync with
+// the key-7 contour in composite.wgsl).
+const TEMP_ACT_THRESHOLD: f32 = 2.0;
 const TEMP_BUOYANCY: f32 = 12.0;   // force per unit of DEVIATION from ambient (screen-up = +y)
 // AMBIENT CLIMATE: the sun's role in this world is PHOTOCHEMISTRY (UV
 // activates monomers), not heating — water barely warms at the surface,
@@ -619,13 +622,26 @@ fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
         // GEOTHERMAL RE-ACTIVATION: the vent recharges SPENT monomers in
         // its plume — the deep-world counterpart of surface UV. Energy
         // enters the closed world only here and at the lit surface.
-        let p_act = clamp(FUMAROLE_ACT_P * w * jitter, 0.0, 0.9);
+        // (Activation moved out of the per-vent loop: it is now driven by
+        // the local TEMPERATURE, below.)
+        let _unused_w = w * jitter;
+    }
+
+    // THERMAL RE-ACTIVATION: hot water recharges SPENT monomers wherever
+    // it is above the activation isotherm — the active zone travels with
+    // the plume instead of being a fixed disc around the vent. Visible as
+    // the white contour on the key-7 heatmap.
+    {
+        let fx_t = min((x * FLUID_GRID_SIZE) / GAMMA_GRID_DIM, FLUID_GRID_SIZE - 1u);
+        let fy_t = min((y * FLUID_GRID_SIZE) / GAMMA_GRID_DIM, FLUID_GRID_SIZE - 1u);
+        let t_loc = temp_in[fy_t * FLUID_GRID_SIZE + fx_t];
+        let p_act = clamp(FUMAROLE_ACT_P * (t_loc - TEMP_ACT_THRESHOLD) / TEMP_ACT_THRESHOLD, 0.0, 0.9);
         if (p_act > 0.0) {
             for (var ac = 0u; ac < 4u; ac++) {
                 let slot = dye_idx * 4u + ac;
                 let spent_here = atomicLoad(&chem_grid[slot]) >> 16u;
                 if (spent_here > 0u) {
-                    let hseed = hash_u32(slot ^ (i * 0x9E3779B9u) ^ (time_bucket * 0x85EBCA6Bu) ^ 0x51ED270Bu);
+                    let hseed = hash_u32(slot ^ (time_bucket * 0x85EBCA6Bu) ^ 0x51ED270Bu ^ u32(fp_f32(FP_TIME)));
                     if (rand01(hseed) < p_act) {
                         let _ok = fluid_chem_activate_one(slot);
                     }

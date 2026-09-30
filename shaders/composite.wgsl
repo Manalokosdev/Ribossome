@@ -378,12 +378,15 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (wx2 >= 0.0 && wx2 < ws2 && wy2 >= 0.0 && wy2 < ws2) {
             let fxc = min(u32(wx2 / ws2 * f32(FLUID_GRID_SIZE)), FLUID_GRID_SIZE - 1u);
             let fyc = min(u32(wy2 / ws2 * f32(FLUID_GRID_SIZE)), FLUID_GRID_SIZE - 1u);
-            let tt = clamp(fluid_temperature[fyc * FLUID_GRID_SIZE + fxc] / 12.0, 0.0, 1.0);
-            under_color = vec3<f32>(
-                clamp(tt * 3.0, 0.0, 1.0),
-                clamp(tt * 3.0 - 1.0, 0.0, 1.0),
-                clamp(tt * 3.0 - 2.0, 0.0, 1.0)
-            );
+            // Cold blue -> warm red, with the ACTIVATION ISOTHERM (T = 2.0,
+            // TEMP_ACT_THRESHOLD in fluid.wgsl) drawn as a white contour:
+            // inside it, hot water re-activates spent monomers.
+            let traw = fluid_temperature[fyc * FLUID_GRID_SIZE + fxc];
+            let tt = clamp(sqrt(traw / 12.0), 0.0, 1.0);
+            under_color = mix(vec3<f32>(0.02, 0.08, 0.35), vec3<f32>(0.95, 0.12, 0.05), tt);
+            if (abs(traw - 2.0) < 0.12) {
+                under_color = vec3<f32>(0.95, 0.95, 0.95);
+            }
         } else {
             under_color = vec3<f32>(0.0);
         }
