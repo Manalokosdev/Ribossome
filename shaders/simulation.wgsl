@@ -1792,7 +1792,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let rad = sqrt(hash_f32(hs ^ 0x9E3779B9u)) * SENSOR_ION_RADIUS;
                 let sp = world_pos + vec2<f32>(cos(ang), sin(ang)) * rad;
                 if (is_in_bounds(sp)) {
-                    hits += f32(chem_count(grid_index(sp), target_ch));
+                    hits += f32(chem_act_count(grid_index(sp), target_ch)); // senses ACTIVATED (food) only
                 }
             }
 

@@ -451,12 +451,15 @@ fn chem_act_f(idx: u32, ch: u32) -> f32 {
 }
 
 // Pool sums in legacy float units (1.0 = REF quanta): pool 0 = A+U, 1 = G+C.
-// Counts TOTAL matter (sensors smell monomers, charged or not).
+// Counts ACTIVATED monomers only (what sensors perceive).
 fn chem_pool_count_f(idx: u32, pool: u32) -> f32 {
     let base = idx * 4u + pool * 2u;
     let v0 = atomicLoad(&chem_grid[base]);
     let v1 = atomicLoad(&chem_grid[base + 1u]);
-    let t = (v0 & CHEM_STATE_MASK) + (v0 >> 16u) + (v1 & CHEM_STATE_MASK) + (v1 >> 16u);
+    // ACTIVATED only: every sensor and sampler built on this pool view
+    // perceives FOOD (charged monomers); spent grey matter is invisible to
+    // chemotaxis, so agents climb real energy gradients.
+    let t = (v0 & CHEM_STATE_MASK) + (v1 & CHEM_STATE_MASK);
     return f32(t) * QUANTA_VIS;
 }
 

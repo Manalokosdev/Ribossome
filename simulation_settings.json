@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.8291184,
+  "camera_zoom": 0.6177051,
   "spawn_probability": 5.0,
   "death_probability": 0.01,
   "mutation_rate": 0.003,
@@ -195,13 +195,16 @@
   ],
   "monomer_brightness": 0.05,
   "dig_rate": 1.0,
+  "uv_strength": 1.0,
+  "uv_depth": 8.0,
+  "uv_damage": 2.5,
   "dye_alpha_thinfilm": false,
   "dye_alpha_thinfilm_mult": 5.0,
   "dye_beta_thinfilm": false,
   "dye_beta_thinfilm_mult": 50.0,
   "fumaroles": [
     {
-      "enabled": false,
+      "enabled": true,
       "x_frac": 0.55,
       "y_frac": 0.15,
       "dir_degrees": 230.0,
@@ -212,7 +215,7 @@
       "variation": 0.93
     },
     {
-      "enabled": false,
+      "enabled": true,
       "x_frac": 0.4859278,
       "y_frac": 0.09425863,
       "dir_degrees": 0.0,
