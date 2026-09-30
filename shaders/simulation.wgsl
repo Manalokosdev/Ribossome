@@ -3634,7 +3634,7 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
             vs = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
         }
         let spd_s = length(vs);
-        let p_sed = clamp(spd_s * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP) * GAMMA_SEDIMENT_FACTOR * mob;
+        let p_sed = parcel_hop_p(spd_s) * GAMMA_SEDIMENT_FACTOR * mob;
         let hw = hash(idx ^ (params.epoch * 747796405u) ^ (phase * 196613u) ^ (params.random_seed * 2891336453u));
         let rw = f32(hw) / 4294967295.0;
         var dest = idx;
@@ -3779,10 +3779,21 @@ const DIFF_AGITATION_SPEED: f32 = 0.5;
 // Suspended monomers ALWAYS ride the current — fixed physical coupling, not
 // a user setting (colloidal particles move with the water; there is nothing
 // to tune, and no stale settings file can freeze the soup again).
-const MONOMER_ADV_COUPLING: f32 = 1.0;
-// Cap on the drift speed (cells/epoch). Shared by monomer transport AND
-// both agent-fluid couplings so food and agents always ride together.
+// Cap on the drift speed (cells/epoch) — safety only; the parcel-exact
+// law below rarely approaches it.
 const MONOMER_ADV_CAP: f32 = 0.9;
+
+// PARCEL-EXACT hop probability: expected displacement = |v| * dt *
+// cell_to_world cells/epoch — the SAME distance a fluid parcel (and a
+// riding agent) travels. The old law (|v| * 1.0, capped) moved quanta
+// 3-13x FASTER than the flow and saturated at the cap: that nonlinearity
+// EVACUATED persistent voids at plume acceleration zones and piled rings
+// at deceleration fronts. A passive tracer advected consistently with an
+// incompressible field stays uniform, as it must.
+fn parcel_hop_p(speed_raw: f32) -> f32 {
+    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+    return clamp(speed_raw * cell_to_world * max(params.dt, 1e-3), 0.0, MONOMER_ADV_CAP);
+}
 // Buried monomers (inside gamma mass) creep at this fraction of the base
 // diffusion rate, further divided by local occupancy. They never advect.
 const BURIED_DIFF_FACTOR: f32 = 0.25;
@@ -3818,7 +3829,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         v = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
     }
     let speed_t = length(v);
-    let p_adv = clamp(speed_t * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP);
+    let p_adv = parcel_hop_p(speed_t);
     let agitation = clamp(speed_t / DIFF_AGITATION_SPEED, 0.0, 1.0);
     let p_diff = DIFF_HOP_P * mix(DIFF_HOP_FLOOR, 1.0, agitation);
 
