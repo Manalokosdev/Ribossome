@@ -3570,23 +3570,21 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     let idx = y * GRID_SIZE + x;
     let n = gamma_count(idx);
 
-    // GAMMA COHESION (Ostwald ripening): isolated fines (1-2 quanta) slowly
-    // migrate INTO a larger neighboring mass. This is the terrain's
-    // anti-entropy: digging spoil and landslide specks reconsolidate into
-    // rocks over geological timescales, scars self-heal, and abandoned
-    // tunnels close — instead of long runs grinding all terrain into a
-    // uniform speck field. Restricted to counts below the sandpile band so
-    // it never fights the slides; exact take/add conservation.
+    // LOOSE-GRAIN DYNAMICS (counts below the sandpile band): ONE unified
+    // minimum-energy move rule. A grain ALWAYS moves toward the candidate
+    // cell where it would have the MOST occupied neighbors (bond-count
+    // maximization = surface-energy minimization: grains nestle into
+    // corners and notches, growing compact blobs laterally — never
+    // towers, since it also can never land on a cell higher than its own
+    // level). Mobility falls 4x per current bond (contacts grip); the
+    // fluid can still rip weakly-bonded grains downstream (sediment).
+    // Ties are hash-broken to avoid scan-order directional drift.
     if (n >= 1u && n < SANDPILE_DIFF) {
-        // Scan the FULL 8-neighborhood. Only TRULY ISOLATED cells migrate:
-        // a cell with any same-level neighbor is part of a coherent
-        // structure (a rubble field, a level-2 wall) and stays put — this
-        // also protects deliberately thin terrain features from slowly
-        // dissolving. A stray with a LARGER neighbor hops into it.
-        var big_idx = idx;
-        var big_count = 0u;
-        var has_same_level = false;
         var bonds = 0u;
+        var best_idx = idx;
+        var best_score = -1i;
+        var best_c = 0xFFFFu;
+        var tie_h = hash(idx ^ (params.epoch * 1597334677u) ^ (params.random_seed * 3812015801u) ^ (phase * 2654435761u));
         for (var dy = -1i; dy <= 1i; dy++) {
             for (var dx = -1i; dx <= 1i; dx++) {
                 if (dx == 0i && dy == 0i) { continue; }
@@ -3597,58 +3595,84 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
                 }
                 let ni = u32(ny) * GRID_SIZE + u32(nx);
                 let c = gamma_count(ni);
-                if (c == n) { has_same_level = true; }
                 if (c >= 1u) { bonds += 1u; }
-                if (c > big_count) {
-                    big_count = c;
-                    big_idx = ni;
+                // Candidate destination: no higher than our own level.
+                if (c <= n) {
+                    // Score = occupied cells around the CANDIDATE, skipping
+                    // our own cell (we vacate it on moving).
+                    var score = 0i;
+                    for (var sy = -1i; sy <= 1i; sy++) {
+                        for (var sx = -1i; sx <= 1i; sx++) {
+                            if (sx == 0i && sy == 0i) { continue; }
+                            let qx = nx + sx;
+                            let qy = ny + sy;
+                            if (qx < 0i || qy < 0i || qx >= i32(GRID_SIZE) || qy >= i32(GRID_SIZE)) {
+                                continue;
+                            }
+                            let qi = u32(qy) * GRID_SIZE + u32(qx);
+                            if (qi == idx) { continue; }
+                            if (gamma_count(qi) >= 1u) { score += 1i; }
+                        }
+                    }
+                    tie_h = hash(tie_h ^ ni);
+                    if (score > best_score
+                        || (score == best_score && c < best_c)
+                        || (score == best_score && c == best_c && (tie_h & 1u) == 1u)) {
+                        best_score = score;
+                        best_c = c;
+                        best_idx = ni;
+                    }
                 }
             }
         }
-        if (!has_same_level && big_idx != idx && big_count > n && big_count < GAMMA_PILE_MAX) {
-            let hc = hash(idx ^ (params.epoch * 2246822519u) ^ (phase * 3266489917u) ^ (params.random_seed * 668265263u));
-            if (f32(hc) / 4294967295.0 < GAMMA_COHESION_P) {
-                if (gamma_take_one(idx)) {
-                    gamma_add_one(big_idx);
-                }
-            }
-        } else if (n == 1u && bonds <= 3u) {
-            // STRAY WALK + SEDIMENT TRANSPORT (0<->1 exchange): loose
-            // single quanta ride the current downstream (same law as
-            // monomer advection, at half mobility — inert mass is heavier)
-            // and otherwise random-walk, until absorbed by a mass or
-            // buried in bonds. Mobility falls 4x PER OCCUPIED NEIGHBOR
-            // (surface-diffusion style: each contact grips): 0 bonds =
-            // free debris, 1 = 25%, 2 = 6%, 3 = 1.6%, 4+ = locked in.
-            // Loose fines wash into calm zones and pile against obstacles
-            // — alluvial deposition.
-            let mob = pow(0.25, f32(bonds));
-            var vs = vec2<f32>(0.0);
-            if (params._pad_rain0 == 1u) {
-                let fxi = min((x * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
-                let fyi = min((y * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
-                vs = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
-            }
-            let spd_s = length(vs);
-            let p_sed = clamp(spd_s * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP) * GAMMA_SEDIMENT_FACTOR * mob;
-            let hw = hash(idx ^ (params.epoch * 747796405u) ^ (phase * 196613u) ^ (params.random_seed * 2891336453u));
-            let rw = f32(hw) / 4294967295.0;
+        if (bonds >= 4u) {
+            return; // locked in
+        }
+        let mob = pow(0.25, f32(bonds));
+
+        var vs = vec2<f32>(0.0);
+        if (params._pad_rain0 == 1u) {
+            let fxi = min((x * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
+            let fyi = min((y * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
+            vs = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
+        }
+        let spd_s = length(vs);
+        let p_sed = clamp(spd_s * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP) * GAMMA_SEDIMENT_FACTOR * mob;
+        let hw = hash(idx ^ (params.epoch * 747796405u) ^ (phase * 196613u) ^ (params.random_seed * 2891336453u));
+        let rw = f32(hw) / 4294967295.0;
+        var dest = idx;
+        var have_dest = false;
+        if (rw < p_sed) {
+            // Downstream hop: axis chosen by |vx| vs |vy| weight
+            // (mirrors transport_quanta). Never climbs above own level.
             var ddx = 0i;
             var ddy = 0i;
-            var move_it = false;
-            if (rw < p_sed) {
-                // Downstream hop: axis chosen by |vx| vs |vy| weight
-                // (mirrors transport_quanta).
-                move_it = true;
-                let ax = abs(vs.x);
-                let ay = abs(vs.y);
-                if (hash_f32(hw ^ 0x85EBCA6Bu) < ax / max(ax + ay, 1e-6)) {
-                    ddx = select(-1i, 1i, vs.x > 0.0);
-                } else {
-                    ddy = select(-1i, 1i, vs.y > 0.0);
+            let ax = abs(vs.x);
+            let ay = abs(vs.y);
+            if (hash_f32(hw ^ 0x85EBCA6Bu) < ax / max(ax + ay, 1e-6)) {
+                ddx = select(-1i, 1i, vs.x > 0.0);
+            } else {
+                ddy = select(-1i, 1i, vs.y > 0.0);
+            }
+            let wx = i32(x) + ddx;
+            let wy = i32(y) + ddy;
+            if (wx >= 0i && wy >= 0i && wx < i32(GRID_SIZE) && wy < i32(GRID_SIZE)) {
+                let wi = u32(wy) * GRID_SIZE + u32(wx);
+                if (gamma_count(wi) <= n) {
+                    dest = wi;
+                    have_dest = true;
                 }
-            } else if (rw < p_sed + GAMMA_STRAY_WALK_P * mob) {
-                move_it = true;
+            }
+        } else if (rw < p_sed + GAMMA_STRAY_WALK_P * mob) {
+            if (best_score > i32(bonds)) {
+                // Energy-improving move: settle where we'd have MORE
+                // neighbors than here.
+                dest = best_idx;
+                have_dest = true;
+            } else if (bonds == 0u) {
+                // Free debris at a local optimum of nothing: explore.
+                var ddx = 0i;
+                var ddy = 0i;
                 let d = (hw >> 8u) % 8u;
                 switch d {
                     case 0u: { ddx = 1i; }
@@ -3660,20 +3684,20 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
                     case 6u: { ddx = 1i; ddy = -1i; }
                     default: { ddx = -1i; ddy = -1i; }
                 }
-            }
-            if (move_it) {
                 let wx = i32(x) + ddx;
                 let wy = i32(y) + ddy;
                 if (wx >= 0i && wy >= 0i && wx < i32(GRID_SIZE) && wy < i32(GRID_SIZE)) {
                     let wi = u32(wy) * GRID_SIZE + u32(wx);
-                    // May land on occupied ground too (merging), up to the
-                    // pile ceiling.
-                    if (gamma_count(wi) < GAMMA_PILE_MAX) {
-                        if (gamma_take_one(idx)) {
-                            gamma_add_one(wi);
-                        }
+                    if (gamma_count(wi) <= n) {
+                        dest = wi;
+                        have_dest = true;
                     }
                 }
+            }
+        }
+        if (have_dest && dest != idx) {
+            if (gamma_take_one(idx)) {
+                gamma_add_one(dest);
             }
         }
         return;
