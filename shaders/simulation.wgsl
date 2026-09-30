@@ -3557,6 +3557,9 @@ const GAMMA_COHESION_P: f32 = 0.01;
 // Random-walk rate for fully isolated single quanta (all 8 neighbors
 // empty) — the 0<->1 exchange that lets strays search for company.
 const GAMMA_STRAY_WALK_P: f32 = 0.05;
+// Loose debris rides currents at this fraction of the monomer advection
+// law (inert mass is heavier than dissolved monomers).
+const GAMMA_SEDIMENT_FACTOR: f32 = 0.5;
 
 fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     let x = gid.x;
@@ -3583,6 +3586,7 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
         var big_idx = idx;
         var big_count = 0u;
         var has_same_level = false;
+        var bonds = 0u;
         for (var dy = -1i; dy <= 1i; dy++) {
             for (var dx = -1i; dx <= 1i; dx++) {
                 if (dx == 0i && dy == 0i) { continue; }
@@ -3594,6 +3598,7 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
                 let ni = u32(ny) * GRID_SIZE + u32(nx);
                 let c = gamma_count(ni);
                 if (c == n) { has_same_level = true; }
+                if (c >= 1u) { bonds += 1u; }
                 if (c > big_count) {
                     big_count = c;
                     big_idx = ni;
@@ -3607,17 +3612,44 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
                     gamma_add_one(big_idx);
                 }
             }
-        } else if (n == 1u && big_count == 0u) {
-            // STRAY WALK — the missing 0<->1 exchange: a quantum with ALL
-            // eight neighbors empty random-walks across bare ground until
-            // it lands next to something, and the absorption rule above
-            // takes over. Without this, lone specks in the void were
-            // immortal fossils.
+        } else if (n == 1u && bonds <= 3u) {
+            // STRAY WALK + SEDIMENT TRANSPORT (0<->1 exchange): loose
+            // single quanta ride the current downstream (same law as
+            // monomer advection, at half mobility — inert mass is heavier)
+            // and otherwise random-walk, until absorbed by a mass or
+            // buried in bonds. Mobility falls 4x PER OCCUPIED NEIGHBOR
+            // (surface-diffusion style: each contact grips): 0 bonds =
+            // free debris, 1 = 25%, 2 = 6%, 3 = 1.6%, 4+ = locked in.
+            // Loose fines wash into calm zones and pile against obstacles
+            // — alluvial deposition.
+            let mob = pow(0.25, f32(bonds));
+            var vs = vec2<f32>(0.0);
+            if (params._pad_rain0 == 1u) {
+                let fxi = min((x * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
+                let fyi = min((y * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
+                vs = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
+            }
+            let spd_s = length(vs);
+            let p_sed = clamp(spd_s * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP) * GAMMA_SEDIMENT_FACTOR * mob;
             let hw = hash(idx ^ (params.epoch * 747796405u) ^ (phase * 196613u) ^ (params.random_seed * 2891336453u));
-            if (f32(hw) / 4294967295.0 < GAMMA_STRAY_WALK_P) {
+            let rw = f32(hw) / 4294967295.0;
+            var ddx = 0i;
+            var ddy = 0i;
+            var move_it = false;
+            if (rw < p_sed) {
+                // Downstream hop: axis chosen by |vx| vs |vy| weight
+                // (mirrors transport_quanta).
+                move_it = true;
+                let ax = abs(vs.x);
+                let ay = abs(vs.y);
+                if (hash_f32(hw ^ 0x85EBCA6Bu) < ax / max(ax + ay, 1e-6)) {
+                    ddx = select(-1i, 1i, vs.x > 0.0);
+                } else {
+                    ddy = select(-1i, 1i, vs.y > 0.0);
+                }
+            } else if (rw < p_sed + GAMMA_STRAY_WALK_P * mob) {
+                move_it = true;
                 let d = (hw >> 8u) % 8u;
-                var ddx = 0i;
-                var ddy = 0i;
                 switch d {
                     case 0u: { ddx = 1i; }
                     case 1u: { ddx = -1i; }
@@ -3628,12 +3660,18 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
                     case 6u: { ddx = 1i; ddy = -1i; }
                     default: { ddx = -1i; ddy = -1i; }
                 }
+            }
+            if (move_it) {
                 let wx = i32(x) + ddx;
                 let wy = i32(y) + ddy;
                 if (wx >= 0i && wy >= 0i && wx < i32(GRID_SIZE) && wy < i32(GRID_SIZE)) {
                     let wi = u32(wy) * GRID_SIZE + u32(wx);
-                    if (gamma_take_one(idx)) {
-                        gamma_add_one(wi);
+                    // May land on occupied ground too (merging), up to the
+                    // pile ceiling.
+                    if (gamma_count(wi) < GAMMA_PILE_MAX) {
+                        if (gamma_take_one(idx)) {
+                            gamma_add_one(wi);
+                        }
                     }
                 }
             }
