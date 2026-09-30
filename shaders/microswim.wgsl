@@ -115,7 +115,11 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // as the wind coupling in simulation.wgsl): at rest in the water
         // means moving with the currents the dye shows; swimming is
         // measured relative to that.
-        v_fluid_tick = fluid_ride_velocity(agents_out[agent_id].position);
+        // Scaled by the push slider: the water-frame dissipation below pulls
+        // velocity toward this reference, so at slider 0 it must be the
+        // world frame (immune to the fluid), at 1 the full water velocity.
+        v_fluid_tick = fluid_ride_velocity(agents_out[agent_id].position)
+            * clamp(params.fluid_wind_push_strength, 0.0, 1.0);
     }
     var current_vel = agents_out[agent_id].velocity - v_fluid_tick;
     let speed = length(current_vel);

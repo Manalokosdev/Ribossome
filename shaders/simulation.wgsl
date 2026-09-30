@@ -2750,7 +2750,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Slider headroom up to 2x so the ride can be trimmed against the
         // rebuilt (slower) velocity field without shader edits.
         let v_water = (wind_target / wind_k)
-            * clamp(params.fluid_wind_push_strength, 0.0, 2.0);
+            * clamp(params.fluid_wind_push_strength, 0.0, 1.0);
         // Baseline = water motion + slow gravitational settling (marine
         // snow): the medium carries you sideways, gravity pulls you down,
         // and everything else is relative motion you must pay for.
