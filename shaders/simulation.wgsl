@@ -2393,12 +2393,19 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (wind_coupling != 0.0) {
                 // Avoid clamping OOB into edge cells (prevents artificial edge wind).
                 if (world_pos.x >= 0.0 && world_pos.x < f32(SIM_SIZE) && world_pos.y >= 0.0 && world_pos.y < f32(SIM_SIZE)) {
-                    // Fluid velocity is in fluid-cell units; convert to world-units per simulation tick.
                     let v = sample_fluid_velocity_bilinear(world_pos);
-                    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
-                    // NOTE: fluid velocity is in (fluid-cells / second). Our agent integrator uses
-                    // per-tick deltas, so multiply by params.dt to convert seconds -> tick.
-                    let v_frame = v * (cell_to_world * params.dt);
+                    // CALIBRATION: the drift target is the MONOMER TRANSPORT
+                    // LAW — quanta hop downstream at min(|v|*coupling, 0.45)
+                    // cells/epoch — so at slider=1 agents drift at the same
+                    // speed as their food, never launched faster than the
+                    // soup. Raw fluid velocity (no cell_to_world, no dt),
+                    // exactly like transport_quanta, which also makes this
+                    // invariant under fluid-grid resolution changes.
+                    let spd_c = length(v);
+                    var v_frame = vec2<f32>(0.0);
+                    if (spd_c > 1e-5) {
+                        v_frame = (v / spd_c) * clamp(spd_c * MONOMER_ADV_COUPLING, 0.0, 0.45);
+                    }
 
                     // WATER FRAME: viscous drag toward the fluid's velocity.
                     // The torque keeps the explicit per-part form (angular

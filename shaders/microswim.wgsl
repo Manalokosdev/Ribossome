@@ -111,8 +111,16 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // the microswim algorithm with the fluid->agent coupling.
     var v_fluid_tick = vec2<f32>(0.0);
     if (params._pad_rain0 == 1u) {
-        let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
-        v_fluid_tick = sample_fluid_velocity_bilinear(agents_out[agent_id].position) * (cell_to_world * dt_safe);
+        // Water reference = the MONOMER TRANSPORT LAW (same as the wind
+        // coupling in simulation.wgsl): the soup drifts at
+        // min(|v|*coupling, 0.45) cells/epoch, so being at rest in the
+        // water means moving with the food, and swimming is measured
+        // relative to that.
+        let vf = sample_fluid_velocity_bilinear(agents_out[agent_id].position);
+        let sc = length(vf);
+        if (sc > 1e-5) {
+            v_fluid_tick = (vf / sc) * clamp(sc * MONOMER_ADV_COUPLING, 0.0, 0.45);
+        }
     }
     var current_vel = agents_out[agent_id].velocity - v_fluid_tick;
     let speed = length(current_vel);
