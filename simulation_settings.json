@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.9169854,
+  "camera_zoom": 1.1092824,
   "spawn_probability": 2.1,
   "death_probability": 0.01,
   "mutation_rate": 0.005,
@@ -30,10 +30,10 @@
   "morphology_change_cost": 0.0001,
   "pairing_cost": 0.0,
   "prop_wash_strength": 0.0,
-  "prop_wash_strength_fluid": -0.01,
+  "prop_wash_strength_fluid": -0.001,
   "propellers_enabled": false,
   "microswim_enabled": true,
-  "microswim_coupling": 3.0,
+  "microswim_coupling": 10.0,
   "microswim_base_drag": 0.02,
   "microswim_anisotropy": 5.0,
   "microswim_max_frame_vel": 5.0,
@@ -44,7 +44,7 @@
   "microswim_max_length_ratio": 1.6,
   "repulsion_strength": 0.0,
   "agent_repulsion_strength": 0.01,
-  "limit_fps": true,
+  "limit_fps": false,
   "limit_fps_25": false,
   "render_interval": 100,
   "gamma_debug_visual": false,
@@ -53,7 +53,7 @@
   "fluid_enabled": true,
   "fluid_show": true,
   "fluid_dt": 0.003,
-  "fluid_decay": 0.85,
+  "fluid_decay": 0.95,
   "fluid_jacobi_iters": 10,
   "fluid_vorticity": 5.0,
   "fluid_viscosity": 3.7,
@@ -136,8 +136,8 @@
       "max_threshold": 55000.0,
       "adjustment_percent": 20.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 37078,
-      "difficulty_level": -6
+      "last_adjustment_epoch": 40000,
+      "difficulty_level": -8
     },
     "alpha_rain": {
       "enabled": false,

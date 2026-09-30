@@ -2213,6 +2213,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
+    // Water-frame drag accumulators: applied once after the loop in a
+    // stable exponential form (see below).
+    var wind_k = 0.0;
+    var wind_target = vec2<f32>(0.0);
+
     var chirality_flip_physics = 1.0; // Track cumulative chirality for propeller direction
     // Accumulate rotational inertia and detect vampire/beta mouths in this same pass
     // to avoid extra full body scans.
@@ -2353,15 +2358,22 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // per-tick deltas, so multiply by params.dt to convert seconds -> tick.
                     let v_frame = v * (cell_to_world * params.dt);
 
-                    // WATER FRAME: viscous drag toward the fluid's velocity,
-                    // i.e. force ~ (v_fluid - v_agent). Self-limiting: an agent
-                    // already moving with the current feels nothing; one held
-                    // still in a current is pushed; one darting through calm
-                    // water is slowed. Replaces the old one-way push ~ v_fluid.
+                    // WATER FRAME: viscous drag toward the fluid's velocity.
+                    // The torque keeps the explicit per-part form (angular
+                    // velocity is clamped elsewhere); the LINEAR drag is only
+                    // accumulated here and applied once after the loop in an
+                    // unconditionally stable exponential form. The old path
+                    // pushed v_rel*k through the overdamped velocity blend --
+                    // explicit Euler, whose effective gain exceeded 2 for
+                    // light (few-part) agents: their velocity flipped sign
+                    // every epoch with slowly growing amplitude, rendering as
+                    // agents blinking between two fixed positions.
+                    let k_part = wind_coupling * part_area_weight * params.fluid_wind_push_strength * area_response;
                     let v_rel = v_frame - agent_velocity;
-                    let wind_force = v_rel * (wind_coupling * part_area_weight * params.fluid_wind_push_strength * area_response) * drag_coefficient;
-                    force += wind_force;
+                    let wind_force = v_rel * k_part * drag_coefficient;
                     torque += (r_com.x * wind_force.y - r_com.y * wind_force.x);
+                    wind_k += k_part;
+                    wind_target += v_frame * k_part;
                 }
             }
         }
@@ -2643,6 +2655,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // This filters high-frequency oscillations while preserving directed motion
     let mass_smoothing = clamp(1.0 - (total_mass * 2.5), 0.1, 0.95);
     agent_vel = mix(agent_vel, new_velocity, mass_smoothing);
+
+    // Stable water-frame drag: exponential relaxation toward the
+    // area-weighted local fluid velocity. Matches the old linear behavior
+    // for small couplings (1 - exp(-x) ~ x) and saturates at "move with
+    // the fluid" for large ones -- the velocity can approach the water's
+    // but can never overshoot or flip, for ANY coupling/mass combination.
+    if (wind_k > 0.0) {
+        let v_water = wind_target / wind_k;
+        let relax = 1.0 - exp(-wind_k * mass_smoothing);
+        agent_vel = mix(agent_vel, v_water, relax);
+    }
 
     // Apply hard-collision correction after smoothing so it can't be damped away
     // for heavy agents. Cap to avoid huge teleports in extreme pileups.
