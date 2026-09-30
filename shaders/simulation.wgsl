@@ -232,6 +232,31 @@ fn deposit_stillbirth(agent_id: u32, packed: array<u32, GENOME_PACKED_WORDS>, of
     }
 }
 
+// Displace one gamma quantum out of `from_idx`, mole-style: try the cell
+// behind (relative to the push), then the two sides in hashed left/right
+// order. The quantum lands in the first non-solid candidate; if all three
+// are solid rock, nothing moves (you cannot compact rock into rock).
+// Side-casting is what lets agents dig INTO deep terrain: head-on the
+// "behind" cell is often solid too, but the flanks rarely are.
+fn gamma_shove(from_idx: u32, from_pos: vec2<f32>, back_dir: vec2<f32>, seed: u32) {
+    let perp = vec2<f32>(-back_dir.y, back_dir.x);
+    let flip = select(1.0, -1.0, (hash(seed) & 1u) == 1u);
+    var cand: array<vec2<f32>, 3>;
+    cand[0] = back_dir;
+    cand[1] = perp * flip;
+    cand[2] = perp * (-flip);
+    for (var c = 0u; c < 3u; c++) {
+        let tp = clamp_position(from_pos + cand[c] * 1.5);
+        let ti = grid_index(tp);
+        if (ti != from_idx && gamma_count(ti) < GAMMA_SOLID_THRESHOLD) {
+            if (gamma_take_one(from_idx)) {
+                gamma_add_one(ti);
+            }
+            return;
+        }
+    }
+}
+
 // Unified "ionization" chemical sensors: stochastic collision sampling radius
 // (world units) and charge gained per monomer collision. Charge fades each
 // frame at the variant's falloff rate.
@@ -2826,16 +2851,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         if (hit) {
-            // GRIND: pressing against the wall can dislodge one quantum to
-            // the agent's rear (tunneling by persistence).
+            // GRIND: pressing against the wall can dislodge one quantum
+            // from the blocking cell — behind the agent if free, otherwise
+            // cast to the side (lets diggers tunnel into deep rock instead
+            // of stalling when the cell behind is also solid).
             let bseed0 = (agent_id + 1u) * 2246822519u ^ (params.random_seed * 3266489917u);
             if (hash_f32(bseed0) < DIG_P_PER_FRAME * max(total_mass, 0.1)) {
-                let behind0 = clamp_position(agent_pos - dir_m * 2.0);
-                if (gamma_count(grid_index(behind0)) < GAMMA_SOLID_THRESHOLD) {
-                    if (gamma_take_one(hit_idx)) {
-                        gamma_add_one(grid_index(behind0));
-                    }
-                }
+                gamma_shove(hit_idx, hit_pos, -dir_m, bseed0 ^ 0x27D4EB2Fu);
             }
             // Wall normal from the local gamma gradient (points out of the
             // rock). Kill only the approach component of velocity (with a
@@ -2956,12 +2978,8 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let p_dig = clamp(DIG_P_PER_FRAME * max(props.mass, 0.1) * clamp(spd_bd * 4.0 / VEL_MAX, 0.0, 1.0), 0.0, 1.0);
                     let bseed = (agent_id + 1u) * 97u ^ (i * 193u) ^ (params.random_seed * 389u);
                     if (hash_f32(bseed) < p_dig) {
-                        let behind = world_pos - (agent_velocity / spd_bd) * 1.5;
-                        if (is_in_bounds(behind)) {
-                            if (gamma_take_one(idx)) {
-                                gamma_add_one(grid_index(behind));
-                            }
-                        }
+                        // Mole-style: behind first, then side-cast.
+                        gamma_shove(idx, world_pos, -(agent_velocity / spd_bd), bseed ^ 0xC2B2AE35u);
                     }
                 }
             }
