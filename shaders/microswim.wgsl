@@ -236,17 +236,23 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var agent_vel = agents_out[agent_id].velocity + final_thrust;
 
-    // Quadratic drag: keep some high-Re behavior but avoid runaway sustained speed.
+    // WATER-FRAME dissipation: quadratic drag and damping act on motion
+    // RELATIVE to the local fluid, not on world velocity. Drifting with the
+    // current costs nothing; only motion THROUGH the water is damped.
+    // (The old world-frame damping pulled toward zero while the wind
+    // coupling pulled toward the water velocity — two dampers fighting,
+    // which crippled both drifting and swimming in currents.)
+    var rel_v = agent_vel - v_fluid_tick;
+    let rspd = length(rel_v);
     let quad_drag_coeff = 0.004 * re_blend;
-    let quad_drag = speed * speed * quad_drag_coeff;
-    if (speed > 0.01) {
-        agent_vel -= normalize(agent_vel) * quad_drag;
+    let quad_drag = rspd * rspd * quad_drag_coeff;
+    if (rspd > 0.01) {
+        rel_v -= normalize(rel_v) * min(quad_drag, rspd);
     }
-
-    // Damping: reduce the high-Re "free ride" a bit.
     let base_damping = 0.95;
     let damping = mix(base_damping, 0.97, re_blend);
-    agent_vel *= damping;
+    rel_v *= damping;
+    agent_vel = v_fluid_tick + rel_v;
 
     // Keep global velocity cap consistent with the main physics.
     let v_len = length(agent_vel);

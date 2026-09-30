@@ -2410,7 +2410,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // light (few-part) agents: their velocity flipped sign
                     // every epoch with slowly growing amplitude, rendering as
                     // agents blinking between two fixed positions.
-                    let k_part = wind_coupling * part_area_weight * params.fluid_wind_push_strength * area_response;
+                    // NOTE: no area_response here — it reached 10x for light
+                    // agents and made them snap to the water velocity every
+                    // frame, erasing microswim thrust. Light-vs-heavy
+                    // differentiation comes from mass_smoothing at the
+                    // application site. With slider=1 a light agent relaxes
+                    // ~35%/epoch toward the current; a heavy one ~5%.
+                    let k_part = wind_coupling * part_area_weight * params.fluid_wind_push_strength;
                     let v_rel = v_frame - agent_velocity;
                     let wind_force = v_rel * k_part * drag_coefficient;
                     torque += (r_com.x * wind_force.y - r_com.y * wind_force.x);

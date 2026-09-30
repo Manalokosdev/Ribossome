@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.7388746,
+  "camera_zoom": 0.95855856,
   "spawn_probability": 5.0,
   "death_probability": 0.005,
   "mutation_rate": 0.005,
@@ -33,7 +33,7 @@
   "prop_wash_strength_fluid": -0.001,
   "propellers_enabled": false,
   "microswim_enabled": true,
-  "microswim_coupling": 10.0,
+  "microswim_coupling": 2.0,
   "microswim_base_drag": 0.02,
   "microswim_anisotropy": 5.0,
   "microswim_max_frame_vel": 5.0,
@@ -75,7 +75,7 @@
   "fluid_chem_deposit_mult_alpha": 1.0,
   "fluid_chem_deposit_mult_beta": 1.0,
   "fluid_chem_deposit_mult_gamma": 0.0,
-  "fluid_wind_push_strength": 0.4,
+  "fluid_wind_push_strength": 0.01,
   "vector_force_power": 0.0,
   "vector_force_x": 0.0,
   "vector_force_y": 0.01,
@@ -199,7 +199,7 @@
   "dye_beta_thinfilm_mult": 50.0,
   "fumaroles": [
     {
-      "enabled": false,
+      "enabled": true,
       "x_frac": 0.37,
       "y_frac": 0.48,
       "dir_degrees": 230.0,
