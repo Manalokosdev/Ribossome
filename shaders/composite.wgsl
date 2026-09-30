@@ -285,6 +285,12 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let dye_y = u32(clamp(world_pos.y / ws * grid_f, 0.0, max_idx_f));
             let dye_idx = dye_y * GAMMA_GRID_DIM + dye_x;
 
+            // AQUARIUM AMBIENT LIGHT: a faint glow showing the UV gradient
+            // (screen top = low world y = lit surface; keep LIGHT_ATTEN in
+            // sync with simulation.wgsl).
+            let light_c = exp(-4.0 * clamp(world_pos.y / ws, 0.0, 1.0));
+            under_color = under_color + vec3<f32>(0.035, 0.05, 0.07) * light_c;
+
             // Sample the per-monomer dye (x=A, y=U, z=G, w=C), honoring the
             // Grid Interpolation setting like the deposit renderer does.
             var dye_raw4 = max(fluid_dye[dye_idx], vec4<f32>(0.0));
