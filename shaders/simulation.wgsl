@@ -3984,6 +3984,42 @@ fn fs_inspector_overlay(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<
 @group(1) @binding(0)
 var<storage, read_write> species_hash_buffer: array<u32>;
 
+// Matter telemetry: free monomer totals per channel (A/U/G/C), reduced at the
+// species-sampling cadence. Cleared CPU-side before each dispatch. Locked
+// matter (strands, paired complements, energy) is summed on the CPU from the
+// agents readback that species counting already performs.
+@group(1) @binding(1)
+var<storage, read_write> matter_totals: array<atomic<u32>, 4>;
+
+const MATTER_REDUCE_THREADS: u32 = 4096u;
+
+@compute @workgroup_size(64)
+fn reduce_matter_chem(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let tid = gid.x;
+    if (tid >= MATTER_REDUCE_THREADS) {
+        return;
+    }
+    var s0 = 0u;
+    var s1 = 0u;
+    var s2 = 0u;
+    var s3 = 0u;
+    let total_cells = GRID_SIZE * GRID_SIZE;
+    var c = tid;
+    loop {
+        if (c >= total_cells) { break; }
+        let base = c * 4u;
+        s0 += atomicLoad(&chem_grid[base]);
+        s1 += atomicLoad(&chem_grid[base + 1u]);
+        s2 += atomicLoad(&chem_grid[base + 2u]);
+        s3 += atomicLoad(&chem_grid[base + 3u]);
+        c += MATTER_REDUCE_THREADS;
+    }
+    atomicAdd(&matter_totals[0], s0);
+    atomicAdd(&matter_totals[1], s1);
+    atomicAdd(&matter_totals[2], s2);
+    atomicAdd(&matter_totals[3], s3);
+}
+
 @compute @workgroup_size(256)
 fn compute_species_hash(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;

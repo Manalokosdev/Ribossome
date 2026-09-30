@@ -192,6 +192,25 @@ var<storage, read> fluid_dye: array<vec4<f32>>;
 // palette as the deposit render.
 var<storage, read> chem_grid: array<vec4<f32>>;
 
+// Bilinear dye sampling (used when Grid Interpolation is smooth/bicubic so
+// the dye layer matches the deposit's smoothness).
+fn sample_dye_bilinear(world_pos: vec2<f32>, ws: f32) -> vec4<f32> {
+    let grid_f = f32(GAMMA_GRID_DIM);
+    let gx = clamp(world_pos.x / ws * grid_f - 0.5, 0.0, grid_f - 1.0);
+    let gy = clamp(world_pos.y / ws * grid_f - 0.5, 0.0, grid_f - 1.0);
+    let x0 = u32(floor(gx));
+    let y0 = u32(floor(gy));
+    let x1 = min(x0 + 1u, GAMMA_GRID_DIM - 1u);
+    let y1 = min(y0 + 1u, GAMMA_GRID_DIM - 1u);
+    let fx = fract(gx);
+    let fy = fract(gy);
+    let v00 = fluid_dye[y0 * GAMMA_GRID_DIM + x0];
+    let v10 = fluid_dye[y0 * GAMMA_GRID_DIM + x1];
+    let v01 = fluid_dye[y1 * GAMMA_GRID_DIM + x0];
+    let v11 = fluid_dye[y1 * GAMMA_GRID_DIM + x1];
+    return mix(mix(v00, v10, fx), mix(v01, v11, fx), fy);
+}
+
 @compute @workgroup_size(16, 16)
 fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (params.draw_enabled == 0u) { return; }
@@ -248,9 +267,12 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let dye_y = u32(clamp(world_pos.y / ws * grid_f, 0.0, max_idx_f));
             let dye_idx = dye_y * GAMMA_GRID_DIM + dye_x;
 
-            // Sample the per-monomer dye (x=A, y=U, z=G, w=C).
-            // Apply a visualization-only gain, then tone-map to avoid hard saturation.
-            let dye_raw4 = max(fluid_dye[dye_idx], vec4<f32>(0.0));
+            // Sample the per-monomer dye (x=A, y=U, z=G, w=C), honoring the
+            // Grid Interpolation setting like the deposit renderer does.
+            var dye_raw4 = max(fluid_dye[dye_idx], vec4<f32>(0.0));
+            if (params.grid_interpolation >= 1u) {
+                dye_raw4 = max(sample_dye_bilinear(world_pos, ws), vec4<f32>(0.0));
+            }
             let dye_lin4 = dye_raw4 * DYE_VIS_GAIN;
             // Simple Reinhard tone map per-channel: x / (1 + x)
             let dye_tm4 = dye_lin4 / (vec4<f32>(1.0) + dye_lin4);

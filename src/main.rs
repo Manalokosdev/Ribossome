@@ -3990,6 +3990,9 @@ struct GpuState {
     species_hash_readback: wgpu::Buffer,
     species_hash_bind_group: wgpu::BindGroup,
     compute_species_hash_pipeline: wgpu::ComputePipeline,
+    matter_totals_buffer: wgpu::Buffer,
+    matter_totals_readback: wgpu::Buffer,
+    reduce_matter_pipeline: wgpu::ComputePipeline,
     spawn_debug_counters: wgpu::Buffer, // [spawn_counter, debug_counter, alive_counter]
     init_dead_dispatch_args: wgpu::Buffer, // Indirect dispatch args buffer for init-dead (x,y,z)
     init_dead_params_buffer: wgpu::Buffer, // 16-byte uniform: [max_agents, 0, 0, 0]
@@ -4216,6 +4219,9 @@ struct GpuState {
     species_bucket_size: u32,           // Quantization bucket for species hash (higher = fewer species, more tolerance)
     nucleotide_debug_mask: u32,         // Keys 1-4 toggle RGBW view of A/U/G/C concentrations
     env_gen_level: f32,                 // Amplitude for env Generate (flat value / noise peak)
+    matter_free: [u32; 4],              // Free monomer counts (A/U/G/C) at last sample
+    matter_locked_quanta: u64,          // Quanta locked in living strands + paired complements
+    matter_energy: f64,                 // Total agent energy (energy units) at last sample
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
@@ -5289,6 +5295,21 @@ impl GpuState {
         let species_hash_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Species Hash Readback"),
             size: (max_agents * std::mem::size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Matter telemetry: 4 u32 totals (free A/U/G/C monomer counts).
+        let matter_totals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Matter Totals"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let matter_totals_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Matter Totals Readback"),
+            size: 16,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -6553,24 +6574,43 @@ impl GpuState {
         let species_hash_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Species Hash Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    // Matter telemetry totals
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
         let species_hash_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Species Hash Bind Group"),
             layout: &species_hash_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: species_hash_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: species_hash_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: matter_totals_buffer.as_entire_binding(),
+                },
+            ],
         });
         let species_hash_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -6584,6 +6624,15 @@ impl GpuState {
                 layout: Some(&species_hash_pipeline_layout),
                 module: &shader,
                 entry_point: "compute_species_hash",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let reduce_matter_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Reduce Matter Pipeline"),
+                layout: Some(&species_hash_pipeline_layout),
+                module: &shader,
+                entry_point: "reduce_matter_chem",
                 compilation_options: Default::default(),
                 cache: None,
             });
@@ -7675,6 +7724,9 @@ impl GpuState {
             environment_init_params_buffer,
             species_hash_buffer,
             species_hash_readback,
+            matter_totals_buffer,
+            matter_totals_readback,
+            reduce_matter_pipeline,
             species_hash_bind_group,
             compute_species_hash_pipeline,
             spawn_debug_counters,
@@ -7818,6 +7870,9 @@ impl GpuState {
             species_bucket_size: 3,
             nucleotide_debug_mask: 0,
             env_gen_level: 0.02,
+            matter_free: [0; 4],
+            matter_locked_quanta: 0,
+            matter_energy: 0.0,
             last_autosave_epoch: 0,
             last_autosave_time: std::time::Instant::now(),
 
@@ -11753,6 +11808,10 @@ impl GpuState {
     /// so a single added/removed/changed part doesn't create a new species.
     /// Reads back agent data from GPU (blocking), so call infrequently.
     fn count_species(&mut self) -> u32 {
+        // Step 0: zero the matter totals (executed before the encoder below).
+        self.queue
+            .write_buffer(&self.matter_totals_buffer, 0, &[0u8; 16]);
+
         // Step 1: Dispatch GPU compute to hash each agent's phenotype.
         let bg = if self.ping_pong {
             &self.compute_bind_group_b
@@ -11775,11 +11834,18 @@ impl GpuState {
             cpass.set_bind_group(0, bg, &[]);
             cpass.set_bind_group(1, &self.species_hash_bind_group, &[]);
             cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 255) / 256, 1, 1);
+
+            // Matter telemetry: reduce the free monomer totals per channel.
+            cpass.set_pipeline(&self.reduce_matter_pipeline);
+            cpass.set_bind_group(0, bg, &[]);
+            cpass.set_bind_group(1, &self.species_hash_bind_group, &[]);
+            cpass.dispatch_workgroups(4096 / 64, 1, 1);
         }
 
         // Step 2: Copy hash buffer to readback.
         let hash_size = (self.agent_buffer_capacity * std::mem::size_of::<u32>()) as u64;
         encoder.copy_buffer_to_buffer(&self.species_hash_buffer, 0, &self.species_hash_readback, 0, hash_size);
+        encoder.copy_buffer_to_buffer(&self.matter_totals_buffer, 0, &self.matter_totals_readback, 0, 16);
 
         // Also copy agents for thumbnail data (only needed for top 10 representatives).
         let current_buffer = if self.ping_pong {
@@ -11800,9 +11866,18 @@ impl GpuState {
         // Step 3: Read back hash buffer.
         let hash_slice = self.species_hash_readback.slice(..);
         let agents_slice = self.agents_readback.slice(..);
+        let matter_slice = self.matter_totals_readback.slice(..);
         hash_slice.map_async(wgpu::MapMode::Read, |_| {});
         agents_slice.map_async(wgpu::MapMode::Read, |_| {});
+        matter_slice.map_async(wgpu::MapMode::Read, |_| {});
         self.device.poll(wgpu::Maintain::Wait);
+
+        {
+            let md = matter_slice.get_mapped_range();
+            let totals: &[u32] = bytemuck::cast_slice(&md);
+            self.matter_free = [totals[0], totals[1], totals[2], totals[3]];
+        }
+        self.matter_totals_readback.unmap();
 
         let species_count;
         {
@@ -11819,6 +11894,19 @@ impl GpuState {
                     *hash_counts.entry(h).or_insert(0) += 1;
                 }
             }
+
+            // Matter telemetry: quanta locked in living agents (strand bases +
+            // captured pairing complements) and their total energy.
+            let mut locked: u64 = 0;
+            let mut energy_raw: u64 = 0;
+            for agent in agents.iter().take(take_len) {
+                if agent.alive == 1 {
+                    locked += (agent.gene_length + agent.pairing_counter) as u64;
+                    energy_raw += agent.energy as u64;
+                }
+            }
+            self.matter_locked_quanta = locked;
+            self.matter_energy = energy_raw as f64 / 100000.0; // ENERGY_SCALE
 
             species_count = hash_counts.len() as u32;
             let total_living: u32 = hash_counts.values().sum();
@@ -15250,6 +15338,33 @@ fn main() {
                                                     state.epoch_sample_interval
                                                 ));
 
+                                                // Matter conservation readout (sampled with species counting).
+                                                if state.matter_free.iter().any(|&v| v > 0)
+                                                    || state.matter_locked_quanta > 0
+                                                {
+                                                    let free_total: u64 =
+                                                        state.matter_free.iter().map(|&v| v as u64).sum();
+                                                    let energy_q = if state.food_power > 0.0 {
+                                                        state.matter_energy / state.food_power as f64
+                                                    } else {
+                                                        0.0
+                                                    };
+                                                    let total = free_total as f64
+                                                        + state.matter_locked_quanta as f64
+                                                        + energy_q;
+                                                    ui.label(format!(
+                                                        "Matter (quanta): TOTAL {:.0} = free {} (A {} · U {} · G {} · C {}) + locked {} + energy≈{:.0}",
+                                                        total,
+                                                        free_total,
+                                                        state.matter_free[0],
+                                                        state.matter_free[1],
+                                                        state.matter_free[2],
+                                                        state.matter_free[3],
+                                                        state.matter_locked_quanta,
+                                                        energy_q,
+                                                    ));
+                                                }
+
                                                 if !state.population_plot_points.is_empty() {
                                                     use egui_plot::{Line, Plot};
 
@@ -15850,154 +15965,40 @@ fn main() {
                                                         ui.label("(bias strength for slope-based shifting; sign flips direction)");
 
                                                         ui.separator();
-                                                        ui.heading("Alpha Controls");
+                                                        ui.heading("Monomers");
                                                         ui.add(
                                                             egui::Slider::new(&mut state.env_gen_level, 0.001..=0.5)
                                                                 .logarithmic(true)
-                                                                .text("Level (flat value / noise peak)")
+                                                                .text("Amount (flat value / noise peak)")
                                                                 .custom_formatter(|n, _| format!("{:.3}", n)),
                                                         );
-                                                        ui.horizontal(|ui| {
-                                                            if ui.button("Clear").clicked() {
-                                                                state.generate_map(1, 0, 0.0, 0);
-                                                            }
-                                                            if ui.button("Set Flat (level)").clicked() {
-                                                                state.generate_map(1, 0, state.env_gen_level, 0);
-                                                            }
-                                                            if ui.button("Noise (level)").clicked() {
-                                                                let seed = rand::random::<u32>();
-                                                                state.generate_map(1, 1, state.env_gen_level, seed);
-                                                            }
-                                                        });
                                                         ui.add(
                                                             egui::Slider::new(&mut state.alpha_noise_scale, 0.1..=10.0)
                                                                 .logarithmic(true)
-                                                                .text("Alpha Noise Scale"),
+                                                                .text("Noise Scale"),
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.noise_power, 0.1..=5.0)
                                                                 .text("Noise Power (Contrast)"),
                                                         );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.alpha_multiplier, 0.0..=2.0)
-                                                                .text("Rain Probability")
-                                                                .logarithmic(true)
-                                                                .custom_formatter(|n, _| format!("{:.6}", n)),
-                                                        );
-                                                        ui.checkbox(&mut state.rain_debug_visual, "=�Ŀ Show Rain Pattern");
-                                                        if state.rain_debug_visual {
-                                                            ui.label("=��� Green = Alpha (food) | =��� Red = Beta (poison)");
-                                                        }
                                                         ui.horizontal(|ui| {
-                                                            if ui.button("Load Alpha Rain Map").clicked() {
-                                                                if let Some(path) = rfd::FileDialog::new()
-                                                                    .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
-                                                                    .pick_file()
-                                                                {
-                                                                    if let Err(err) =
-                                                                        state.load_alpha_rain_map(&path)
-                                                                    {
-                                                                        eprintln!(
-                                                                            "Failed to load alpha rain map {}: {err:?}",
-                                                                            path.display()
-                                                                        );
-                                                                    }
-                                                                }
-                                                            }
                                                             if ui.button("Clear").clicked() {
-                                                                state.clear_alpha_rain_map();
-                                                            }
-                                                        });
-                                                        ui.label(match state.alpha_rain_map_path.as_ref() {
-                                                            Some(path) => {
-                                                                let name = path
-                                                                    .file_name()
-                                                                    .and_then(|n| n.to_str())
-                                                                    .map(|s| s.to_string())
-                                                                    .unwrap_or_else(|| path.display().to_string());
-                                                                format!("Alpha rain map: {}", name)
-                                                            }
-                                                            None => "Alpha rain map: uniform".to_string(),
-                                                        });
-                                                        if let Some(tex_id) = state.alpha_rain_texture_id(ui.ctx()) {
-                                                            ui.add(
-                                                                egui::Image::new((
-                                                                    tex_id,
-                                                                    egui::Vec2::splat(RAIN_THUMB_SIZE as f32),
-                                                                ))
-                                                                .bg_fill(egui::Color32::DARK_GRAY),
-                                                            )
-                                                            .on_hover_text(
-                                                                "Grayscale preview of alpha rain probability (white = more rain)",
-                                                            );
-                                                        }
-
-                                                        ui.separator();
-                                                        ui.heading("Beta Controls");
-                                                        ui.horizontal(|ui| {
-                                                            if ui.button("Set Flat 0.0").clicked() {
+                                                                state.generate_map(1, 0, 0.0, 0);
                                                                 state.generate_map(2, 0, 0.0, 0);
                                                             }
-                                                            if ui.button("Set Flat (level)").clicked() {
+                                                            if ui.button("Set Flat").clicked() {
+                                                                state.generate_map(1, 0, state.env_gen_level, 0);
                                                                 state.generate_map(2, 0, state.env_gen_level, 0);
                                                             }
-                                                            if ui.button("Noise (level)").clicked() {
-                                                                let seed = rand::random::<u32>();
-                                                                state.generate_map(2, 1, state.env_gen_level, seed);
+                                                            if ui.button("Noise").clicked() {
+                                                                // Different seeds per pool: AU and GC patches land
+                                                                // in different places (geographic niches).
+                                                                state.beta_noise_scale = state.alpha_noise_scale;
+                                                                state.generate_map(1, 1, state.env_gen_level, rand::random::<u32>());
+                                                                state.generate_map(2, 1, state.env_gen_level, rand::random::<u32>());
                                                             }
                                                         });
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.beta_noise_scale, 0.1..=10.0)
-                                                                .logarithmic(true)
-                                                                .text("Beta Noise Scale"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.beta_multiplier, 0.0..=2.0)
-                                                                .text("Rain Probability")
-                                                                .logarithmic(true)
-                                                                .custom_formatter(|n, _| format!("{:.6}", n)),
-                                                        );
-                                                        ui.horizontal(|ui| {
-                                                            if ui.button("Load Beta Rain Map").clicked() {
-                                                                if let Some(path) = rfd::FileDialog::new()
-                                                                    .add_filter("Images", &["png", "jpg", "jpeg", "bmp"])
-                                                                    .pick_file()
-                                                                {
-                                                                    if let Err(err) = state.load_beta_rain_map(&path) {
-                                                                        eprintln!(
-                                                                            "Failed to load beta rain map {}: {err:?}",
-                                                                            path.display()
-                                                                        );
-                                                                    }
-                                                                }
-                                                            }
-                                                            if ui.button("Clear").clicked() {
-                                                                state.clear_beta_rain_map();
-                                                            }
-                                                        });
-                                                        ui.label(match state.beta_rain_map_path.as_ref() {
-                                                            Some(path) => {
-                                                                let name = path
-                                                                    .file_name()
-                                                                    .and_then(|n| n.to_str())
-                                                                    .map(|s| s.to_string())
-                                                                    .unwrap_or_else(|| path.display().to_string());
-                                                                format!("Beta rain map: {}", name)
-                                                            }
-                                                            None => "Beta rain map: uniform".to_string(),
-                                                        });
-                                                        if let Some(tex_id) = state.beta_rain_texture_id(ui.ctx()) {
-                                                            ui.add(
-                                                                egui::Image::new((
-                                                                    tex_id,
-                                                                    egui::Vec2::splat(RAIN_THUMB_SIZE as f32),
-                                                                ))
-                                                                .bg_fill(egui::Color32::DARK_GRAY),
-                                                            )
-                                                            .on_hover_text(
-                                                                "Grayscale preview of beta rain probability (white = more rain)",
-                                                            );
-                                                        }
+                                                        ui.label("Generates all 4 monomer channels (AU + GC pools, distinct noise seeds).");
 
                                                         ui.separator();
                                                         ui.heading("Gamma Controls");
