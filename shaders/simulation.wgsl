@@ -3266,39 +3266,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             selected_agent_buffer[0].genome_packed = agents_out[agent_id].genome_packed;
             selected_agent_buffer[0].body = agents_out[agent_id].body;
 
-            // Robust selection transfer:
-            // - First, try a handful of hashed candidates.
-            // - If that fails (e.g. unlucky dead picks), do a short linear scan.
-            // This avoids losing selection and freezing the inspector.
-            let transfer_hash = hash(agent_id * 2654435761u + params.random_seed);
-            var transferred = false;
-
-            if (params.agent_count > 0u) {
-                for (var t = 0u; t < 8u; t = t + 1u) {
-                    let cand = hash(transfer_hash + t * 747796405u) % params.agent_count;
-                    if (cand != agent_id && agents_in[cand].alive == 1u) {
-                        agents_out[cand].is_selected = 1u;
-                        transferred = true;
-                        break;
-                    }
-                }
-
-                if (!transferred) {
-                    // Wraparound scan from a hashed start (bounded to avoid GPU timeouts).
-                    let start = transfer_hash % params.agent_count;
-                    let limit = min(params.agent_count, 2048u);
-                    for (var i = 0u; i < limit; i = i + 1u) {
-                        let idx = (start + i) % params.agent_count;
-                        if (idx != agent_id && agents_in[idx].alive == 1u) {
-                            agents_out[idx].is_selected = 1u;
-                            transferred = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Selection state is stored in agents_out; keep local scalars immutable.
+            // NO selection transfer on death. The old behavior jumped the
+            // selection to a random survivor, which in fast-turnover species
+            // (short genomes, dense clone clouds) made the crosshair hop
+            // between look-alike agents every few epochs — it read as one
+            // agent flickering between distant positions. The CPU deselects
+            // when it sees alive == 0 in the readback.
             agents_out[agent_id].is_selected = 0u;
         }
 

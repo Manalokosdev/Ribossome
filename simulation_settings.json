@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.8006592,
+  "camera_zoom": 2.4096224,
   "spawn_probability": 2.1,
   "death_probability": 0.01,
   "mutation_rate": 0.005,
@@ -44,8 +44,8 @@
   "microswim_max_length_ratio": 1.6,
   "repulsion_strength": 0.0,
   "agent_repulsion_strength": 0.01,
-  "limit_fps": true,
-  "limit_fps_25": true,
+  "limit_fps": false,
+  "limit_fps_25": false,
   "render_interval": 100,
   "gamma_debug_visual": false,
   "slope_debug_visual": false,
@@ -136,8 +136,8 @@
       "max_threshold": 55000.0,
       "adjustment_percent": 20.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 0,
-      "difficulty_level": 0
+      "last_adjustment_epoch": 35511,
+      "difficulty_level": -5
     },
     "alpha_rain": {
       "enabled": false,

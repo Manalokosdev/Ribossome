@@ -9032,15 +9032,21 @@ impl GpuState {
             };
             if let Some(result) = message {
                 if let Ok(agent) = result {
-                    // IMPORTANT:
-                    // Do NOT clear selection on alive==0.
-                    // The GPU tries to transfer selection on death; keeping the inspector open
-                    // avoids a close/freeze loop and lets the next readback show the new agent.
-                    self.selected_agent_data = Some(agent);
+                    if agent.alive == 0 && self.selected_agent_index.is_some() {
+                        // Selected agent died: deselect. (The GPU no longer
+                        // auto-transfers selection to a random survivor —
+                        // that made the crosshair hop between clones.)
+                        self.selected_agent_index = None;
+                        self.selected_agent_data = None;
+                        self.species_heatmap_enabled = false;
+                        self.follow_selected_agent = false;
+                    } else {
+                        self.selected_agent_data = Some(agent);
 
-                    // Update camera target if following this agent
-                    if self.follow_selected_agent {
-                        self.camera_target = agent.position;
+                        // Update camera target if following this agent
+                        if self.follow_selected_agent {
+                            self.camera_target = agent.position;
+                        }
                     }
                 }
                 self.selected_agent_readback_inflight[slot] = false;
