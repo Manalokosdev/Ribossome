@@ -3572,25 +3572,29 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     // uniform speck field. Restricted to counts below the sandpile band so
     // it never fights the slides; exact take/add conservation.
     if (n >= 1u && n < SANDPILE_DIFF) {
+        // Scan the FULL 8-neighborhood; move toward the largest neighbor
+        // with count >= own (so two lone specks DO merge — the first to
+        // fire becomes the seed; simultaneous symmetric fires are a p^2
+        // rarity). Ties broken by scan order.
         var big_idx = idx;
-        var big_count = n;
-        if (x > 0u) {
-            let c = gamma_count(idx - 1u);
-            if (c > big_count) { big_count = c; big_idx = idx - 1u; }
+        var big_count = 0u;
+        for (var dy = -1i; dy <= 1i; dy++) {
+            for (var dx = -1i; dx <= 1i; dx++) {
+                if (dx == 0i && dy == 0i) { continue; }
+                let nx = i32(x) + dx;
+                let ny = i32(y) + dy;
+                if (nx < 0i || ny < 0i || nx >= i32(GRID_SIZE) || ny >= i32(GRID_SIZE)) {
+                    continue;
+                }
+                let ni = u32(ny) * GRID_SIZE + u32(nx);
+                let c = gamma_count(ni);
+                if (c > big_count) {
+                    big_count = c;
+                    big_idx = ni;
+                }
+            }
         }
-        if (x + 1u < GRID_SIZE) {
-            let c = gamma_count(idx + 1u);
-            if (c > big_count) { big_count = c; big_idx = idx + 1u; }
-        }
-        if (y > 0u) {
-            let c = gamma_count(idx - GRID_SIZE);
-            if (c > big_count) { big_count = c; big_idx = idx - GRID_SIZE; }
-        }
-        if (y + 1u < GRID_SIZE) {
-            let c = gamma_count(idx + GRID_SIZE);
-            if (c > big_count) { big_count = c; big_idx = idx + GRID_SIZE; }
-        }
-        if (big_idx != idx && big_count < GAMMA_PILE_MAX) {
+        if (big_idx != idx && big_count >= n && big_count < GAMMA_PILE_MAX) {
             let hc = hash(idx ^ (params.epoch * 2246822519u) ^ (phase * 3266489917u) ^ (params.random_seed * 668265263u));
             if (f32(hc) / 4294967295.0 < GAMMA_COHESION_P) {
                 if (gamma_take_one(idx)) {
