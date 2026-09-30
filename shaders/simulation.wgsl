@@ -3853,6 +3853,9 @@ fn parcel_hop_p(v: vec2<f32>) -> f32 {
 // masses and agents can harvest the rims (was 0.25 and 1/(1+g): ~30x
 // slower, gamma interiors were sealed vaults).
 const BURIED_DIFF_FACTOR: f32 = 1.0;
+// Downward settling hop probability per free monomer per epoch (light
+// gravity: ~1 cell every 500 epochs, much slower than plume lift).
+const MONOMER_SETTLE_P: f32 = 0.002;
 const GAMMA_POROSITY_K: f32 = 0.3;
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
 // Aquarium thermodynamics: UV activation at full light (per spent monomer
@@ -3959,6 +3962,12 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let d = hash(h ^ 0xC2B2AE35u) & 3u;
                 if (d == 0u) { dx = 1; } else if (d == 1u) { dx = -1; }
                 else if (d == 2u) { dy = 1; } else { dy = -1; }
+            } else if (g_src == 0u && r < p_adv_eff + p_diff_eff + MONOMER_SETTLE_P) {
+                // LIGHT SEDIMENTATION: free monomers slowly settle toward
+                // the bottom (-y = screen down), refilling the vents'
+                // intake so plumes keep having material to lift. Treated
+                // like diffusion at rock boundaries (never pushed in).
+                dy = -1;
             } else {
                 continue;
             }
