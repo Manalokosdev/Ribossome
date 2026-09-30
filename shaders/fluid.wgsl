@@ -138,7 +138,20 @@ const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.97;
 // - chem_grid[idx].z = G monomer
 // - chem_grid[idx].w = C monomer
 // (dye exchange works on pool totals: a = A+U, b = G+C)
-@group(0) @binding(10) var<storage, read_write> chem_grid: array<vec4<f32>>;
+// QUANTIZED: integer monomer counts, 4 atomic u32 per cell (idx*4 + ch).
+@group(0) @binding(10) var<storage, read_write> chem_grid: array<atomic<u32>>;
+
+const CHEM_QUANTA_REF_F: f32 = 3.0;
+
+// Float view of a cell's monomer counts (1.0 = REF quanta), for the dye tracer.
+fn chem_cell_f(idx: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32(atomicLoad(&chem_grid[idx * 4u + 0u])),
+        f32(atomicLoad(&chem_grid[idx * 4u + 1u])),
+        f32(atomicLoad(&chem_grid[idx * 4u + 2u])),
+        f32(atomicLoad(&chem_grid[idx * 4u + 3u]))
+    ) * (1.0 / CHEM_QUANTA_REF_F);
+}
 
 // Fluid-driven lift/deposition of the environment chem layers.
 // Model: the advected dye field acts as the "carried" reservoir.
@@ -689,7 +702,7 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let env_idx = gamma_index(x, y);
     // Per-monomer tracer: dye channels mirror the chem channels 1:1
     // (x=A, y=U, z=G, w=C) — full per-nucleotide identity in the flow.
-    let chem_c = chem_grid[env_idx];
+    let chem_c = chem_cell_f(env_idx);
     let tracer_gain = susp * 0.08;
     dye_val = min(dye_val + clamp(chem_c, vec4<f32>(0.0), vec4<f32>(1.0)) * tracer_gain, vec4<f32>(1.0));
 
@@ -759,7 +772,7 @@ fn diffuse_dye_no_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
     // drain the environment reservoirs.
     let env_idx = gamma_index(x, y);
     // Per-monomer non-depleting injection (dye channels mirror chem 1:1).
-    let chem_c = clamp(chem_grid[env_idx], vec4<f32>(0.0), vec4<f32>(1.0));
+    let chem_c = clamp(chem_cell_f(env_idx), vec4<f32>(0.0), vec4<f32>(1.0));
 
     // If ooze rate is 0, use a small default in no-fluid mode so dye gets replenished.
     // Interpret the UI value as a per-epoch fraction in no-fluid mode.

@@ -4096,10 +4096,7 @@ struct GpuState {
     clear_fluid_force_vectors_pipeline: wgpu::ComputePipeline,
     diffuse_pipeline: wgpu::ComputePipeline,
     diffuse_commit_pipeline: wgpu::ComputePipeline,
-    diffuse_pipeline_b: wgpu::ComputePipeline,
-    diffuse_commit_pipeline_b: wgpu::ComputePipeline,
-    advect_chem_pipeline: wgpu::ComputePipeline,
-    advect_chem_commit_pipeline: wgpu::ComputePipeline,
+    transport_quanta_pipeline: wgpu::ComputePipeline,
     diffuse_trails_pipeline: wgpu::ComputePipeline,
     rain_pipeline: wgpu::ComputePipeline,
     clear_visual_pipeline: wgpu::ComputePipeline,
@@ -6507,44 +6504,16 @@ impl GpuState {
         });
         profiler.mark("diffuse pipeline stage2");
 
-        // Second diffusion round for the G/C monomer channels (staging buffer
-        // only fits two chem channels + gamma per round).
-        let diffuse_pipeline_b = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Diffuse Pipeline (stage1b G/C)"),
+        // Quantized monomer transport (Brownian diffusion + fluid advection).
+        let transport_quanta_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Transport Quanta Pipeline"),
             layout: Some(&compute_pipeline_layout),
             module: &shader,
-            entry_point: "diffuse_grids_stage1b",
+            entry_point: "transport_quanta",
             compilation_options: Default::default(),
             cache: None,
         });
-        let diffuse_commit_pipeline_b = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Diffuse Pipeline (stage2b commit G/C)"),
-            layout: Some(&compute_pipeline_layout),
-            module: &shader,
-            entry_point: "diffuse_grids_stage2b",
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        profiler.mark("diffuse pipeline b");
-
-        // Monomer advection by the fluid velocity field (floating soup).
-        let advect_chem_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Advect Chem Pipeline (stage1)"),
-            layout: Some(&compute_pipeline_layout),
-            module: &shader,
-            entry_point: "advect_chem_stage1",
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let advect_chem_commit_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Advect Chem Pipeline (stage2 commit)"),
-            layout: Some(&compute_pipeline_layout),
-            module: &shader,
-            entry_point: "advect_chem_stage2",
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        profiler.mark("advect chem pipeline");
+        profiler.mark("transport quanta pipeline");
 
         let diffuse_trails_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -7745,10 +7714,7 @@ impl GpuState {
             clear_fluid_force_vectors_pipeline,
             diffuse_pipeline,
             diffuse_commit_pipeline,
-            diffuse_pipeline_b,
-            diffuse_commit_pipeline_b,
-            advect_chem_pipeline,
-            advect_chem_commit_pipeline,
+            transport_quanta_pipeline,
             diffuse_trails_pipeline,
             rain_pipeline,
             clear_visual_pipeline,
@@ -10020,28 +9986,15 @@ impl GpuState {
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
 
-                    // Commit staged A/U + gamma back into the environment grids.
+                    // Commit staged gamma back into the environment grid.
                     cpass.set_pipeline(&self.diffuse_commit_pipeline);
                     cpass.set_bind_group(0, bg_process, &[]);
                     cpass.dispatch_workgroups(groups_x, groups_y, 1);
 
-                    // Round B: diffuse + commit the G/C monomer channels.
-                    cpass.set_pipeline(&self.diffuse_pipeline_b);
+                    // Quantized monomer transport (diffusion + fluid advection).
+                    cpass.set_pipeline(&self.transport_quanta_pipeline);
                     cpass.set_bind_group(0, bg_process, &[]);
                     cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                    cpass.set_pipeline(&self.diffuse_commit_pipeline_b);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
-
-                    // Monomer advection by fluid currents (floating soup).
-                    if self.fluid_enabled && self.alpha_fluid_convolution > 0.0 {
-                        cpass.set_pipeline(&self.advect_chem_pipeline);
-                        cpass.set_bind_group(0, bg_process, &[]);
-                        cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                        cpass.set_pipeline(&self.advect_chem_commit_pipeline);
-                        cpass.set_bind_group(0, bg_process, &[]);
-                        cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                    }
 
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
@@ -10218,22 +10171,10 @@ impl GpuState {
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
 
-                cpass.set_pipeline(&self.diffuse_pipeline_b);
+                // Quantized monomer transport (diffusion + fluid advection).
+                cpass.set_pipeline(&self.transport_quanta_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                cpass.set_pipeline(&self.diffuse_commit_pipeline_b);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(groups_x, groups_y, 1);
-
-                // Monomer advection by fluid currents (floating soup).
-                if self.fluid_enabled && self.alpha_fluid_convolution > 0.0 {
-                    cpass.set_pipeline(&self.advect_chem_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                    cpass.set_pipeline(&self.advect_chem_commit_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
-                }
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE_COMMIT);
@@ -12018,14 +11959,15 @@ impl GpuState {
             let gamma_data = gamma_slice.get_mapped_range();
             let agents_data = agents_slice.get_mapped_range();
 
-            let chem: Vec<[f32; 4]> = bytemuck::cast_slice(&chem_data).to_vec();
+            // Quantized grid: u32 monomer counts per channel. Snapshots keep
+            // storing legacy float pools (1.0 = CHEM_QUANTA_REF quanta per
+            // channel); the per-base split is restored on load.
+            let chem: Vec<[u32; 4]> = bytemuck::cast_slice(&chem_data).to_vec();
             let mut alpha: Vec<f32> = Vec::with_capacity(chem.len());
             let mut beta: Vec<f32> = Vec::with_capacity(chem.len());
             for v in &chem {
-                // Snapshot stores legacy 2-channel pools: alpha = A+U, beta = G+C.
-                // (Per-base split is restored as an even split on load.)
-                alpha.push(v[0] + v[1]);
-                beta.push(v[2] + v[3]);
+                alpha.push((v[0] + v[1]) as f32 / 3.0);
+                beta.push((v[2] + v[3]) as f32 / 3.0);
             }
             let gamma: Vec<f32> = bytemuck::cast_slice(&gamma_data).to_vec();
             let agents: Vec<Agent> = bytemuck::cast_slice(&agents_data).to_vec();
@@ -13150,14 +13092,19 @@ impl GpuState {
             );
         }
 
-        // Upload grids to GPU. Snapshots store legacy 2-channel pools; split each
-        // pool evenly between its two monomers (A/U from alpha, G/C from beta).
-        // Rain map multipliers live in rain_map_texture, not chem_grid.zw.
-        let mut chem_grid: Vec<[f32; 4]> = Vec::with_capacity(alpha_grid.len());
+        // Upload grids to GPU. Snapshots store legacy float pools (1.0 = 3
+        // quanta per channel); split each pool evenly between its two monomers
+        // and quantize with probabilistic rounding.
+        let mut chem_grid: Vec<[u32; 4]> = Vec::with_capacity(alpha_grid.len());
         for i in 0..alpha_grid.len() {
-            let a = alpha_grid[i] * 0.5;
-            let b = beta_grid[i] * 0.5;
-            chem_grid.push([a, a, b, b]);
+            let quantize = |per_channel_q: f32| -> u32 {
+                let whole = per_channel_q.max(0.0).floor();
+                let frac = per_channel_q.max(0.0) - whole;
+                whole as u32 + if rand::random::<f32>() < frac { 1 } else { 0 }
+            };
+            let a_q = alpha_grid[i] * 0.5 * 3.0;
+            let b_q = beta_grid[i] * 0.5 * 3.0;
+            chem_grid.push([quantize(a_q), quantize(a_q), quantize(b_q), quantize(b_q)]);
         }
         self.queue.write_buffer(&self.chem_grid, 0, bytemuck::cast_slice(&chem_grid));
         self.queue.write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_grid));
