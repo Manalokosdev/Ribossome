@@ -3560,6 +3560,9 @@ const GAMMA_STRAY_WALK_P: f32 = 0.05;
 // Loose debris rides currents at this fraction of the monomer advection
 // law (inert mass is heavier than dissolved monomers).
 const GAMMA_SEDIMENT_FACTOR: f32 = 0.5;
+// Shedding rate: a 2-stack beside an empty cell drops its top quantum
+// into the best-nestled vacancy (gravity, not bond-gated).
+const GAMMA_SHED_P: f32 = 0.03;
 
 fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     let x = gid.x;
@@ -3584,6 +3587,9 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
         var best_idx = idx;
         var best_score = -1i;
         var best_c = 0xFFFFu;
+        var em_idx = idx;
+        var em_score = -1i;
+        var em_found = false;
         var tie_h = hash(idx ^ (params.epoch * 1597334677u) ^ (params.random_seed * 3812015801u) ^ (phase * 2654435761u));
         for (var dy = -1i; dy <= 1i; dy++) {
             for (var dx = -1i; dx <= 1i; dx++) {
@@ -3622,6 +3628,13 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
                         best_c = c;
                         best_idx = ni;
                     }
+                    // Track the best EMPTY candidate separately (shedding
+                    // target): the vacancy with the most material around it.
+                    if (c == 0u && (score > em_score || (score == em_score && (tie_h & 2u) == 2u))) {
+                        em_score = score;
+                        em_idx = ni;
+                        em_found = true;
+                    }
                 }
             }
         }
@@ -3642,7 +3655,13 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
         let rw = f32(hw) / 4294967295.0;
         var dest = idx;
         var have_dest = false;
-        if (rw < p_sed) {
+        // SHEDDING (the reverse rule): a 2-stack beside a VACANCY is a
+        // mini-cliff — the top quantum steps down into the most-nestled
+        // empty neighbor. Gravity-driven, so independent of bond grip.
+        if (n >= 2u && em_found && hash_f32(hw ^ 0x632BE5ABu) < GAMMA_SHED_P) {
+            dest = em_idx;
+            have_dest = true;
+        } else if (rw < p_sed) {
             // Downstream hop: axis chosen by |vx| vs |vy| weight
             // (mirrors transport_quanta). Never climbs above own level.
             var ddx = 0i;

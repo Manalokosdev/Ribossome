@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 5.008968,
+  "camera_zoom": 1.4795829,
   "spawn_probability": 5.0,
   "death_probability": 0.01,
   "mutation_rate": 0.003,
@@ -223,7 +223,7 @@
       "variation": 0.5
     }
   ],
-  "grid_interpolation": 0,
+  "grid_interpolation": 1,
   "alpha_gamma_adjust": 0.5,
   "beta_gamma_adjust": 0.5,
   "gamma_gamma_adjust": 5.0,
