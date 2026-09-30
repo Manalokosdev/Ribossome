@@ -964,12 +964,40 @@ fn obstacle_strength(x: u32, y: u32) -> f32 {
     return 1.0 - perm;
 }
 
+// Quantized solidity of the terrain under a fluid cell: the fraction of
+// sampled gamma cells holding SOLID rock (>= 3 quanta, matching the
+// agent-side GAMMA_SOLID_THRESHOLD). This is what slope-only permeability
+// could never capture: a flat-topped plateau has zero slope in its
+// interior, so fluid flowed straight THROUGH solid rock and currents
+// never channeled along canyons.
+const GAMMA_SOLID_COUNT: u32 = 3u;
+
+fn gamma_solidity_at_fluid_cell(x: u32, y: u32) -> f32 {
+    let scale = f32(GAMMA_GRID_DIM) / f32(FLUID_GRID_SIZE);
+    let gx = (f32(x) + 0.5) * scale;
+    let gy = (f32(y) + 0.5) * scale;
+    let h = scale * 0.25;
+    var n_solid = 0u;
+    for (var s = 0u; s < 4u; s++) {
+        let ox = select(-h, h, (s & 1u) == 1u);
+        let oy = select(-h, h, (s & 2u) == 2u);
+        let sx = u32(clamp(gx + ox, 0.0, f32(GAMMA_GRID_DIM - 1u)));
+        let sy = u32(clamp(gy + oy, 0.0, f32(GAMMA_GRID_DIM - 1u)));
+        if (atomicLoad(&gamma_grid[sy * GAMMA_GRID_DIM + sx]) >= GAMMA_SOLID_COUNT) {
+            n_solid += 1u;
+        }
+    }
+    return f32(n_solid) * 0.25;
+}
+
 fn permeability(x: u32, y: u32) -> f32 {
     // 1..0 where 0 means fully solid.
     if (!obstacles_enabled()) {
         return 1.0;
     }
-    return clamp(slope_permeability(x, y), 0.0, 1.0);
+    let slope_perm = clamp(slope_permeability(x, y), 0.0, 1.0);
+    let height_perm = 1.0 - gamma_solidity_at_fluid_cell(x, y);
+    return min(slope_perm, height_perm);
 }
 
 fn is_effectively_solid(x: u32, y: u32) -> bool {
