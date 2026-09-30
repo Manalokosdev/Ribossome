@@ -3398,6 +3398,9 @@ fn suspension_factor(world_pos: vec2<f32>) -> f32 {
 const DIFF_HOP_P: f32 = 0.01;
 const DIFF_HOP_FLOOR: f32 = 0.05;
 const DIFF_AGITATION_SPEED: f32 = 0.5;
+// Buried monomers (inside gamma mass) creep at this fraction of the base
+// diffusion rate, further divided by local occupancy. They never advect.
+const BURIED_DIFF_FACTOR: f32 = 0.25;
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
 
 @compute @workgroup_size(16, 16)
@@ -3421,6 +3424,18 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agitation = clamp(speed_t / DIFF_AGITATION_SPEED, 0.0, 1.0);
     let p_diff = DIFF_HOP_P * mix(DIFF_HOP_FLOOR, 1.0, agitation);
 
+    // GAMMA INTERACTION (no ghosting): monomers INSIDE inert mass do not
+    // ride currents — buried matter only creeps by slow diffusion, scaled
+    // down by occupancy and independent of water agitation (the water does
+    // not reach inside the rock).
+    let g_src = gamma_count(idx);
+    var p_adv_eff = p_adv;
+    var p_diff_eff = p_diff;
+    if (g_src > 0u) {
+        p_adv_eff = 0.0;
+        p_diff_eff = DIFF_HOP_P * BURIED_DIFF_FACTOR / (1.0 + f32(g_src));
+    }
+
     for (var ch = 0u; ch < 4u; ch++) {
         let slot = idx * 4u + ch;
         let n = min(atomicLoad(&chem_grid[slot]), MAX_HOPS_PER_CELL_CH);
@@ -3429,8 +3444,10 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
             let r = f32(h) / 4294967295.0;
             var dx = 0;
             var dy = 0;
-            if (r < p_adv) {
+            var is_adv = false;
+            if (r < p_adv_eff) {
                 // Downstream hop: axis chosen by |vx| vs |vy| weight.
+                is_adv = true;
                 let ax = abs(v.x);
                 let ay = abs(v.y);
                 if (hash_f32(h ^ 0x85EBCA6Bu) < ax / max(ax + ay, 1e-6)) {
@@ -3438,7 +3455,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
                 } else {
                     dy = select(-1, 1, v.y > 0.0);
                 }
-            } else if (r < p_adv + p_diff) {
+            } else if (r < p_adv_eff + p_diff_eff) {
                 let d = hash(h ^ 0xC2B2AE35u) & 3u;
                 if (d == 0u) { dx = 1; } else if (d == 1u) { dx = -1; }
                 else if (d == 2u) { dy = 1; } else { dy = -1; }
@@ -3449,11 +3466,16 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
             let ny = i32(y) + dy;
             if (nx < 0 || ny < 0 || nx >= i32(GRID_SIZE) || ny >= i32(GRID_SIZE)) { continue; }
             let t_idx = u32(ny) * GRID_SIZE + u32(nx);
-            // INFILTRATION: gamma mass attenuates monomer movement — hops
-            // into occupied terrain are increasingly unlikely, so nutrients
-            // seep slowly into (and out of) buried veins until someone digs.
-            let gperm = 1.0 / (1.0 + f32(gamma_count(t_idx)));
-            if (gperm < 1.0 && hash_f32(h ^ 0x27D4EB2Fu) >= gperm) { continue; }
+            // INFILTRATION: currents can NEVER push monomers into rock —
+            // only diffusion enters gamma-occupied cells, attenuated by
+            // occupancy, so nutrients seep slowly into buried veins and
+            // stay there until eroded or dug out.
+            let g_tgt = gamma_count(t_idx);
+            if (g_tgt > 0u) {
+                if (is_adv) { continue; }
+                let gperm = 1.0 / (1.0 + f32(g_tgt));
+                if (hash_f32(h ^ 0x27D4EB2Fu) >= gperm) { continue; }
+            }
             if (chem_take_one(slot)) {
                 chem_add(t_idx, ch, 1u);
             }
