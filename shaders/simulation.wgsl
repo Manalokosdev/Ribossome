@@ -4118,12 +4118,14 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else if (params.nucleotide_debug_mask != 0u) {
         // Nucleotide debug view (keys 1-4): show raw per-monomer concentrations
         // as RGBW — A=red, U=green, G=blue, C=white. Multiple channels stack.
+        // Keys 1-4: ACTIVATED monomers only, per-nucleotide palette
+        // (A=red, U=yellow, G=green, C=blue).
         let m = params.nucleotide_debug_mask;
         var dbg = vec3<f32>(0.0);
-        if ((m & 1u) != 0u) { dbg += vec3<f32>(1.0, 0.0, 0.0) * clamp(cc.x, 0.0, 1.0); }
-        if ((m & 2u) != 0u) { dbg += vec3<f32>(0.0, 1.0, 0.0) * clamp(cc.y, 0.0, 1.0); }
-        if ((m & 4u) != 0u) { dbg += vec3<f32>(0.2, 0.4, 1.0) * clamp(cc.z, 0.0, 1.0); }
-        if ((m & 8u) != 0u) { dbg += vec3<f32>(1.0, 1.0, 1.0) * clamp(cc.w, 0.0, 1.0); }
+        if ((m & 1u) != 0u) { dbg += vec3<f32>(1.0, 0.15, 0.1) * clamp(cc.x, 0.0, 1.0); }
+        if ((m & 2u) != 0u) { dbg += vec3<f32>(1.0, 0.85, 0.1) * clamp(cc.y, 0.0, 1.0); }
+        if ((m & 4u) != 0u) { dbg += vec3<f32>(0.15, 0.9, 0.25) * clamp(cc.z, 0.0, 1.0); }
+        if ((m & 8u) != 0u) { dbg += vec3<f32>(0.2, 0.45, 1.0) * clamp(cc.w, 0.0, 1.0); }
         // Key 6: isolated gamma view — raw quantized terrain height as
         // grayscale (1 quantum = 0.25 grey step, 4+ = white). Combines
         // with keys 1-4 if both are toggled.
@@ -4137,17 +4139,18 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         // U=yellow, G=green, C=blue, dimmed to 50% so agents stay
         // readable on top. alpha_show gates A/U, beta_show gates G/C.
         {
+            // Two-tone energy palette (matches the dye compositor):
+            // ACTIVATED = gold, SPENT = complementary cool blue. Mixed
+            // per-nucleotide hues averaged to grey and hid the spent
+            // state; per-channel identity lives on debug keys 1-4.
             var dep = vec3<f32>(0.0);
-            if (params.alpha_show != 0u) {
-                dep += vec3<f32>(1.0, 0.15, 0.1) * pow(clamp(cc.x, 0.0, 1.0), params.alpha_gamma_adjust);
-                dep += vec3<f32>(1.0, 0.85, 0.1) * pow(clamp(cc.y, 0.0, 1.0), params.alpha_gamma_adjust);
-            }
-            if (params.beta_show != 0u) {
-                dep += vec3<f32>(0.15, 0.9, 0.25) * pow(clamp(cc.z, 0.0, 1.0), params.beta_gamma_adjust);
-                dep += vec3<f32>(0.2, 0.45, 1.0) * pow(clamp(cc.w, 0.0, 1.0), params.beta_gamma_adjust);
-            }
-            // SPENT monomers: inert grey matter awaiting re-activation.
-            dep += vec3<f32>(0.55, 0.57, 0.6) * clamp(cc_spent, 0.0, 1.0) * 0.6;
+            var act_sum = 0.0;
+            if (params.alpha_show != 0u) { act_sum += cc.x + cc.y; }
+            if (params.beta_show != 0u) { act_sum += cc.z + cc.w; }
+            dep += vec3<f32>(1.0, 0.8, 0.3)
+                * pow(clamp(act_sum, 0.0, 1.0), params.alpha_gamma_adjust);
+            // SPENT monomers: discharged matter awaiting re-activation.
+            dep += vec3<f32>(0.3, 0.45, 0.9) * clamp(cc_spent, 0.0, 1.0) * 0.7;
             // Brightness slider (repurposed _pad_dye_alpha_color slot).
             base_color = base_color + dep * clamp(params._pad_dye_alpha_color, 0.0, 1.0);
         }

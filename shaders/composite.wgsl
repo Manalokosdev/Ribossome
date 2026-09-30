@@ -17,13 +17,13 @@ const SIM_SIZE: u32 = 61440u;
 // only how strongly the dye is displayed when params.fluid_show is enabled.
 // Keep this modest; the overlay also applies a tone-map to avoid blowout.
 const DYE_VIS_GAIN: f32 = 2.0;
-// Per-nucleotide display palette (shared idea with the deposit renderer):
-// A=red, U=yellow, G=green, C=blue; MONOMER_VIS dims the soup so agents
-// stay readable on top.
-const MONOMER_COLOR_A: vec3<f32> = vec3<f32>(1.0, 0.15, 0.1);
-const MONOMER_COLOR_U: vec3<f32> = vec3<f32>(1.0, 0.85, 0.1);
-const MONOMER_COLOR_G: vec3<f32> = vec3<f32>(0.15, 0.9, 0.25);
-const MONOMER_COLOR_C: vec3<f32> = vec3<f32>(0.2, 0.45, 1.0);
+// Two-tone energy palette (shared with the deposit renderer): ACTIVATED
+// monomers are GOLD (charged, alive), SPENT are the complementary cool
+// BLUE — mixed nucleotide hues averaged out to grey and became
+// indistinguishable from the spent tint. Per-channel identity remains
+// available on debug keys 1-4.
+const MONOMER_ACT_COLOR: vec3<f32> = vec3<f32>(1.0, 0.8, 0.3);
+const MONOMER_SPENT_COLOR: vec3<f32> = vec3<f32>(0.3, 0.45, 0.9);
 const MONOMER_VIS: f32 = 0.5;
 
 const TAU: f32 = 6.2831853;
@@ -289,7 +289,8 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // (screen top = low world y = lit surface; keep LIGHT_ATTEN in
             // sync with simulation.wgsl).
             let light_c = exp(-4.0 * clamp(world_pos.y / ws, 0.0, 1.0));
-            under_color = under_color + vec3<f32>(0.035, 0.05, 0.07) * light_c;
+            // Warm sunlight tint (so it never reads as the cool spent blue).
+            under_color = under_color + vec3<f32>(0.06, 0.05, 0.035) * light_c;
 
             // Sample the per-monomer dye (x=A, y=U, z=G, w=C), honoring the
             // Grid Interpolation setting like the deposit renderer does.
@@ -315,16 +316,18 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // RGBW debug (keys 1-4) applies to the dye too: split each
                 // pool's tracer by the local monomer ratio — A=red, U=green,
                 // G=blue, C=white, matching the deposit debug view.
+                // Keys 1-4: ACTIVATED monomers only, per-nucleotide palette
+                // (A=red, U=yellow, G=green, C=blue — the dye tracks act).
                 let m = params.nucleotide_debug_mask;
                 let a_dye = dye_tm4.x;
                 let u_dye = dye_tm4.y;
                 let g_dye = dye_tm4.z;
                 let c_dye = dye_tm4.w;
                 var dbg = vec3<f32>(0.0);
-                if ((m & 1u) != 0u) { dbg += vec3<f32>(1.0, 0.0, 0.0) * a_dye; }
-                if ((m & 2u) != 0u) { dbg += vec3<f32>(0.0, 1.0, 0.0) * u_dye; }
-                if ((m & 4u) != 0u) { dbg += vec3<f32>(0.2, 0.4, 1.0) * g_dye; }
-                if ((m & 8u) != 0u) { dbg += vec3<f32>(1.0, 1.0, 1.0) * c_dye; }
+                if ((m & 1u) != 0u) { dbg += vec3<f32>(1.0, 0.15, 0.1) * a_dye; }
+                if ((m & 2u) != 0u) { dbg += vec3<f32>(1.0, 0.85, 0.1) * u_dye; }
+                if ((m & 4u) != 0u) { dbg += vec3<f32>(0.15, 0.9, 0.25) * g_dye; }
+                if ((m & 8u) != 0u) { dbg += vec3<f32>(0.2, 0.45, 1.0) * c_dye; }
                 under_color = clamp(under_color + dbg, vec3<f32>(0.0), vec3<f32>(1.0));
             } else {
             // Per-nucleotide palette: A=red, U=yellow, G=green, C=blue —
@@ -332,21 +335,15 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // identifiable at a glance. MONOMER_VIS dims the whole layer so
             // agents stay clearly readable on top of the soup.
             let dye_gamma = max(params.alpha_gamma_adjust, 0.05);
-            let a_i = pow(dye_tm4.x, dye_gamma);
-            let u_i = pow(dye_tm4.y, dye_gamma);
-            let g_i = pow(dye_tm4.z, dye_gamma);
-            let c_i = pow(dye_tm4.w, dye_gamma);
-            let col = MONOMER_COLOR_A * a_i
-                + MONOMER_COLOR_U * u_i
-                + MONOMER_COLOR_G * g_i
-                + MONOMER_COLOR_C * c_i;
-            // SPENT monomers render as grey: inert matter waiting for UV
-            // or a fumarole to re-activate it.
+            // Two-tone: all activated monomers GOLD, all spent monomers
+            // the complementary cool BLUE.
+            let act_i = pow(clamp(dye_tm4.x + dye_tm4.y + dye_tm4.z + dye_tm4.w, 0.0, 1.0), dye_gamma);
+            let col = MONOMER_ACT_COLOR * act_i;
             let spent_f = chem_spent_total_f(dye_idx);
-            let grey = vec3<f32>(0.55, 0.57, 0.6) * clamp(spent_f, 0.0, 1.0) * 0.6;
+            let spent_col = MONOMER_SPENT_COLOR * clamp(spent_f, 0.0, 1.0) * 0.7;
             // Brightness slider (repurposed _pad_dye_alpha_color slot).
             let monomer_vis = clamp(params._pad_dye_alpha_color, 0.0, 1.0);
-            under_color = under_color + (col + grey) * monomer_vis;
+            under_color = under_color + (col + spent_col) * monomer_vis;
             under_color = clamp(under_color, vec3<f32>(0.0), vec3<f32>(1.0));
             }
         }
