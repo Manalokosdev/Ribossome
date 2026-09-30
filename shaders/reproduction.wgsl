@@ -65,14 +65,22 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let num_offspring = select(1u, 2u, split_reproduction);
 
         let inherited_energy = agent_energy_cur * 0.5;
+        if (inherited_energy <= 0.0) {
+            // Closed world: pairing completed but there is no energy to endow
+            // offspring — nothing spawns, yet the strand monomers were already
+            // captured. Refund them all at the parent's position.
+            let refund = genome_paired_complement_counts(agent_genome_packed, genome_offset, gene_length, gene_length);
+            let ridx = grid_index(agent_pos);
+            let rseed = (agent_id + 1u) * 747796405u ^ (params.random_seed * 2654435761u);
+            for (var rc = 0u; rc < 4u; rc++) {
+                chem_deposit_prob(ridx, rc, refund[rc], rseed ^ (rc * 374761393u));
+            }
+        }
         if (inherited_energy > 0.0) {
             let spawn_index = atomicAdd(&spawn_debug_counters[0], num_offspring);
 
             for (var offspring_idx = 0u; offspring_idx < num_offspring; offspring_idx++) {
                 let current_spawn_index = spawn_index + offspring_idx;
-                if (current_spawn_index >= MAX_SPAWN_REQUESTS) {
-                    break;
-                }
 
                 var offspring_gene_offset = genome_offset;
                 var offspring_gene_length = gene_length;
@@ -84,6 +92,20 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         offspring_gene_offset = second_gene_start;
                         offspring_gene_length = (genome_offset + gene_length) - second_gene_start;
                     }
+                }
+
+                if (current_spawn_index >= MAX_SPAWN_REQUESTS) {
+                    // Closed world: spawn queue full — this offspring cannot
+                    // materialize, but its strand monomers were already
+                    // captured during pairing. Refund the segment's
+                    // complements to the grid at the parent's position.
+                    let refund = genome_paired_complement_counts(agent_genome_packed, offspring_gene_offset, offspring_gene_length, offspring_gene_length);
+                    let ridx = grid_index(agent_pos);
+                    let rseed = (agent_id + 1u) * 747796405u ^ (offspring_idx * 2654435761u) ^ params.random_seed;
+                    for (var rc = 0u; rc < 4u; rc++) {
+                        chem_deposit_prob(ridx, rc, refund[rc], rseed ^ (rc * 374761393u));
+                    }
+                    continue;
                 }
 
                 let offspring_hash = (hash3 ^ (current_spawn_index * 0x9e3779b9u) ^ (agent_id * 0x85ebca6bu) ^ (offspring_idx * 0x7f4a7c13u)) * 1664525u + 1013904223u;

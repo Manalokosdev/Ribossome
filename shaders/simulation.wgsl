@@ -197,6 +197,23 @@ const UPTAKE_P_PER_QUANTUM: f32 = 0.01;
 // shoving one gamma quantum from under the part to the cell behind it.
 const DIG_P_PER_FRAME: f32 = 0.05;
 
+// Closed world: a STILLBIRTH (non-viable genome after mutation) must return
+// everything it embodies — the strand its parent paid complements for, plus
+// its inherited energy — otherwise matter silently vanishes with every
+// failed mutation (this was a real, dominant mass leak).
+fn deposit_stillbirth(agent_id: u32, packed: array<u32, GENOME_PACKED_WORDS>, offset: u32, len: u32, energy: f32, pos: vec2<f32>) {
+    let comp = genome_composition(packed, offset, len);
+    var quanta = f32(len);
+    if (params.food_power > 0.0) {
+        quanta += max(energy, 0.0) / params.food_power;
+    }
+    let idx = grid_index(pos);
+    let seed = (agent_id + 1u) * 2654435761u ^ (params.random_seed * 668265263u);
+    for (var c = 0u; c < 4u; c++) {
+        chem_deposit_prob(idx, c, comp[c] * quanta, seed ^ (c * 374761393u));
+    }
+}
+
 // Unified "ionization" chemical sensors: stochastic collision sampling radius
 // (world units) and charge gained per monomer collision. Charge fades each
 // frame at the variant's falloff rate.
@@ -959,9 +976,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         if (start == 0xFFFFFFFFu) {
-            // Non-viable genome (no start codon or no codons)
+            // Non-viable genome (no start codon or no codons): stillbirth —
+            // return the embodied matter before dying.
+            deposit_stillbirth(agent_id, agent_genome_packed, agent_genome_offset, agent_gene_length, agent_energy, agent_position);
             agents_out[agent_id].alive = 0u;
             agents_out[agent_id].body_count = 0u;
+            atomicStore(&agents_out[agent_id].energy, 0u);
             return;
         }
         start_byte = start;
@@ -994,7 +1014,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         body_count_val = count;
 
         if (count == 0u) {
+            // Stillbirth (genome translated to zero parts): return matter.
+            deposit_stillbirth(agent_id, agent_genome_packed, agent_genome_offset, agent_gene_length, agent_energy, agent_position);
             agents_out[agent_id].alive = 0u;
+            atomicStore(&agents_out[agent_id].energy, 0u);
             return;
         }
     }
@@ -2977,8 +3000,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         energy_consumption += baseline + organ_extra;
     }
 
-    // Cap energy by storage capacity after feeding (use post-build capacity)
-    // Always clamp to avoid energy > capacity, and to zero when capacity == 0
+    // Cap energy by storage capacity after feeding (use post-build capacity).
+    // Closed world: energy above capacity (e.g. vampire gains) is SPILLED
+    // back into the environment as monomers instead of clamped into nothing.
+    let overflow_e = max(agent_energy_cur - max(capacity, 0.0), 0.0);
+    if (overflow_e > 0.0 && params.food_power > 0.0) {
+        let spill_q = overflow_e / max(params.food_power * food_power_multiplier, 1e-6);
+        let spill_idx = grid_index(agent_pos);
+        let spill_seed = (agent_id + 1u) * 1181u ^ (params.random_seed * 2129u);
+        for (var oc = 0u; oc < 4u; oc++) {
+            chem_deposit_prob(spill_idx, oc, spill_q * 0.25, spill_seed ^ (oc * 374761393u));
+        }
+    }
     agent_energy_cur = clamp(agent_energy_cur, 0.0, max(capacity, 0.0));
 
     // 3) Maintenance: subtract consumption after feeding.
