@@ -3965,9 +3965,14 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else if (g_src == 0u && r < p_adv_eff + p_diff_eff + MONOMER_SETTLE_P) {
                 // LIGHT SEDIMENTATION: free monomers slowly settle toward
                 // the bottom (-y = screen down), refilling the vents'
-                // intake so plumes keep having material to lift. Treated
-                // like diffusion at rock boundaries (never pushed in).
+                // intake so plumes keep having material to lift. Settling
+                // never enters rock: sediment RESTS ON TOP of boulders
+                // (only lateral/random diffusion percolates inward).
                 dy = -1;
+                let below_y = i32(y) - 1;
+                if (below_y >= 0 && gamma_count(u32(below_y) * GRID_SIZE + x) > 0u) {
+                    continue;
+                }
             } else {
                 continue;
             }
