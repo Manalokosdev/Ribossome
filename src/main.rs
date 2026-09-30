@@ -10870,20 +10870,20 @@ impl GpuState {
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_DIVERGENCE);
 
-                    // 6. Clear pressure buffers
-                    cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
-                    cpass.set_pipeline(&self.fluid_clear_pressure_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
-
+                    // 6. WARM START: pressure is NOT cleared. Clearing every
+                    // solve meant 10 Jacobi iterations from zero, which only
+                    // removes divergence at a few-cell scale: large plumes
+                    // stayed divergent (buoyancy acted as a fluid SOURCE),
+                    // evacuating monomers into low-density bubbles. Reusing
+                    // last solve's pressure lets Jacobi converge across frames
+                    // — effectively hundreds of iterations for steady flows.
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_CLEAR_PRESSURE);
 
-                    // 7. Jacobi iterations for pressure
-                    let jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
+                    // 7. Jacobi iterations for pressure. Must be EVEN so the
+                    // result lands in pressure_a (read by subtract_gradient
+                    // and by next solve's first iteration).
+                    let jacobi_iters = (self.fluid_jacobi_iters.clamp(2, 128) + 1) & !1u32;
                     for i in 0..jacobi_iters {
                         let bg = if (i & 1) == 0 { bg_ab } else { bg_ba };
                         cpass.set_pipeline(&self.fluid_jacobi_pressure_pipeline);
