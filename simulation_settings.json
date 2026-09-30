@@ -136,8 +136,8 @@
       "max_threshold": 55000.0,
       "adjustment_percent": 20.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 299208,
-      "difficulty_level": 8
+      "last_adjustment_epoch": 324712,
+      "difficulty_level": 9
     },
     "alpha_rain": {
       "enabled": false,

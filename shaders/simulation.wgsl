@@ -193,6 +193,12 @@ const SPIKE_KILL_COST_FRAC_OF_VICTIM: f32 = 0.00;
 // part mass and agent stillness.
 const UPTAKE_P_PER_QUANTUM: f32 = 0.01;
 
+// Unified "ionization" chemical sensors: stochastic collision sampling radius
+// (world units) and charge gained per monomer collision. Charge fades each
+// frame at the variant's falloff rate.
+const SENSOR_ION_RADIUS: f32 = 6.0;
+const SENSOR_CHARGE_PER_HIT: f32 = 0.12;
+
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
@@ -1632,58 +1638,67 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Rotate to world space
         let perpendicular_world = normalize(apply_agent_rotation(perpendicular_local, agent_rotation));
 
-        if (amino_props.is_alpha_sensor) {
+        // ==============================================================
+        // UNIFIED CHEMICAL SENSORS — "ionization" model
+        // Types 22/38/39 emit into the alpha chain; 23/40/41 into beta.
+        // Stochastic collision sampling within a radius: monomers of the
+        // sensor's TARGET type build up charge, which fades every frame
+        // (bacteria-style TEMPORAL chemotaxis — the charge dynamics as
+        // the agent moves carry the direction, not a spatial gradient).
+        // Variant (modifier 0-19) decodes:
+        //   target monomer = modifier % 4  (A/U/G/C)
+        //   falloff tier   = (modifier/4) % 5  (fast -> slow memory)
+        // Sensitivity magnitude + polarity come from promoter+modifier
+        // parameter1, as before.
+        // ==============================================================
+        let is_chem_sensor_alpha = amino_props.is_alpha_sensor || base_type == 38u || base_type == 39u;
+        let is_chem_sensor_beta = amino_props.is_beta_sensor || base_type == 40u || base_type == 41u;
+        if (is_chem_sensor_alpha || is_chem_sensor_beta) {
             let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent_rotation);
             let world_pos = agent_position + rotated_pos;
-            let sensor_seed = agent_id * 1000u + i * 13u;
 
-            // Extract promoter and modifier parameter1 values
-            // The part_type encodes the modifier (0-19) as parameter (0-255)
             let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
-
-            // Convert organ_param (0-255) back to modifier index (0-19)
             let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
-
-            // Alpha sensors use promoters V(17) or M(10), get their parameter1 values
-            // For sensors: organ 22 can be from V(17)+mod or M(10)+mod
-            // We need to determine which promoter was used - check agent's genome or use base approximation
-            // For simplicity, we'll use the organ's own parameter1 as promoter baseline
-            // Reuse amino_props which was already computed for base_type
             let promoter_param1 = amino_props.parameter1;
-
-            // Get modifier amino acid parameter1
             let modifier_props = get_amino_acid_properties(modifier_index);
             let modifier_param1 = modifier_props.parameter1;
 
-            let sensed_value = sample_stochastic_gaussian(world_pos, env_sensor_gain_mult, sensor_seed, 0u, params.debug_mode != 0u, perpendicular_world, chirality_flip_signal, promoter_param1, modifier_param1);
-            // Apply sqrt to increase sensitivity to low signals (0.01 -> 0.1, 0.25 -> 0.5, 1.0 -> 1.0)
-            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
-            // Add sensor contribution to diffused signal (instead of mixing)
-            new_alpha = new_alpha + nonlinear_value;
-        }
-        if (amino_props.is_beta_sensor) {
-            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent_rotation);
-            let world_pos = agent_position + rotated_pos;
-            let sensor_seed = agent_id * 1000u + i * 13u;
+            let target_ch = modifier_index % 4u;
+            let falloff_tier = (modifier_index / 4u) % 5u;
+            var ion_decay = 0.85;
+            if (falloff_tier == 0u) { ion_decay = 0.50; }
+            else if (falloff_tier == 1u) { ion_decay = 0.72; }
+            else if (falloff_tier == 3u) { ion_decay = 0.93; }
+            else if (falloff_tier == 4u) { ion_decay = 0.97; }
 
-            // Extract promoter and modifier parameter1 values
-            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
+            let combined = promoter_param1 + modifier_param1;
+            let polarity = select(1.0, -1.0, combined < 0.0);
+            let gain = abs(combined);
 
-            // Convert organ_param (0-255) back to modifier index (0-19)
-            let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
+            // Stochastic collisions within the sensing radius.
+            var hits = 0.0;
+            let base_seed = (agent_id * 1000u + i * 13u) ^ (params.random_seed * 747796405u);
+            for (var s = 0u; s < 4u; s++) {
+                let hs = hash(base_seed ^ (s * 2654435761u));
+                let ang = hash_f32(hs) * 6.2831853;
+                let rad = sqrt(hash_f32(hs ^ 0x9E3779B9u)) * SENSOR_ION_RADIUS;
+                let sp = world_pos + vec2<f32>(cos(ang), sin(ang)) * rad;
+                if (is_in_bounds(sp)) {
+                    hits += f32(chem_count(grid_index(sp), target_ch));
+                }
+            }
 
-            // Get promoter and modifier parameter1 values
-            // Reuse amino_props which was already computed for base_type
-            let promoter_param1 = amino_props.parameter1;
+            // Ionization charge: accumulates with collisions, fades over time.
+            var charge = max(agents_out[agent_id].body[i]._pad.x, 0.0);
+            charge = charge * ion_decay + hits * SENSOR_CHARGE_PER_HIT;
+            agents_out[agent_id].body[i]._pad.x = charge;
 
-            let modifier_props = get_amino_acid_properties(modifier_index);
-            let modifier_param1 = modifier_props.parameter1;
-
-            let sensed_value = sample_stochastic_gaussian(world_pos, env_sensor_gain_mult, sensor_seed, 1u, params.debug_mode != 0u, perpendicular_world, chirality_flip_signal, promoter_param1, modifier_param1);
-            // Apply sqrt to increase sensitivity to low signals (0.01 -> 0.1, 0.25 -> 0.5, 1.0 -> 1.0)
-            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
-            // Add sensor contribution to diffused signal (instead of mixing)
-            new_beta = new_beta + nonlinear_value;
+            let emitted = sqrt(clamp(charge * gain, 0.0, 1.0)) * polarity;
+            if (is_chem_sensor_alpha) {
+                new_alpha = new_alpha + emitted;
+            } else {
+                new_beta = new_beta + emitted;
+            }
         }
 
         // TRAIL ENERGY SENSOR - Senses nearby agent energies from trail
@@ -1704,41 +1719,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             new_beta += max(-normalized_value, 0.0);
         }
 
-        // ALPHA MAGNITUDE SENSORS - Organ types 38, 39 (V/M + I/K)
-        // Measure alpha signal strength without directional bias
-        if (base_type == 38u || base_type == 39u) {
-            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent_rotation);
-            let world_pos = agent_position + rotated_pos;
-            let sensor_seed = agent_id * 1000u + i * 13u;
-
-            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
-            let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
-            let promoter_param1 = amino_props.parameter1;
-            let modifier_props = get_amino_acid_properties(modifier_index);
-            let modifier_param1 = modifier_props.parameter1;
-
-            let sensed_value = sample_magnitude_only(world_pos, env_sensor_gain_mult, sensor_seed, 0u, params.debug_mode != 0u, promoter_param1, modifier_param1);
-            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
-            new_alpha = new_alpha + nonlinear_value;
-        }
-
-        // BETA MAGNITUDE SENSORS - Organ types 40, 41 (V/M + T/V)
-        // Measure beta signal strength without directional bias
-        if (base_type == 40u || base_type == 41u) {
-            let rotated_pos = apply_agent_rotation(agents_out[agent_id].body[i].pos, agent_rotation);
-            let world_pos = agent_position + rotated_pos;
-            let sensor_seed = agent_id * 1000u + i * 13u;
-
-            let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
-            let modifier_index = u32((f32(organ_param) / 255.0) * 19.0);
-            let promoter_param1 = amino_props.parameter1;
-            let modifier_props = get_amino_acid_properties(modifier_index);
-            let modifier_param1 = modifier_props.parameter1;
-
-            let sensed_value = sample_magnitude_only(world_pos, env_sensor_gain_mult, sensor_seed, 1u, params.debug_mode != 0u, promoter_param1, modifier_param1);
-            let nonlinear_value = sqrt(clamp(abs(sensed_value), 0.0, 1.0)) * sign(sensed_value);
-            new_beta = new_beta + nonlinear_value;
-        }
+        // (Magnitude sensor types 38-41 are folded into the unified
+        //  ionization sensor above — same model, beta-family variants just
+        //  emit into the beta chain.)
 
         // AGENT ALPHA SENSOR - Organ type 34 (V/M + L)
         // Senses nearby agent colors from trail
