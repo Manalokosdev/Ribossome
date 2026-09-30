@@ -54,3 +54,4 @@ dist/
 
 # Snapshots folder (user-generated saves)
 snapshots/
+selection_log.csv
