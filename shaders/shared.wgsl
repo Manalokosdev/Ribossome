@@ -35,6 +35,9 @@ const ANGVEL_MAX: f32 = 1.5;         // Max angular change (radians) per frame
 // Convert local fluid vorticity (curl) into agent spin.
 // Torque-based spin still exists; this makes vortices visibly rotate agents.
 const WIND_CURL_ANGVEL_SCALE: f32 = 0.25;
+// Weathervane: how fast the body turns toward the least-drag orientation
+// (axis aligned with the relative flow).
+const WIND_VANE_STRENGTH: f32 = 0.5;
 // Signal-to-angle shaping (no dt): cap amplitude and per-frame change
 // Lowered to reduce excessive signal-driven bending/rotation.
 const SIGNAL_GAIN: f32 = 1.0;       // was 20.0 (divide all alpha/beta responses by ~5)

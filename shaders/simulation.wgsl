@@ -2404,7 +2404,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let spd_c = length(v);
                     var v_frame = vec2<f32>(0.0);
                     if (spd_c > 1e-5) {
-                        v_frame = (v / spd_c) * clamp(spd_c * MONOMER_ADV_COUPLING, 0.0, 0.45);
+                        v_frame = (v / spd_c) * clamp(spd_c * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP);
                     }
 
                     // WATER FRAME: viscous drag toward the fluid's velocity.
@@ -2783,25 +2783,34 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // Add spin from local fluid vorticity (curl). This makes vortices visibly rotate agents.
+    // WEATHERVANE: instead of spinning with the curl, the body turns toward
+    // the least-drag orientation — its axis aligns with the RELATIVE flow
+    // (water velocity minus own velocity), like a rod streaming in a
+    // current. The axis is a line, so we align to the nearest of the two
+    // directions (error wrapped to [-pi/2, pi/2]).
     if (params.fluid_wind_push_strength != 0.0) {
-        // center_of_mass is local (0,0) in this phase; sample at agent world position.
         let com_world = agent_pos;
         if (com_world.x >= 0.0 && com_world.x < f32(SIM_SIZE) && com_world.y >= 0.0 && com_world.y < f32(SIM_SIZE)) {
-            let curl = sample_fluid_curl(com_world);
-            // Curl is in ~1/sec; convert to per-tick delta with params.dt.
-            // No area_response here (it reached 10x for light agents: they
-            // spun in place while the capped drift barely moved them), and
-            // the curl is scaled by the same factor the LINEAR drift law
-            // applies to the raw velocity, so agents rotate with the water
-            // exactly as much as they translate with it.
-            let spd_curl = length(sample_fluid_velocity_bilinear(com_world));
-            let drift_factor = select(
-                MONOMER_ADV_COUPLING,
-                0.45 / max(spd_curl, 1e-5),
-                spd_curl * MONOMER_ADV_COUPLING > 0.45
-            );
-            angular_velocity += curl * drift_factor * params.fluid_wind_push_strength * WIND_CURL_ANGVEL_SCALE * params.dt;
+            let vraw = sample_fluid_velocity_bilinear(com_world);
+            let sr = length(vraw);
+            var v_w = vec2<f32>(0.0);
+            if (sr > 1e-5) {
+                v_w = (vraw / sr) * clamp(sr * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP);
+            }
+            let v_rel_w = v_w - agent_vel;
+            let rspd_w = length(v_rel_w);
+            if (rspd_w > 0.02) {
+                let fwd = vec2<f32>(cos(agent_rot), sin(agent_rot));
+                let flow_dir = v_rel_w / rspd_w;
+                var ang_err = atan2(fwd.x * flow_dir.y - fwd.y * flow_dir.x, dot(fwd, flow_dir));
+                if (ang_err > 1.5707963) { ang_err -= 3.14159265; }
+                if (ang_err < -1.5707963) { ang_err += 3.14159265; }
+                let w_vane = clamp(
+                    ang_err * WIND_VANE_STRENGTH * min(rspd_w, 1.0),
+                    -0.05, 0.05
+                ) * min(params.fluid_wind_push_strength, 2.0);
+                angular_velocity += w_vane;
+            }
         }
     }
     angular_velocity = angular_velocity * ANGULAR_BLEND;
@@ -3578,7 +3587,10 @@ const DIFF_AGITATION_SPEED: f32 = 0.5;
 // Suspended monomers ALWAYS ride the current — fixed physical coupling, not
 // a user setting (colloidal particles move with the water; there is nothing
 // to tune, and no stale settings file can freeze the soup again).
-const MONOMER_ADV_COUPLING: f32 = 0.5;
+const MONOMER_ADV_COUPLING: f32 = 1.0;
+// Cap on the drift speed (cells/epoch). Shared by monomer transport AND
+// both agent-fluid couplings so food and agents always ride together.
+const MONOMER_ADV_CAP: f32 = 0.9;
 // Buried monomers (inside gamma mass) creep at this fraction of the base
 // diffusion rate, further divided by local occupancy. They never advect.
 const BURIED_DIFF_FACTOR: f32 = 0.25;
@@ -3600,7 +3612,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         v = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
     }
     let speed_t = length(v);
-    let p_adv = clamp(speed_t * MONOMER_ADV_COUPLING, 0.0, 0.45);
+    let p_adv = clamp(speed_t * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP);
     let agitation = clamp(speed_t / DIFF_AGITATION_SPEED, 0.0, 1.0);
     let p_diff = DIFF_HOP_P * mix(DIFF_HOP_FLOOR, 1.0, agitation);
 

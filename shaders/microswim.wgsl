@@ -119,7 +119,7 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let vf = sample_fluid_velocity_bilinear(agents_out[agent_id].position);
         let sc = length(vf);
         if (sc > 1e-5) {
-            v_fluid_tick = (vf / sc) * clamp(sc * MONOMER_ADV_COUPLING, 0.0, 0.45);
+            v_fluid_tick = (vf / sc) * clamp(sc * MONOMER_ADV_COUPLING, 0.0, MONOMER_ADV_CAP);
         }
     }
     var current_vel = agents_out[agent_id].velocity - v_fluid_tick;
