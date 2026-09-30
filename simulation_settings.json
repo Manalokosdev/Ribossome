@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.41038847,
+  "camera_zoom": 0.7289999,
   "spawn_probability": 5.0,
   "death_probability": 0.01,
   "mutation_rate": 0.003,
@@ -52,7 +52,7 @@
   "rain_debug_visual": false,
   "fluid_enabled": true,
   "fluid_show": true,
-  "fluid_dt": 0.006,
+  "fluid_dt": 0.017,
   "fluid_decay": 1.0,
   "fluid_jacobi_iters": 10,
   "fluid_substep": 2,
@@ -202,11 +202,11 @@
   "fumaroles": [
     {
       "enabled": true,
-      "x_frac": 0.55,
-      "y_frac": 0.15,
+      "x_frac": 0.4858247,
+      "y_frac": 0.03271409,
       "dir_degrees": 230.0,
       "strength": 50.0,
-      "spread": 10.0,
+      "spread": 13.604892,
       "alpha_dye_rate": 0.0,
       "beta_dye_rate": 0.0,
       "variation": 0.93
@@ -217,7 +217,7 @@
       "y_frac": 0.45,
       "dir_degrees": 0.0,
       "strength": 3000.0,
-      "spread": 10.0,
+      "spread": 7.78688,
       "alpha_dye_rate": 0.0,
       "beta_dye_rate": 0.0,
       "variation": 0.5

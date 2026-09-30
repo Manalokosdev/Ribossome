@@ -3634,7 +3634,7 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
             vs = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
         }
         let spd_s = length(vs);
-        let p_sed = parcel_hop_p(spd_s) * GAMMA_SEDIMENT_FACTOR * mob;
+        let p_sed = parcel_hop_p(vs) * GAMMA_SEDIMENT_FACTOR * mob;
         let hw = hash(idx ^ (params.epoch * 747796405u) ^ (phase * 196613u) ^ (params.random_seed * 2891336453u));
         let rw = f32(hw) / 4294967295.0;
         var dest = idx;
@@ -3790,9 +3790,18 @@ const MONOMER_ADV_CAP: f32 = 0.9;
 // EVACUATED persistent voids at plume acceleration zones and piled rings
 // at deceleration fronts. A passive tracer advected consistently with an
 // incompressible field stays uniform, as it must.
-fn parcel_hop_p(speed_raw: f32) -> f32 {
+// NOTE the L1 norm (|vx|+|vy|), not Euclidean: the hop direction is split
+// by |vx|/(|vx|+|vy|), so with an L1 total probability the per-axis flux
+// is EXACTLY k*vx*n / k*vy*n — a conservative upwind scheme in
+// expectation, which preserves uniform fields under divergence-free flow.
+// With the L2 norm the flux carried a direction-dependent factor
+// (|v|/(|vx|+|vy|) in [0.707, 1]) that broke discrete continuity wherever
+// the flow direction ROTATES — plume heads and vortex rims — carving the
+// persistent vacuum pockets Filipe kept (correctly!) refusing to accept.
+fn parcel_hop_p(v: vec2<f32>) -> f32 {
     let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
-    return clamp(speed_raw * cell_to_world * max(params.dt, 1e-3), 0.0, MONOMER_ADV_CAP);
+    let l1 = abs(v.x) + abs(v.y);
+    return clamp(l1 * cell_to_world * max(params.dt, 1e-3), 0.0, MONOMER_ADV_CAP);
 }
 // Buried monomers (inside gamma mass) creep at this fraction of the base
 // diffusion rate, further divided by local occupancy. They never advect.
@@ -3824,12 +3833,13 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var v = vec2<f32>(0.0);
     if (params._pad_rain0 == 1u) {
-        let fxi = min((x * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
-        let fyi = min((y * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
-        v = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
+        // Bilinear: nearest-cell sampling gave every 4x4 env block one
+        // piecewise-constant velocity, creating artificial divergence
+        // steps at block boundaries.
+        v = sample_fluid_velocity_bilinear(vec2<f32>(f32(x) + 0.5, f32(y) + 0.5));
     }
     let speed_t = length(v);
-    let p_adv = parcel_hop_p(speed_t);
+    let p_adv = parcel_hop_p(v);
     let agitation = clamp(speed_t / DIFF_AGITATION_SPEED, 0.0, 1.0);
     let p_diff = DIFF_HOP_P * mix(DIFF_HOP_FLOOR, 1.0, agitation);
 
