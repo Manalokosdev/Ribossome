@@ -2728,9 +2728,37 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         agent_rot = 0.0; // keep zero for disabled global rotation experiment
     }
 
-    // Update position
-    // Closed world: clamp at boundaries
-    agent_pos = clamp_position(agent_pos + agent_vel);
+    // Update position with HARD terrain collision: solid rock (>= threshold
+    // quanta) cannot be entered — forces alone can be overwhelmed by
+    // microswim thrust, and fast agents would tunnel through 1-cell walls.
+    // A blocked agent GRINDS against the wall: each blocked frame has a
+    // chance (~ mass) to dislodge one quantum from the blocking cell to its
+    // rear — tunneling by persistence.
+    {
+        let try_pos = clamp_position(agent_pos + agent_vel);
+        let mid_pos = clamp_position(agent_pos + agent_vel * 0.5);
+        let mid_solid = gamma_count(grid_index(mid_pos)) >= GAMMA_SOLID_THRESHOLD;
+        let dst_solid = gamma_count(grid_index(try_pos)) >= GAMMA_SOLID_THRESHOLD;
+        if (mid_solid || dst_solid) {
+            let block_idx = select(grid_index(try_pos), grid_index(mid_pos), mid_solid);
+            let spd_b = length(agent_vel);
+            if (spd_b > 0.01) {
+                let bseed0 = (agent_id + 1u) * 2246822519u ^ (params.random_seed * 3266489917u);
+                if (hash_f32(bseed0) < DIG_P_PER_FRAME * max(total_mass, 0.1)) {
+                    let behind0 = clamp_position(agent_pos - (agent_vel / spd_b) * 2.0);
+                    if (gamma_count(grid_index(behind0)) < GAMMA_SOLID_THRESHOLD) {
+                        if (gamma_take_one(block_idx)) {
+                            gamma_add_one(grid_index(behind0));
+                        }
+                    }
+                }
+            }
+            // Soft bounce; do not enter.
+            agent_vel = agent_vel * -0.2;
+        } else {
+            agent_pos = try_pos;
+        }
+    }
 
     // ====== UNIFIED ORGAN ACTIVITY LOOP ======
     // Process trail deposition, energy consumption, and feeding in single pass
