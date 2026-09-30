@@ -147,7 +147,7 @@ const TEMP_BUOYANCY: f32 = 12.0;   // force per unit of DEVIATION from ambient (
 // negligible); cooling relaxes toward it and buoyancy acts on the
 // DEVIATION, so the background is force-free and vents dominate
 // convection, as Filipe specified.
-const TEMP_AMBIENT_SURFACE: f32 = 0.15;
+const TEMP_AMBIENT_SURFACE: f32 = 0.0;
 const TEMP_AMBIENT_ATTEN: f32 = 4.0;
 
 fn temp_ambient_at(y: u32) -> f32 {
