@@ -129,6 +129,19 @@ const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.97;
 @group(0) @binding(0) var<storage, read> velocity_in: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read_write> velocity_out: array<vec2<f32>>;
 
+// TEMPERATURE field (one f32 per fluid cell): heated by fumaroles, advected
+// with the flow, cooled toward ambient. Buoyancy = UP * BUOYANCY * T — the
+// plume force dies as the parcel cools, so convection self-limits into
+// finite cells instead of an ever-accelerating jet.
+@group(0) @binding(11) var<storage, read_write> temp_in: array<f32>;
+@group(0) @binding(14) var<storage, read_write> temp_out: array<f32>;
+
+const TEMP_HEAT_RATE: f32 = 0.01;  // T gain per fumarole-strength unit per second at core
+const TEMP_COOL_RATE: f32 = 0.4;   // relaxation toward ambient (1/s)
+const TEMP_MAX: f32 = 8.0;
+const TEMP_BUOYANCY: f32 = 30.0;   // force per unit T (screen-up = +y)
+const TEMP_DIFFUSE: f32 = 0.15;    // 4-neighbor blend fraction per solve
+
 // Gamma grid (terrain) sampled as an obstacle field
 // QUANTIZED: height plane holds integer gamma-quanta counts (atomic u32);
 // slope planes hold f32 bitcast through the same array.
@@ -404,86 +417,86 @@ fn inject_fumarole_force_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
     let yi = i32(y);
     let idx = grid_index(x, y);
 
-    var added = vec2<f32>(0.0, 0.0);
+    // THERMAL BUOYANCY FROM THE TEMPERATURE FIELD: force = UP * BUOY * T.
+    // The parcel carries its heat as it rises and COOLS, so the force dies
+    // with the plume — convection self-limits into finite cells instead of
+    // the old ever-accelerating jet that swept the aquarium to the walls.
+    // A small T-scaled lateral flicker keeps plumes wobbling naturally.
+    let t_here = temp_in[idx];
+    if (t_here > 1e-4) {
+        if (xi > 0 && yi > 0 && xi < i32(FLUID_GRID_SIZE) - 1 && yi < i32(FLUID_GRID_SIZE) - 1) {
+            let seed0 = hash_u32(idx ^ time_bucket * 0x85EBCA6Bu ^ 0xC2B2AE35u);
+            let side = (rand01(seed0) * 2.0 - 1.0) * 0.25;
+            let f = vec2<f32>(side, 1.0) * (TEMP_BUOYANCY * t_here);
+            let base = idx * 2u;
+            atomic_add_f32(base + 0u, f.x);
+            atomic_add_f32(base + 1u, f.y);
+        }
+    }
+    let _unused_count = count;
+    let _unused_size = size_f;
+}
 
+// TEMPERATURE UPDATE: semi-Lagrangian advection by the current velocity +
+// fumarole heating + diffusion + cooling toward ambient (0).
+@compute @workgroup_size(16, 16)
+fn update_temperature(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
+    }
+    let idx = grid_index(x, y);
+    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
+
+    // Advect: backtrace along the (fresh) velocity field.
+    let vel = raw_velocity_cell(x, y);
+    let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
+    let src = pos - vel * dt;
+    let sx = clamp(i32(floor(src.x)), 0, i32(FLUID_GRID_SIZE) - 1);
+    let sy = clamp(i32(floor(src.y)), 0, i32(FLUID_GRID_SIZE) - 1);
+    var t = temp_in[grid_index(u32(sx), u32(sy))];
+
+    // Small diffusion (also smooths advection sampling noise).
+    let tl = temp_in[grid_index(u32(max(i32(x) - 1, 0)), y)];
+    let tr = temp_in[grid_index(u32(min(i32(x) + 1, i32(FLUID_GRID_SIZE) - 1)), y)];
+    let tb = temp_in[grid_index(x, u32(max(i32(y) - 1, 0)))];
+    let tt = temp_in[grid_index(x, u32(min(i32(y) + 1, i32(FLUID_GRID_SIZE) - 1)))];
+    t = mix(t, (tl + tr + tb + tt) * 0.25, TEMP_DIFFUSE);
+
+    // Fumarole heating.
+    let count_f = fumaroles[0u];
+    let count = u32(clamp(floor(count_f + 0.0001), 0.0, f32(MAX_FUMAROLES)));
+    let size_f = f32(FLUID_GRID_SIZE);
     for (var i = 0u; i < count; i = i + 1u) {
         let base = 1u + i * FUM_STRIDE;
-        let enabled = fum_f32(base, FUM_ENABLED);
-        if (enabled < 0.5) {
-            continue;
+        if (fum_f32(base, FUM_ENABLED) < 0.5) { continue; }
+        let strength = max(fum_f32(base, FUM_STRENGTH), 0.0);
+        if (strength <= 0.0) { continue; }
+        let fx = size_f * clamp(fum_f32(base, FUM_X_FRAC), 0.0, 1.0);
+        let fy = size_f * clamp(fum_f32(base, FUM_Y_FRAC), 0.0, 1.0);
+        let r = max(fum_f32(base, FUM_SPREAD), 1.0);
+        let d = length(vec2<f32>(f32(x) + 0.5 - fx, f32(y) + 0.5 - fy));
+        if (d < r) {
+            let w0 = 1.0 - d / r;
+            t += strength * TEMP_HEAT_RATE * w0 * w0 * dt;
         }
-
-        let x_frac = clamp(fum_f32(base, FUM_X_FRAC), 0.0, 1.0);
-        let y_frac = clamp(fum_f32(base, FUM_Y_FRAC), 0.0, 1.0);
-
-        // Keep it away from edges to avoid boundary artifacts.
-        let fx_i = clamp(i32(round(size_f * x_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
-        let fy_i = clamp(i32(round(size_f * y_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
-
-        let dx = xi - fx_i;
-        let dy = yi - fy_i;
-
-        let base_strength = max(fum_f32(base, FUM_STRENGTH), 0.0);
-        if (base_strength <= 0.0) {
-            continue;
-        }
-
-        let spread_f = max(fum_f32(base, FUM_SPREAD), 0.0);
-        let r = i32(clamp(round(spread_f), 0.0, 64.0));
-
-        // Avoid out-of-bounds / boundary artifacts.
-        if (xi <= 0 || yi <= 0 || xi >= i32(FLUID_GRID_SIZE) - 1 || yi >= i32(FLUID_GRID_SIZE) - 1) {
-            continue;
-        }
-
-        if (r <= 0) {
-            if (dx != 0 || dy != 0) {
-                continue;
-            }
-        } else {
-            if (abs(dx) > r || abs(dy) > r) {
-                continue;
-            }
-            let dist2 = f32(dx * dx + dy * dy);
-            let rr = f32(r * r);
-            if (dist2 > rr) {
-                continue;
-            }
-        }
-
-        // THERMAL BUOYANCY (non-directional): the fumarole is a HEAT
-        // source. Hot fluid is lighter and RISES toward the surface
-        // (screen top = LOW y in the renderer's mapping) — the pressure
-        // solve turns this into real convection: rising plume, mushroom
-        // head, return flow down the sides. The old directional jet
-        // (FUM_DIR_*) produced unnatural pinwheel swirls and is ignored;
-        // FUM_VARIATION now drives the lateral flicker that makes plumes
-        // wobble and bifurcate like real thermals.
-        var w = 1.0;
-        if (r > 0) {
-            let dist = sqrt(f32(dx * dx + dy * dy));
-            let w0 = clamp(1.0 - dist / (f32(r) + 0.001), 0.0, 1.0);
-            w = w0 * w0;
-        }
-        let heat = base_strength * w;
-
-        let variation = clamp(fum_f32(base, FUM_VARIATION), 0.0, 1.0);
-        let seed_base = hash_u32(i * 0x9E3779B9u ^ time_bucket * 0x85EBCA6Bu ^ 0xC2B2AE35u);
-        var side = 0.0;
-        if (variation > 1e-5) {
-            let seed0 = hash_u32(seed_base ^ idx);
-            side = (rand01(seed0) * 2.0 - 1.0) * variation * 0.6;
-        }
-
-        // Up on screen = +y (empirical; the present chain flips once).
-        added = added + vec2<f32>(side, 1.0) * heat;
     }
 
-    if (added.x != 0.0 || added.y != 0.0) {
-        let base = idx * 2u;
-        atomic_add_f32(base + 0u, added.x);
-        atomic_add_f32(base + 1u, added.y);
+    // Cooling toward ambient.
+    t = t * exp(-TEMP_COOL_RATE * dt);
+    temp_out[idx] = clamp(t, 0.0, TEMP_MAX);
+}
+
+@compute @workgroup_size(16, 16)
+fn copy_temperature(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if (x >= FLUID_GRID_SIZE || y >= FLUID_GRID_SIZE) {
+        return;
     }
+    let idx = grid_index(x, y);
+    temp_in[idx] = temp_out[idx];
 }
 
 // Inject dye at the fumarole location.

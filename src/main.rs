@@ -4045,6 +4045,10 @@ struct GpuState {
     // Fluid simulation buffers (128x128 grid)
     fluid_velocity_a: wgpu::Buffer,
     fluid_velocity_b: wgpu::Buffer,
+    fluid_temperature_a: wgpu::Buffer,
+    fluid_temperature_b: wgpu::Buffer,
+    fluid_update_temperature_pipeline: wgpu::ComputePipeline,
+    fluid_copy_temperature_pipeline: wgpu::ComputePipeline,
     fluid_pressure_a: wgpu::Buffer,
     fluid_pressure_b: wgpu::Buffer,
     fluid_divergence: wgpu::Buffer,
@@ -5826,6 +5830,21 @@ impl GpuState {
             mapped_at_creation: false,
         });
 
+        // Temperature field (f32 per fluid cell): fumarole-heated, advected,
+        // cooled; drives self-limiting thermal buoyancy.
+        let fluid_temperature_a = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fluid Temperature A"),
+            size: fluid_scalar_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fluid_temperature_b = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fluid Temperature B"),
+            size: fluid_scalar_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Create force vectors buffer for per-frame propeller force injection
         let force_vectors_zeros = vec![[0.0f32, 0.0f32]; fluid_grid_cells];
         let fluid_force_vectors = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -5918,6 +5937,17 @@ impl GpuState {
                 // Monomer field for unified dye tinting
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Fluid temperature field (key-7 heatmap view)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -6540,6 +6570,7 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: fluid_dye_a.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: chem_grid.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: fluid_temperature_a.as_entire_binding() },
             ],
         });
         profiler.mark("Composite bind group");
@@ -7353,6 +7384,28 @@ impl GpuState {
                     },
                     count: None,
                 },
+                // Temperature field (in/out; both read_write — the copy
+                // kernel writes 11 from 14).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -7376,6 +7429,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 12, resource: trail_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 13, resource: trail_grid_inject.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 17, resource: fluid_fumaroles_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: fluid_temperature_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 14, resource: fluid_temperature_b.as_entire_binding() },
             ],
         });
 
@@ -7398,6 +7453,8 @@ impl GpuState {
                 wgpu::BindGroupEntry { binding: 12, resource: trail_grid.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 13, resource: trail_grid_inject.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 17, resource: fluid_fumaroles_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: fluid_temperature_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 14, resource: fluid_temperature_b.as_entire_binding() },
             ],
         });
 
@@ -7424,6 +7481,24 @@ impl GpuState {
             layout: Some(&fluid_pipeline_layout),
             module: &fluid_shader,
             entry_point: "inject_fumarole_force_vector",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_update_temperature_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Update Temperature"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "update_temperature",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let fluid_copy_temperature_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Fluid Copy Temperature"),
+            layout: Some(&fluid_pipeline_layout),
+            module: &fluid_shader,
+            entry_point: "copy_temperature",
             compilation_options: Default::default(),
             cache: None,
         });
@@ -8102,6 +8177,10 @@ impl GpuState {
             fumaroles: settings.fumaroles.clone(),
             fluid_velocity_a,
             fluid_velocity_b,
+            fluid_temperature_a,
+            fluid_temperature_b,
+            fluid_update_temperature_pipeline,
+            fluid_copy_temperature_pipeline,
             fluid_pressure_a,
             fluid_pressure_b,
             fluid_divergence,
@@ -8835,6 +8914,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: self.chem_grid.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.fluid_temperature_a.as_entire_binding(),
                 },
             ],
         });
@@ -10709,8 +10792,17 @@ impl GpuState {
                     let bg_ab = &self.fluid_bind_group_ab;
                     let bg_ba = &self.fluid_bind_group_ba;
 
-                    // Combine force_vectors (written in simulation pass) into fluid_forces.
-                    // Inject a deterministic point-force "fumarole" for debugging/visual validation.
+                    // TEMPERATURE: advect + fumarole heating + cooling, then
+                    // publish (copy out -> in) so buoyancy reads fresh T.
+                    cpass.set_pipeline(&self.fluid_update_temperature_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    cpass.set_pipeline(&self.fluid_copy_temperature_pipeline);
+                    cpass.set_bind_group(0, bg_ab, &[]);
+                    cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
+
+                    // Thermal buoyancy from the temperature field.
                     cpass.set_pipeline(&self.fluid_fumarole_pipeline);
                     cpass.set_bind_group(0, bg_ab, &[]);
                     cpass.dispatch_workgroups(fluid_workgroups, fluid_workgroups, 1);
@@ -13035,6 +13127,10 @@ impl GpuState {
                             binding: 4,
                             resource: self.chem_grid.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.fluid_temperature_a.as_entire_binding(),
+                        },
                     ],
                 });
 
@@ -14918,6 +15014,10 @@ fn main() {
                                         // Key 6: isolated gamma (terrain) view, grayscale.
                                         PhysicalKey::Code(KeyCode::Digit6) => {
                                             state.nucleotide_debug_mask ^= 16;
+                                        }
+                                        // Key 7: fluid temperature heatmap view.
+                                        PhysicalKey::Code(KeyCode::Digit7) => {
+                                            state.nucleotide_debug_mask ^= 32;
                                         }
                                         PhysicalKey::Code(KeyCode::KeyF) => {
                                             // Toggle follow mode

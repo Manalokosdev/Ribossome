@@ -2758,9 +2758,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // frames (visible as agents suddenly leaping). 5/frame still separates
     // a full overlap within a few frames, without ballistics.
     if (!anchor_active_prev) {
+        // NEWBORN GRACE: fresh agents overlap their parent and siblings by
+        // construction. Ramp the separation impulse in over the first ~60
+        // frames so births ooze apart instead of catapulting.
+        let grace = clamp(f32(agents_in[agent_id].age) / 60.0, 0.1, 1.0);
+        let hc_cap = 5.0 * grace;
         let hc_len = length(hard_collision_vel);
-        if (hc_len > 5.0) {
-            hard_collision_vel = hard_collision_vel * (5.0 / max(hc_len, 1e-6));
+        if (hc_len > hc_cap) {
+            hard_collision_vel = hard_collision_vel * (hc_cap / max(hc_len, 1e-6));
         }
         agent_vel += hard_collision_vel;
     }

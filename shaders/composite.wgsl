@@ -201,6 +201,10 @@ var<storage, read> fluid_dye: array<vec4<f32>>;
 // matter as grey under the colored (activated) dye.
 var<storage, read> chem_grid: array<u32>;
 
+@group(0) @binding(5)
+// Fluid temperature field (f32 per fluid cell) for the key-7 heatmap view.
+var<storage, read> fluid_temperature: array<f32>;
+
 fn chem_spent_total_f(cell_idx: u32) -> f32 {
     let base = cell_idx * 4u;
     let t = (chem_grid[base] >> 16u)
@@ -351,6 +355,32 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             under_color = under_color + hue * inten * monomer_vis;
             under_color = clamp(under_color, vec3<f32>(0.0), vec3<f32>(1.0));
             }
+        }
+    }
+
+    // KEY 7: temperature heatmap view (black -> red -> yellow -> white),
+    // overrides the background layers.
+    if ((params.nucleotide_debug_mask & 32u) != 0u) {
+        let safe_zoom2 = max(params.camera_zoom, 0.0001);
+        let safe_w2 = max(params.window_width, 1.0);
+        let safe_h2 = max(params.window_height, 1.0);
+        let aspect2 = safe_w2 / safe_h2;
+        let vw2 = params.grid_size / safe_zoom2;
+        let vh2 = vw2 / aspect2;
+        let wx2 = params.camera_pan_x - vw2 * 0.5 + ((f32(x) + 0.5) / safe_w2) * vw2;
+        let wy2 = params.camera_pan_y - vh2 * 0.5 + ((f32(y) + 0.5) / safe_h2) * vh2;
+        let ws2 = max(params.grid_size, 1e-6);
+        if (wx2 >= 0.0 && wx2 < ws2 && wy2 >= 0.0 && wy2 < ws2) {
+            let fxc = min(u32(wx2 / ws2 * f32(FLUID_GRID_SIZE)), FLUID_GRID_SIZE - 1u);
+            let fyc = min(u32(wy2 / ws2 * f32(FLUID_GRID_SIZE)), FLUID_GRID_SIZE - 1u);
+            let tt = clamp(fluid_temperature[fyc * FLUID_GRID_SIZE + fxc] / 8.0, 0.0, 1.0);
+            under_color = vec3<f32>(
+                clamp(tt * 3.0, 0.0, 1.0),
+                clamp(tt * 3.0 - 1.0, 0.0, 1.0),
+                clamp(tt * 3.0 - 2.0, 0.0, 1.0)
+            );
+        } else {
+            under_color = vec3<f32>(0.0);
         }
     }
 
