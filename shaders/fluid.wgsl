@@ -208,7 +208,7 @@ fn fluid_chem_activate_one(slot: u32) -> bool {
 
 // Activation probability per spent monomer per solve pass at a fumarole's
 // center (falls off with the same squared-distance weight as the dye).
-const FUMAROLE_ACT_P: f32 = 0.06;
+const FUMAROLE_ACT_P: f32 = 0.15;
 
 // Fluid-driven lift/deposition of the environment chem layers.
 // Model: the advected dye field acts as the "carried" reservoir.

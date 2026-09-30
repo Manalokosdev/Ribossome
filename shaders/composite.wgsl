@@ -294,7 +294,7 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // AQUARIUM AMBIENT LIGHT: a faint glow showing the UV gradient
             // (screen top = low world y = lit surface; keep LIGHT_ATTEN in
             // sync with simulation.wgsl).
-            let light_c = exp(-4.0 * (1.0 - clamp(world_pos.y / ws, 0.0, 1.0)));
+            let light_c = exp(-8.0 * (1.0 - clamp(world_pos.y / ws, 0.0, 1.0)));
             // Warm sunlight tint (so it never reads as the cool spent blue).
             under_color = under_color + vec3<f32>(0.06, 0.05, 0.035) * light_c;
 

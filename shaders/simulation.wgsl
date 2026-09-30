@@ -3821,8 +3821,8 @@ const MAX_HOPS_PER_CELL_CH: u32 = 8u;
 // per epoch), light attenuation with depth (top of world = high y = lit;
 // bottom retains exp(-LIGHT_ATTEN) ~ 5%), and spontaneous activation decay.
 // NOTE: the renderer maps SCREEN TOP to LOW world y — light enters at y=0.
-const LIGHT_ACT_P: f32 = 0.02;
-const LIGHT_ATTEN: f32 = 4.0;
+const LIGHT_ACT_P: f32 = 0.006;
+const LIGHT_ATTEN: f32 = 8.0;
 const CHEM_DECAY_P: f32 = 0.002;
 // Hot shallow water: death probability multiplier at full light (the fast
 // lane — rich but deadly; the deep is cold, slow, safe and poor).
