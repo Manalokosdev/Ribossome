@@ -2735,28 +2735,42 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // chance (~ mass) to dislodge one quantum from the blocking cell to its
     // rear — tunneling by persistence.
     {
-        let try_pos = clamp_position(agent_pos + agent_vel);
-        let mid_pos = clamp_position(agent_pos + agent_vel * 0.5);
-        let mid_solid = gamma_count(grid_index(mid_pos)) >= GAMMA_SOLID_THRESHOLD;
-        let dst_solid = gamma_count(grid_index(try_pos)) >= GAMMA_SOLID_THRESHOLD;
-        if (mid_solid || dst_solid) {
-            let block_idx = select(grid_index(try_pos), grid_index(mid_pos), mid_solid);
-            let spd_b = length(agent_vel);
-            if (spd_b > 0.01) {
-                let bseed0 = (agent_id + 1u) * 2246822519u ^ (params.random_seed * 3266489917u);
-                if (hash_f32(bseed0) < DIG_P_PER_FRAME * max(total_mass, 0.1)) {
-                    let behind0 = clamp_position(agent_pos - (agent_vel / spd_b) * 2.0);
-                    if (gamma_count(grid_index(behind0)) < GAMMA_SOLID_THRESHOLD) {
-                        if (gamma_take_one(block_idx)) {
-                            gamma_add_one(grid_index(behind0));
-                        }
+        // Ray-march the move in sub-cell steps: fast agents (up to VEL_MAX
+        // units/frame) would otherwise jump clean over 1-cell walls. The
+        // agent slides up to the last free position before the wall.
+        let move_len = length(agent_vel);
+        var hit = false;
+        var hit_idx = 0u;
+        if (move_len > 1e-5) {
+            let dir_m = agent_vel / move_len;
+            let steps = min(u32(ceil(move_len / 0.9)) + 1u, 16u);
+            let step_len = move_len / f32(steps);
+            for (var s = 1u; s <= steps; s++) {
+                let p = clamp_position(agent_pos + dir_m * (step_len * f32(s)));
+                let ci = grid_index(p);
+                if (gamma_count(ci) >= GAMMA_SOLID_THRESHOLD) {
+                    hit = true;
+                    hit_idx = ci;
+                    break;
+                }
+                agent_pos = p;
+            }
+        }
+        if (hit) {
+            // GRIND: pressing against the wall can dislodge one quantum to
+            // the agent's rear (tunneling by persistence).
+            let spd_b = max(move_len, 1e-6);
+            let bseed0 = (agent_id + 1u) * 2246822519u ^ (params.random_seed * 3266489917u);
+            if (hash_f32(bseed0) < DIG_P_PER_FRAME * max(total_mass, 0.1)) {
+                let behind0 = clamp_position(agent_pos - (agent_vel / spd_b) * 2.0);
+                if (gamma_count(grid_index(behind0)) < GAMMA_SOLID_THRESHOLD) {
+                    if (gamma_take_one(hit_idx)) {
+                        gamma_add_one(grid_index(behind0));
                     }
                 }
             }
-            // Soft bounce; do not enter.
+            // Soft bounce; never enter.
             agent_vel = agent_vel * -0.2;
-        } else {
-            agent_pos = try_pos;
         }
     }
 

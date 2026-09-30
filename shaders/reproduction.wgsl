@@ -118,7 +118,13 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let jitter_angle = hash_f32(offspring_hash ^ 0xBADC0FFEu) * 6.28318530718;
                     let jitter_dist = 5.0 + hash_f32(offspring_hash ^ 0x1B56C4E9u) * 10.0;
                     let jitter = vec2<f32>(cos(jitter_angle), sin(jitter_angle)) * jitter_dist;
-                    offspring.position = clamp_position(agent_pos + jitter);
+                    var birth_pos = clamp_position(agent_pos + jitter);
+                    // Never spawn inside solid terrain: fall back to the
+                    // parent's own (free) position.
+                    if (gamma_count(grid_index(birth_pos)) >= GAMMA_SOLID_THRESHOLD) {
+                        birth_pos = agent_pos;
+                    }
+                    offspring.position = birth_pos;
                 }
                 offspring.velocity = vec2<f32>(0.0);
 
