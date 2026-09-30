@@ -1238,11 +1238,11 @@ fn write_gamma_slope(idx: u32, slope: vec2<f32>) {
 }
 
 fn read_combined_height(ix: i32, iy: i32) -> f32 {
+    // Terrain only. Monomers no longer contribute to slopes: with quantized
+    // counts every grain created steep phantom slopes that blocked the fluid
+    // and looked like eruptions. Matter is matter, terrain is terrain.
     let idx = clamp_gamma_coords(ix, iy);
-    var height = read_gamma_height(idx);
-    if (params.chemical_slope_scale_alpha != 0.0) { height += chem_pool_count_f(idx, 0u) * params.chemical_slope_scale_alpha; }
-    if (params.chemical_slope_scale_beta != 0.0) { height += chem_pool_count_f(idx, 1u) * params.chemical_slope_scale_beta; }
-    return height;
+    return read_gamma_height(idx);
 }
 
 // ---- Monomer pool helpers -------------------------------------------------

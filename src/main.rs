@@ -3807,9 +3807,11 @@ impl SimulationSettings {
         self.gamma_shift = self.gamma_shift.clamp(0.0, 1.0);
         self.alpha_slope_bias = self.alpha_slope_bias.clamp(-10.0, 10.0);
         self.beta_slope_bias = self.beta_slope_bias.clamp(-10.0, 10.0);
-        // Closed world: 0.0 must be reachable (no rain at all).
-        self.alpha_multiplier = self.alpha_multiplier.clamp(0.0, 2.0);
-        self.beta_multiplier = self.beta_multiplier.clamp(0.0, 2.0);
+        // RAIN IS RETIRED (closed world): force multipliers to zero so stale
+        // settings/snapshots can never silently re-inject matter. The UI
+        // controls are gone; these fields survive only for serde compat.
+        self.alpha_multiplier = 0.0;
+        self.beta_multiplier = 0.0;
         self.dye_precipitation = self.dye_precipitation.clamp(0.0, 1.0);
         self.chemical_slope_scale_alpha = self.chemical_slope_scale_alpha.clamp(0.0, 1.0);
         self.chemical_slope_scale_beta = self.chemical_slope_scale_beta.clamp(0.0, 1.0);
@@ -4222,6 +4224,7 @@ struct GpuState {
     matter_free: [u32; 4],              // Free monomer counts (A/U/G/C) at last sample
     matter_locked_quanta: u64,          // Quanta locked in living strands + paired complements
     matter_energy: f64,                 // Total agent energy (energy units) at last sample
+    target_total_quanta: u64,           // God-mode target for total free monomers
 
     // Auto-snapshot tracking
     last_autosave_epoch: u64,     // Last epoch when auto-snapshot was saved
@@ -7873,6 +7876,7 @@ impl GpuState {
             matter_free: [0; 4],
             matter_locked_quanta: 0,
             matter_energy: 0.0,
+            target_total_quanta: 1_000_000,
             last_autosave_epoch: 0,
             last_autosave_time: std::time::Instant::now(),
 
@@ -15823,11 +15827,6 @@ fn main() {
                                                                 .text("Pairing Cost per Increment")
                                                                 .step_by(0.01),
                                                         );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.poison_power, 0.0..=10.0)
-                                                                .text("Poison Power (inert — RNA-world has no poison)"),
-                                                        );
-
                                                         ui.separator();
                                                         ui.heading("Physics");
                                                         ui.add(
@@ -15872,97 +15871,10 @@ fn main() {
                                                                 .text("Rebuild slope every N steps"),
                                                         );
 
-                                                        ui.separator();
-                                                        ui.heading("Classic Diffusion");
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.alpha_blur, 0.0..=1.0)
-                                                                .text("Alpha Diffuse")
-                                                                .custom_formatter(|n, _| format!("{:.3}", n)),
-                                                        );
-                                                        ui.label("(controls 3�3 blur strength per update)");
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.beta_blur, 0.0..=1.0)
-                                                                .text("Beta Diffuse")
-                                                                .custom_formatter(|n, _| format!("{:.3}", n)),
-                                                        );
-                                                        ui.label("(controls 3�3 blur strength per update)");
-
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.gamma_diffuse, 0.0..=1.0)
-                                                                .text("Gamma Diffuse")
-                                                                .custom_formatter(|n, _| format!("{:.3}", n)),
-                                                        );
-                                                        ui.label("(controls 3�3 blur strength per update)");
-
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.gamma_shift, 0.0..=1.0)
-                                                                .text("Gamma Shift Strength"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.gamma_blur, 0.9..=1.0)
-                                                                .text("Env Persistence"),
-                                                        );
-
-                                                        // Precipitation/levitation gate disabled for now: the
-                                                        // simulation is dye-exclusive (all monomers permanently
-                                                        // suspended). suspension_factor is a stub in simulation.wgsl.
-
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.fluid_ooze_still_rate,
-                                                                0.0..=100.0,
-                                                            )
-                                                            .text("Dye Injection (Fluid Off, visual)"),
-                                                        );
-
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.fluid_dye_escape_rate,
-                                                                0.0..=20.0,
-                                                            )
-                                                            .text("Dye Escape Rate (Alpha)")
-                                                            .custom_formatter(|n, _| format!("{:.3}", n)),
-                                                        );
-
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.fluid_dye_escape_rate_beta,
-                                                                0.0..=20.0,
-                                                            )
-                                                            .text("Dye Escape Rate (Beta)")
-                                                            .custom_formatter(|n, _| format!("{:.3}", n)),
-                                                        );
-
-                                                        ui.separator();
-                                                        ui.heading("Slope Mixing");
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.chemical_slope_scale_alpha,
-                                                                0.0..=1.0,
-                                                            )
-                                                            .text("Alpha Slope Mix"),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.chemical_slope_scale_beta,
-                                                                0.0..=1.0,
-                                                            )
-                                                            .text("Beta Slope Mix"),
-                                                        );
-
-                                                        ui.separator();
-                                                        ui.heading("Slope Bias");
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.alpha_slope_bias, -10.0..=10.0)
-                                                            .text("Alpha Slope Bias")
-                                                            .custom_formatter(|n, _| format!("{:.2}", n)),
-                                                        );
-                                                        ui.add(
-                                                            egui::Slider::new(&mut state.beta_slope_bias, -10.0..=10.0)
-                                                            .text("Beta Slope Bias")
-                                                            .custom_formatter(|n, _| format!("{:.2}", n)),
-                                                        );
-                                                        ui.label("(bias strength for slope-based shifting; sign flips direction)");
+                                                        // (Legacy float-diffusion, persistence, dye-escape, slope-mix
+                                                        //  and slope-bias controls removed: the quantized substrate
+                                                        //  replaced them with stochastic transport, sandpile terrain
+                                                        //  and count-tracking dye.)
 
                                                         ui.separator();
                                                         ui.heading("Monomers");
@@ -15999,6 +15911,32 @@ fn main() {
                                                             }
                                                         });
                                                         ui.label("Generates all 4 monomer channels (AU + GC pools, distinct noise seeds).");
+
+                                                        // Direct total control: scale the whole world's free
+                                                        // monomers to a target count (uses the live matter readout).
+                                                        let free_total: u64 =
+                                                            state.matter_free.iter().map(|&v| v as u64).sum();
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(format!("Free now: {}", free_total));
+                                                            ui.add(
+                                                                egui::DragValue::new(&mut state.target_total_quanta)
+                                                                    .speed(10_000)
+                                                                    .range(0..=100_000_000)
+                                                                    .prefix("target "),
+                                                            );
+                                                            let can_scale = free_total > 0;
+                                                            if ui
+                                                                .add_enabled(can_scale, egui::Button::new("Set Total"))
+                                                                .on_hover_text(
+                                                                    "Scales every channel by target/current (probabilistic rounding). Requires a fresh matter sample.",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                let factor =
+                                                                    state.target_total_quanta as f32 / free_total as f32;
+                                                                state.generate_map(4, 0, factor, rand::random::<u32>());
+                                                            }
+                                                        });
 
                                                         ui.separator();
                                                         ui.heading("Gamma Controls");
@@ -16824,7 +16762,7 @@ fn main() {
                                                                 &mut state.fluid_obstacle_strength,
                                                                 0.0..=1000.0,
                                                             )
-                                                            .text("Obstacle Blocking")
+                                                            .text("Terrain Permeability (fluid + microswim)")
                                                             .clamping(egui::SliderClamping::Always),
                                                         )
                                                         .on_hover_text(

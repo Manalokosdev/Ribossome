@@ -4409,7 +4409,24 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    if (mode == 1u) {
+    if (mode == 4u) {
+        // GOD MODE — scale the total monomer amount: every channel count is
+        // multiplied by `value` (target/current) with probabilistic rounding.
+        let factor = max(output_value, 0.0);
+        var dv4 = fluid_dye[idx];
+        for (var mc = 0u; mc < 4u; mc++) {
+            let slot = idx * 4u + mc;
+            let cur = atomicLoad(&chem_grid[slot]);
+            let scaled = f32(cur) * factor;
+            let whole = u32(floor(scaled));
+            let fr = scaled - f32(whole);
+            var nq = whole;
+            if (hash_f32(idx * 747796405u ^ (mc * 0x9E3779B9u) ^ (seed * 668265263u)) < fr) { nq += 1u; }
+            atomicStore(&chem_grid[slot], nq);
+            dv4[mc] = f32(nq) * QUANTA_VIS;
+        }
+        fluid_dye[idx] = dv4;
+    } else if (mode == 1u) {
         write_chem_alpha(idx, output_value);
         // Mirror the ACTUAL quantized counts into the dye — mirroring the
         // smooth float value would paint a uniform background under the
