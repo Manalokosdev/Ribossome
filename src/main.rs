@@ -15408,13 +15408,9 @@ fn main() {
 
                                         if do_egui_update {
                                         let full_output = self.egui_state.egui_ctx().run(raw_input, |ctx| {
-                                        // Fumarole gizmos: heat-vent markers over the viewport
-                                        // (ring = spread radius, dot = core).
+                                        // Fumarole gizmos: interactive heat-vent markers —
+                                        // DRAG to move, SCROLL over one to resize the spread.
                                         if state.ui_visible && state.fluid_enabled && !state.fumaroles.is_empty() {
-                                            let painter = ctx.layer_painter(egui::LayerId::new(
-                                                egui::Order::Background,
-                                                egui::Id::new("fumarole_gizmos"),
-                                            ));
                                             let w = state.surface_config.width as f32;
                                             let h = state.surface_config.height as f32;
                                             if w > 1.0 && h > 1.0 {
@@ -15422,38 +15418,72 @@ fn main() {
                                                 let half_x = state.sim_size / (2.0 * state.camera_zoom);
                                                 let half_y = half_x * aspect;
                                                 let ppp = ctx.pixels_per_point();
-                                                for fum in &state.fumaroles {
-                                                    if !fum.enabled {
-                                                        continue;
-                                                    }
-                                                    let wx = fum.x_frac * state.sim_size;
-                                                    let wy = fum.y_frac * state.sim_size;
-                                                    let norm_x = (wx - state.camera_pan[0]) / (2.0 * half_x) + 0.5;
-                                                    let norm_y = 0.5 - (wy - state.camera_pan[1]) / (2.0 * half_y);
+                                                let w_pts = w / ppp;
+                                                let h_pts = h / ppp;
+                                                let sim_size = state.sim_size;
+                                                let cam = state.camera_pan;
+                                                let fluid_res = state.fluid_grid_resolution as f32;
+                                                for i in 0..state.fumaroles.len() {
+                                                    let (enabled, x_frac, y_frac, spread) = {
+                                                        let f = &state.fumaroles[i];
+                                                        (f.enabled, f.x_frac, f.y_frac, f.spread)
+                                                    };
+                                                    let wx = x_frac * sim_size;
+                                                    let wy = y_frac * sim_size;
+                                                    let norm_x = (wx - cam[0]) / (2.0 * half_x) + 0.5;
+                                                    let norm_y = 0.5 - (wy - cam[1]) / (2.0 * half_y);
                                                     if norm_x < -0.1 || norm_x > 1.1 || norm_y < -0.1 || norm_y > 1.1 {
                                                         continue;
                                                     }
-                                                    let sx = norm_x * w / ppp;
-                                                    let sy = norm_y * h / ppp;
-                                                    let center = egui::pos2(sx, sy);
-                                                    let r_world = fum.spread * state.sim_size
-                                                        / state.fluid_grid_resolution as f32;
-                                                    let r_px = (r_world / (2.0 * half_x)) * w / ppp;
-                                                    let col = egui::Color32::from_rgba_unmultiplied(255, 140, 40, 180);
-                                                    painter.circle_stroke(
-                                                        center,
-                                                        r_px.max(6.0),
-                                                        egui::Stroke::new(1.5, col),
-                                                    );
-                                                    painter.circle_filled(center, 3.0, col);
-                                                    painter.circle_stroke(
-                                                        center,
-                                                        (r_px * 0.55).max(4.0),
-                                                        egui::Stroke::new(
-                                                            1.0,
-                                                            egui::Color32::from_rgba_unmultiplied(255, 200, 80, 120),
-                                                        ),
-                                                    );
+                                                    let sx = norm_x * w_pts;
+                                                    let sy = norm_y * h_pts;
+                                                    let r_world = spread * sim_size / fluid_res;
+                                                    let r_px = ((r_world / (2.0 * half_x)) * w_pts).max(8.0);
+                                                    let size = r_px * 2.0 + 8.0;
+                                                    let area_resp = egui::Area::new(egui::Id::new(("fumarole_gizmo", i)))
+                                                        .order(egui::Order::Middle)
+                                                        .fixed_pos(egui::pos2(sx - size * 0.5, sy - size * 0.5))
+                                                        .show(ctx, |ui| {
+                                                            let (rect, resp) = ui.allocate_exact_size(
+                                                                egui::vec2(size, size),
+                                                                egui::Sense::click_and_drag(),
+                                                            );
+                                                            let col = if enabled {
+                                                                egui::Color32::from_rgba_unmultiplied(255, 140, 40, 200)
+                                                            } else {
+                                                                egui::Color32::from_rgba_unmultiplied(120, 120, 130, 140)
+                                                            };
+                                                            let p = ui.painter();
+                                                            p.circle_stroke(rect.center(), r_px, egui::Stroke::new(1.5, col));
+                                                            p.circle_filled(rect.center(), 3.0, col);
+                                                            p.circle_stroke(
+                                                                rect.center(),
+                                                                (r_px * 0.55).max(4.0),
+                                                                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 200, 80, 120)),
+                                                            );
+                                                            resp
+                                                        })
+                                                        .inner;
+                                                    if area_resp.dragged() {
+                                                        let d = area_resp.drag_delta();
+                                                        let dx_world = d.x * (2.0 * half_x) / w_pts;
+                                                        let dy_world = -d.y * (2.0 * half_y) / h_pts;
+                                                        let f = &mut state.fumaroles[i];
+                                                        f.x_frac = (f.x_frac + dx_world / sim_size).clamp(0.02, 0.98);
+                                                        f.y_frac = (f.y_frac + dy_world / sim_size).clamp(0.02, 0.98);
+                                                    }
+                                                    if area_resp.hovered() {
+                                                        let scroll = ctx.input(|inp| inp.raw_scroll_delta.y);
+                                                        if scroll.abs() > 0.0 {
+                                                            let f = &mut state.fumaroles[i];
+                                                            f.spread = (f.spread * (1.0 + scroll * 0.002))
+                                                                .clamp(2.0, 64.0);
+                                                        }
+                                                        area_resp.clone().on_hover_text(format!(
+                                                            "Fumarola {} — arrasta para mover, scroll para o raio (spread {:.0})",
+                                                            i, state.fumaroles[i].spread
+                                                        ));
+                                                    }
                                                 }
                                             }
                                         }
