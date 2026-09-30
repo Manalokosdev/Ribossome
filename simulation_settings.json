@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.61985,
+  "camera_zoom": 1.2909313,
   "spawn_probability": 5.0,
   "death_probability": 0.005,
   "mutation_rate": 0.005,
@@ -43,7 +43,7 @@
   "microswim_min_length_ratio": 0.75,
   "microswim_max_length_ratio": 1.6,
   "repulsion_strength": 1.0,
-  "agent_repulsion_strength": 0.1,
+  "agent_repulsion_strength": 0.01,
   "limit_fps": false,
   "limit_fps_25": false,
   "render_interval": 100,

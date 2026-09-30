@@ -243,6 +243,13 @@ fn deposit_stillbirth(agent_id: u32, packed: array<u32, GENOME_PACKED_WORDS>, of
 // are solid rock, nothing moves (you cannot compact rock into rock).
 // Side-casting is what lets agents dig INTO deep terrain: head-on the
 // "behind" cell is often solid too, but the flanks rarely are.
+// Shoved quanta can HEAP: targets accept material up to this count (above
+// the solid threshold), so pushed spoil accumulates into piles and berms
+// instead of only spreading thin — agents can bank up walls, and the
+// sandpile relaxation makes tall heaps slump into natural talus. Filipe's
+// request: a not-completely-full neighbor should take the quantum.
+const GAMMA_PILE_MAX: u32 = 6u;
+
 fn gamma_shove(from_idx: u32, from_pos: vec2<f32>, back_dir: vec2<f32>, seed: u32) {
     let perp = vec2<f32>(-back_dir.y, back_dir.x);
     let flip = select(1.0, -1.0, (hash(seed) & 1u) == 1u);
@@ -253,7 +260,7 @@ fn gamma_shove(from_idx: u32, from_pos: vec2<f32>, back_dir: vec2<f32>, seed: u3
     for (var c = 0u; c < 3u; c++) {
         let tp = clamp_position(from_pos + cand[c] * 1.5);
         let ti = grid_index(tp);
-        if (ti != from_idx && gamma_count(ti) < GAMMA_SOLID_THRESHOLD) {
+        if (ti != from_idx && gamma_count(ti) < GAMMA_PILE_MAX) {
             if (gamma_take_one(from_idx)) {
                 gamma_add_one(ti);
             }
