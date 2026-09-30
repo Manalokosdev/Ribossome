@@ -15416,63 +15416,81 @@ fn main() {
                                             }
 
                                             ui.separator();
+                                            egui::CollapsingHeader::new("⚖ Matter Conservation")
+                                                .default_open(true)
+                                                .show(ui, |ui| {
+                                                    if state.matter_total > 0.0 {
+                                                        let free_total: u64 = state
+                                                            .matter_free
+                                                            .iter()
+                                                            .map(|&v| v as u64)
+                                                            .sum();
+                                                        ui.label(format!(
+                                                            "TOTAL {:.1} quanta = free {} + locked {} + energy {:.1}",
+                                                            state.matter_total,
+                                                            free_total,
+                                                            state.matter_locked_quanta,
+                                                            state.matter_energy_quanta,
+                                                        ));
+                                                        ui.label(format!(
+                                                            "free    A {} · U {} · G {} · C {}",
+                                                            state.matter_free[0],
+                                                            state.matter_free[1],
+                                                            state.matter_free[2],
+                                                            state.matter_free[3],
+                                                        ));
+                                                        ui.label(format!(
+                                                            "locked  A {} · U {} · G {} · C {}",
+                                                            state.matter_locked_per_ch[0],
+                                                            state.matter_locked_per_ch[1],
+                                                            state.matter_locked_per_ch[2],
+                                                            state.matter_locked_per_ch[3],
+                                                        ));
+                                                        if let Some(base) = state.matter_baseline {
+                                                            let delta = state.matter_total - base;
+                                                            let pct = if base > 0.0 {
+                                                                delta / base * 100.0
+                                                            } else {
+                                                                0.0
+                                                            };
+                                                            let color = if pct.abs() < 0.05 {
+                                                                egui::Color32::from_rgb(120, 220, 120)
+                                                            } else if pct.abs() < 1.0 {
+                                                                egui::Color32::from_rgb(230, 200, 90)
+                                                            } else {
+                                                                egui::Color32::from_rgb(240, 110, 110)
+                                                            };
+                                                            ui.horizontal(|ui| {
+                                                                ui.colored_label(
+                                                                    color,
+                                                                    format!(
+                                                                        "Δ vs baseline: {:+.1} quanta ({:+.4}%)",
+                                                                        delta, pct
+                                                                    ),
+                                                                );
+                                                                if ui.small_button("Rebase").clicked() {
+                                                                    state.matter_baseline =
+                                                                        Some(state.matter_total);
+                                                                }
+                                                            });
+                                                        } else {
+                                                            ui.label("Baseline: capturing at next sample…");
+                                                        }
+                                                    } else {
+                                                        ui.label(format!(
+                                                            "Waiting for first sample (every {} epochs, sim must be running)…",
+                                                            state.epoch_sample_interval
+                                                        ));
+                                                    }
+                                                });
+
+                                            ui.separator();
                                             ui.collapsing("Population History", |ui| {
                                                 ui.label(format!(
                                                     "Samples: {} (every {} epochs)",
                                                     state.population_history.len(),
                                                     state.epoch_sample_interval
                                                 ));
-
-                                                // Matter conservation instrument (sampled with species counting).
-                                                if state.matter_total > 0.0 {
-                                                    let free_total: u64 =
-                                                        state.matter_free.iter().map(|&v| v as u64).sum();
-                                                    ui.label(format!(
-                                                        "Matter TOTAL {:.1} quanta = free {} + locked {} + energy {:.1}",
-                                                        state.matter_total,
-                                                        free_total,
-                                                        state.matter_locked_quanta,
-                                                        state.matter_energy_quanta,
-                                                    ));
-                                                    ui.label(format!(
-                                                        "  free    A {} · U {} · G {} · C {}",
-                                                        state.matter_free[0],
-                                                        state.matter_free[1],
-                                                        state.matter_free[2],
-                                                        state.matter_free[3],
-                                                    ));
-                                                    ui.label(format!(
-                                                        "  locked  A {} · U {} · G {} · C {}",
-                                                        state.matter_locked_per_ch[0],
-                                                        state.matter_locked_per_ch[1],
-                                                        state.matter_locked_per_ch[2],
-                                                        state.matter_locked_per_ch[3],
-                                                    ));
-                                                    if let Some(base) = state.matter_baseline {
-                                                        let delta = state.matter_total - base;
-                                                        let pct = if base > 0.0 { delta / base * 100.0 } else { 0.0 };
-                                                        let color = if pct.abs() < 0.05 {
-                                                            egui::Color32::from_rgb(120, 220, 120)
-                                                        } else if pct.abs() < 1.0 {
-                                                            egui::Color32::from_rgb(230, 200, 90)
-                                                        } else {
-                                                            egui::Color32::from_rgb(240, 110, 110)
-                                                        };
-                                                        ui.horizontal(|ui| {
-                                                            ui.colored_label(
-                                                                color,
-                                                                format!(
-                                                                    "  Δ vs baseline: {:+.1} quanta ({:+.4}%)",
-                                                                    delta, pct
-                                                                ),
-                                                            );
-                                                            if ui.small_button("Rebase").clicked() {
-                                                                state.matter_baseline =
-                                                                    Some(state.matter_total);
-                                                            }
-                                                        });
-                                                    }
-                                                }
 
                                                 if !state.population_plot_points.is_empty() {
                                                     use egui_plot::{Line, Plot};
