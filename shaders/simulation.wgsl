@@ -3593,47 +3593,10 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         // New visualization system: composite channels with blend modes
 
-        // A/U pool channel (A = base color, U = swizzled variant)
-        if (params.alpha_show != 0u) {
-            let alpha_color_base = vec3<f32>(
-                clamp(params.alpha_color_r, 0.0, 1.0),
-                clamp(params.alpha_color_g, 0.0, 1.0),
-                clamp(params.alpha_color_b, 0.0, 1.0)
-            );
-            let alpha_color = mix(alpha_color_base, alpha_color_base.brg, ratio_u);
-
-            // Apply gamma correction to alpha value
-            let alpha_corrected = pow(alpha, params.alpha_gamma_adjust);
-
-            if (params.alpha_blend_mode == 0u) {
-                // Additive: add channel color scaled by intensity
-                base_color = base_color + alpha_color * alpha_corrected;
-            } else {
-                // Multiply: darken with inverted channel color
-                base_color = base_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - alpha_color, alpha_corrected);
-            }
-        }
-
-        // G/C pool channel (G = base color, C = swizzled variant)
-        if (params.beta_show != 0u) {
-            let beta_color_base = vec3<f32>(
-                clamp(params.beta_color_r, 0.0, 1.0),
-                clamp(params.beta_color_g, 0.0, 1.0),
-                clamp(params.beta_color_b, 0.0, 1.0)
-            );
-            let beta_color = mix(beta_color_base, beta_color_base.gbr, ratio_c);
-
-            // Apply gamma correction to beta value
-            let beta_corrected = pow(beta, params.beta_gamma_adjust);
-
-            if (params.beta_blend_mode == 0u) {
-                // Additive
-                base_color = base_color + beta_color * beta_corrected;
-            } else {
-                // Multiply with inverted channel
-                base_color = base_color * mix(vec3<f32>(1.0), vec3<f32>(1.0) - beta_color, beta_corrected);
-            }
-        }
+        // DEPOSIT LAYER DISABLED (dye-exclusive simulation): monomers are
+        // rendered only through the dye tracer in the composite pass. The
+        // RGBW debug branch above still reads the raw counts (ground truth),
+        // and gamma/terrain below renders normally.
 
         // Gamma channel
         if (params.gamma_show != 0u) {
