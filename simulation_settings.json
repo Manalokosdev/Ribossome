@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.3131628,
+  "camera_zoom": 1.139191,
   "spawn_probability": 5.0,
   "death_probability": 0.005,
   "mutation_rate": 0.005,
@@ -75,7 +75,7 @@
   "fluid_chem_deposit_mult_alpha": 1.0,
   "fluid_chem_deposit_mult_beta": 1.0,
   "fluid_chem_deposit_mult_gamma": 0.0,
-  "fluid_wind_push_strength": 2.0,
+  "fluid_wind_push_strength": 0.15,
   "vector_force_power": 0.0,
   "vector_force_x": 0.0,
   "vector_force_y": 0.01,

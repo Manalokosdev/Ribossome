@@ -265,10 +265,17 @@ fn gamma_shove(from_idx: u32, from_pos: vec2<f32>, back_dir: vec2<f32>, seed: u3
 // capped law (max ~1 cell/epoch) — the soup pattern lags the flow in
 // violent currents; that is a known approximation of the quanta transport,
 // not of the agents.
+// Empirical match between the fluid solver's velocity units and the speed
+// the dye VISUALLY streams at per epoch (the solver has its own dt and
+// substep cadence, so the analytic conversion chain is ambiguous). Filipe
+// calibrated this by eye: with the factor at 1.0 the ride was ~6-7x the
+// visual flow; 0.15 matches it.
+const RIDE_VISUAL_MATCH: f32 = 0.15;
+
 fn fluid_ride_velocity(world_pos: vec2<f32>) -> vec2<f32> {
     let v = sample_fluid_velocity_bilinear(world_pos);
     let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
-    var vw = v * (cell_to_world * max(params.dt, 1e-3));
+    var vw = v * (cell_to_world * max(params.dt, 1e-3) * RIDE_VISUAL_MATCH);
     let m = length(vw);
     let ride_cap = VEL_MAX * 0.8;
     if (m > ride_cap) {
