@@ -16014,7 +16014,13 @@ fn main() {
                                                                 &mut state.spawn_probability,
                                                                 0.0..=5.0,
                                                             )
-                                                            .text("Pairing Probability"),
+                                                            .text("Pairing Rate (bases/epoch)"),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Expected bases paired per epoch when complements are \
+                                                             within reach of the body (integer part = guaranteed \
+                                                             attempts, fraction = extra bernoulli attempt; capped \
+                                                             at 8). Needs energy > 1 and pays pairing cost per base.",
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(

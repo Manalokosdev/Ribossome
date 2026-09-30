@@ -201,6 +201,8 @@ const DIG_P_PER_FRAME: f32 = 0.05;
 // from a cell within this radius of itself (internal diffusion carries it
 // to the replication site). Roughly one body-part diameter.
 const PAIRING_REACH: f32 = 2.5;
+// Hard cap on bases paired per epoch (bounds the per-agent scan cost).
+const PAIRING_MAX_PER_EPOCH: u32 = 8u;
 
 // Quantized terrain collision:
 const GAMMA_SOLID_THRESHOLD: u32 = 3u;
@@ -3308,76 +3310,77 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (agent_gene_length > 0u && pairing_counter < agent_gene_length) {
         // Pairing requires energy capacity (storage) and sufficient energy (> 1.0)
         if (agent_energy_capacity > 0.0 && agent_energy_cur > 1.0) {
-            // Template-directed replication: position `pairing_counter` copies
-            // its base by capturing the complementary free monomer from the
-            // environment under the body. No complement available -> stalls.
-            let next_base = genome_get_base_ascii(agent_genome_packed, agent_genome_offset + pairing_counter, agent_genome_offset, agent_gene_length);
-            var comp_ch = 0u;
-            if (next_base == 65u) { comp_ch = 1u; }      // A pairs a free U
-            else if (next_base == 85u) { comp_ch = 0u; } // U pairs a free A
-            else if (next_base == 71u) { comp_ch = 3u; } // G pairs a free C
-            else if (next_base == 67u) { comp_ch = 2u; } // C pairs a free G
-
-            // WHOLE-BODY CAPTURE: any body part can grab the complement
-            // from the cell within PAIRING_REACH of itself; internal
-            // diffusion carries it to the replication site. Parts are
-            // scanned from a hashed start index so none is systematically
-            // favored; the first cell holding the complement wins. This
-            // makes the encounter rate scale with body coverage instead of
-            // depending on one exact cell being stocked.
+            // PAIRING RATE: params.spawn_probability is the expected number
+            // of bases paired PER EPOCH, directly — no hidden energy/scale
+            // factors. The integer part is guaranteed attempts, the
+            // fractional part one extra bernoulli attempt. Each attempt
+            // needs its complement within reach of some body part
+            // (whole-body capture, internal diffusion to the site); the
+            // first missing monomer ends the epoch's run.
+            let rate = max(params.spawn_probability, 0.0);
+            let rseed0 = ((agent_id + 1u) * 747796405u) ^ (params.random_seed * 196613u);
+            var attempts = u32(rate);
+            if (hash_f32(rseed0 ^ 0x1B873593u) < fract(rate)) { attempts += 1u; }
+            attempts = min(attempts, PAIRING_MAX_PER_EPOCH);
             let bc_p = max(min(body_count, MAX_BODY_PARTS), 1u);
-            let scan_seed = ((agent_id + 1u) * 747796405u)
-                ^ (pairing_counter * 2891336453u)
-                ^ (params.random_seed * 196613u);
-            var cap_found = false;
-            var cap_idx = 0u;
-            var cap_pos = agent_pos;
-            let start_i = hash(scan_seed) % bc_p;
-            for (var k = 0u; k < bc_p; k++) {
-                let pi2 = (start_i + k) % bc_p;
-                let pp = agents_out[agent_id].body[pi2].pos;
-                // Small stochastic reach around the part.
-                let oh = hash(scan_seed ^ (pi2 * 668265263u));
-                let oa = hash_f32(oh) * 6.2831853;
-                let orr = hash_f32(oh ^ 0x9E3779B9u) * PAIRING_REACH;
-                let wp2 = clamp_position(
-                    agent_pos + apply_agent_rotation(pp, agent_rot)
-                        + vec2<f32>(cos(oa), sin(oa)) * orr
-                );
-                let gi2 = grid_index(wp2);
-                if (atomicLoad(&chem_grid[gi2 * 4u + comp_ch]) > 0u) {
-                    cap_found = true;
-                    cap_idx = gi2;
-                    cap_pos = wp2;
-                    break;
-                }
-            }
+            let pairing_cost = max(params.pairing_cost, 0.0);
 
-            if (cap_found) {
-                let slot = cap_idx * 4u + comp_ch;
-                let rnd = hash_f32(scan_seed ^ 0xB5297A4Du);
-                let energy_scaled = sqrt(max(agent_energy_cur, 0.0));
-                // One quantum present = full drive (quantized world).
-                let pairing_drive = suspension_factor(cap_pos);
-                let base_p = params.spawn_probability * energy_scaled * 0.1;
-                let pair_p = clamp(base_p * pairing_drive, 0.0, 1.0);
+            for (var a = 0u; a < attempts; a++) {
+                if (pairing_counter >= agent_gene_length) { break; }
+                if (agent_energy_cur <= 1.0 || agent_energy_cur < pairing_cost) { break; }
 
-                if (rnd < pair_p) {
-                    // Pairing cost per increment
-                    let pairing_cost = params.pairing_cost;
-                    if (agent_energy_cur >= pairing_cost) {
-                        // Capture the complementary monomer (returned on death
-                        // if replication never completes).
-                        if (chem_take_one(slot)) {
-                            pairing_counter += 1u;
-                            agent_energy_cur -= pairing_cost;
-                            // Visual: bite the exact dye channel of the captured monomer.
-                            let after = chem_count(cap_idx, comp_ch);
-                            var dv = fluid_dye[cap_idx];
-                            dv[comp_ch] = dv[comp_ch] * f32(after) / f32(after + 1u);
-                            fluid_dye[cap_idx] = dv;
-                        }
+                // Template-directed: base at position `pairing_counter`
+                // captures its complementary free monomer.
+                let next_base = genome_get_base_ascii(agent_genome_packed, agent_genome_offset + pairing_counter, agent_genome_offset, agent_gene_length);
+                var comp_ch = 0u;
+                if (next_base == 65u) { comp_ch = 1u; }      // A pairs a free U
+                else if (next_base == 85u) { comp_ch = 0u; } // U pairs a free A
+                else if (next_base == 71u) { comp_ch = 3u; } // G pairs a free C
+                else if (next_base == 67u) { comp_ch = 2u; } // C pairs a free G
+
+                let scan_seed = rseed0
+                    ^ (pairing_counter * 2891336453u)
+                    ^ (a * 374761393u);
+                var cap_found = false;
+                var cap_idx = 0u;
+                var cap_pos = agent_pos;
+                let start_i = hash(scan_seed) % bc_p;
+                for (var k = 0u; k < bc_p; k++) {
+                    let pi2 = (start_i + k) % bc_p;
+                    let pp = agents_out[agent_id].body[pi2].pos;
+                    // Small stochastic reach around the part.
+                    let oh = hash(scan_seed ^ (pi2 * 668265263u));
+                    let oa = hash_f32(oh) * 6.2831853;
+                    let orr = hash_f32(oh ^ 0x9E3779B9u) * PAIRING_REACH;
+                    let wp2 = clamp_position(
+                        agent_pos + apply_agent_rotation(pp, agent_rot)
+                            + vec2<f32>(cos(oa), sin(oa)) * orr
+                    );
+                    let gi2 = grid_index(wp2);
+                    if (atomicLoad(&chem_grid[gi2 * 4u + comp_ch]) > 0u) {
+                        cap_found = true;
+                        cap_idx = gi2;
+                        cap_pos = wp2;
+                        break;
                     }
+                }
+                if (!cap_found) { break; }
+
+                // Suspension stub (currently 1.0) kept as a per-attempt gate.
+                if (hash_f32(scan_seed ^ 0xB5297A4Du) >= suspension_factor(cap_pos)) { continue; }
+
+                // Capture the complementary monomer (returned on death if
+                // replication never completes).
+                if (chem_take_one(cap_idx * 4u + comp_ch)) {
+                    pairing_counter += 1u;
+                    agent_energy_cur -= pairing_cost;
+                    // Visual: bite the exact dye channel of the captured monomer.
+                    let after = chem_count(cap_idx, comp_ch);
+                    var dv = fluid_dye[cap_idx];
+                    dv[comp_ch] = dv[comp_ch] * f32(after) / f32(after + 1u);
+                    fluid_dye[cap_idx] = dv;
+                } else {
+                    break;
                 }
             }
         }
