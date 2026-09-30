@@ -2790,7 +2790,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (com_world.x >= 0.0 && com_world.x < f32(SIM_SIZE) && com_world.y >= 0.0 && com_world.y < f32(SIM_SIZE)) {
             let curl = sample_fluid_curl(com_world);
             // Curl is in ~1/sec; convert to per-tick delta with params.dt.
-            angular_velocity += curl * params.fluid_wind_push_strength * WIND_CURL_ANGVEL_SCALE * params.dt * area_response;
+            // No area_response here (it reached 10x for light agents: they
+            // spun in place while the capped drift barely moved them), and
+            // the curl is scaled by the same factor the LINEAR drift law
+            // applies to the raw velocity, so agents rotate with the water
+            // exactly as much as they translate with it.
+            let spd_curl = length(sample_fluid_velocity_bilinear(com_world));
+            let drift_factor = select(
+                MONOMER_ADV_COUPLING,
+                0.45 / max(spd_curl, 1e-5),
+                spd_curl * MONOMER_ADV_COUPLING > 0.45
+            );
+            angular_velocity += curl * drift_factor * params.fluid_wind_push_strength * WIND_CURL_ANGVEL_SCALE * params.dt;
         }
     }
     angular_velocity = angular_velocity * ANGULAR_BLEND;
