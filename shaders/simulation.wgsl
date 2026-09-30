@@ -3554,6 +3554,9 @@ const GAMMA_RELAX_P: f32 = 0.12;
 // merges in ~50 epochs; a field of scattered debris consolidates over
 // thousands.
 const GAMMA_COHESION_P: f32 = 0.01;
+// Random-walk rate for fully isolated single quanta (all 8 neighbors
+// empty) — the 0<->1 exchange that lets strays search for company.
+const GAMMA_STRAY_WALK_P: f32 = 0.05;
 
 fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     let x = gid.x;
@@ -3602,6 +3605,36 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
             if (f32(hc) / 4294967295.0 < GAMMA_COHESION_P) {
                 if (gamma_take_one(idx)) {
                     gamma_add_one(big_idx);
+                }
+            }
+        } else if (n == 1u && big_count == 0u) {
+            // STRAY WALK — the missing 0<->1 exchange: a quantum with ALL
+            // eight neighbors empty random-walks across bare ground until
+            // it lands next to something, and the absorption rule above
+            // takes over. Without this, lone specks in the void were
+            // immortal fossils.
+            let hw = hash(idx ^ (params.epoch * 747796405u) ^ (phase * 196613u) ^ (params.random_seed * 2891336453u));
+            if (f32(hw) / 4294967295.0 < GAMMA_STRAY_WALK_P) {
+                let d = (hw >> 8u) % 8u;
+                var ddx = 0i;
+                var ddy = 0i;
+                switch d {
+                    case 0u: { ddx = 1i; }
+                    case 1u: { ddx = -1i; }
+                    case 2u: { ddy = 1i; }
+                    case 3u: { ddy = -1i; }
+                    case 4u: { ddx = 1i; ddy = 1i; }
+                    case 5u: { ddx = -1i; ddy = 1i; }
+                    case 6u: { ddx = 1i; ddy = -1i; }
+                    default: { ddx = -1i; ddy = -1i; }
+                }
+                let wx = i32(x) + ddx;
+                let wy = i32(y) + ddy;
+                if (wx >= 0i && wy >= 0i && wx < i32(GRID_SIZE) && wy < i32(GRID_SIZE)) {
+                    let wi = u32(wy) * GRID_SIZE + u32(wx);
+                    if (gamma_take_one(idx)) {
+                        gamma_add_one(wi);
+                    }
                 }
             }
         }
