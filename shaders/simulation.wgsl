@@ -3572,12 +3572,14 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     // uniform speck field. Restricted to counts below the sandpile band so
     // it never fights the slides; exact take/add conservation.
     if (n >= 1u && n < SANDPILE_DIFF) {
-        // Scan the FULL 8-neighborhood; move toward the largest neighbor
-        // with count >= own (so two lone specks DO merge — the first to
-        // fire becomes the seed; simultaneous symmetric fires are a p^2
-        // rarity). Ties broken by scan order.
+        // Scan the FULL 8-neighborhood. Only TRULY ISOLATED cells migrate:
+        // a cell with any same-level neighbor is part of a coherent
+        // structure (a rubble field, a level-2 wall) and stays put — this
+        // also protects deliberately thin terrain features from slowly
+        // dissolving. A stray with a LARGER neighbor hops into it.
         var big_idx = idx;
         var big_count = 0u;
+        var has_same_level = false;
         for (var dy = -1i; dy <= 1i; dy++) {
             for (var dx = -1i; dx <= 1i; dx++) {
                 if (dx == 0i && dy == 0i) { continue; }
@@ -3588,13 +3590,14 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
                 }
                 let ni = u32(ny) * GRID_SIZE + u32(nx);
                 let c = gamma_count(ni);
+                if (c == n) { has_same_level = true; }
                 if (c > big_count) {
                     big_count = c;
                     big_idx = ni;
                 }
             }
         }
-        if (big_idx != idx && big_count >= n && big_count < GAMMA_PILE_MAX) {
+        if (!has_same_level && big_idx != idx && big_count > n && big_count < GAMMA_PILE_MAX) {
             let hc = hash(idx ^ (params.epoch * 2246822519u) ^ (phase * 3266489917u) ^ (params.random_seed * 668265263u));
             if (f32(hc) / 4294967295.0 < GAMMA_COHESION_P) {
                 if (gamma_take_one(idx)) {
