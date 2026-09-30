@@ -2709,17 +2709,25 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Higher mass = more smoothing (0.95 for mass=0.01, 0.7 for mass=0.1)
     // This filters high-frequency oscillations while preserving directed motion
     let mass_smoothing = clamp(1.0 - (total_mass * 2.5), 0.1, 0.95);
-    agent_vel = mix(agent_vel, new_velocity, mass_smoothing);
 
-    // Stable water-frame drag: exponential relaxation toward the
-    // area-weighted local fluid velocity. Matches the old linear behavior
-    // for small couplings (1 - exp(-x) ~ x) and saturates at "move with
-    // the fluid" for large ones -- the velocity can approach the water's
-    // but can never overshoot or flip, for ANY coupling/mass combination.
+    // WATER-FRAME BASELINE. In the overdamped regime everything moves WITH
+    // the medium; forces produce motion RELATIVE to it. The old structure
+    // blended total velocity toward force/drag (i.e., toward zero for a
+    // passive agent) while a separate drag term fought to pull it back to
+    // the water velocity — the equilibrium sat at ~40% of an already-slow
+    // drift and agents never visibly rode currents. Now the relative
+    // velocity is what the overdamped blend decays, and the water velocity
+    // (monomer transport law x push slider; 1 = ride exactly with the
+    // food) is simply added on top — riding a current is the default
+    // state, not a force that must win a fight.
     if (wind_k > 0.0) {
-        let v_water = wind_target / wind_k;
-        let relax = 1.0 - exp(-wind_k * mass_smoothing);
-        agent_vel = mix(agent_vel, v_water, relax);
+        let v_water = (wind_target / wind_k)
+            * clamp(params.fluid_wind_push_strength, 0.0, 1.0);
+        var relv = agent_vel - v_water;
+        relv = mix(relv, new_velocity, mass_smoothing);
+        agent_vel = v_water + relv;
+    } else {
+        agent_vel = mix(agent_vel, new_velocity, mass_smoothing);
     }
 
     // Apply hard-collision correction after smoothing so it can't be damped away
