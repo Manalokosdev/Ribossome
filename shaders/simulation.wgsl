@@ -1881,57 +1881,50 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // K/C + M/N/P/Q modifiers: samples slope gradient and emits signal based on orientation dot product
         let base_type_slope = get_base_part_type(agents_out[agent_id].body[i].part_type);
         if (base_type_slope == 32u) {
-            // Get slope gradient at this position
+            // GAMMA SENSOR (was slope sensor): the unified ionization model
+            // applied to the quantized inert mass — stochastic collision
+            // samples within the sensing radius accumulate charge from gamma
+            // quanta; the charge fades at the variant's falloff rate and is
+            // emitted into alpha (K promoter) or beta (C promoter). With
+            // solid terrain as excluded volume, "smelling rock" is what a
+            // digger or wall-follower needs.
             let world_pos = agent_pos + apply_agent_rotation(part_pos, agent_rot);
-            var slope_gradient = read_gamma_slope(grid_index(world_pos));
 
-            // Preserve historical behavior: slope sensors respond to both terrain slope AND
-            // the configured global vector force (gravity/wind).
-            if (params.vector_force_power > 0.0) {
-                let gravity_vector = vec2<f32>(
-                    params.vector_force_x * params.vector_force_power,
-                    params.vector_force_y * params.vector_force_power
-                );
-                slope_gradient += gravity_vector;
-            }
-
-            // Calculate orientation vector (perpendicular to segment)
-            var segment_dir = vec2<f32>(0.0);
-            if (i > 0u) {
-                let prev = agents_out[agent_id].body[i-1u].pos;
-                segment_dir = part_pos - prev;
-            } else if (agents_out[agent_id].body_count > 1u) {
-                let next = agents_out[agent_id].body[1u].pos;
-                segment_dir = next - part_pos;
-            } else {
-                segment_dir = vec2<f32>(1.0, 0.0);
-            }
-            let seg_len = length(segment_dir);
-            let axis_local = select(segment_dir / seg_len, vec2<f32>(1.0, 0.0), seg_len < 1e-4);
-            let orientation_local = vec2<f32>(-axis_local.y, axis_local.x);
-            let orientation_world = apply_agent_rotation(orientation_local, agent_rot);
-
-            // Dot product of slope with orientation
-            let slope_alignment = dot(slope_gradient, orientation_world);
-
-            // Get modifier parameter (encoded in part_type)
             let organ_param = get_organ_param(agents_out[agent_id].body[i].part_type);
-
-            // Decode promoter type from bit 7: K=0 (alpha), C=1 (beta)
             let is_C_promoter = ((organ_param & 128u) != 0u);
-
-            // Get modifier parameter (lower 7 bits)
             let modifier_param1 = f32(organ_param & 127u) / 127.0;
+            let g_gain = modifier_param1 + amino_props.parameter1;
+            let g_polarity = select(1.0, -1.0, g_gain < 0.0);
+            let g_mag = abs(g_gain);
 
-            // Generate signal: slope alignment * (modifier_param1 + props.parameter1)
-            let signal_strength = slope_alignment * (modifier_param1 + amino_props.parameter1);
+            // Falloff tier from modifier bits 0-1 (fast -> slow memory).
+            let g_tier = organ_param & 3u;
+            var g_decay = 0.72;
+            if (g_tier == 1u) { g_decay = 0.85; }
+            else if (g_tier == 2u) { g_decay = 0.93; }
+            else if (g_tier == 3u) { g_decay = 0.97; }
 
-            // Emit to appropriate signal channel based on promoter
-            // K promoter ? alpha signal, C promoter ? beta signal
+            var g_hits = 0.0;
+            let gseed = (agent_id * 1000u + i * 29u) ^ (params.random_seed * 747796405u);
+            for (var s = 0u; s < 4u; s++) {
+                let hs = hash(gseed ^ (s * 2654435761u));
+                let ang = hash_f32(hs) * 6.2831853;
+                let rad = sqrt(hash_f32(hs ^ 0x9E3779B9u)) * SENSOR_ION_RADIUS;
+                let sp = world_pos + vec2<f32>(cos(ang), sin(ang)) * rad;
+                if (is_in_bounds(sp)) {
+                    g_hits += f32(gamma_count(grid_index(sp)));
+                }
+            }
+
+            var g_charge = max(agents_out[agent_id].body[i]._pad.x, 0.0);
+            g_charge = g_charge * g_decay + g_hits * SENSOR_CHARGE_PER_HIT;
+            agents_out[agent_id].body[i]._pad.x = g_charge;
+
+            let g_emitted = sqrt(clamp(g_charge * g_mag, 0.0, 1.0)) * g_polarity;
             if (is_C_promoter) {
-                new_beta = new_beta + signal_strength;
+                new_beta = new_beta + g_emitted;
             } else {
-                new_alpha = new_alpha + signal_strength;
+                new_alpha = new_alpha + g_emitted;
             }
         }
 
