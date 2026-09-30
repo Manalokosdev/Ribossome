@@ -300,6 +300,39 @@ fn fluid_ride_velocity(world_pos: vec2<f32>) -> vec2<f32> {
     return vw;
 }
 
+// UV LIGHT WITH TERRAIN SHADOWS. Light enters at the top of the screen
+// (HIGH y), attenuates with water depth (UV Attenuation slider), and is
+// absorbed by gamma between the point and the surface: the column above
+// is sampled at 16 points and each sample's quanta dim the light. Below
+// the lit band the column scan is skipped (light is negligible anyway),
+// which keeps the cost confined to the upper layer.
+const UV_SHADOW_SAMPLES: u32 = 16u;
+const UV_SHADOW_ABSORB: f32 = 0.35; // per gamma quantum per sample
+
+fn uv_light_at_cell(x: u32, y: u32) -> f32 {
+    let depth_frac = 1.0 - (f32(y) + 0.5) / f32(GRID_SIZE);
+    let water = exp(-max(params.dye_alpha_color_g, 0.5) * depth_frac);
+    if (water < 1e-2) {
+        return water;
+    }
+    let span = f32(GRID_SIZE - 1u - min(y, GRID_SIZE - 1u));
+    if (span < 1.0) {
+        return water;
+    }
+    var q = 0.0;
+    for (var k = 1u; k <= UV_SHADOW_SAMPLES; k++) {
+        let sy = y + u32(span * f32(k) / f32(UV_SHADOW_SAMPLES));
+        q += f32(gamma_count(min(sy, GRID_SIZE - 1u) * GRID_SIZE + x));
+    }
+    return water * exp(-UV_SHADOW_ABSORB * q);
+}
+
+fn uv_light_at_world(p: vec2<f32>) -> f32 {
+    let cx = u32(clamp(p.x / f32(SIM_SIZE) * f32(GRID_SIZE), 0.0, f32(GRID_SIZE - 1u)));
+    let cy = u32(clamp(p.y / f32(SIM_SIZE) * f32(GRID_SIZE), 0.0, f32(GRID_SIZE - 1u)));
+    return uv_light_at_cell(cx, cy);
+}
+
 // Unified "ionization" chemical sensors: stochastic collision sampling radius
 // (world units) and charge gained per monomer collision. Charge fades each
 // frame at the variant's falloff rate.
@@ -3301,7 +3334,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // AQUARIUM TEMPERATURE: shallow lit water is HOT — higher death
         // rate in the rich fast lane at the top; the deep is cold, slow,
         // safe and poor. Same light curve as photo-activation.
-        let light_a = exp(-max(params.dye_alpha_color_g, 0.5) * (1.0 - clamp(agent_pos.y / f32(SIM_SIZE), 0.0, 1.0)));
+        let light_a = uv_light_at_world(agent_pos);
         let temp_mult = mix(1.0, max(params.dye_alpha_color_b, 1.0), light_a);
         let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * temp_mult, 0.0, 1.0);
 
@@ -3815,7 +3848,12 @@ fn parcel_hop_p(v: vec2<f32>) -> f32 {
 }
 // Buried monomers (inside gamma mass) creep at this fraction of the base
 // diffusion rate, further divided by local occupancy. They never advect.
-const BURIED_DIFF_FACTOR: f32 = 0.25;
+// POROUS ROCK: buried monomers percolate at the full base diffusion rate,
+// attenuated gently by occupancy, so nutrients seep in and out of gamma
+// masses and agents can harvest the rims (was 0.25 and 1/(1+g): ~30x
+// slower, gamma interiors were sealed vaults).
+const BURIED_DIFF_FACTOR: f32 = 1.0;
+const GAMMA_POROSITY_K: f32 = 0.3;
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
 // Aquarium thermodynamics: UV activation at full light (per spent monomer
 // per epoch), light attenuation with depth (top of world = high y = lit;
@@ -3866,13 +3904,13 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
     var p_diff_eff = p_diff;
     if (g_src > 0u) {
         p_adv_eff = 0.0;
-        p_diff_eff = DIFF_HOP_P * BURIED_DIFF_FACTOR / (1.0 + f32(g_src));
+        p_diff_eff = DIFF_HOP_P * BURIED_DIFF_FACTOR / (1.0 + GAMMA_POROSITY_K * f32(g_src));
     }
 
     // AQUARIUM LIGHT: UV enters at the TOP of the screen — empirically
     // HIGH world y (the present chain flips y once more than the
     // composite math suggests). Attenuates with depth.
-    let light_t = exp(-max(params.dye_alpha_color_g, 0.5) * (1.0 - (f32(y) + 0.5) / f32(GRID_SIZE)));
+    let light_t = uv_light_at_cell(x, y);
 
     for (var ch = 0u; ch < 4u; ch++) {
         let slot = idx * 4u + ch;
@@ -3935,7 +3973,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
             let g_tgt = gamma_count(t_idx);
             if (g_tgt > 0u) {
                 if (is_adv) { continue; }
-                let gperm = 1.0 / (1.0 + f32(g_tgt));
+                let gperm = 1.0 / (1.0 + GAMMA_POROSITY_K * f32(g_tgt));
                 if (hash_f32(h ^ 0x27D4EB2Fu) >= gperm) { continue; }
             }
             // Hops preserve the monomer's state (act or spent), chosen
@@ -4188,7 +4226,7 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
         if ((m & 16u) != 0u) { dbg += vec3<f32>(1.0, 1.0, 1.0) * clamp(gamma, 0.0, 1.0); }
         // Key 8: UV radiation map (violet), scaled by the UV strength slider.
         if ((m & 64u) != 0u) {
-            let uv_l = exp(-max(params.dye_alpha_color_g, 0.5) * (1.0 - clamp(world_pos.y / params.grid_size, 0.0, 1.0)));
+            let uv_l = uv_light_at_world(world_pos);
             dbg += vec3<f32>(0.7, 0.3, 1.0) * clamp(uv_l * max(params.dye_alpha_color_r, 0.0), 0.0, 1.0);
         }
         base_color = dbg;
