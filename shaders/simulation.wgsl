@@ -2742,8 +2742,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let move_len = length(agent_vel);
         var hit = false;
         var hit_idx = 0u;
+        var hit_pos = agent_pos;
+        var dir_m = vec2<f32>(1.0, 0.0);
         if (move_len > 1e-5) {
-            let dir_m = agent_vel / move_len;
+            dir_m = agent_vel / move_len;
             let steps = min(u32(ceil(move_len / 0.9)) + 1u, 16u);
             let step_len = move_len / f32(steps);
             for (var s = 1u; s <= steps; s++) {
@@ -2752,6 +2754,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (gamma_count(ci) >= GAMMA_SOLID_THRESHOLD) {
                     hit = true;
                     hit_idx = ci;
+                    hit_pos = p;
                     break;
                 }
                 agent_pos = p;
@@ -2760,18 +2763,34 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (hit) {
             // GRIND: pressing against the wall can dislodge one quantum to
             // the agent's rear (tunneling by persistence).
-            let spd_b = max(move_len, 1e-6);
             let bseed0 = (agent_id + 1u) * 2246822519u ^ (params.random_seed * 3266489917u);
             if (hash_f32(bseed0) < DIG_P_PER_FRAME * max(total_mass, 0.1)) {
-                let behind0 = clamp_position(agent_pos - (agent_vel / spd_b) * 2.0);
+                let behind0 = clamp_position(agent_pos - dir_m * 2.0);
                 if (gamma_count(grid_index(behind0)) < GAMMA_SOLID_THRESHOLD) {
                     if (gamma_take_one(hit_idx)) {
                         gamma_add_one(grid_index(behind0));
                     }
                 }
             }
-            // Soft bounce; never enter.
-            agent_vel = agent_vel * -0.2;
+            // Wall normal from the local gamma gradient (points out of the
+            // rock). Kill only the approach component of velocity (with a
+            // 20% bounce) and keep the tangential part, so agents SLIDE
+            // along walls instead of flip-flopping against their own
+            // thrust every frame (visible as flickering).
+            let gxm = f32(gamma_count(grid_index(clamp_position(hit_pos + vec2<f32>(-1.5, 0.0)))));
+            let gxp = f32(gamma_count(grid_index(clamp_position(hit_pos + vec2<f32>( 1.5, 0.0)))));
+            let gym = f32(gamma_count(grid_index(clamp_position(hit_pos + vec2<f32>(0.0, -1.5)))));
+            let gyp = f32(gamma_count(grid_index(clamp_position(hit_pos + vec2<f32>(0.0,  1.5)))));
+            var wall_n = vec2<f32>(gxm - gxp, gym - gyp);
+            if (dot(wall_n, wall_n) < 1e-4) {
+                wall_n = -dir_m;
+            } else {
+                wall_n = normalize(wall_n);
+            }
+            let vn = dot(agent_vel, wall_n);
+            if (vn < 0.0) {
+                agent_vel -= wall_n * vn * 1.2;
+            }
         }
     }
 
@@ -2826,8 +2845,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             dirv = normalize(dirv);
             agent_pos = clamp_position(agent_pos + dirv * GAMMA_EXTRACT_STEP);
-            // Kill momentum so the extraction is not immediately undone.
-            agent_vel = agent_vel * 0.4;
+            // Remove only the velocity component pointing back INTO the
+            // rock; tangential/outward motion is untouched so extraction
+            // doesn't fight normal movement (jitter/flicker).
+            let vin = dot(agent_vel, dirv);
+            if (vin < 0.0) {
+                agent_vel -= dirv * vin;
+            }
         }
     }
 

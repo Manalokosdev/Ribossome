@@ -10175,8 +10175,14 @@ impl GpuState {
                     };
                     cpass.set_pipeline(&self.reproduction_pipeline);
                     cpass.set_bind_group(0, reproduction_bg, &[]);
+                    // Full capacity: agent_count is a stale async readback.
+                    // An agent past the stale cutoff whose pairing completed
+                    // would never spawn its offspring, yet process_agents
+                    // (which covers full capacity) still resets its counter
+                    // and charges it — silently destroying the captured
+                    // complements (matter leak) and the birth.
                     cpass.dispatch_workgroups(
-                        ((self.agent_count) + 255) / 256,
+                        ((self.agent_buffer_capacity as u32) + 255) / 256,
                         1,
                         1,
                     );
@@ -10394,8 +10400,10 @@ impl GpuState {
                 };
                 cpass.set_pipeline(&self.reproduction_pipeline);
                 cpass.set_bind_group(0, reproduction_bg, &[]);
+                // Full capacity: agent_count is a stale async readback (see
+                // the other reproduction dispatch for why this matters).
                 cpass.dispatch_workgroups(
-                    ((self.agent_count) + 255) / 256,
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
                     1,
                     1,
                 );
@@ -10859,7 +10867,12 @@ impl GpuState {
 
                     cpass.set_pipeline(&self.process_pipeline);
                     cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                    // Full capacity: agent_count is a stale async readback.
+                    cpass.dispatch_workgroups(
+                        ((self.agent_buffer_capacity as u32) + 255) / 256,
+                        1,
+                        1,
+                    );
 
                     self.frame_profiler.write_ts_compute_pass(
                         &mut cpass,
@@ -10914,11 +10927,22 @@ impl GpuState {
                     .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_FINALIZE_MERGE);
             }
 
-            // Render all agents to agent_grid when drawing
+            // Render all agents to agent_grid when drawing.
+            // IMPORTANT: cover the FULL buffer capacity, not the CPU-side
+            // agent_count — that count comes from an async readback and lags
+            // several frames. During growth, live agents past the stale
+            // cutoff were simulated but not drawn, and since compaction
+            // order is nondeterministic, WHICH agents fell past it changed
+            // every frame (flickering + invisible "ghost" agents). The
+            // kernel early-exits on dead slots, so this is cheap.
             if should_draw {
                 cpass.set_pipeline(&self.render_agents_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                cpass.dispatch_workgroups(
+                    ((self.agent_buffer_capacity as u32) + 255) / 256,
+                    1,
+                    1,
+                );
             }
 
             self.frame_profiler
@@ -11689,7 +11713,9 @@ impl GpuState {
 
             const PICK_RADIUS: f32 = 400.0; // Ignore agents beyond this radius when selecting
 
-            for (i, agent) in agents.iter().enumerate().take(self.agent_count as usize) {
+            // Full buffer: agent_count is a stale async readback and would
+            // make freshly-born agents unselectable.
+            for (i, agent) in agents.iter().enumerate() {
                 if agent.alive == 0 {
                     continue;
                 }
@@ -11709,9 +11735,7 @@ impl GpuState {
             let mut agents_vec: Vec<Agent> = agents.iter().copied().collect();
 
             // Clear all selection flags first, then set the nearest one
-            let max_len = agents_vec.len();
-            let take_len = (self.agent_count as usize).min(max_len);
-            for agent in agents_vec.iter_mut().take(take_len) {
+            for agent in agents_vec.iter_mut() {
                 agent.is_selected = 0;
             }
 
@@ -11759,7 +11783,7 @@ impl GpuState {
             self.queue.write_buffer(
                 current_buffer,
                 0,
-                bytemuck::cast_slice(&agents_vec[..take_len]),
+                bytemuck::cast_slice(&agents_vec[..]),
             );
         }
     }
@@ -11907,7 +11931,10 @@ impl GpuState {
             let hashes: &[u32] = bytemuck::cast_slice(&hash_data);
             let agents_data = agents_slice.get_mapped_range();
             let agents: &[Agent] = bytemuck::cast_slice(&agents_data);
-            let take_len = (self.agent_count as usize).min(hashes.len()).min(agents.len());
+            // Scan the FULL buffer: agent_count is a stale async readback,
+            // and live agents past it would be missed by species counting
+            // and the matter ledger (alive==0 slots are skipped anyway).
+            let take_len = hashes.len().min(agents.len());
 
             // Count occurrences of each hash (0 = dead/filtered, skip).
             let mut hash_counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
@@ -12942,7 +12969,12 @@ impl GpuState {
 
                     cpass.set_pipeline(&self.render_agents_pipeline);
                     cpass.set_bind_group(0, &tile_bg_process, &[]);
-                    cpass.dispatch_workgroups((self.agent_count + 255) / 256, 1, 1);
+                    // Full capacity: agent_count is a stale async readback.
+                    cpass.dispatch_workgroups(
+                        ((self.agent_buffer_capacity as u32) + 255) / 256,
+                        1,
+                        1,
+                    );
                 }
 
                 // Composite
