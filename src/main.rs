@@ -3088,6 +3088,7 @@ fn default_dye_diffusion() -> f32 { 0.01 }
 fn default_dye_diffusion_no_fluid() -> f32 { 0.15 }
 fn default_env_grid_resolution() -> u32 { DEFAULT_ENV_GRID_RESOLUTION }
 fn default_fluid_grid_resolution() -> u32 { DEFAULT_FLUID_GRID_RESOLUTION }
+fn default_fluid_substep() -> u32 { 1 }
 fn default_spatial_grid_resolution() -> u32 { DEFAULT_SPATIAL_GRID_RESOLUTION }
 fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
@@ -3263,6 +3264,8 @@ struct SimulationSettings {
     fluid_dt: f32,            // Fluid solver dt (used by stable-fluids steps)
     fluid_decay: f32,         // Fluid decay/dissipation factor
     fluid_jacobi_iters: u32,  // Pressure solve iterations
+    #[serde(default = "default_fluid_substep")]
+    fluid_substep: u32,       // Run the fluid solver every N epochs with dt*N (1 = every epoch)
     fluid_vorticity: f32,     // Vorticity confinement strength (0 disables)
     fluid_viscosity: f32,     // Viscosity (nu) for velocity diffusion (0 disables)
     // Lift/sedimentation controls for chem<->dye coupling (shared across alpha/beta/gamma).
@@ -3445,6 +3448,7 @@ impl Default for SimulationSettings {
             fluid_dt: 0.016,
             fluid_decay: 0.995,
             fluid_jacobi_iters: 31,
+            fluid_substep: 1,
             fluid_vorticity: 0.0,
             fluid_viscosity: 0.05,
             // Lift/sedimentation controls for chem<->dye coupling (shared across alpha/beta/gamma).
@@ -3865,6 +3869,7 @@ impl SimulationSettings {
         self.fluid_dt = self.fluid_dt.clamp(0.001, 0.05);
         self.fluid_decay = self.fluid_decay.clamp(0.5, 1.0);
         self.fluid_jacobi_iters = self.fluid_jacobi_iters.clamp(1, 128);
+        self.fluid_substep = self.fluid_substep.clamp(1, 4);
         self.fluid_vorticity = self.fluid_vorticity.clamp(0.0, 50.0);
         self.fluid_viscosity = self.fluid_viscosity.clamp(0.0, 5.0);
         self.dye_diffusion = self.dye_diffusion.clamp(0.0, 1.0);
@@ -4363,6 +4368,7 @@ struct GpuState {
     fluid_dt: f32,
     fluid_decay: f32,
     fluid_jacobi_iters: u32,
+    fluid_substep: u32,
     fluid_vorticity: f32,
     fluid_viscosity: f32,
     fluid_ooze_rate: f32,
@@ -4598,6 +4604,7 @@ impl GpuState {
         self.fluid_dt = settings.fluid_dt;
         self.fluid_decay = settings.fluid_decay;
         self.fluid_jacobi_iters = settings.fluid_jacobi_iters;
+        self.fluid_substep = settings.fluid_substep.clamp(1, 4);
         self.fluid_vorticity = settings.fluid_vorticity;
         self.fluid_viscosity = settings.fluid_viscosity;
         self.fluid_ooze_rate = settings.fluid_ooze_rate;
@@ -8008,6 +8015,7 @@ impl GpuState {
             fluid_dt: settings.fluid_dt,
             fluid_decay: settings.fluid_decay,
             fluid_jacobi_iters: settings.fluid_jacobi_iters,
+            fluid_substep: settings.fluid_substep.clamp(1, 4),
             fluid_vorticity: settings.fluid_vorticity,
             fluid_viscosity: settings.fluid_viscosity,
             fluid_ooze_rate: settings.fluid_ooze_rate,
@@ -8909,6 +8917,7 @@ impl GpuState {
             fluid_dt: self.fluid_dt,
             fluid_decay: self.fluid_decay,
             fluid_jacobi_iters: self.fluid_jacobi_iters,
+            fluid_substep: self.fluid_substep,
             fluid_vorticity: self.fluid_vorticity,
             fluid_viscosity: self.fluid_viscosity,
             fluid_ooze_rate: self.fluid_ooze_rate,
@@ -9940,7 +9949,11 @@ impl GpuState {
         {
             let fluid_params_f32: [f32; 40] = [
                 self.epoch as f32,         // time
-                self.fluid_dt,             // dt
+                // Temporal substepping: the solver runs every N epochs with
+                // dt*N, so fluid time advances at the same rate for less
+                // than half the cost (forces from the representative frame
+                // integrate over the whole window).
+                self.fluid_dt * self.fluid_substep.max(1) as f32, // dt
                 self.fluid_decay,          // decay
                 FLUID_GRID_SIZE as f32,    // grid_size (as f32)
                 0.0, 0.0, 0.0, 0.0,        // mouse
@@ -10621,7 +10634,13 @@ impl GpuState {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_FLUID_PASS_START);
 
-                if should_run_simulation {
+                // Temporal substepping: solve only every fluid_substep epochs
+                // (with dt scaled up to match); the velocity field persists
+                // and is sampled normally by agents/monomers in between.
+                let fluid_solve_frame = self.fluid_substep <= 1
+                    || (self.epoch % self.fluid_substep as u64) == 0;
+
+                if should_run_simulation && fluid_solve_frame {
                 // Run fluid solver - forces already written by agents to force_vectors
                 // Stable Fluids order: inject_test_force (combines) ? add_forces ? diffuse ? advect ? project
                 {
@@ -17039,6 +17058,16 @@ fn main() {
                                                             );
                                                         });
                                                         ui.label("Higher iters = less compressible (more GPU cost)");
+
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Substep (solve every N epochs)");
+                                                            ui.add(
+                                                                egui::DragValue::new(&mut state.fluid_substep)
+                                                                    .range(1..=4)
+                                                                    .speed(0.1),
+                                                            );
+                                                        });
+                                                        ui.label("2 = half the fluid cost; dt is scaled so flow speed is unchanged");
 
                                                         ui.separator();
                                                         ui.add(

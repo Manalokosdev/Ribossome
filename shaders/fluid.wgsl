@@ -41,7 +41,7 @@
 // NOTE: FLUID_GRID_SIZE is injected by Rust at shader compile time.
 
 // Stability limits
-const MAX_DT: f32 = 0.02;         // Clamp dt spikes (e.g., window stalls)
+const MAX_DT: f32 = 0.07;         // Clamp dt spikes; must admit dt*substep (up to 4x)
 const MAX_FORCE: f32 = 200000.0;  // Clamp injected force magnitude per cell
 const MAX_VEL: f32 = 2000.0;      // Clamp velocity magnitude per cell
 
