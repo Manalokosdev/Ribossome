@@ -130,7 +130,11 @@ const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.97;
 @group(0) @binding(1) var<storage, read_write> velocity_out: array<vec2<f32>>;
 
 // Gamma grid (terrain) sampled as an obstacle field
-@group(0) @binding(2) var<storage, read_write> gamma_grid: array<f32>;
+// QUANTIZED: height plane holds integer gamma-quanta counts (atomic u32);
+// slope planes hold f32 bitcast through the same array.
+@group(0) @binding(2) var<storage, read_write> gamma_grid: array<atomic<u32>>;
+
+const GAMMA_QUANTUM_F: f32 = 0.25;
 
 // Environment chemistry grid (must match shaders/shared.wgsl layout):
 // - chem_grid[idx].x = A monomer
@@ -853,11 +857,14 @@ const GAMMA_SLOPE_X_OFFSET: u32 = GAMMA_LAYER_SIZE;
 const GAMMA_SLOPE_Y_OFFSET: u32 = GAMMA_LAYER_SIZE * 2u;
 
 fn gamma_height_at_idx(idx: u32) -> f32 {
-    return gamma_grid[idx];
+    return f32(atomicLoad(&gamma_grid[idx])) * GAMMA_QUANTUM_F;
 }
 
 fn gamma_slope_at_idx(idx: u32) -> vec2<f32> {
-    return vec2<f32>(gamma_grid[idx + GAMMA_SLOPE_X_OFFSET], gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET]);
+    return vec2<f32>(
+        bitcast<f32>(atomicLoad(&gamma_grid[idx + GAMMA_SLOPE_X_OFFSET])),
+        bitcast<f32>(atomicLoad(&gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET]))
+    );
 }
 
 fn gamma_at_fluid_cell(x: u32, y: u32) -> f32 {

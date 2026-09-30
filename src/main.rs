@@ -8207,12 +8207,13 @@ impl GpuState {
         let height = gray.height() as usize;
         let raw = gray.as_raw();
 
-        let mut gamma_values = Vec::with_capacity(self.env_grid_cell_count);
+        // Quantized gamma: heights become integer quanta counts (quantum 0.25).
+        let mut gamma_values: Vec<u32> = Vec::with_capacity(self.env_grid_cell_count);
         for row in (0..height).rev() {
             let row_offset = row * width;
             for col in 0..width {
                 let pix = raw[row_offset + col] as f32 / 255.0;
-                gamma_values.push(pix.clamp(0.0, 1.0));
+                gamma_values.push((pix.clamp(0.0, 1.0) / 0.25).round() as u32);
             }
         }
 
@@ -11969,7 +11970,10 @@ impl GpuState {
                 alpha.push((v[0] + v[1]) as f32 / 3.0);
                 beta.push((v[2] + v[3]) as f32 / 3.0);
             }
-            let gamma: Vec<f32> = bytemuck::cast_slice(&gamma_data).to_vec();
+            // Quantized gamma: GPU holds u32 quanta counts; snapshots keep
+            // legacy float heights (count * 0.25).
+            let gamma_counts: Vec<u32> = bytemuck::cast_slice(&gamma_data).to_vec();
+            let gamma: Vec<f32> = gamma_counts.iter().map(|&c| c as f32 * 0.25).collect();
             let agents: Vec<Agent> = bytemuck::cast_slice(&agents_data).to_vec();
 
             (alpha, beta, gamma, agents)
@@ -13107,7 +13111,13 @@ impl GpuState {
             chem_grid.push([quantize(a_q), quantize(a_q), quantize(b_q), quantize(b_q)]);
         }
         self.queue.write_buffer(&self.chem_grid, 0, bytemuck::cast_slice(&chem_grid));
-        self.queue.write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_grid));
+        // Quantized gamma: snapshot stores legacy float heights; convert to
+        // integer quanta counts (quantum 0.25) for the GPU buffer.
+        let gamma_counts: Vec<u32> = gamma_grid
+            .iter()
+            .map(|&h| (h.max(0.0) / 0.25).round() as u32)
+            .collect();
+        self.queue.write_buffer(&self.gamma_grid, 0, bytemuck::cast_slice(&gamma_counts));
 
         // Queue agents from snapshot for spawning
         for agent_snap in snapshot.agents.iter() {

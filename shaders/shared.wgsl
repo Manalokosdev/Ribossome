@@ -551,7 +551,12 @@ var<storage, read> spawn_requests: array<SpawnRequest>;
 var<storage, read_write> selected_agent_buffer: array<Agent>;  // Buffer to hold the selected agent for CPU readback
 
 @group(0) @binding(13)
-var<storage, read_write> gamma_grid: array<f32>; // Terrain height field + slope components
+// QUANTIZED INERT MASS (terrain): the height plane holds integer gamma-quanta
+// counts (atomic u32); the slope planes hold f32 values BITCAST through the
+// same atomic array (single-writer kernel). Height = count * GAMMA_QUANTUM.
+// Gamma is immune to fluid transport — it moves only by sandpile relaxation
+// (angle of repose) and by agents pushing it (bulldozing/digging).
+var<storage, read_write> gamma_grid: array<atomic<u32>>;
 
 @group(0) @binding(14)
 // NOTE: Use vec4 for std430-friendly 16-byte stride to match host buffer layout
@@ -1180,12 +1185,16 @@ fn clamp_gamma_coords(ix: i32, iy: i32) -> u32 {
     return u32(clamped_y) * GRID_SIZE + u32(clamped_x);
 }
 
+const GAMMA_QUANTUM: f32 = 0.25;
+
+fn gamma_count(idx: u32) -> u32 { return atomicLoad(&gamma_grid[idx]); }
+
 fn read_gamma_texel(ix: i32, iy: i32) -> f32 {
     let idx = clamp_gamma_coords(ix, iy);
-    return gamma_grid[idx];
+    return f32(gamma_count(idx)) * GAMMA_QUANTUM;
 }
 
-fn read_gamma_height(idx: u32) -> f32 { return gamma_grid[idx]; }
+fn read_gamma_height(idx: u32) -> f32 { return f32(gamma_count(idx)) * GAMMA_QUANTUM; }
 fn sanitize_nonneg_f32(x: f32) -> f32 {
     // Keep gamma unbounded (positive-only), but guard against NaN.
     // (x != x) is true iff x is NaN.
@@ -1193,13 +1202,44 @@ fn sanitize_nonneg_f32(x: f32) -> f32 {
     return select(y, 0.0, y != y);
 }
 
-fn write_gamma_height(idx: u32, value: f32) { gamma_grid[idx] = sanitize_nonneg_f32(value); }
-fn read_gamma_slope(idx: u32) -> vec2<f32> { return vec2<f32>(gamma_grid[idx + GAMMA_SLOPE_X_OFFSET], gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET]); }
-fn write_gamma_slope(idx: u32, slope: vec2<f32>) { gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = slope.x; gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET] = slope.y; }
+// SET the height (generation/painting tools): quantized with rounding.
+fn write_gamma_height(idx: u32, value: f32) {
+    atomicStore(&gamma_grid[idx], u32(round(sanitize_nonneg_f32(value) / GAMMA_QUANTUM)));
+}
+
+// Take exactly one gamma quantum (CAS with floor at 0). Returns success.
+fn gamma_take_one(idx: u32) -> bool {
+    var taken = false;
+    loop {
+        let old = atomicLoad(&gamma_grid[idx]);
+        if (old == 0u) { break; }
+        let res = atomicCompareExchangeWeak(&gamma_grid[idx], old, old - 1u);
+        if (res.exchanged) {
+            taken = true;
+            break;
+        }
+    }
+    return taken;
+}
+
+fn gamma_add_one(idx: u32) {
+    atomicAdd(&gamma_grid[idx], 1u);
+}
+
+fn read_gamma_slope(idx: u32) -> vec2<f32> {
+    return vec2<f32>(
+        bitcast<f32>(atomicLoad(&gamma_grid[idx + GAMMA_SLOPE_X_OFFSET])),
+        bitcast<f32>(atomicLoad(&gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET]))
+    );
+}
+fn write_gamma_slope(idx: u32, slope: vec2<f32>) {
+    atomicStore(&gamma_grid[idx + GAMMA_SLOPE_X_OFFSET], bitcast<u32>(slope.x));
+    atomicStore(&gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET], bitcast<u32>(slope.y));
+}
 
 fn read_combined_height(ix: i32, iy: i32) -> f32 {
     let idx = clamp_gamma_coords(ix, iy);
-    var height = gamma_grid[idx];
+    var height = read_gamma_height(idx);
     if (params.chemical_slope_scale_alpha != 0.0) { height += chem_pool_count_f(idx, 0u) * params.chemical_slope_scale_alpha; }
     if (params.chemical_slope_scale_beta != 0.0) { height += chem_pool_count_f(idx, 1u) * params.chemical_slope_scale_beta; }
     return height;

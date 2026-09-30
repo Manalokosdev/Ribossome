@@ -193,6 +193,10 @@ const SPIKE_KILL_COST_FRAC_OF_VICTIM: f32 = 0.00;
 // part mass and agent stillness.
 const UPTAKE_P_PER_QUANTUM: f32 = 0.01;
 
+// Bulldozing: per-frame probability (per part of mass 1.0 at full speed) of
+// shoving one gamma quantum from under the part to the cell behind it.
+const DIG_P_PER_FRAME: f32 = 0.05;
+
 // Unified "ionization" chemical sensors: stochastic collision sampling radius
 // (world units) and charge gained per monomer collision. Charge fades each
 // frame at the variant's falloff rate.
@@ -2372,22 +2376,17 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let target_idx = u32(target_gy) * GRID_SIZE + u32(target_gx);
 
                     if (target_idx != center_idx) {
-                        var center_gamma = read_gamma_height(center_idx);
-                        var target_gamma = read_gamma_height(target_idx);
+                        // Quantized gamma wash: probabilistically shove one
+                        // whole quantum (prob = transfer / quantum size).
                         let transfer_amount = prop_strength * 0.05 * part_weight;
-                        if (transfer_amount > 0.0) {
-                            let gamma_capacity = max(0.0, 10.0 - target_gamma);
-                            let gamma_transfer = min(min(center_gamma, transfer_amount), gamma_capacity);
-
-                            if (gamma_transfer > 0.0) {
-                                center_gamma = center_gamma - gamma_transfer;
-                                target_gamma = target_gamma + gamma_transfer;
-                                write_gamma_height(center_idx, center_gamma);
-                                write_gamma_height(target_idx, target_gamma);
+                        if (transfer_amount > 0.0 && gamma_count(target_idx) < 40u) {
+                            let p_move = clamp(transfer_amount / GAMMA_QUANTUM, 0.0, 1.0);
+                            let wseed = (agent_id + 1u) * 193u ^ (i * 389u) ^ (params.random_seed * 769u);
+                            if (hash_f32(wseed) < p_move) {
+                                if (gamma_take_one(center_idx)) {
+                                    gamma_add_one(target_idx);
+                                }
                             }
-
-                            // (Monomer wash removed: the quantized transport
-                            // kernel handles all chem movement.)
                         }
                     }
                 }
@@ -2767,6 +2766,29 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
 
+        // BULLDOZING: a moving body shoves inert gamma mass from under it to
+        // the cell behind (relative to motion) — passive digging. Species can
+        // evolve to exploit buried monomer veins this way; digging also
+        // reshapes terrain, which redirects currents (niche construction).
+        {
+            let gq = gamma_count(idx);
+            if (gq > 0u) {
+                let spd_bd = length(agent_velocity);
+                if (spd_bd > 0.05) {
+                    let p_dig = clamp(DIG_P_PER_FRAME * max(props.mass, 0.1) * clamp(spd_bd * 4.0 / VEL_MAX, 0.0, 1.0), 0.0, 1.0);
+                    let bseed = (agent_id + 1u) * 97u ^ (i * 193u) ^ (params.random_seed * 389u);
+                    if (hash_f32(bseed) < p_dig) {
+                        let behind = world_pos - (agent_velocity / spd_bd) * 1.5;
+                        if (is_in_bounds(behind)) {
+                            if (gamma_take_one(idx)) {
+                                gamma_add_one(grid_index(behind));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Organ-part wash: during microswimming, body motion stirs/displaces the chemistry layers.
         // This is a direct, fluidless transfer similar to prop wash, driven by per-part motion
         // (rigid translation + rotation) so the whole organism can advect nearby chems.
@@ -2803,21 +2825,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let part_weight = part_mass / max(total_mass, 1e-6);
 
                         let transfer_amount = wash_strength * 0.02 * part_weight * clamp(norm_spd, 0.0, 1.0);
-                        if (transfer_amount > 0.0) {
-                            // Gamma is positive-only and effectively unbounded, but we cap piling up per cell
-                            // similarly to prop wash to keep things stable.
-                            let gamma_capacity = max(0.0, 10.0 - target_gamma);
-                            let gamma_transfer = min(min(center_gamma, transfer_amount), gamma_capacity);
-
-                            if (gamma_transfer > 0.0) {
-                                center_gamma = center_gamma - gamma_transfer;
-                                target_gamma = target_gamma + gamma_transfer;
-                                write_gamma_height(center_idx, center_gamma);
-                                write_gamma_height(target_idx, target_gamma);
+                        // Quantized gamma wash: probabilistically shove one
+                        // whole quantum (prob = transfer / quantum size).
+                        if (transfer_amount > 0.0 && gamma_count(target_idx) < 40u) {
+                            let p_move = clamp(transfer_amount / GAMMA_QUANTUM, 0.0, 1.0);
+                            let wseed = (agent_id + 1u) * 449u ^ (i * 577u) ^ (params.random_seed * 907u);
+                            if (hash_f32(wseed) < p_move) {
+                                if (gamma_take_one(center_idx)) {
+                                    gamma_add_one(target_idx);
+                                }
                             }
-
-                            // (Monomer wash removed: the quantized transport
-                            // kernel handles all chem movement.)
                         }
                     }
                 }
@@ -3237,44 +3254,68 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 // ENVIRONMENT DIFFUSION & DECAY
 // ============================================================================
 
-// GAMMA (terrain) stays a float field: classic pairwise-exchange blur, staged
-// through trail_grid_inject.x to avoid in-place races.
-@compute @workgroup_size(16, 16)
-fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
+// ============================================================================
+// SANDPILE RELAXATION (quantized inert gamma mass)
+// ============================================================================
+// If a cell holds at least SANDPILE_DIFF more quanta than its lowest
+// 4-neighbor, one quantum slides downhill with probability GAMMA_RELAX_P.
+// Emergent angle of repose: slopes below the threshold are stable forever;
+// disturbed piles produce landslides. Atomic take/add — exactly conserving.
+// Runs twice per frame (the old stage1/stage2 dispatch slots).
+const SANDPILE_DIFF: u32 = 2u;
+const GAMMA_RELAX_P: f32 = 0.25;
+
+fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     let x = gid.x;
     let y = gid.y;
     if (x >= GRID_SIZE || y >= GRID_SIZE) {
         return;
     }
     let idx = y * GRID_SIZE + x;
-
-    let current_gamma = read_gamma_height(idx);
-    let gamma_diffuse_strength = clamp(params.gamma_diffuse, 0.0, 1.0);
-
-    var gamma_ex = 0.0;
-    for (var i = 0u; i < 9u; i++) {
-        let dx = i32(i % 3u) - 1;
-        let dy = i32(i / 3u) - 1;
-        if (dx == 0 && dy == 0) { continue; }
-        let nx_i = i32(x) + dx;
-        let ny_i = i32(y) + dy;
-        if (nx_i < 0 || ny_i < 0 || nx_i >= i32(GRID_SIZE) || ny_i >= i32(GRID_SIZE)) { continue; }
-        gamma_ex += read_gamma_height(u32(ny_i) * GRID_SIZE + u32(nx_i)) - current_gamma;
+    let n = gamma_count(idx);
+    if (n < SANDPILE_DIFF) {
+        return;
     }
 
-    let final_gamma = max(current_gamma + gamma_diffuse_strength * gamma_ex / 9.0, 0.0);
-    trail_grid_inject[idx] = vec4<f32>(final_gamma, 0.0, 0.0, 0.0);
+    // Find the lowest in-bounds 4-neighbor.
+    var best_idx = idx;
+    var best_count = n;
+    if (x > 0u) {
+        let c = gamma_count(idx - 1u);
+        if (c < best_count) { best_count = c; best_idx = idx - 1u; }
+    }
+    if (x + 1u < GRID_SIZE) {
+        let c = gamma_count(idx + 1u);
+        if (c < best_count) { best_count = c; best_idx = idx + 1u; }
+    }
+    if (y > 0u) {
+        let c = gamma_count(idx - GRID_SIZE);
+        if (c < best_count) { best_count = c; best_idx = idx - GRID_SIZE; }
+    }
+    if (y + 1u < GRID_SIZE) {
+        let c = gamma_count(idx + GRID_SIZE);
+        if (c < best_count) { best_count = c; best_idx = idx + GRID_SIZE; }
+    }
+
+    if (best_idx == idx || n - best_count < SANDPILE_DIFF) {
+        return;
+    }
+    let h = hash(idx ^ (params.epoch * 668265263u) ^ (phase * 2654435761u) ^ (params.random_seed * 374761393u));
+    if (f32(h) / 4294967295.0 < GAMMA_RELAX_P) {
+        if (gamma_take_one(idx)) {
+            gamma_add_one(best_idx);
+        }
+    }
+}
+
+@compute @workgroup_size(16, 16)
+fn diffuse_grids_stage1(@builtin(global_invocation_id) gid: vec3<u32>) {
+    relax_gamma_pass(gid, 0u);
 }
 
 @compute @workgroup_size(16, 16)
 fn diffuse_grids_stage2(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    if (x >= GRID_SIZE || y >= GRID_SIZE) {
-        return;
-    }
-    let idx = y * GRID_SIZE + x;
-    write_gamma_height(idx, trail_grid_inject[idx].x);
+    relax_gamma_pass(gid, 1u);
 }
 
 // Dye-exclusive simulation: precipitation is disabled for now — all monomers
@@ -3353,8 +3394,14 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
             let nx = i32(x) + dx;
             let ny = i32(y) + dy;
             if (nx < 0 || ny < 0 || nx >= i32(GRID_SIZE) || ny >= i32(GRID_SIZE)) { continue; }
+            let t_idx = u32(ny) * GRID_SIZE + u32(nx);
+            // INFILTRATION: gamma mass attenuates monomer movement — hops
+            // into occupied terrain are increasingly unlikely, so nutrients
+            // seep slowly into (and out of) buried veins until someone digs.
+            let gperm = 1.0 / (1.0 + f32(gamma_count(t_idx)));
+            if (gperm < 1.0 && hash_f32(h ^ 0x27D4EB2Fu) >= gperm) { continue; }
             if (chem_take_one(slot)) {
-                chem_add(u32(ny) * GRID_SIZE + u32(nx), ch, 1u);
+                chem_add(t_idx, ch, 1u);
             }
         }
     }
@@ -3988,10 +4035,9 @@ fn initialize_environment(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (hash_f32(idx * 747796405u ^ (c4 * 0x9E3779B9u)) < qfrac) { q += 1u; }
         atomicStore(&chem_grid[idx * 4u + c4], q);
     }
-    gamma_grid[idx] = 0.0;
+    atomicStore(&gamma_grid[idx], 0u);
 
-    gamma_grid[idx + GAMMA_SLOPE_X_OFFSET] = environment_init.slope_pair.x;
-    gamma_grid[idx + GAMMA_SLOPE_Y_OFFSET] = environment_init.slope_pair.y;
+    write_gamma_slope(idx, environment_init.slope_pair);
 
     trail_grid[idx] = environment_init.trail_values;
     trail_grid_inject[idx] = environment_init.trail_values;
