@@ -197,6 +197,13 @@ const UPTAKE_P_PER_QUANTUM: f32 = 0.01;
 // shoving one gamma quantum from under the part to the cell behind it.
 const DIG_P_PER_FRAME: f32 = 0.05;
 
+// Quantized terrain collision:
+const GAMMA_SOLID_THRESHOLD: u32 = 3u;
+const GAMMA_EJECT_FORCE: f32 = 30.0;
+const GAMMA_WALL_FORCE: f32 = 10.0;
+const GAMMA_SOLID_BRAKE: f32 = 1.0;
+const GAMMA_RUBBLE_DRAG: f32 = 0.3;
+
 // Closed world: a STILLBIRTH (non-viable genome after mutation) must return
 // everything it embodies — the strand its parent paid complements for, plus
 // its inherited energy — otherwise matter silently vanishes with every
@@ -2263,51 +2270,72 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // (Virtual swim thrust is computed once per-agent above; avoid double-counting per-part.)
 
-        // Slope force per amino acid
-        // Anchor (type 42): when active, ignore slope/global-vector contribution so
-        // the mass multiplier doesn't turn slope into extreme lateral sliding.
+        // ==================================================================
+        // QUANTIZED TERRAIN COLLISION (replaces slope-gradient forces)
+        // Gamma cells holding >= GAMMA_SOLID_THRESHOLD quanta are SOLID:
+        // embedded parts are ejected toward open space and braked; parts
+        // beside walls feel repulsion; 1..THRESH-1 quanta are rubble
+        // (viscous drag). Pressing into solid rock can dislodge quanta to
+        // the rear (slow tunneling), so digging species remain possible.
+        // Anchors (type 42) opt out, as they did for slope forces.
+        // ==================================================================
         if (!anchor_active) {
-            var slope_gradient = read_gamma_slope(grid_index(world_pos));
-            // Preserve historical behavior: add global vector force at usage site.
+            // Global vector force (was previously folded into the slope path).
             if (params.vector_force_power > 0.0) {
-                let gravity_vector = vec2<f32>(
+                let gravity_force = vec2<f32>(
                     params.vector_force_x * params.vector_force_power,
                     params.vector_force_y * params.vector_force_power
-                );
-                slope_gradient += gravity_vector;
+                ) * part_mass;
+                force += gravity_force;
+                torque += (r_com.x * gravity_force.y - r_com.y * gravity_force.x);
             }
 
-            let slope_mag = length(slope_gradient);
+            let t_idx = grid_index(world_pos);
+            let g_here = gamma_count(t_idx);
 
-            // Dead zone: ignore slopes below a minimum magnitude to prevent
-            // floating-point noise on flat terrain from creating phantom drag.
-            let SLOPE_DEAD_ZONE: f32 = 0.01;
+            var solid_push = vec2<f32>(0.0);
+            if (gamma_count(grid_index(world_pos + vec2<f32>( 1.0, 0.0))) >= GAMMA_SOLID_THRESHOLD) { solid_push.x -= 1.0; }
+            if (gamma_count(grid_index(world_pos + vec2<f32>(-1.0, 0.0))) >= GAMMA_SOLID_THRESHOLD) { solid_push.x += 1.0; }
+            if (gamma_count(grid_index(world_pos + vec2<f32>(0.0,  1.0))) >= GAMMA_SOLID_THRESHOLD) { solid_push.y -= 1.0; }
+            if (gamma_count(grid_index(world_pos + vec2<f32>(0.0, -1.0))) >= GAMMA_SOLID_THRESHOLD) { solid_push.y += 1.0; }
 
-            if (slope_mag > SLOPE_DEAD_ZONE) {
-                // Velocity-aligned slope force (slows uphill, speeds downhill)
-                let agent_speed = length(agent_velocity);
-                if (agent_speed > 0.01) {
-                    let velocity_dir = agent_velocity / agent_speed;
-                    let slope_alignment = dot(-slope_gradient, velocity_dir);
-                    let mass_factor = part_mass;
-                    let slope_force = velocity_dir * slope_alignment * params.gamma_strength * mass_factor;
-                    force += slope_force;
-                    torque += (r_com.x * slope_force.y - r_com.y * slope_force.x);
+            if (g_here >= GAMMA_SOLID_THRESHOLD) {
+                // Embedded in solid: eject toward open space and brake hard.
+                var eject = solid_push;
+                if (dot(eject, eject) < 0.25) {
+                    // Fully surrounded: pick a hashed escape direction.
+                    let eh = hash((agent_id + 1u) * 31u ^ (i * 67u) ^ params.random_seed);
+                    let ea = hash_f32(eh) * 6.2831853;
+                    eject = vec2<f32>(cos(ea), sin(ea));
                 }
+                let ej = normalize(eject) * GAMMA_EJECT_FORCE * part_mass;
+                force += ej;
+                torque += (r_com.x * ej.y - r_com.y * ej.x);
+                force -= agent_velocity * GAMMA_SOLID_BRAKE * part_mass;
 
-                // Obstacle barrier: push agents away from steep terrain.
-                // Acts as a direct repulsion force perpendicular to the slope (downhill),
-                // preventing agents from crossing ridges and obstacles.
-                let obstacle_k = params.fluid_obstacle_strength;
-                if (obstacle_k > 0.0 && slope_mag > SLOPE_DEAD_ZONE * 10.0) {
-                    // Force points downhill (opposite to gradient = uphill direction)
-                    let downhill = -slope_gradient / slope_mag;
-                    // Strength scales with slope steepness and obstacle_strength parameter.
-                    // Use a soft threshold so gentle slopes don't block, but steep ones do.
-                    let steepness = clamp((slope_mag - SLOPE_DEAD_ZONE * 10.0) * 2.0, 0.0, 1.0);
-                    let barrier_force = downhill * steepness * obstacle_k * part_mass * 0.5;
-                    force += barrier_force;
-                    torque += (r_com.x * barrier_force.y - r_com.y * barrier_force.x);
+                // Pressure digging: dislodge one quantum to the part's rear.
+                let spd_p = length(agent_velocity);
+                if (spd_p > 0.02) {
+                    let dseed3 = (agent_id + 1u) * 151u ^ (i * 271u) ^ (params.random_seed * 631u);
+                    if (hash_f32(dseed3) < DIG_P_PER_FRAME * max(part_mass, 0.1)) {
+                        let behind_p = world_pos - (agent_velocity / spd_p) * 2.0;
+                        if (is_in_bounds(behind_p)) {
+                            if (gamma_take_one(t_idx)) {
+                                gamma_add_one(grid_index(behind_p));
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (g_here > 0u) {
+                    // Rubble: viscous drag proportional to occupancy.
+                    force -= agent_velocity * GAMMA_RUBBLE_DRAG * f32(g_here) * part_mass;
+                }
+                if (dot(solid_push, solid_push) > 0.25) {
+                    // Beside a wall: soft repulsion keeps parts out of it.
+                    let wp = normalize(solid_push) * GAMMA_WALL_FORCE * part_mass;
+                    force += wp;
+                    torque += (r_com.x * wp.y - r_com.y * wp.x);
                 }
             }
         }
