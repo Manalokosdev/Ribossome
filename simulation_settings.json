@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 10.750776,
+  "camera_zoom": 3.8654766,
   "spawn_probability": 2.1,
   "death_probability": 0.001,
   "mutation_rate": 0.005,
@@ -30,7 +30,7 @@
   "morphology_change_cost": 0.0001,
   "pairing_cost": 0.0,
   "prop_wash_strength": 0.0,
-  "prop_wash_strength_fluid": 0.0,
+  "prop_wash_strength_fluid": -0.01,
   "propellers_enabled": false,
   "microswim_enabled": true,
   "microswim_coupling": 3.0,
@@ -52,10 +52,10 @@
   "rain_debug_visual": false,
   "fluid_enabled": true,
   "fluid_show": true,
-  "fluid_dt": 0.015,
-  "fluid_decay": 0.95,
+  "fluid_dt": 0.003,
+  "fluid_decay": 0.98,
   "fluid_jacobi_iters": 10,
-  "fluid_vorticity": 29.0,
+  "fluid_vorticity": 3.7,
   "fluid_viscosity": 3.7,
   "fluid_ooze_rate": 1.0,
   "fluid_ooze_fade_rate": 0.1,
@@ -74,7 +74,7 @@
   "fluid_chem_deposit_mult_alpha": 1.0,
   "fluid_chem_deposit_mult_beta": 1.0,
   "fluid_chem_deposit_mult_gamma": 0.0,
-  "fluid_wind_push_strength": 0.1,
+  "fluid_wind_push_strength": 0.05,
   "vector_force_power": 0.0,
   "vector_force_x": 0.0,
   "vector_force_y": 0.01,
@@ -136,8 +136,8 @@
       "max_threshold": 55000.0,
       "adjustment_percent": 20.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 324712,
-      "difficulty_level": 9
+      "last_adjustment_epoch": 8511405,
+      "difficulty_level": -5
     },
     "alpha_rain": {
       "enabled": false,
@@ -206,7 +206,7 @@
       "spread": 10.0,
       "alpha_dye_rate": 0.0,
       "beta_dye_rate": 0.0,
-      "variation": 0.12
+      "variation": 0.45
     },
     {
       "enabled": false,
@@ -240,7 +240,7 @@
   "alpha_noise_scale": 10.0,
   "beta_noise_scale": 1.0,
   "gamma_noise_scale": 10.0,
-  "noise_power": 1.0,
+  "noise_power": 2.3,
   "agent_trail_decay": 1.0,
   "env_grid_resolution": 2048,
   "fluid_grid_resolution": 1024,

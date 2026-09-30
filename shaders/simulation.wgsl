@@ -3295,7 +3295,14 @@ fn suspension_factor(world_pos: vec2<f32>) -> f32 {
 // - else with probability DIFF_HOP_P: hop to a random 4-neighbor (diffusion).
 // Atomic take/add makes every hop exactly mass-conserving; hops across the
 // world boundary are cancelled. No staging buffer needed.
-const DIFF_HOP_P: f32 = 0.02;
+// Diffusion hop probability is AGITATION-DEPENDENT: near-still water only
+// allows a small Brownian residue (DIFF_HOP_FLOOR of the base rate), while
+// moving water mixes at the full rate. This is the anti-entropy mechanism:
+// calm zones become persistent concentrated reservoirs instead of everything
+// random-walking to uniform dilution over long runs.
+const DIFF_HOP_P: f32 = 0.01;
+const DIFF_HOP_FLOOR: f32 = 0.05;
+const DIFF_AGITATION_SPEED: f32 = 0.5;
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
 
 @compute @workgroup_size(16, 16)
@@ -3314,7 +3321,10 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         v = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
     }
     let adv_strength = max(params.alpha_fluid_convolution, 0.0);
-    let p_adv = clamp(length(v) * adv_strength, 0.0, 0.45);
+    let speed_t = length(v);
+    let p_adv = clamp(speed_t * adv_strength, 0.0, 0.45);
+    let agitation = clamp(speed_t / DIFF_AGITATION_SPEED, 0.0, 1.0);
+    let p_diff = DIFF_HOP_P * mix(DIFF_HOP_FLOOR, 1.0, agitation);
 
     for (var ch = 0u; ch < 4u; ch++) {
         let slot = idx * 4u + ch;
@@ -3333,7 +3343,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
                 } else {
                     dy = select(-1, 1, v.y > 0.0);
                 }
-            } else if (r < p_adv + DIFF_HOP_P) {
+            } else if (r < p_adv + p_diff) {
                 let d = hash(h ^ 0xC2B2AE35u) & 3u;
                 if (d == 0u) { dx = 1; } else if (d == 1u) { dx = -1; }
                 else if (d == 2u) { dy = 1; } else { dy = -1; }
