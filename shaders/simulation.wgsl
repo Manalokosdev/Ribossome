@@ -4210,7 +4210,8 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
             let hue = mix(vec3<f32>(0.05, 0.3, 0.85), vec3<f32>(1.0, 0.62, 0.05), act_frac);
             let inten = pow(clamp(total_amt, 0.0, 1.0), params.alpha_gamma_adjust);
             // Brightness slider (repurposed _pad_dye_alpha_color slot).
-            base_color = base_color + hue * inten * clamp(params._pad_dye_alpha_color, 0.0, 1.0);
+            // Opacity blend (matches the compositor).
+            base_color = mix(base_color, hue, clamp(inten * clamp(params._pad_dye_alpha_color, 0.0, 1.0), 0.0, 1.0));
         }
 
         // Gamma channel

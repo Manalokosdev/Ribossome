@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.5841926,
+  "camera_zoom": 0.8291184,
   "spawn_probability": 5.0,
   "death_probability": 0.01,
   "mutation_rate": 0.003,
@@ -201,7 +201,7 @@
   "dye_beta_thinfilm_mult": 50.0,
   "fumaroles": [
     {
-      "enabled": true,
+      "enabled": false,
       "x_frac": 0.55,
       "y_frac": 0.15,
       "dir_degrees": 230.0,
@@ -212,9 +212,9 @@
       "variation": 0.93
     },
     {
-      "enabled": true,
-      "x_frac": 0.15878457,
-      "y_frac": 0.07997289,
+      "enabled": false,
+      "x_frac": 0.4859278,
+      "y_frac": 0.09425863,
       "dir_degrees": 0.0,
       "strength": 3000.0,
       "spread": 10.0,

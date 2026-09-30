@@ -357,7 +357,9 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let inten = pow(clamp(total_amt, 0.0, 1.0), dye_gamma);
             // Brightness slider (repurposed _pad_dye_alpha_color slot).
             let monomer_vis = clamp(params._pad_dye_alpha_color, 0.0, 1.0);
-            under_color = under_color + hue * inten * monomer_vis;
+            // OPACITY blend (not additive): deposit and dye now show the same
+            // counts, and adding them doubled the soup over the agents.
+            under_color = mix(under_color, hue, clamp(inten * monomer_vis, 0.0, 1.0));
             under_color = clamp(under_color, vec3<f32>(0.0), vec3<f32>(1.0));
             }
         }
