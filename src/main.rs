@@ -3089,6 +3089,7 @@ fn default_dye_diffusion_no_fluid() -> f32 { 0.15 }
 fn default_env_grid_resolution() -> u32 { DEFAULT_ENV_GRID_RESOLUTION }
 fn default_fluid_grid_resolution() -> u32 { DEFAULT_FLUID_GRID_RESOLUTION }
 fn default_fluid_substep() -> u32 { 1 }
+fn default_monomer_brightness() -> f32 { 0.5 }
 fn default_spatial_grid_resolution() -> u32 { DEFAULT_SPATIAL_GRID_RESOLUTION }
 fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
@@ -3351,6 +3352,9 @@ struct SimulationSettings {
     dye_beta_color: [f32; 3],
 
     // Fluid dye visualization mode controls.
+    // Visual intensity of the monomer layers (dye + deposit); display only.
+    #[serde(default = "default_monomer_brightness")]
+    monomer_brightness: f32,
     // When enabled, the dye is colored using a thin-film interference palette instead of a flat tint.
     #[serde(default)]
     dye_alpha_thinfilm: bool,
@@ -3518,6 +3522,7 @@ impl Default for SimulationSettings {
             gamma_color: [0.0, 0.0, 1.0], // blue
             dye_alpha_color: default_dye_alpha_color(),
             dye_beta_color: default_dye_beta_color(),
+            monomer_brightness: 0.5,
             dye_alpha_thinfilm: false,
             dye_alpha_thinfilm_mult: default_dye_thinfilm_multiplier(),
             dye_beta_thinfilm: false,
@@ -3824,6 +3829,7 @@ impl SimulationSettings {
         self.amino_maintenance_cost = self.amino_maintenance_cost.clamp(0.0, 0.01);
         self.morphology_change_cost = self.morphology_change_cost.clamp(0.0, 10.0);
         self.pairing_cost = self.pairing_cost.clamp(0.0, 1.0);
+        self.monomer_brightness = self.monomer_brightness.clamp(0.0, 1.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         // Back-compat: older settings files won't have the fluid prop-wash strength.
         // Use the exact sentinel value -1.0 to mean "inherit direct wash".
@@ -4446,6 +4452,7 @@ struct GpuState {
     gamma_color: [f32; 3],
     dye_alpha_color: [f32; 3],
     dye_beta_color: [f32; 3],
+    monomer_brightness: f32,
     dye_alpha_thinfilm: bool,
     dye_alpha_thinfilm_mult: f32,
     dye_beta_thinfilm: bool,
@@ -8121,6 +8128,7 @@ impl GpuState {
             gamma_color: settings.gamma_color,
             dye_alpha_color: settings.dye_alpha_color,
             dye_beta_color: settings.dye_beta_color,
+            monomer_brightness: settings.monomer_brightness.clamp(0.0, 1.0),
             dye_alpha_thinfilm: settings.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: settings.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: settings.dye_beta_thinfilm,
@@ -8976,6 +8984,7 @@ impl GpuState {
             gamma_color: self.gamma_color,
             dye_alpha_color: self.dye_alpha_color,
             dye_beta_color: self.dye_beta_color,
+            monomer_brightness: self.monomer_brightness,
             dye_alpha_thinfilm: self.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: self.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: self.dye_beta_thinfilm,
@@ -9886,11 +9895,10 @@ impl GpuState {
             dye_alpha_color_r: self.dye_alpha_color[0],
             dye_alpha_color_g: self.dye_alpha_color[1],
             dye_alpha_color_b: self.dye_alpha_color[2],
-            _pad_dye_alpha_color: if self.dye_alpha_thinfilm {
-                self.dye_alpha_thinfilm_mult
-            } else {
-                0.0
-            },
+            // REPURPOSED: this slot now carries the monomer display
+            // brightness (the thin-film mode died with the per-nucleotide
+            // palette).
+            _pad_dye_alpha_color: self.monomer_brightness.clamp(0.0, 1.0),
             dye_beta_color_r: self.dye_beta_color[0],
             dye_beta_color_g: self.dye_beta_color[1],
             dye_beta_color_b: self.dye_beta_color[2],
@@ -16209,6 +16217,15 @@ fn main() {
 
                                                         ui.separator();
                                                         ui.heading("Monomers");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.monomer_brightness, 0.0..=1.0)
+                                                                .text("Brightness (display only)"),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Visual intensity of the monomer layers (dye + deposit). \
+                                                             Lower = darker soup, agents stand out more. Does not \
+                                                             affect the simulation.",
+                                                        );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.env_gen_level, 0.001..=0.5)
                                                                 .logarithmic(true)

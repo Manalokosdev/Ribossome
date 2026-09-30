@@ -3939,7 +3939,8 @@ fn clear_visual(@builtin(global_invocation_id) gid: vec3<u32>) {
                 dep += vec3<f32>(0.15, 0.9, 0.25) * pow(clamp(cc.z, 0.0, 1.0), params.beta_gamma_adjust);
                 dep += vec3<f32>(0.2, 0.45, 1.0) * pow(clamp(cc.w, 0.0, 1.0), params.beta_gamma_adjust);
             }
-            base_color = base_color + dep * 0.5;
+            // Brightness slider (repurposed _pad_dye_alpha_color slot).
+            base_color = base_color + dep * clamp(params._pad_dye_alpha_color, 0.0, 1.0);
         }
 
         // Gamma channel

@@ -324,7 +324,9 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 + MONOMER_COLOR_U * u_i
                 + MONOMER_COLOR_G * g_i
                 + MONOMER_COLOR_C * c_i;
-            under_color = under_color + col * MONOMER_VIS;
+            // Brightness slider (repurposed _pad_dye_alpha_color slot).
+            let monomer_vis = clamp(params._pad_dye_alpha_color, 0.0, 1.0);
+            under_color = under_color + col * monomer_vis;
             under_color = clamp(under_color, vec3<f32>(0.0), vec3<f32>(1.0));
             }
         }
