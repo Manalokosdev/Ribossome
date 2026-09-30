@@ -16030,6 +16030,26 @@ fn main() {
                                                             )
                                                             .text("Death Probability"),
                                                         );
+                                                        if state.difficulty.death_prob.enabled {
+                                                            let eff = state
+                                                                .difficulty
+                                                                .death_prob
+                                                                .apply_to(state.death_probability, true);
+                                                            ui.horizontal(|ui| {
+                                                                ui.colored_label(
+                                                                    egui::Color32::from_rgb(240, 150, 90),
+                                                                    format!(
+                                                                        "⚠ Auto-difficulty is overriding this: effective {:.5} (level {})",
+                                                                        eff,
+                                                                        state.difficulty.death_prob.difficulty_level,
+                                                                    ),
+                                                                );
+                                                                if ui.small_button("Disable").clicked() {
+                                                                    state.difficulty.death_prob.enabled = false;
+                                                                    state.difficulty.death_prob.difficulty_level = 0;
+                                                                }
+                                                            });
+                                                        }
                                                         ui.add(
                                                             egui::Slider::new(
                                                                 &mut state.mutation_rate,
