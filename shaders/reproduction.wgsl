@@ -119,10 +119,26 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let jitter_dist = 5.0 + hash_f32(offspring_hash ^ 0x1B56C4E9u) * 10.0;
                     let jitter = vec2<f32>(cos(jitter_angle), sin(jitter_angle)) * jitter_dist;
                     var birth_pos = clamp_position(agent_pos + jitter);
-                    // Never spawn inside solid terrain: fall back to the
-                    // parent's own (free) position.
+                    // Never spawn inside solid terrain: try a few other
+                    // spots around the parent. Do NOT fall back to the exact
+                    // parent position — two agents stacked at the same point
+                    // render as one body flickering between two poses.
                     if (gamma_count(grid_index(birth_pos)) >= GAMMA_SOLID_THRESHOLD) {
-                        birth_pos = agent_pos;
+                        var placed = false;
+                        for (var bt = 0u; bt < 8u; bt++) {
+                            let ba = hash_f32(offspring_hash ^ (0xA5A5u + bt * 977u)) * 6.2831853;
+                            let bd = 3.0 + hash_f32(offspring_hash ^ (0x5A5Au + bt * 331u)) * 12.0;
+                            let cand = clamp_position(agent_pos + vec2<f32>(cos(ba), sin(ba)) * bd);
+                            if (gamma_count(grid_index(cand)) < GAMMA_SOLID_THRESHOLD) {
+                                birth_pos = cand;
+                                placed = true;
+                                break;
+                            }
+                        }
+                        if (!placed) {
+                            let na = hash_f32(offspring_hash ^ 0x33CCu) * 6.2831853;
+                            birth_pos = clamp_position(agent_pos + vec2<f32>(cos(na), sin(na)) * 1.5);
+                        }
                     }
                     offspring.position = birth_pos;
                 }

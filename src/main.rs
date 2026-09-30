@@ -9375,8 +9375,9 @@ impl GpuState {
 
                 cpass.set_pipeline(&self.compact_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
-                // Scan ENTIRE buffer to ensure no alive agents are missed
-                cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 63) / 64, 1, 1);
+                // Stable compaction: EXACTLY ONE workgroup (the kernel walks
+                // the whole buffer in chunks with an order-preserving scan).
+                cpass.dispatch_workgroups(1, 1, 1);
 
                 cpass.set_pipeline(&self.cpu_spawn_pipeline);
                 cpass.set_bind_group(0, bg_compact_merge, &[]);
@@ -10835,11 +10836,13 @@ impl GpuState {
                     .write_ts_compute_pass(&mut cpass, TS_POST_PASS_START);
 
                 if should_run_simulation {
-                    // Compact alive agents - workgroup_size(64), scan ENTIRE buffer
+                    // Compact alive agents — stable, order-preserving kernel:
+                    // dispatch EXACTLY ONE workgroup (it walks the whole
+                    // buffer in 256-wide chunks internally).
                     cpass.set_pipeline(&self.compact_pipeline);
                     cpass.set_bind_group(0, bg_swap, &[]);
 
-                    cpass.dispatch_workgroups((self.agent_buffer_capacity as u32 + 63) / 64, 1, 1);
+                    cpass.dispatch_workgroups(1, 1, 1);
 
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_POST_AFTER_COMPACT);

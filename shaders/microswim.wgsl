@@ -253,6 +253,20 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (v_len > VEL_MAX) {
         agent_vel *= VEL_MAX / max(v_len, 1e-6);
     }
+
+    // Don't thrust INTO solid terrain: if the cell just ahead is solid
+    // rock, drop the approach component. Without this, thrust re-enters
+    // the wall every frame and the collision response pushes back out —
+    // a period-2 limit cycle that reads as agents vibrating between two
+    // poses at walls.
+    let spd_ms = length(agent_vel);
+    if (spd_ms > 1e-4) {
+        let dir_ms = agent_vel / spd_ms;
+        let ahead = clamp_position(agent_pos + dir_ms * clamp(spd_ms, 1.0, 3.0));
+        if (gamma_count(grid_index(ahead)) >= GAMMA_SOLID_THRESHOLD) {
+            agent_vel -= dir_ms * spd_ms;
+        }
+    }
     agents_out[agent_id].velocity = agent_vel;
 
     // Asymmetry torque (stable across regimes)
