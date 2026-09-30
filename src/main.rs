@@ -16157,31 +16157,55 @@ fn main() {
                                                         });
                                                         ui.label("Generates all 4 monomer channels (AU + GC pools, distinct noise seeds).");
 
-                                                        // Direct total control: scale the whole world's free
-                                                        // monomers to a target count (uses the live matter readout).
+                                                        // Direct WORLD-TOTAL control: the target counts everything
+                                                        // (environment + matter embodied in agents + energy). The
+                                                        // environment is scaled so env + agents = target; matter
+                                                        // inside agents is never touched (it returns on death).
                                                         let free_total: u64 =
                                                             state.matter_free.iter().map(|&v| v as u64).sum();
+                                                        let embodied = state.matter_locked_quanta as f64
+                                                            + state.matter_energy_quanta;
+                                                        ui.label(format!(
+                                                            "TOTAL now: {:.0} = env {} + agents {:.0}",
+                                                            state.matter_total, free_total, embodied,
+                                                        ));
                                                         ui.horizontal(|ui| {
-                                                            ui.label(format!("Free now: {}", free_total));
                                                             ui.add(
                                                                 egui::DragValue::new(&mut state.target_total_quanta)
                                                                     .speed(10_000)
                                                                     .range(0..=100_000_000)
-                                                                    .prefix("target "),
+                                                                    .prefix("target TOTAL "),
                                                             );
                                                             let can_scale = free_total > 0;
                                                             if ui
-                                                                .add_enabled(can_scale, egui::Button::new("Set Total"))
+                                                                .add_enabled(can_scale, egui::Button::new("Set World Total"))
                                                                 .on_hover_text(
-                                                                    "Scales every channel by target/current (probabilistic rounding). Requires a fresh matter sample.",
+                                                                    "Scales the environment so env + agents = target \
+                                                                     (probabilistic rounding, channel ratios preserved). \
+                                                                     Uses the last matter sample; the conservation \
+                                                                     baseline re-captures at the next sample.",
                                                                 )
                                                                 .clicked()
                                                             {
+                                                                let target_free = (state.target_total_quanta as f64
+                                                                    - embodied)
+                                                                    .max(0.0);
                                                                 let factor =
-                                                                    state.target_total_quanta as f32 / free_total as f32;
+                                                                    (target_free / free_total as f64) as f32;
                                                                 state.generate_map(4, 0, factor, rand::random::<u32>());
                                                             }
                                                         });
+                                                        if (state.target_total_quanta as f64) < embodied {
+                                                            ui.colored_label(
+                                                                egui::Color32::from_rgb(230, 200, 90),
+                                                                format!(
+                                                                    "Target below matter embodied in agents ({:.0}): \
+                                                                     the environment will be emptied and the total \
+                                                                     only reaches the target as agents die.",
+                                                                    embodied,
+                                                                ),
+                                                            );
+                                                        }
 
                                                         ui.separator();
                                                         ui.heading("Gamma Controls");
