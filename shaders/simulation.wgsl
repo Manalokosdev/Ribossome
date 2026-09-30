@@ -282,11 +282,11 @@ fn gamma_shove(from_idx: u32, from_pos: vec2<f32>, back_dir: vec2<f32>, seed: u3
 // substep cadence, so the analytic conversion chain is ambiguous). Filipe
 // calibrated this by eye: with the factor at 1.0 the ride was ~6-7x the
 // visual flow; 0.15 matches it.
-// Recalibrated after the fluid-core rebuild: the old 0.15 was measured
-// against the inflated pre-rebuild velocity field; the clean solver runs
-// slower, and at 0.15 the ride fell below the marine-snow sink rate —
-// agents stopped being carried at all.
-const RIDE_VISUAL_MATCH: f32 = 0.6;
+// PARCEL-EXACT riding: a fluid parcel travels v * dt * cell_to_world world
+// units per epoch, which is exactly this formula at factor 1.0. (The old
+// 0.15/0.6 values were empirical compensations for the pre-rebuild
+// rocket-inflated field.) Slider at 1 = agents move like the water itself.
+const RIDE_VISUAL_MATCH: f32 = 1.0;
 
 fn fluid_ride_velocity(world_pos: vec2<f32>) -> vec2<f32> {
     let v = sample_fluid_velocity_bilinear(world_pos);
