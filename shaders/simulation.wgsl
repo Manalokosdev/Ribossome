@@ -3333,9 +3333,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let energy_scaled = sqrt(energy_for_pair);
 
             // QUANTIZED: replication captures exactly ONE complementary
-            // monomer. Hard gate: one must be present; speed scales with the
-            // local count relative to the reference "full" level.
-            let pairing_drive = clamp(f32(avail_q) / f32(CHEM_QUANTA_REF), 0.0, 1.0)
+            // monomer. Hard gate: one must be present — and one IS enough
+            // (full drive at 1 quantum). The old /CHEM_QUANTA_REF scaling
+            // was a holdover from the continuous fields: it cut the rate to
+            // 1/3rd exactly in the sparse worlds where encounters are
+            // already the bottleneck.
+            let pairing_drive = clamp(f32(avail_q), 0.0, 1.0)
                 * suspension_factor(site_pos);
 
             let base_p = params.spawn_probability * energy_scaled * 0.1;
