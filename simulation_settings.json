@@ -28,7 +28,7 @@
   "poison_power": 10.0,
   "amino_maintenance_cost": 0.0001,
   "morphology_change_cost": 0.0001,
-  "pairing_cost": 0.0,
+  "pairing_cost": 0.1,
   "prop_wash_strength": 0.0,
   "prop_wash_strength_fluid": -0.001,
   "propellers_enabled": false,

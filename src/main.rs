@@ -16129,8 +16129,15 @@ fn main() {
                                                         );
                                                         ui.add(
                                                             egui::Slider::new(&mut state.pairing_cost, 0.0..=1.0)
-                                                                .text("Pairing Cost per Increment")
+                                                                .text("Pairing Cost (energy per base)")
                                                                 .step_by(0.01),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Energy spent per base paired. Together with Food Power \
+                                                             this sets the metabolism/replication exchange rate: one \
+                                                             eaten monomer funds food_power/cost bases. At 0, pairing \
+                                                             is free and agents never need to alternate eating with \
+                                                             replicating.",
                                                         );
                                                         ui.separator();
                                                         ui.heading("Physics");
