@@ -634,7 +634,8 @@ fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    if (add_alpha != 0.0 || add_beta != 0.0) {
+    // Dye is an exact mirror of the counts now: no fake color injection.
+    if (false && (add_alpha != 0.0 || add_beta != 0.0)) {
         // Dye layout: x=A, y=U, z=G, w=C. Alpha rate feeds the AU pair,
         // beta rate the GC pair (even split).
         let current = dye_out[dye_idx];
@@ -694,6 +695,15 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     let idx = dye_grid_index(x, y);
+
+    // DYE RETIRED AS AN INDEPENDENT FIELD: it had its own advection
+    // ("convection of the convection") on top of the real monomer
+    // transport, so the display showed a second, different flow. The
+    // buffer is now an EXACT per-frame mirror of the activated counts —
+    // one transport (the monomers), one truth on screen.
+    let env_idx0 = gamma_index(x, y);
+    dye_out[idx] = clamp(chem_cell_f(env_idx0), vec4<f32>(0.0), vec4<f32>(1.0));
+    if (true) { return; }
 
     // Position in dye-grid coordinates (center of cell)
     let pos = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
@@ -779,9 +789,9 @@ fn advect_dye(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // moving monomers comet-trail plumes.
     let env_idx = gamma_index(x, y);
     let chem_c = clamp(chem_cell_f(env_idx), vec4<f32>(0.0), vec4<f32>(1.0));
-    dye_val = mix(dye_val, chem_c, DYE_TRACK_RATE);
-
-    dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
+    // Exact mirror (dye retired as an independent field).
+    let _unused_dye = dye_val;
+    dye_out[idx] = chem_c;
 }
 
 // When the full fluid solver is disabled, we can still use the dye/trail buffers as
@@ -833,9 +843,9 @@ fn diffuse_dye_no_fluid(@builtin(global_invocation_id) gid: vec3<u32>) {
     // exponential pursuit as advect_dye — cannot saturate or accumulate).
     let env_idx = gamma_index(x, y);
     let chem_c = clamp(chem_cell_f(env_idx), vec4<f32>(0.0), vec4<f32>(1.0));
-    dye_val = mix(dye_val, chem_c, DYE_TRACK_RATE);
-
-    dye_out[idx] = clamp(dye_val, vec4<f32>(0.0), vec4<f32>(1.0));
+    // Exact mirror (dye retired as an independent field).
+    let _unused_dye = dye_val;
+    dye_out[idx] = chem_c;
 }
 
 @compute @workgroup_size(16, 16)

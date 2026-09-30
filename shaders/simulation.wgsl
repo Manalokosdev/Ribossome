@@ -3798,10 +3798,14 @@ const MONOMER_ADV_CAP: f32 = 0.9;
 // (|v|/(|vx|+|vy|) in [0.707, 1]) that broke discrete continuity wherever
 // the flow direction ROTATES — plume heads and vortex rims — carving the
 // persistent vacuum pockets Filipe kept (correctly!) refusing to accept.
+// UNITS: hops are in ENV-GRID cells, so the conversion is env cells per
+// fluid cell (GRID_SIZE / FLUID_GRID_SIZE) — NOT world units per fluid
+// cell (SIM_SIZE is the much larger world size; using it overshot the hop
+// rate ~30x and saturated the cap).
 fn parcel_hop_p(v: vec2<f32>) -> f32 {
-    let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+    let env_per_fluid = f32(GRID_SIZE) / f32(FLUID_GRID_SIZE);
     let l1 = abs(v.x) + abs(v.y);
-    return clamp(l1 * cell_to_world * max(params.dt, 1e-3), 0.0, MONOMER_ADV_CAP);
+    return clamp(l1 * env_per_fluid * max(params.dt, 1e-3), 0.0, MONOMER_ADV_CAP);
 }
 // Buried monomers (inside gamma mass) creep at this fraction of the base
 // diffusion rate, further divided by local occupancy. They never advect.
@@ -3836,7 +3840,11 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Bilinear: nearest-cell sampling gave every 4x4 env block one
         // piecewise-constant velocity, creating artificial divergence
         // steps at block boundaries.
-        v = sample_fluid_velocity_bilinear(vec2<f32>(f32(x) + 0.5, f32(y) + 0.5));
+        // Takes a WORLD position: env cell -> world (SIM_SIZE != GRID_SIZE;
+        // passing cell coords sampled only the world's corner and froze
+        // every monomer).
+        let cell_w = f32(SIM_SIZE) / f32(GRID_SIZE);
+        v = sample_fluid_velocity_bilinear(vec2<f32>(f32(x) + 0.5, f32(y) + 0.5) * cell_w);
     }
     let speed_t = length(v);
     let p_adv = parcel_hop_p(v);
