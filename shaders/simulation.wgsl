@@ -3541,8 +3541,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 // Emergent angle of repose: slopes below the threshold are stable forever;
 // disturbed piles produce landslides. Atomic take/add — exactly conserving.
 // Runs twice per frame (the old stage1/stage2 dispatch slots).
-const SANDPILE_DIFF: u32 = 2u;
-const GAMMA_RELAX_P: f32 = 0.25;
+// DIFF 3 => stable slopes up to 2 quanta/cell: spoil heaps and berms can
+// actually gain height instead of the sandpile flattening every shoved
+// quantum back to baseline within frames (with DIFF 2 the max stable
+// slope was 1/cell, so a 6-high pile needed a ~36-quanta pyramid and
+// transient bright pixels always relaxed away). Lower relax probability
+// makes slides chunkier and terrain generally more rugged.
+const SANDPILE_DIFF: u32 = 3u;
+const GAMMA_RELAX_P: f32 = 0.12;
 
 fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     let x = gid.x;
