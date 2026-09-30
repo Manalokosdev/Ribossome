@@ -104,7 +104,17 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c_par  = mix(c_par_base, c_par_base * 0.6, re_blend);
     let c_perp = mix(c_perp_base, c_perp_base * 0.8, re_blend);
 
-    var current_vel = agents_out[agent_id].velocity;
+    // WATER FRAME: swimming is relative to the LOCAL FLUID, not the world.
+    // All thrust/drag below uses (agent velocity - fluid velocity), so an
+    // agent drifting with a current experiences no spurious drag, and one
+    // swimming against it fights the water it is actually in. This unifies
+    // the microswim algorithm with the fluid->agent coupling.
+    var v_fluid_tick = vec2<f32>(0.0);
+    if (params._pad_rain0 == 1u) {
+        let cell_to_world = f32(SIM_SIZE) / f32(FLUID_GRID_SIZE);
+        v_fluid_tick = sample_fluid_velocity_bilinear(agents_out[agent_id].position) * (cell_to_world * dt_safe);
+    }
+    var current_vel = agents_out[agent_id].velocity - v_fluid_tick;
     let speed = length(current_vel);
     var forward_dir = vec2<f32>(cos(agent_rot), sin(agent_rot));
     if (speed > 0.01) {

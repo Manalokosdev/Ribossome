@@ -2321,8 +2321,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // per-tick deltas, so multiply by params.dt to convert seconds -> tick.
                     let v_frame = v * (cell_to_world * params.dt);
 
-                    // Overdamped: choose force so resulting velocity contribution ~ v_frame scaled.
-                    let wind_force = v_frame * (wind_coupling * part_area_weight * params.fluid_wind_push_strength * area_response) * drag_coefficient;
+                    // WATER FRAME: viscous drag toward the fluid's velocity,
+                    // i.e. force ~ (v_fluid - v_agent). Self-limiting: an agent
+                    // already moving with the current feels nothing; one held
+                    // still in a current is pushed; one darting through calm
+                    // water is slowed. Replaces the old one-way push ~ v_fluid.
+                    let v_rel = v_frame - agent_velocity;
+                    let wind_force = v_rel * (wind_coupling * part_area_weight * params.fluid_wind_push_strength * area_response) * drag_coefficient;
                     force += wind_force;
                     torque += (r_com.x * wind_force.y - r_com.y * wind_force.x);
                 }
