@@ -3396,8 +3396,12 @@ fn suspension_factor(world_pos: vec2<f32>) -> f32 {
 // calm zones become persistent concentrated reservoirs instead of everything
 // random-walking to uniform dilution over long runs.
 const DIFF_HOP_P: f32 = 0.01;
-const DIFF_HOP_FLOOR: f32 = 0.05;
+const DIFF_HOP_FLOOR: f32 = 0.15;
 const DIFF_AGITATION_SPEED: f32 = 0.5;
+// Suspended monomers ALWAYS ride the current — fixed physical coupling, not
+// a user setting (colloidal particles move with the water; there is nothing
+// to tune, and no stale settings file can freeze the soup again).
+const MONOMER_ADV_COUPLING: f32 = 0.5;
 // Buried monomers (inside gamma mass) creep at this fraction of the base
 // diffusion rate, further divided by local occupancy. They never advect.
 const BURIED_DIFF_FACTOR: f32 = 0.25;
@@ -3418,9 +3422,8 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         let fyi = min((y * FLUID_GRID_SIZE) / GRID_SIZE, FLUID_GRID_SIZE - 1u);
         v = fluid_velocity[fyi * FLUID_GRID_SIZE + fxi];
     }
-    let adv_strength = max(params.alpha_fluid_convolution, 0.0);
     let speed_t = length(v);
-    let p_adv = clamp(speed_t * adv_strength, 0.0, 0.45);
+    let p_adv = clamp(speed_t * MONOMER_ADV_COUPLING, 0.0, 0.45);
     let agitation = clamp(speed_t / DIFF_AGITATION_SPEED, 0.0, 1.0);
     let p_diff = DIFF_HOP_P * mix(DIFF_HOP_FLOOR, 1.0, agitation);
 

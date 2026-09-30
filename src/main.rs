@@ -16697,14 +16697,9 @@ fn main() {
                                                                 .text("Vorticity")
                                                                 .clamping(egui::SliderClamping::Always),
                                                         );
-                                                        ui.add(
-                                                            egui::Slider::new(
-                                                                &mut state.alpha_fluid_convolution,
-                                                                0.0..=1.0,
-                                                            )
-                                                            .text("Monomer Advection (floating soup)")
-                                                            .clamping(egui::SliderClamping::Always),
-                                                        );
+                                                        // (Monomer advection is now a fixed physical coupling in
+                                                        //  the shader — suspended matter always rides the current;
+                                                        //  no setting can freeze the soup.)
                                                         ui.add(
                                                             egui::Slider::new(&mut state.fluid_viscosity, 0.0..=5.0)
                                                                 .text("Viscosity")
