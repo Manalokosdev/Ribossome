@@ -12014,9 +12014,10 @@ impl GpuState {
                         }
                     }
                     if fp > 0.0 {
-                        let yield_per_q =
-                            (fp * 0.75f64.powi(agent.poison_resistant_count as i32)).max(1e-6);
-                        energy_quanta += (agent.energy as f64 / ENERGY_SCALE as f64) / yield_per_q;
+                        // Global yield: energy<->matter converts at food_power
+                        // for everyone (resistance now taxes uptake probability
+                        // instead of the conversion rate).
+                        energy_quanta += (agent.energy as f64 / ENERGY_SCALE as f64) / fp;
                     }
                 }
             }

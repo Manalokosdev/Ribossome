@@ -847,8 +847,10 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let strand_quanta = select(f32(agents_in[agent_id].gene_length), 0.0, agents_in[agent_id].generation == 0u);
             var energy_quanta = 0.0;
             if (params.food_power > 0.0) {
-                let fpm = pow(0.75, f32(agents_in[agent_id].poison_resistant_count));
-                energy_quanta = energy_from_u32(agents_in[agent_id].energy) / max(params.food_power * fpm, 1e-6);
+                // GLOBAL yield: energy<->matter always converts at food_power
+                // for everyone. Per-agent yields leaked matter whenever
+                // energy crossed resistance classes (inheritance, drains).
+                energy_quanta = energy_from_u32(agents_in[agent_id].energy) / max(params.food_power, 1e-6);
             }
             let per_part = (comp * (strand_quanta + energy_quanta) + paired_counts) * (1.0 / f32(body_count));
             let agent_pos = agents_in[agent_id].position;
@@ -2907,7 +2909,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let c2 = chem_count(idx, 2u);
             let c3 = chem_count(idx, 3u);
             let total_q = c0 + c1 + c2 + c3;
-            let yield_per_q = max(params.food_power * food_power_multiplier, 1e-6);
+            // GLOBAL yield: every monomer is worth food_power energy for
+            // everyone (per-agent yields leaked matter across resistance
+            // classes). Resistance now taxes the CAPTURE PROBABILITY
+            // instead — same evolutionary tradeoff, exact conservation.
+            let yield_per_q = max(params.food_power, 1e-6);
             // Closed world: don't absorb what the storage can't hold (the
             // clamp would destroy the captured monomer's mass).
             if (total_q > 0u && agent_energy_cur + yield_per_q <= capacity) {
@@ -2915,7 +2921,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let speed_norm = clamp(length(agent_velocity) / VEL_MAX, 0.0, 1.0);
                 let speed_mult = exp(-4.0 * speed_norm);
                 let susp = suspension_factor(world_pos);
-                let p_take = clamp(UPTAKE_P_PER_QUANTUM * max(props.mass, 0.1) * speed_mult * susp * f32(total_q), 0.0, 1.0);
+                let p_take = clamp(UPTAKE_P_PER_QUANTUM * max(props.mass, 0.1) * speed_mult * susp * f32(total_q) * food_power_multiplier, 0.0, 1.0);
                 let useed = (agent_id + 1u) * 374761393u ^ (i * 668265263u) ^ (params.random_seed * 2246822519u);
                 if (hash_f32(useed) < p_take) {
                     // Pick one present monomer, weighted by counts.
@@ -3154,7 +3160,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     // back into the environment as monomers instead of clamped into nothing.
     let overflow_e = max(agent_energy_cur - max(capacity, 0.0), 0.0);
     if (overflow_e > 0.0 && params.food_power > 0.0) {
-        let spill_q = overflow_e / max(params.food_power * food_power_multiplier, 1e-6);
+        let spill_q = overflow_e / max(params.food_power, 1e-6);
         let spill_idx = grid_index(agent_pos);
         let spill_seed = (agent_id + 1u) * 1181u ^ (params.random_seed * 2129u);
         for (var oc = 0u; oc < 4u; oc++) {
@@ -3173,7 +3179,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let cf_total = consumed_frame.x + consumed_frame.y + consumed_frame.z + consumed_frame.w;
         if (cf_total > 1e-6) { ecomp = consumed_frame / cf_total; }
         let excrete_idx = grid_index(agent_pos);
-        let excrete_yield = max(params.food_power * food_power_multiplier, 1e-6);
+        let excrete_yield = max(params.food_power, 1e-6);
         let excreted_q = excreted_energy / excrete_yield;
         let eseed = (agent_id + 1u) * 2654435761u ^ (params.random_seed * 334214467u);
         for (var ec = 0u; ec < 4u; ec++) {
@@ -3233,7 +3239,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let strand_quanta = select(f32(agent_gene_length), 0.0, agents_out[agent_id].generation == 0u);
             var energy_quanta = 0.0;
             if (params.food_power > 0.0) {
-                energy_quanta = max(agent_energy_cur, 0.0) / max(params.food_power * food_power_multiplier, 1e-6);
+                energy_quanta = max(agent_energy_cur, 0.0) / max(params.food_power, 1e-6);
             }
             let pc = f32(min(body_count, MAX_BODY_PARTS));
             let per_part = (comp * (strand_quanta + energy_quanta) + paired_counts) * (1.0 / pc);
