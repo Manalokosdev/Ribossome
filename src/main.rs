@@ -4230,6 +4230,8 @@ struct GpuState {
     matter_baseline: Option<f64>,       // Reference TOTAL for conservation drift; None = capture next sample
     matter_history: std::collections::VecDeque<f64>, // TOTAL per sample (same cadence as population_history)
     matter_plot_points: Vec<[f64; 2]>,  // Cached plot points for the matter TOTAL line
+    selection_log_enabled: bool,        // Debug: record every selected-agent readback
+    selection_log: Vec<[f64; 8]>,       // age, generation, x, y, rot, vx, vy, alive
     target_total_quanta: u64,           // God-mode target for total free monomers
 
     // Auto-snapshot tracking
@@ -7894,6 +7896,8 @@ impl GpuState {
             matter_baseline: None,
             matter_history: std::collections::VecDeque::new(),
             matter_plot_points: Vec::new(),
+            selection_log_enabled: false,
+            selection_log: Vec::new(),
             target_total_quanta: 1_000_000,
             last_autosave_epoch: 0,
             last_autosave_time: std::time::Instant::now(),
@@ -9032,6 +9036,18 @@ impl GpuState {
             };
             if let Some(result) = message {
                 if let Ok(agent) = result {
+                    if self.selection_log_enabled && self.selection_log.len() < 200_000 {
+                        self.selection_log.push([
+                            agent.age as f64,
+                            agent.generation as f64,
+                            agent.position[0] as f64,
+                            agent.position[1] as f64,
+                            agent.rotation as f64,
+                            agent.velocity[0] as f64,
+                            agent.velocity[1] as f64,
+                            agent.alive as f64,
+                        ]);
+                    }
                     if agent.alive == 0 && self.selected_agent_index.is_some() {
                         // Selected agent died: deselect. (The GPU no longer
                         // auto-transfers selection to a random survivor —
@@ -15297,6 +15313,48 @@ fn main() {
                                                                 eprintln!("Save canceled or failed: {err:?}");
                                                             }
                                                         }
+                                                    }
+                                                });
+
+                                                // Debug: per-readback position log for flicker diagnosis.
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.checkbox(
+                                                        &mut state.selection_log_enabled,
+                                                        "Log selected (debug)",
+                                                    );
+                                                    ui.label(format!(
+                                                        "{} samples",
+                                                        state.selection_log.len()
+                                                    ));
+                                                    if ui.button("Save selection_log.csv").clicked() {
+                                                        let mut csv = String::from(
+                                                            "age,generation,x,y,rotation,vx,vy,alive\n",
+                                                        );
+                                                        for row in &state.selection_log {
+                                                            csv.push_str(&format!(
+                                                                "{},{},{:.3},{:.3},{:.4},{:.4},{:.4},{}\n",
+                                                                row[0] as u64,
+                                                                row[1] as u64,
+                                                                row[2],
+                                                                row[3],
+                                                                row[4],
+                                                                row[5],
+                                                                row[6],
+                                                                row[7] as u32,
+                                                            ));
+                                                        }
+                                                        match std::fs::write("selection_log.csv", csv) {
+                                                            Ok(_) => println!(
+                                                                "Wrote selection_log.csv ({} rows)",
+                                                                state.selection_log.len()
+                                                            ),
+                                                            Err(e) => eprintln!(
+                                                                "Failed to write selection_log.csv: {e}"
+                                                            ),
+                                                        }
+                                                    }
+                                                    if ui.button("Clear log").clicked() {
+                                                        state.selection_log.clear();
                                                     }
                                                 });
 
