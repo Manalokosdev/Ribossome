@@ -3090,6 +3090,7 @@ fn default_env_grid_resolution() -> u32 { DEFAULT_ENV_GRID_RESOLUTION }
 fn default_fluid_grid_resolution() -> u32 { DEFAULT_FLUID_GRID_RESOLUTION }
 fn default_fluid_substep() -> u32 { 1 }
 fn default_monomer_brightness() -> f32 { 0.5 }
+fn default_dig_rate() -> f32 { 1.0 }
 fn default_spatial_grid_resolution() -> u32 { DEFAULT_SPATIAL_GRID_RESOLUTION }
 fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
@@ -3355,6 +3356,9 @@ struct SimulationSettings {
     // Visual intensity of the monomer layers (dye + deposit); display only.
     #[serde(default = "default_monomer_brightness")]
     monomer_brightness: f32,
+    // Multiplier on all terrain digging (bulldozing + wall grinding).
+    #[serde(default = "default_dig_rate")]
+    dig_rate: f32,
     // When enabled, the dye is colored using a thin-film interference palette instead of a flat tint.
     #[serde(default)]
     dye_alpha_thinfilm: bool,
@@ -3523,6 +3527,7 @@ impl Default for SimulationSettings {
             dye_alpha_color: default_dye_alpha_color(),
             dye_beta_color: default_dye_beta_color(),
             monomer_brightness: 0.5,
+            dig_rate: 1.0,
             dye_alpha_thinfilm: false,
             dye_alpha_thinfilm_mult: default_dye_thinfilm_multiplier(),
             dye_beta_thinfilm: false,
@@ -3830,6 +3835,7 @@ impl SimulationSettings {
         self.morphology_change_cost = self.morphology_change_cost.clamp(0.0, 10.0);
         self.pairing_cost = self.pairing_cost.clamp(0.0, 1.0);
         self.monomer_brightness = self.monomer_brightness.clamp(0.0, 1.0);
+        self.dig_rate = self.dig_rate.clamp(0.0, 5.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         // Back-compat: older settings files won't have the fluid prop-wash strength.
         // Use the exact sentinel value -1.0 to mean "inherit direct wash".
@@ -4453,6 +4459,7 @@ struct GpuState {
     dye_alpha_color: [f32; 3],
     dye_beta_color: [f32; 3],
     monomer_brightness: f32,
+    dig_rate: f32,
     dye_alpha_thinfilm: bool,
     dye_alpha_thinfilm_mult: f32,
     dye_beta_thinfilm: bool,
@@ -4720,6 +4727,52 @@ impl GpuState {
            self.apply_settings(&settings);
 
         Ok(())
+    }
+
+    /// Synchronously measure the current FREE monomer total on the GPU
+    /// (blocking ~ms; fine for button handlers, do not call per frame).
+    fn measure_free_quanta(&mut self) -> u64 {
+        self.queue
+            .write_buffer(&self.matter_totals_buffer, 0, &[0u8; 16]);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Measure Free Quanta Encoder"),
+            });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Measure Free Quanta Pass"),
+                timestamp_writes: None,
+            });
+            let bg = if self.ping_pong {
+                &self.compute_bind_group_b
+            } else {
+                &self.compute_bind_group_a
+            };
+            cpass.set_pipeline(&self.reduce_matter_pipeline);
+            cpass.set_bind_group(0, bg, &[]);
+            cpass.set_bind_group(1, &self.species_hash_bind_group, &[]);
+            cpass.dispatch_workgroups(4096 / 64, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(
+            &self.matter_totals_buffer,
+            0,
+            &self.matter_totals_readback,
+            0,
+            16,
+        );
+        self.queue.submit(Some(encoder.finish()));
+        let slice = self.matter_totals_readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::Maintain::Wait);
+        let total;
+        {
+            let md = slice.get_mapped_range();
+            let t: &[u32] = bytemuck::cast_slice(&md);
+            total = t[0] as u64 + t[1] as u64 + t[2] as u64 + t[3] as u64;
+        }
+        self.matter_totals_readback.unmap();
+        total
     }
 
     fn generate_map(&mut self, mode: u32, gen_type: u32, value: f32, seed: u32) {
@@ -8129,6 +8182,7 @@ impl GpuState {
             dye_alpha_color: settings.dye_alpha_color,
             dye_beta_color: settings.dye_beta_color,
             monomer_brightness: settings.monomer_brightness.clamp(0.0, 1.0),
+            dig_rate: settings.dig_rate.clamp(0.0, 5.0),
             dye_alpha_thinfilm: settings.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: settings.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: settings.dye_beta_thinfilm,
@@ -8985,6 +9039,7 @@ impl GpuState {
             dye_alpha_color: self.dye_alpha_color,
             dye_beta_color: self.dye_beta_color,
             monomer_brightness: self.monomer_brightness,
+            dig_rate: self.dig_rate,
             dye_alpha_thinfilm: self.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: self.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: self.dye_beta_thinfilm,
@@ -9902,11 +9957,8 @@ impl GpuState {
             dye_beta_color_r: self.dye_beta_color[0],
             dye_beta_color_g: self.dye_beta_color[1],
             dye_beta_color_b: self.dye_beta_color[2],
-            _pad_dye_beta_color: if self.dye_beta_thinfilm {
-                self.dye_beta_thinfilm_mult
-            } else {
-                0.0
-            },
+            // REPURPOSED: this slot now carries the Digging Rate multiplier.
+            _pad_dye_beta_color: self.dig_rate.clamp(0.0, 5.0),
             species_heatmap: if self.species_heatmap_enabled { 1 } else { 0 },
             species_bucket_size: self.species_bucket_size.max(1),
             nucleotide_debug_mask: self.nucleotide_debug_mask,
@@ -15137,6 +15189,14 @@ fn main() {
                                                 if factor < 0.999 {
                                                     state.generate_map(4, 0, factor, rand::random::<u32>());
                                                 }
+                                            } else if state.matter_total < target * 0.99 {
+                                                // Below target: RAIN the deficit uniformly
+                                                // (scaling cannot create quanta in empty cells).
+                                                let deficit = target - state.matter_total;
+                                                let cells = (state.env_grid_resolution as f64)
+                                                    * (state.env_grid_resolution as f64);
+                                                let per_cell_ch = (deficit / (cells * 4.0)) as f32;
+                                                state.generate_map(5, 0, per_cell_ch, rand::random::<u32>());
                                             }
                                         }
 
@@ -16250,16 +16310,56 @@ fn main() {
                                                                 state.generate_map(1, 0, 0.0, 0);
                                                                 state.generate_map(2, 0, 0.0, 0);
                                                             }
-                                                            if ui.button("Set Flat").clicked() {
-                                                                state.generate_map(1, 0, state.env_gen_level, 0);
-                                                                state.generate_map(2, 0, state.env_gen_level, 0);
+                                                            if ui
+                                                                .button("Flat @ target")
+                                                                .on_hover_text(
+                                                                    "Uniform fill calibrated so the resulting free \
+                                                                     monomers equal target TOTAL minus what agents \
+                                                                     already embody.",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                // set_chem_pool writes value*1.5 per channel; modes
+                                                                // 1+2 cover 4 channels => 6*value quanta per cell.
+                                                                let embodied_now = state.matter_locked_quanta as f64
+                                                                    + state.matter_energy_quanta;
+                                                                let target_free = ((state.target_total_quanta as f64)
+                                                                    - embodied_now)
+                                                                    .max(0.0);
+                                                                let cells = (state.env_grid_resolution as f64)
+                                                                    * (state.env_grid_resolution as f64);
+                                                                let v = (target_free / (cells * 6.0)) as f32;
+                                                                state.generate_map(1, 0, v, 0);
+                                                                state.generate_map(2, 0, v, 0);
                                                             }
-                                                            if ui.button("Noise").clicked() {
+                                                            if ui
+                                                                .button("Noise @ target")
+                                                                .on_hover_text(
+                                                                    "Generates patchy noise (shape from Noise \
+                                                                     Scale/Power), then rescales it so the free \
+                                                                     monomers equal target TOTAL minus what agents \
+                                                                     already embody.",
+                                                                )
+                                                                .clicked()
+                                                            {
                                                                 // Different seeds per pool: AU and GC patches land
                                                                 // in different places (geographic niches).
                                                                 state.beta_noise_scale = state.alpha_noise_scale;
-                                                                state.generate_map(1, 1, state.env_gen_level, rand::random::<u32>());
-                                                                state.generate_map(2, 1, state.env_gen_level, rand::random::<u32>());
+                                                                state.generate_map(1, 1, 1.0, rand::random::<u32>());
+                                                                state.generate_map(2, 1, 1.0, rand::random::<u32>());
+                                                                // Measure what the pattern produced, then scale it
+                                                                // onto the target (shape preserved).
+                                                                let produced = state.measure_free_quanta();
+                                                                let embodied_now = state.matter_locked_quanta as f64
+                                                                    + state.matter_energy_quanta;
+                                                                let target_free = ((state.target_total_quanta as f64)
+                                                                    - embodied_now)
+                                                                    .max(0.0);
+                                                                if produced > 0 {
+                                                                    let factor =
+                                                                        (target_free / produced as f64) as f32;
+                                                                    state.generate_map(4, 0, factor, rand::random::<u32>());
+                                                                }
                                                             }
                                                         });
                                                         ui.label("Generates all 4 monomer channels (AU + GC pools, distinct noise seeds).");
@@ -16283,23 +16383,34 @@ fn main() {
                                                                     .range(0..=100_000_000)
                                                                     .prefix("target TOTAL "),
                                                             );
-                                                            let can_scale = free_total > 0;
                                                             if ui
-                                                                .add_enabled(can_scale, egui::Button::new("Set World Total"))
+                                                                .button("Set World Total")
                                                                 .on_hover_text(
-                                                                    "Scales the environment so env + agents = target \
-                                                                     (probabilistic rounding, channel ratios preserved). \
-                                                                     Uses the last matter sample; the conservation \
-                                                                     baseline re-captures at the next sample.",
+                                                                    "Adjusts the environment so env + agents = target. \
+                                                                     Removing scales existing cells proportionally; \
+                                                                     ADDING rains the deficit uniformly over the whole \
+                                                                     world (channel-balanced). The conservation baseline \
+                                                                     re-captures at the next sample.",
                                                                 )
                                                                 .clicked()
                                                             {
+                                                                let free_now = state.measure_free_quanta();
                                                                 let target_free = (state.target_total_quanta as f64
                                                                     - embodied)
                                                                     .max(0.0);
-                                                                let factor =
-                                                                    (target_free / free_total as f64) as f32;
-                                                                state.generate_map(4, 0, factor, rand::random::<u32>());
+                                                                if target_free > free_now as f64 {
+                                                                    // RAIN the deficit uniformly.
+                                                                    let cells = (state.env_grid_resolution as f64)
+                                                                        * (state.env_grid_resolution as f64);
+                                                                    let per_cell_ch = ((target_free - free_now as f64)
+                                                                        / (cells * 4.0))
+                                                                        as f32;
+                                                                    state.generate_map(5, 0, per_cell_ch, rand::random::<u32>());
+                                                                } else if free_now > 0 {
+                                                                    let factor =
+                                                                        (target_free / free_now as f64) as f32;
+                                                                    state.generate_map(4, 0, factor, rand::random::<u32>());
+                                                                }
                                                             }
                                                         });
                                                         ui.checkbox(
@@ -16345,6 +16456,16 @@ fn main() {
                                                             egui::Slider::new(&mut state.gamma_noise_scale, 0.1..=10.0)
                                                                 .logarithmic(true)
                                                                 .text("Gamma Noise Scale"),
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.dig_rate, 0.0..=5.0)
+                                                                .text("Digging Rate"),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Multiplier on all terrain digging: bulldozing (body \
+                                                             parts shoving gamma while moving over it) and wall \
+                                                             grinding (blocked agents dislodging quanta). 0 = terrain \
+                                                             is immovable by agents.",
                                                         );
                                                         if ui.button("Load Gamma Image").clicked() {
                                                             if let Some(path) = rfd::FileDialog::new()

@@ -195,7 +195,12 @@ const UPTAKE_P_PER_QUANTUM: f32 = 0.01;
 
 // Bulldozing: per-frame probability (per part of mass 1.0 at full speed) of
 // shoving one gamma quantum from under the part to the cell behind it.
-const DIG_P_PER_FRAME: f32 = 0.05;
+// Base digging probability per frame (per part of mass 1.0). Scaled at the
+// use sites by contact pressure (a slow grinding body still digs — the old
+// pure-speed scaling meant terrain GRIP suppressed digging almost
+// entirely) and by the runtime Digging Rate slider
+// (params._pad_dye_beta_color, repurposed slot).
+const DIG_P_PER_FRAME: f32 = 0.3;
 
 // Pairing capture reach: any body part can grab the complement monomer
 // from a cell within this radius of itself (internal diffusion carries it
@@ -2908,7 +2913,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             // cast to the side (lets diggers tunnel into deep rock instead
             // of stalling when the cell behind is also solid).
             let bseed0 = (agent_id + 1u) * 2246822519u ^ (params.random_seed * 3266489917u);
-            if (hash_f32(bseed0) < DIG_P_PER_FRAME * max(total_mass, 0.1)) {
+            if (hash_f32(bseed0) < DIG_P_PER_FRAME * max(total_mass, 0.1) * max(params._pad_dye_beta_color, 0.0)) {
                 gamma_shove(hit_idx, hit_pos, -dir_m, bseed0 ^ 0x27D4EB2Fu);
             }
             // Wall normal from the local gamma gradient (points out of the
@@ -3033,8 +3038,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             let gq = gamma_count(idx);
             if (gq > 0u) {
                 let spd_bd = length(agent_velocity);
-                if (spd_bd > 0.05) {
-                    let p_dig = clamp(DIG_P_PER_FRAME * max(props.mass, 0.1) * clamp(spd_bd * 4.0 / VEL_MAX, 0.0, 1.0), 0.0, 1.0);
+                if (spd_bd > 0.01) {
+                    // Contact pressure digs even at a crawl (0.3 base) —
+                    // terrain grip slows bodies ON gamma, so a pure speed
+                    // scaling starved digging of its own precondition.
+                    let press = clamp(0.3 + spd_bd * 4.0 / VEL_MAX, 0.0, 1.0);
+                    let p_dig = clamp(DIG_P_PER_FRAME * max(props.mass, 0.1) * press * max(params._pad_dye_beta_color, 0.0), 0.0, 1.0);
                     let bseed = (agent_id + 1u) * 97u ^ (i * 193u) ^ (params.random_seed * 389u);
                     if (hash_f32(bseed) < p_dig) {
                         // Mole-style: behind first, then side-cast.
@@ -4610,7 +4619,27 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    if (mode == 4u) {
+    if (mode == 5u) {
+        // RAIN — uniform ADDITIVE fill: every cell/channel gains `value`
+        // expected quanta (probabilistic rounding). Used when Set World
+        // Total must add matter: multiplicative scaling cannot create
+        // quanta where there are none (0 x factor = 0), rain can.
+        var dv5 = fluid_dye[idx];
+        for (var mc = 0u; mc < 4u; mc++) {
+            let slot = idx * 4u + mc;
+            let whole5 = u32(floor(value));
+            var nq5 = whole5;
+            let fr5 = value - f32(whole5);
+            if (hash_f32(idx * 747796405u ^ (mc * 0x9E3779B9u) ^ (seed * 668265263u)) < fr5) {
+                nq5 += 1u;
+            }
+            if (nq5 > 0u) {
+                atomicAdd(&chem_grid[slot], nq5);
+            }
+            dv5[mc] = f32(atomicLoad(&chem_grid[slot])) * QUANTA_VIS;
+        }
+        fluid_dye[idx] = dv5;
+    } else if (mode == 4u) {
         // GOD MODE — scale the total monomer amount: every channel count is
         // multiplied by `value` (target/current) with probabilistic rounding.
         let factor = max(output_value, 0.0);
