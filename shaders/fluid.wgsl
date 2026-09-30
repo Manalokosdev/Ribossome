@@ -137,9 +137,9 @@ const NO_FLUID_DYE_DECAY_PER_TICK: f32 = 0.97;
 @group(0) @binding(14) var<storage, read_write> temp_out: array<f32>;
 
 const TEMP_HEAT_RATE: f32 = 0.01;  // T gain per fumarole-strength unit per second at core
-const TEMP_COOL_RATE: f32 = 0.4;   // relaxation toward ambient (1/s)
-const TEMP_MAX: f32 = 8.0;
-const TEMP_BUOYANCY: f32 = 30.0;   // force per unit T (screen-up = +y)
+const TEMP_COOL_RATE: f32 = 0.12;  // relaxation toward ambient (1/s) — plumes live ~8s
+const TEMP_MAX: f32 = 12.0;
+const TEMP_BUOYANCY: f32 = 12.0;   // force per unit T (screen-up = +y)
 const TEMP_DIFFUSE: f32 = 0.08;    // 4-neighbor blend fraction per solve
 
 // Gamma grid (terrain) sampled as an obstacle field
@@ -1711,44 +1711,17 @@ fn compute_divergence(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Diagonal-informed divergence to reduce axis-aligned grid modes.
-    // We blend axis and diagonal estimates of partial derivatives.
-    let v_c = reflect_if_into_solid(x, y, raw_velocity_cell(x, y));
-
+    // CONSISTENT OPERATOR TRIO (with the 5-point Jacobi Laplacian and the
+    // central pressure gradient): divergence must use the SAME central
+    // stencil, or the projection leaves permanent residual structures in
+    // the modes where the operators disagree — this was the lattice of
+    // static turbulence cells covering the whole domain.
     let v_l = reflect_if_into_solid(x - 1u, y, raw_velocity_cell(x - 1u, y));
     let v_r = reflect_if_into_solid(x + 1u, y, raw_velocity_cell(x + 1u, y));
     let v_b = reflect_if_into_solid(x, y - 1u, raw_velocity_cell(x, y - 1u));
     let v_t = reflect_if_into_solid(x, y + 1u, raw_velocity_cell(x, y + 1u));
 
-    // Diagonals: if the diagonal is solid, mirror the center (Neumann-ish).
-    var v_bl = v_c;
-    if (!is_effectively_solid(x - 1u, y - 1u)) {
-        v_bl = reflect_if_into_solid(x - 1u, y - 1u, raw_velocity_cell(x - 1u, y - 1u));
-    }
-    var v_br = v_c;
-    if (!is_effectively_solid(x + 1u, y - 1u)) {
-        v_br = reflect_if_into_solid(x + 1u, y - 1u, raw_velocity_cell(x + 1u, y - 1u));
-    }
-    var v_tl = v_c;
-    if (!is_effectively_solid(x - 1u, y + 1u)) {
-        v_tl = reflect_if_into_solid(x - 1u, y + 1u, raw_velocity_cell(x - 1u, y + 1u));
-    }
-    var v_tr = v_c;
-    if (!is_effectively_solid(x + 1u, y + 1u)) {
-        v_tr = reflect_if_into_solid(x + 1u, y + 1u, raw_velocity_cell(x + 1u, y + 1u));
-    }
-
-    let du_dx_axis = 0.5 * (v_r.x - v_l.x);
-    let dv_dy_axis = 0.5 * (v_t.y - v_b.y);
-    let du_dx_diag = 0.25 * ((v_tr.x + v_br.x) - (v_tl.x + v_bl.x));
-    let dv_dy_diag = 0.25 * ((v_tr.y + v_tl.y) - (v_br.y + v_bl.y));
-
-    // Blend factor: 0 => classic axis-only, 1 => diagonal-only.
-    let t = 0.5;
-    let du_dx = mix(du_dx_axis, du_dx_diag, t);
-    let dv_dy = mix(dv_dy_axis, dv_dy_diag, t);
-
-    divergence[idx] = du_dx + dv_dy;
+    divergence[idx] = 0.5 * ((v_r.x - v_l.x) + (v_t.y - v_b.y));
 }
 
 fn curl_at(x: u32, y: u32) -> f32 {
@@ -2053,10 +2026,13 @@ fn jacobi_pressure(
     let p_r = select(jacobi_p_tile[r_idx], p_c, jacobi_s_tile[r_idx] != 0u);
     let p_b = select(jacobi_p_tile[b_idx], p_c, jacobi_s_tile[b_idx] != 0u);
     let p_t = select(jacobi_p_tile[t_idx], p_c, jacobi_s_tile[t_idx] != 0u);
-    let p_bl = select(jacobi_p_tile[bl_idx], p_c, jacobi_s_tile[bl_idx] != 0u);
-    let p_br = select(jacobi_p_tile[br_idx], p_c, jacobi_s_tile[br_idx] != 0u);
-    let p_tl = select(jacobi_p_tile[tl_idx], p_c, jacobi_s_tile[tl_idx] != 0u);
-    let p_tr = select(jacobi_p_tile[tr_idx], p_c, jacobi_s_tile[tr_idx] != 0u);
+    // (Diagonal tile entries are still loaded by the halo code but unused:
+    // the solve is the classic 5-point Laplacian, consistent with the
+    // central divergence and gradient.)
+    let _unused_bl = bl_idx;
+    let _unused_br = br_idx;
+    let _unused_tl = tl_idx;
+    let _unused_tr = tr_idx;
 
     let div = divergence[idx];
     if (is_bad_f32(div) || is_bad_f32(p_c)) {
@@ -2064,12 +2040,8 @@ fn jacobi_pressure(
         return;
     }
 
-    // 9-point Laplacian (more isotropic than 5-point):
-    //   ∇²p ≈ (4*axis + diag - 20*p_c) / 6   (with dx = 1)
-    // Solve (Jacobi): p_c = (4*axis + diag - 6*div) / 20
-    let axis_sum = p_l + p_r + p_b + p_t;
-    let diag_sum = p_bl + p_br + p_tl + p_tr;
-    let p_new = (4.0 * axis_sum + diag_sum - 6.0 * div) * (1.0 / 20.0);
+    // 5-point Jacobi: p = (p_l + p_r + p_b + p_t - div) / 4  (dx = 1)
+    let p_new = (p_l + p_r + p_b + p_t - div) * 0.25;
     pressure_out[idx] = select(p_new, 0.0, is_bad_f32(p_new));
 }
 
@@ -2110,29 +2082,9 @@ fn subtract_gradient(@builtin(global_invocation_id) global_id: vec3<u32>) {
         p_t = pressure_in[grid_index(x, y + 1u)];
     }
 
-    var p_bl = p_c;
-    if (x > 0u && y > 0u && !is_effectively_solid(x - 1u, y - 1u)) {
-        p_bl = pressure_in[grid_index(x - 1u, y - 1u)];
-    }
-    var p_br = p_c;
-    if (x + 1u < FLUID_GRID_SIZE && y > 0u && !is_effectively_solid(x + 1u, y - 1u)) {
-        p_br = pressure_in[grid_index(x + 1u, y - 1u)];
-    }
-    var p_tl = p_c;
-    if (x > 0u && y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x - 1u, y + 1u)) {
-        p_tl = pressure_in[grid_index(x - 1u, y + 1u)];
-    }
-    var p_tr = p_c;
-    if (x + 1u < FLUID_GRID_SIZE && y + 1u < FLUID_GRID_SIZE && !is_effectively_solid(x + 1u, y + 1u)) {
-        p_tr = pressure_in[grid_index(x + 1u, y + 1u)];
-    }
-
-    let grad_axis = vec2<f32>(p_r - p_l, p_t - p_b) * 0.5;
-    let grad_diag = vec2<f32>(
-        ((p_tr + p_br) - (p_tl + p_bl)) * 0.25,
-        ((p_tr + p_tl) - (p_br + p_bl)) * 0.25
-    );
-    let grad = mix(grad_axis, grad_diag, 0.5);
+    // Central gradient — consistent with the central divergence and the
+    // 5-point Laplacian (see compute_divergence for why this matters).
+    let grad = vec2<f32>(p_r - p_l, p_t - p_b) * 0.5;
 
     var v = sanitize_vec2(velocity_in[idx]) - grad;
     v = reflect_if_into_solid(x, y, v);

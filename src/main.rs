@@ -10103,7 +10103,11 @@ impl GpuState {
                 // splat: x=lift_min_speed, y=lift_multiplier, z=vorticity confinement, w=viscosity
                 self.fluid_ooze_rate,
                 self.fluid_ooze_fade_rate,
-                self.fluid_vorticity,
+                // VORTICITY CONFINEMENT HARD-RETIRED: it injected rotational
+                // energy that locked grid noise into a lattice of static
+                // eddies. Thermal convection is the legitimate energy source
+                // now; the kernel passes through at 0.
+                0.0,
                 self.fluid_viscosity,
                 self.fluid_slope_force_scale,
                 self.fluid_obstacle_strength,
