@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.89266264,
+  "camera_zoom": 0.5604669,
   "spawn_probability": 2.1,
   "death_probability": 0.01,
   "mutation_rate": 0.005,
@@ -42,7 +42,7 @@
   "microswim_min_total_deformation_sq": 0.0005,
   "microswim_min_length_ratio": 0.75,
   "microswim_max_length_ratio": 1.6,
-  "repulsion_strength": 0.0,
+  "repulsion_strength": 1.0,
   "agent_repulsion_strength": 0.01,
   "limit_fps": false,
   "limit_fps_25": false,
@@ -53,9 +53,9 @@
   "fluid_enabled": true,
   "fluid_show": true,
   "fluid_dt": 0.003,
-  "fluid_decay": 0.95,
+  "fluid_decay": 0.98,
   "fluid_jacobi_iters": 10,
-  "fluid_vorticity": 5.0,
+  "fluid_vorticity": 20.0,
   "fluid_viscosity": 3.7,
   "fluid_ooze_rate": 1.0,
   "fluid_ooze_fade_rate": 0.1,
@@ -136,8 +136,8 @@
       "max_threshold": 55000.0,
       "adjustment_percent": 20.0,
       "cooldown_epochs": 5000,
-      "last_adjustment_epoch": 0,
-      "difficulty_level": 0
+      "last_adjustment_epoch": 120000,
+      "difficulty_level": -24
     },
     "alpha_rain": {
       "enabled": false,
