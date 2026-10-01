@@ -3094,6 +3094,7 @@ fn default_dig_rate() -> f32 { 1.0 }
 fn default_uv_strength() -> f32 { 1.0 }
 fn default_uv_depth() -> f32 { 8.0 }
 fn default_uv_damage() -> f32 { 2.5 }
+fn default_one() -> f32 { 1.0 }
 fn default_spatial_grid_resolution() -> u32 { DEFAULT_SPATIAL_GRID_RESOLUTION }
 fn default_fluid_dye_escape_rate() -> f32 { 0.0 }
 fn default_fluid_dye_escape_rate_beta_unset() -> f32 { -1.0 }
@@ -3369,6 +3370,11 @@ struct SimulationSettings {
     uv_depth: f32,
     #[serde(default = "default_uv_damage")]
     uv_damage: f32,
+    // Gravity multipliers: monomer sedimentation and agent sinking.
+    #[serde(default = "default_one")]
+    gravity_monomer: f32,
+    #[serde(default = "default_one")]
+    gravity_agent: f32,
     // When enabled, the dye is colored using a thin-film interference palette instead of a flat tint.
     #[serde(default)]
     dye_alpha_thinfilm: bool,
@@ -3541,6 +3547,8 @@ impl Default for SimulationSettings {
             uv_strength: 1.0,
             uv_depth: 8.0,
             uv_damage: 2.5,
+            gravity_monomer: 1.0,
+            gravity_agent: 1.0,
             dye_alpha_thinfilm: false,
             dye_alpha_thinfilm_mult: default_dye_thinfilm_multiplier(),
             dye_beta_thinfilm: false,
@@ -3852,6 +3860,8 @@ impl SimulationSettings {
         self.uv_strength = self.uv_strength.clamp(0.0, 10.0);
         self.uv_depth = self.uv_depth.clamp(0.5, 30.0);
         self.uv_damage = self.uv_damage.clamp(1.0, 10.0);
+        self.gravity_monomer = self.gravity_monomer.clamp(0.0, 5.0);
+        self.gravity_agent = self.gravity_agent.clamp(0.0, 5.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         // Back-compat: older settings files won't have the fluid prop-wash strength.
         // Use the exact sentinel value -1.0 to mean "inherit direct wash".
@@ -4487,6 +4497,8 @@ struct GpuState {
     uv_strength: f32,
     uv_depth: f32,
     uv_damage: f32,
+    gravity_monomer: f32,
+    gravity_agent: f32,
     dye_alpha_thinfilm: bool,
     dye_alpha_thinfilm_mult: f32,
     dye_beta_thinfilm: bool,
@@ -8292,6 +8304,8 @@ impl GpuState {
             uv_strength: settings.uv_strength.clamp(0.0, 10.0),
             uv_depth: settings.uv_depth.clamp(0.5, 30.0),
             uv_damage: settings.uv_damage.clamp(1.0, 10.0),
+            gravity_monomer: settings.gravity_monomer.clamp(0.0, 5.0),
+            gravity_agent: settings.gravity_agent.clamp(0.0, 5.0),
             dye_alpha_thinfilm: settings.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: settings.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: settings.dye_beta_thinfilm,
@@ -9156,6 +9170,8 @@ impl GpuState {
             uv_strength: self.uv_strength,
             uv_depth: self.uv_depth,
             uv_damage: self.uv_damage,
+            gravity_monomer: self.gravity_monomer,
+            gravity_agent: self.gravity_agent,
             dye_alpha_thinfilm: self.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: self.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: self.dye_beta_thinfilm,
@@ -10072,8 +10088,9 @@ impl GpuState {
             // brightness (the thin-film mode died with the per-nucleotide
             // palette).
             _pad_dye_alpha_color: self.monomer_brightness.clamp(0.0, 1.0),
-            dye_beta_color_r: self.dye_beta_color[0],
-            dye_beta_color_g: self.dye_beta_color[1],
+            // REPURPOSED: r = monomer gravity, g = agent gravity.
+            dye_beta_color_r: self.gravity_monomer,
+            dye_beta_color_g: self.gravity_agent,
             dye_beta_color_b: self.dye_beta_color[2],
             // REPURPOSED: this slot now carries the Digging Rate multiplier.
             _pad_dye_beta_color: self.dig_rate.clamp(0.0, 5.0),
@@ -16505,6 +16522,9 @@ fn main() {
                                                             egui::Slider::new(&mut state.uv_damage, 1.0..=10.0)
                                                                 .text("UV Damage (death x at surface)"),
                                                         );
+                                                        ui.heading("Gravity");
+                                                        ui.add(egui::Slider::new(&mut state.gravity_monomer, 0.0..=5.0).text("Monomer settling"));
+                                                        ui.add(egui::Slider::new(&mut state.gravity_agent, 0.0..=5.0).text("Agent sinking"));
                                                         ui.separator();
                                                         ui.heading("Monomers");
                                                         ui.add(

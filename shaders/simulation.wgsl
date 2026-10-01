@@ -2785,7 +2785,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // snow): the medium carries you sideways, gravity pulls you down,
         // and everything else is relative motion you must pay for.
         let v_base = v_water
-            + vec2<f32>(0.0, -AGENT_SINK_RATE * clamp(total_mass, 0.1, 2.0));
+            + vec2<f32>(0.0, -AGENT_SINK_RATE * max(params.dye_beta_color_g, 0.0) * clamp(total_mass, 0.1, 2.0));
         var relv = agent_vel - v_base;
         relv = mix(relv, new_velocity, mass_smoothing);
         agent_vel = v_base + relv;
@@ -4066,7 +4066,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 if (d == 0u) { dx = 1; } else if (d == 1u) { dx = -1; }
                 else if (d == 2u) { dy = 1; } else { dy = -1; }
-            } else if (g_src == 0u && r < p_adv_eff + p_diff_eff + MONOMER_SETTLE_P) {
+            } else if (g_src == 0u && r < p_adv_eff + p_diff_eff + MONOMER_SETTLE_P * max(params.dye_beta_color_r, 0.0)) {
                 // LIGHT SEDIMENTATION: free monomers slowly settle toward
                 // the bottom (-y = screen down), refilling the vents'
                 // intake so plumes keep having material to lift. Settling
