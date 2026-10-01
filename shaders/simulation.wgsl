@@ -3288,6 +3288,51 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         energy_consumption += baseline + organ_extra;
     }
 
+    // ====== CATALYTIC TRIPEPTIDES (monomer-converting enzymes) ======
+    // Three specific amino acids in consecutive body parts form a catalytic
+    // site; READ ORDER sets the direction (X-Y-Z converts a->b, Z-Y-X
+    // converts b->a). The site converts one monomer in the cell under the
+    // middle residue (state preserved), paying energy. Conserving: one
+    // quantum changes channel in place. Encoded by the genome, so enzymes
+    // are inherited, mutate, and can be discovered or lost by evolution.
+    {
+        let bc_e = min(body_count, MAX_BODY_PARTS);
+        if (bc_e >= 3u) {
+            // var copies: naga 22 only allows dynamic indexing of variables.
+            var motifs = ENZYME_MOTIFS;
+            var reacts = ENZYME_REACT;
+            for (var ei = 1u; ei + 1u < bc_e; ei++) {
+                let t0 = get_base_part_type(agents_out[agent_id].body[ei - 1u].part_type);
+                let t1 = get_base_part_type(agents_out[agent_id].body[ei].part_type);
+                let t2 = get_base_part_type(agents_out[agent_id].body[ei + 1u].part_type);
+                // from/to channels (A=0, U=1, G=2, C=3); 4u = no enzyme.
+                var e_from = 4u;
+                var e_to = 4u;
+                for (var k = 0u; k < 4u; k++) {
+                    let m = motifs[k];
+                    if (t0 == m.x && t1 == m.y && t2 == m.z) { e_from = reacts[k].x; e_to = reacts[k].y; }
+                    if (t0 == m.z && t1 == m.y && t2 == m.x) { e_from = reacts[k].y; e_to = reacts[k].x; }
+                }
+                if (e_from > 3u) { continue; }
+                if (agent_energy_cur < ENZYME_COST + 1.0) { continue; }
+                let eseed = (agent_id + 1u) * 2654435761u ^ (ei * 374761393u) ^ (params.random_seed * 668265263u);
+                if (hash_f32(eseed) >= ENZYME_RATE) { continue; }
+                let site = agent_pos + apply_agent_rotation(agents_out[agent_id].body[ei].pos, agent_rot);
+                let cidx = grid_index(site);
+                let slot_from = cidx * 4u + e_from;
+                let vf = atomicLoad(&chem_grid[slot_from]);
+                let af = vf & CHEM_STATE_MASK;
+                let sf = vf >> 16u;
+                if (af + sf == 0u) { continue; }
+                let take_spent = hash_f32(eseed ^ 0x6C8E9CF5u) < f32(sf) / f32(af + sf);
+                if (chem_take_state_one(slot_from, take_spent)) {
+                    chem_add_state(cidx, e_to, 1u, take_spent);
+                    agent_energy_cur -= ENZYME_COST;
+                }
+            }
+        }
+    }
+
     // Cap energy by storage capacity after feeding. Energy is harvested
     // ACTIVATION, not matter: overflow and maintenance simply dissipate as
     // heat (the old spill/excretion deposits would now MINT matter, since
@@ -3847,11 +3892,30 @@ const BURIED_DIFF_FACTOR: f32 = 1.0;
 // Downward settling hop probability per free monomer per epoch (light
 // gravity: ~1 cell every 500 epochs, much slower than plume lift).
 const MONOMER_SETTLE_P: f32 = 0.002;
+// CATALYTIC TRIPEPTIDES: amino acid indices (0 A,1 C,2 D,3 E,4 F,5 G,6 H,
+// 7 I,8 K,9 L,10 M,11 N,12 P,13 Q,14 R,15 S,16 T,17 V,18 W,19 Y).
+// Read forward = REACT.x -> REACT.y; read backward = reverse reaction.
+const ENZYME_MOTIFS = array<vec3<u32>, 4>(
+    vec3<u32>(6u, 18u, 19u),  // H-W-Y : A <-> G (purines)
+    vec3<u32>(1u, 10u, 4u),   // C-M-F : U <-> C (pyrimidines)
+    vec3<u32>(13u, 18u, 11u), // Q-W-N : A <-> U
+    vec3<u32>(19u, 10u, 12u)  // Y-M-P : G <-> C
+);
+const ENZYME_REACT = array<vec2<u32>, 4>(
+    vec2<u32>(0u, 2u),
+    vec2<u32>(1u, 3u),
+    vec2<u32>(0u, 1u),
+    vec2<u32>(2u, 3u)
+);
+const ENZYME_RATE: f32 = 0.1;  // conversion attempts per site per frame
+const ENZYME_COST: f32 = 0.05; // energy per conversion
 // MONOMER REACTION RULES (all conserving: they move or transform quanta,
 // never create or destroy them).
 const CHEM_SENSITIZE: f32 = 0.5;      // photo-activation boost per activated monomer in cell
 const CHEM_SHIELD: f32 = 0.5;         // decay reduction per extra activated monomer in cell
-const CHEM_INTERCONV_P: f32 = 0.001;  // spent purine<->purine / pyrimidine<->pyrimidine per epoch
+// Abiotic interconversion RETIRED (unrealistic): base conversion is now
+// enzymatic only (catalytic tripeptides).
+const CHEM_INTERCONV_P: f32 = 0.0; // spent purine<->purine / pyrimidine<->pyrimidine per epoch
 const CHEM_COHESION: f32 = 0.6;       // diffusion bias toward activated same-type neighbors
 const GAMMA_POROSITY_K: f32 = 0.3;
 // PORE CAPACITY per cell (total monomers, all channels and states):

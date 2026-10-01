@@ -4275,7 +4275,8 @@ struct GpuState {
     matter_bottom: u32,                 // Free quanta in the bottom 10% of rows
     matter_act: u32,                    // Activated free quanta
     matter_rubble: u32,                 // Free quanta in rubble cells (1-2 gamma quanta)
-    pop_health: [f64; 5],               // mean height (1=surface), mean energy, starving frac, pairing progress, mean age
+    pop_health: [f64; 5],
+    enzyme_counts: [u32; 8],            // agents carrying each enzyme (A>G,G>A,U>C,C>U,A>U,U>A,G>C,C>G)               // mean height (1=surface), mean energy, starving frac, pairing progress, mean age
     matter_energy: f64,                 // Total agent energy (energy units) at last sample
     matter_energy_quanta: f64,          // Exact quanta-equivalent of agent energy (per-agent yield)
     matter_total: f64,                  // free + locked + energy-equivalent at last sample
@@ -8074,6 +8075,7 @@ impl GpuState {
             matter_act: 0,
             matter_rubble: 0,
             pop_health: [0.0; 5],
+            enzyme_counts: [0; 8],
             matter_energy: 0.0,
             matter_energy_quanta: 0.0,
             matter_total: 0.0,
@@ -12221,6 +12223,9 @@ impl GpuState {
             let mut n_starving = 0u64;
             let mut sum_pair_frac = 0.0f64;
             let mut sum_age = 0.0f64;
+            // Catalytic tripeptides (keep in sync with ENZYME_MOTIFS in simulation.wgsl).
+            const MOTIFS: [[u32; 3]; 4] = [[6, 18, 19], [1, 10, 4], [13, 18, 11], [19, 10, 12]];
+            let mut enzyme_counts = [0u32; 8];
             for agent in agents.iter().take(take_len) {
                 if agent.alive == 1 {
                     n_alive += 1;
@@ -12235,6 +12240,18 @@ impl GpuState {
                         sum_pair_frac += agent.pairing_counter as f64 / agent.gene_length as f64;
                     }
                     sum_age += agent.age as f64;
+                    let bc = (agent.body_count as usize).min(MAX_BODY_PARTS);
+                    let mut has = [false; 8];
+                    for i in 1..bc.saturating_sub(1) {
+                        let t0 = agent.body[i - 1].part_type & 0xFF;
+                        let t1 = agent.body[i].part_type & 0xFF;
+                        let t2 = agent.body[i + 1].part_type & 0xFF;
+                        for (k, m) in MOTIFS.iter().enumerate() {
+                            if t0 == m[0] && t1 == m[1] && t2 == m[2] { has[k * 2] = true; }
+                            if t0 == m[2] && t1 == m[1] && t2 == m[0] { has[k * 2 + 1] = true; }
+                        }
+                    }
+                    for k in 0..8 { if has[k] { enzyme_counts[k] += 1; } }
                     // PRIMORDIAL SEEDS (generation 0): their strand was
                     // minted at world start and vanishes on death, so it is
                     // NOT world matter — only their captured complements and
@@ -12274,6 +12291,7 @@ impl GpuState {
                 }
             }
             self.matter_locked_quanta = locked;
+            self.enzyme_counts = enzyme_counts;
             let na = n_alive.max(1) as f64;
             self.pop_health = [
                 sum_height / na,
@@ -15953,6 +15971,13 @@ fn main() {
                                                             state.pop_health[3] * 100.0,
                                                             state.pop_health[4],
                                                         ));
+                                                        {
+                                                            let e = state.enzyme_counts;
+                                                            ui.label(format!(
+                                                                "enzymes: A>G {} · G>A {} · U>C {} · C>U {} · A>U {} · U>A {} · G>C {} · C>G {}",
+                                                                e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]
+                                                            ));
+                                                        }
                                                         ui.label(format!(
                                                             "locked  A {} · U {} · G {} · C {}",
                                                             state.matter_locked_per_ch[0],
