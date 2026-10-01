@@ -2939,8 +2939,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let wt = water_temperature_at(agent_pos);
         var thermal_mult = mix(COLD_DEATH_MULT, 1.0, clamp(wt / 2.0, 0.0, 1.0));
         if (wt > 2.0) { thermal_mult = mix(1.0, HOT_DEATH_MULT, clamp((wt - 2.0) / 6.0, 0.0, 1.0)); }
-        let temp_mult = uv_mult * thermal_mult;
-        let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * temp_mult, 0.0, 1.0);
+        // UV hits the STRAND, not the metabolism: its hazard is added on
+        // top and is NOT divided by energy. (Multiplied in, a well-fed
+        // agent at the lit surface was nearly immune — sweepers parked
+        // there hoarding food.) Starvation risk stays energy-scaled.
+        let uv_hazard = params.death_probability * (uv_mult - 1.0) * UV_HAZARD_SCALE;
+        let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * thermal_mult + uv_hazard, 0.0, 1.0);
 
         should_die = death_rnd < final_death_prob;
     }
@@ -3559,6 +3563,10 @@ const PHORETIC_GAIN: f32 = 100.0;
 const PHORETIC_MAX_VEL: f32 = 3.0;
 const UPTAKE_ENABLER_BOOST: f32 = 3.0;
 // Thermal mortality multipliers (cold water / vent cores).
+// Energy-independent UV hazard per frame = death_probability x (UV damage
+// slider - 1) x light x this. Defaults (0.02, 10, surface): ~1.8e-4/frame,
+// mean survival ~5500 frames at the surface no matter how well fed.
+const UV_HAZARD_SCALE: f32 = 0.001;
 const COLD_DEATH_MULT: f32 = 0.1;
 const HOT_DEATH_MULT: f32 = 10.0;
 
