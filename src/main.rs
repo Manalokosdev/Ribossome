@@ -1034,6 +1034,7 @@ struct FrameProfiler {
 #[derive(Clone, Copy, Default)]
 struct DispatchTimings {
     sim_pre_ms: Option<f64>,
+    backlog_ms: Option<f64>,
     sim_pre_diffuse_ms: Option<f64>,
     sim_pre_diffuse_commit_ms: Option<f64>,
     sim_pre_trails_ms: Option<f64>,
@@ -1054,6 +1055,10 @@ struct DispatchTimings {
 
 #[derive(Clone, Copy)]
 enum DispatchSegment {
+    // Drains GPU work queued before the timed segments (previous frame's
+    // render/present, earlier commands in this encoder) so it is not billed
+    // to the first timed segment.
+    Backlog,
     SimPre,
     SimPreDiffuse,
     SimPreDiffuseCommit,
@@ -1254,6 +1259,7 @@ but required timestamp-query features are unavailable on this device."
     fn record_dispatch_ms(&mut self, segment: DispatchSegment, ms: f64) {
         let ms = ms.max(0.0);
         match segment {
+            DispatchSegment::Backlog => self.dispatch_timings.backlog_ms = Some(ms),
             DispatchSegment::SimPre => self.dispatch_timings.sim_pre_ms = Some(ms),
             DispatchSegment::SimPreDiffuse => self.dispatch_timings.sim_pre_diffuse_ms = Some(ms),
             DispatchSegment::SimPreDiffuseCommit => {
@@ -1438,7 +1444,8 @@ but required timestamp-query features are unavailable on this device."
 
             if self.dispatch_timing_detail {
                 println!(
-                    "[perf] simPre_parts(ms): diffuse={} commit={} rain={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
+                    "[perf] simPre_parts(ms): backlog={} diffuse={} commit={} rain={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
+                    fmt(self.dispatch_timings.backlog_ms),
                     fmt(self.dispatch_timings.sim_pre_diffuse_ms),
                     fmt(self.dispatch_timings.sim_pre_diffuse_commit_ms),
                     fmt(self.dispatch_timings.sim_pre_rain_ms),
@@ -1489,7 +1496,8 @@ but required timestamp-query features are unavailable on this device."
 
                 if self.dispatch_timing_detail {
                     println!(
-                        "[perf] simPre_parts(ms): diffuse={} commit={} rain={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
+                        "[perf] simPre_parts(ms): backlog={} diffuse={} commit={} rain={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
+                        fmt(self.dispatch_timings.backlog_ms),
                         fmt(self.dispatch_timings.sim_pre_diffuse_ms),
                         fmt(self.dispatch_timings.sim_pre_diffuse_commit_ms),
                         fmt(self.dispatch_timings.sim_pre_rain_ms),
@@ -10478,6 +10486,15 @@ impl GpuState {
         } else {
             // Detailed timing path: split Pass 1 into sub-passes and submit+wait after each.
             // This is only active on sampled frames.
+
+            // (a0) Drain the backlog so (a) measures only its own kernels.
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::Backlog,
+                "Update Encoder (Timed Segment)",
+            );
 
             // (a) Diffuse
             let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
