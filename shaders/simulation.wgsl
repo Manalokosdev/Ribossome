@@ -320,6 +320,7 @@ fn uv_light_at_cell(x: u32, y: u32) -> f32 {
 // widen with depth like real diffuse light. Single workgroup: 256 threads
 // own 8 columns each and sweep all rows with barriers between them.
 const UV_SWEEP_THREADS: u32 = 256u;
+const UV_SPREAD: u32 = 4u; // cells between the 3 averaged taps above
 
 @compute @workgroup_size(256)
 fn compute_uv_light(@builtin(local_invocation_id) lid_v: vec3<u32>) {
@@ -346,8 +347,11 @@ fn compute_uv_light(@builtin(local_invocation_id) lid_v: vec3<u32>) {
         for (var c = 0u; c < cols; c++) {
             let x = lid * cols + c;
             if (x >= GRID_SIZE) { continue; }
-            let xl = select(x - 1u, x, x == 0u);
-            let xr = min(x + 1u, GRID_SIZE - 1u);
+            // Taps UV_SPREAD cells apart: a 3-tap average spreads light only
+            // ~sqrt(depth) cells (near-vertical shadows); spacing the taps
+            // widens the diffuse cone by that factor at the same cost.
+            let xl = select(x - UV_SPREAD, 0u, x < UV_SPREAD);
+            let xr = min(x + UV_SPREAD, GRID_SIZE - 1u);
             let above = (bitcast<f32>(atomicLoad(&gamma_grid[GAMMA_LIGHT_OFFSET + up + xl]))
                 + bitcast<f32>(atomicLoad(&gamma_grid[GAMMA_LIGHT_OFFSET + up + x]))
                 + bitcast<f32>(atomicLoad(&gamma_grid[GAMMA_LIGHT_OFFSET + up + xr]))) / 3.0;
