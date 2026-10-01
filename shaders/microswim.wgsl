@@ -93,8 +93,10 @@ fn microswim_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mass_threshold_low = 2.0;
     let mass_threshold_high = 10.0;
     let re_blend_raw = clamp((mass - mass_threshold_low) / (mass_threshold_high - mass_threshold_low), 0.0, 1.0);
-    // Damp the influence of the high-Re branch (still present, just less dominant).
-    let re_blend = re_blend_raw * 0.5;
+    // HIGH-Re BRANCH DISABLED: every agent swims in the low-Reynolds regime
+    // (no vortex bursts, no coasting bonus, no quadratic drag). Microscopic
+    // swimmers live at Re << 1 whatever their mass.
+    let re_blend = re_blend_raw * 0.0;
 
     // Lower base drag for overall faster motion from deformation
     let c_par_base  = ms_f32(MSP_BASE_DRAG) * 0.7;  // Reduced 30% - agents slip more = faster

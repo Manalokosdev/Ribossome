@@ -379,11 +379,15 @@ const SENSOR_CHARGE_PER_HIT: f32 = 0.12;
 const SWEEP_REACH_MULT: f32 = 4.0; // x the organ's defense radius (world units)
 const SWEEP_TRIES: u32 = 4u;       // random cells sampled per sweeper per frame
 const SWEEP_RATE: f32 = 0.5;       // chance a sweeper acts this frame
-const SWEEP_COST: f32 = 0.02;      // energy per monomer carried
+// Energy per monomer carried, as a fraction of what an activated monomer
+// yields when eaten (food_power): at a flat 0.02 vs a yield of 6 sweeping
+// was ~free and sweepers parked at the lit surface hoarding everyone's food.
+const SWEEP_COST_FRAC: f32 = 0.1;
 
 fn sweep_monomers(agent_id: u32) {
     if (agents_out[agent_id].alive != 1u) { return; }
     var energy = energy_from_u32(atomicLoad(&agents_out[agent_id].energy));
+    let SWEEP_COST = SWEEP_COST_FRAC * max(params.food_power, 1e-6);
     if (energy < SWEEP_COST + 1.0) { return; }
     // Indiscriminate collector: it does not "know" the genome; it grabs any
     // activated monomer it touches (channel chosen by local abundance).
@@ -3551,7 +3555,7 @@ const AGENT_SINK_RATE: f32 = 0.05;
 // Diffusiophoresis: world units/frame of drift per unit of uncompensated
 // uptake flux (monomers/frame) on one side, capped at PHORETIC_MAX_VEL;
 // and how strongly enablers up-regulate local uptake.
-const PHORETIC_GAIN: f32 = 400.0;
+const PHORETIC_GAIN: f32 = 100.0;
 const PHORETIC_MAX_VEL: f32 = 3.0;
 const UPTAKE_ENABLER_BOOST: f32 = 3.0;
 // Thermal mortality multipliers (cold water / vent cores).
