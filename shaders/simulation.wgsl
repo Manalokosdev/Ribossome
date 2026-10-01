@@ -4037,6 +4037,11 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
             let g_tgt = gamma_count(t_idx);
             if (g_tgt > 0u) {
                 if (is_adv) { continue; }
+                // SOLID ROCK accepts no new monomers (only rubble is porous).
+                // Measured: with porous solid rock, half of all free matter
+                // migrated inside — dark, unheated, unreachable — and the
+                // world starved. Monomers already inside can still leave.
+                if (g_tgt >= GAMMA_SOLID_THRESHOLD) { continue; }
                 let gperm = 1.0 / (1.0 + GAMMA_POROSITY_K * f32(g_tgt));
                 if (hash_f32(h ^ 0x27D4EB2Fu) >= gperm) { continue; }
             }
