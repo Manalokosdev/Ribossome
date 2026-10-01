@@ -3375,6 +3375,9 @@ struct SimulationSettings {
     gravity_monomer: f32,
     #[serde(default = "default_one")]
     gravity_agent: f32,
+    // Multiplier on monomer Brownian diffusion (heals depletion voids).
+    #[serde(default = "default_one")]
+    monomer_diffusion: f32,
     // When enabled, the dye is colored using a thin-film interference palette instead of a flat tint.
     #[serde(default)]
     dye_alpha_thinfilm: bool,
@@ -3549,6 +3552,7 @@ impl Default for SimulationSettings {
             uv_damage: 2.5,
             gravity_monomer: 1.0,
             gravity_agent: 1.0,
+            monomer_diffusion: 1.0,
             dye_alpha_thinfilm: false,
             dye_alpha_thinfilm_mult: default_dye_thinfilm_multiplier(),
             dye_beta_thinfilm: false,
@@ -3862,6 +3866,7 @@ impl SimulationSettings {
         self.uv_damage = self.uv_damage.clamp(1.0, 10.0);
         self.gravity_monomer = self.gravity_monomer.clamp(0.0, 5.0);
         self.gravity_agent = self.gravity_agent.clamp(0.0, 5.0);
+        self.monomer_diffusion = self.monomer_diffusion.clamp(0.0, 20.0);
         self.prop_wash_strength = self.prop_wash_strength.clamp(0.0, 5.0);
         // Back-compat: older settings files won't have the fluid prop-wash strength.
         // Use the exact sentinel value -1.0 to mean "inherit direct wash".
@@ -4503,6 +4508,7 @@ struct GpuState {
     uv_damage: f32,
     gravity_monomer: f32,
     gravity_agent: f32,
+    monomer_diffusion: f32,
     dye_alpha_thinfilm: bool,
     dye_alpha_thinfilm_mult: f32,
     dye_beta_thinfilm: bool,
@@ -8334,6 +8340,7 @@ impl GpuState {
             uv_damage: settings.uv_damage.clamp(1.0, 10.0),
             gravity_monomer: settings.gravity_monomer.clamp(0.0, 5.0),
             gravity_agent: settings.gravity_agent.clamp(0.0, 5.0),
+            monomer_diffusion: settings.monomer_diffusion.clamp(0.0, 20.0),
             dye_alpha_thinfilm: settings.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: settings.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: settings.dye_beta_thinfilm,
@@ -9200,6 +9207,7 @@ impl GpuState {
             uv_damage: self.uv_damage,
             gravity_monomer: self.gravity_monomer,
             gravity_agent: self.gravity_agent,
+            monomer_diffusion: self.monomer_diffusion,
             dye_alpha_thinfilm: self.dye_alpha_thinfilm,
             dye_alpha_thinfilm_mult: self.dye_alpha_thinfilm_mult,
             dye_beta_thinfilm: self.dye_beta_thinfilm,
@@ -10119,7 +10127,8 @@ impl GpuState {
             // REPURPOSED: r = monomer gravity, g = agent gravity.
             dye_beta_color_r: self.gravity_monomer,
             dye_beta_color_g: self.gravity_agent,
-            dye_beta_color_b: self.dye_beta_color[2],
+            // REPURPOSED: monomer diffusion multiplier.
+            dye_beta_color_b: self.monomer_diffusion,
             // REPURPOSED: this slot now carries the Digging Rate multiplier.
             _pad_dye_beta_color: self.dig_rate.clamp(0.0, 5.0),
             species_heatmap: if self.species_heatmap_enabled { 1 } else { 0 },
@@ -16637,6 +16646,8 @@ fn main() {
                                                         ui.heading("Gravity");
                                                         ui.add(egui::Slider::new(&mut state.gravity_monomer, 0.0..=5.0).text("Monomer settling"));
                                                         ui.add(egui::Slider::new(&mut state.gravity_agent, 0.0..=5.0).text("Agent sinking"));
+                                                        ui.add(egui::Slider::new(&mut state.monomer_diffusion, 0.0..=20.0).logarithmic(true).text("Monomer diffusion"))
+                                                            .on_hover_text("Brownian spreading of dissolved monomers. Higher heals empty pockets faster; 1 = original rate.");
                                                         ui.separator();
                                                         ui.heading("Monomers");
                                                         ui.add(

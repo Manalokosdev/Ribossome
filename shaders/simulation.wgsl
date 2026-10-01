@@ -4044,7 +4044,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
     let speed_t = length(v);
     let p_adv = parcel_hop_p(v);
     let agitation = clamp(speed_t / DIFF_AGITATION_SPEED, 0.0, 1.0);
-    let p_diff = DIFF_HOP_P * mix(DIFF_HOP_FLOOR, 1.0, agitation);
+    let p_diff = clamp(DIFF_HOP_P * mix(DIFF_HOP_FLOOR, 1.0, agitation) * max(params.dye_beta_color_b, 0.0), 0.0, 0.5);
 
     // GAMMA INTERACTION (no ghosting): monomers INSIDE inert mass do not
     // ride currents — buried matter only creeps by slow diffusion, scaled
