@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.7042162,
+  "camera_zoom": 0.32425773,
   "spawn_probability": 1.0,
   "death_probability": 0.01,
   "mutation_rate": 0.003,
@@ -12,7 +12,7 @@
   "alpha_fluid_convolution": 0.11,
   "beta_fluid_convolution": 0.0,
   "fluid_slope_force_scale": 210.0,
-  "fluid_obstacle_strength": 0.0,
+  "fluid_obstacle_strength": 1000.0,
   "gamma_blur": 1.0,
   "gamma_shift": 0.0,
   "alpha_slope_bias": 0.0,
@@ -216,11 +216,11 @@
     },
     {
       "enabled": true,
-      "x_frac": 0.709903,
-      "y_frac": 0.18962309,
+      "x_frac": 0.72824466,
+      "y_frac": 0.18275778,
       "dir_degrees": 0.0,
       "strength": 3000.0,
-      "spread": 30.0,
+      "spread": 23.360641,
       "alpha_dye_rate": 0.0,
       "beta_dye_rate": 0.0,
       "variation": 0.5

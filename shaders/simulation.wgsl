@@ -261,9 +261,7 @@ fn gamma_shove(from_idx: u32, from_pos: vec2<f32>, back_dir: vec2<f32>, seed: u3
         let tp = clamp_position(from_pos + cand[c] * 1.5);
         let ti = grid_index(tp);
         if (ti != from_idx && gamma_count(ti) < GAMMA_PILE_MAX) {
-            if (gamma_take_one(from_idx)) {
-                gamma_add_one(ti);
-            }
+            let _gm = gamma_move_one(from_idx, ti);
             return;
         }
     }
@@ -2431,9 +2429,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (hash_f32(dseed3) < DIG_P_PER_FRAME * max(part_mass, 0.1)) {
                         let behind_p = world_pos - (agent_velocity / spd_p) * 2.0;
                         if (is_in_bounds(behind_p)) {
-                            if (gamma_take_one(t_idx)) {
-                                gamma_add_one(grid_index(behind_p));
-                            }
+                            let _gm = gamma_move_one(t_idx, grid_index(behind_p));
                         }
                     }
                 }
@@ -2554,9 +2550,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let p_move = clamp(transfer_amount / GAMMA_QUANTUM, 0.0, 1.0);
                             let wseed = (agent_id + 1u) * 193u ^ (i * 389u) ^ (params.random_seed * 769u);
                             if (hash_f32(wseed) < p_move) {
-                                if (gamma_take_one(center_idx)) {
-                                    gamma_add_one(target_idx);
-                                }
+                                let _gm = gamma_move_one(center_idx, target_idx);
                             }
                         }
                     }
@@ -3147,9 +3141,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let p_move = clamp(transfer_amount / GAMMA_QUANTUM, 0.0, 1.0);
                             let wseed = (agent_id + 1u) * 449u ^ (i * 577u) ^ (params.random_seed * 907u);
                             if (hash_f32(wseed) < p_move) {
-                                if (gamma_take_one(center_idx)) {
-                                    gamma_add_one(target_idx);
-                                }
+                                let _gm = gamma_move_one(center_idx, target_idx);
                             }
                         }
                     }
@@ -3738,9 +3730,7 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
             }
         }
         if (have_dest && dest != idx) {
-            if (gamma_take_one(idx)) {
-                gamma_add_one(dest);
-            }
+            let _gm = gamma_move_one(idx, dest);
         }
         return;
     }
@@ -3773,9 +3763,7 @@ fn relax_gamma_pass(gid: vec3<u32>, phase: u32) {
     }
     let h = hash(idx ^ (params.epoch * 668265263u) ^ (phase * 2654435761u) ^ (params.random_seed * 374761393u));
     if (f32(h) / 4294967295.0 < GAMMA_RELAX_P) {
-        if (gamma_take_one(idx)) {
-            gamma_add_one(best_idx);
-        }
+        let _gm = gamma_move_one(idx, best_idx);
     }
 }
 
@@ -3876,6 +3864,41 @@ fn chem_cell_total(cell: u32) -> u32 {
         t += (v & CHEM_STATE_MASK) + (v >> 16u);
     }
     return t;
+}
+
+// THE ONLY WAY TERRAIN MOVES: a gamma quantum goes from `from` to `to`,
+// and any monomers that no longer fit in `to` (its pore capacity just
+// shrank) SWAP back into `from`, which just gained pore volume. Like a
+// falling sand grain displacing water: terrain can never bury monomers,
+// so no cell is ever pushed over capacity. Returns false if no gamma.
+fn gamma_move_one(src_c: u32, dst_c: u32) -> bool {
+    if (!gamma_take_one(src_c)) {
+        return false;
+    }
+    gamma_add_one(dst_c);
+    let cap = chem_capacity(gamma_count(dst_c));
+    var guard = 0u;
+    loop {
+        if (guard >= 64u) { break; }
+        guard += 1u;
+        if (chem_cell_total(dst_c) <= cap) { break; }
+        var moved = false;
+        for (var c = 0u; c < 4u; c++) {
+            let slot = dst_c * 4u + c;
+            if (chem_take_state_one(slot, true)) {
+                chem_add_state(src_c, c, 1u, true);
+                moved = true;
+                break;
+            }
+            if (chem_take_state_one(slot, false)) {
+                chem_add_state(src_c, c, 1u, false);
+                moved = true;
+                break;
+            }
+        }
+        if (!moved) { break; }
+    }
+    return true;
 }
 
 fn chem_capacity(g: u32) -> u32 {
