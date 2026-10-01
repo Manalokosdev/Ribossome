@@ -304,55 +304,60 @@ fn fluid_ride_velocity(world_pos: vec2<f32>) -> vec2<f32> {
 // is sampled at 16 points and each sample's quanta dim the light. Below
 // the lit band the column scan is skipped (light is negligible anyway),
 // which keeps the cost confined to the upper layer.
-const UV_SHADOW_ABSORB: f32 = 0.1; // per solid gamma quantum crossed
+const UV_SHADOW_ABSORB: f32 = 0.3; // per solid gamma quantum crossed
 
 fn uv_light_at_cell(x: u32, y: u32) -> f32 {
-    // Precomputed by clear_uv_light + compute_uv_light (diffuse sky, exact
-    // ray marches, refreshed every ~100 epochs — terrain changes slowly).
+    // Precomputed by compute_uv_light (row sweep, refreshed every ~100 epochs).
     let cx = min(x, GRID_SIZE - 1u);
     let cy = min(y, GRID_SIZE - 1u);
-    return f32(atomicLoad(&gamma_grid[GAMMA_LIGHT_OFFSET + cy * GRID_SIZE + cx])) / UV_FIXED_SCALE;
+    return bitcast<f32>(atomicLoad(&gamma_grid[GAMMA_LIGHT_OFFSET + cy * GRID_SIZE + cx]));
 }
 
-// DIFFUSE SKY: light arrives from UV_DIRS directions (vertical and slants up
-// to |dx/dy| = 0.6, ~31 deg). Each direction is traced by parallel rays from
-// the surface (top of screen = high y) down through EVERY cell, attenuating
-// with water depth and absorbing through solid gamma; each ray adds its
-// share to the cells it crosses (fixed-point atomic sum), giving soft
-// penumbrae instead of hard vertical shadows.
-const UV_DIRS: u32 = 5u;
-const UV_FIXED_SCALE: f32 = 1000000.0;
+// DIFFUSE ROW SWEEP (Filipe's rule): from the surface (top of screen =
+// high y) downward, each cell's light is the AVERAGE of the 3 cells just
+// above it (up-left, up, up-right) times its own transmission: water
+// attenuation per row and absorption by solid gamma. Shadows soften and
+// widen with depth like real diffuse light. Single workgroup: 256 threads
+// own 8 columns each and sweep all rows with barriers between them.
+const UV_SWEEP_THREADS: u32 = 256u;
 
-fn uv_dir_slope(d: u32) -> f32 {
-    return (f32(d) - f32(UV_DIRS - 1u) * 0.5) * 0.3;
-}
-
-@compute @workgroup_size(16, 16)
-fn clear_uv_light(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= GRID_SIZE || gid.y >= GRID_SIZE) { return; }
-    atomicStore(&gamma_grid[GAMMA_LIGHT_OFFSET + gid.y * GRID_SIZE + gid.x], 0u);
-}
-
-@compute @workgroup_size(64)
-fn compute_uv_light(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let d = gid.y;
-    if (d >= UV_DIRS) { return; }
-    let slope = uv_dir_slope(d);
-    let margin = i32(ceil(abs(slope) * f32(GRID_SIZE)));
-    let x0 = i32(gid.x) - margin;
-    if (x0 >= i32(GRID_SIZE) + margin) { return; }
-    let atten = max(params.dye_alpha_color_g, 0.5);
-    var absorbed = 0.0;
-    for (var t = 0u; t < GRID_SIZE; t++) {
-        let y = GRID_SIZE - 1u - t;
-        let xi = x0 + i32(round(f32(t) * slope));
-        if (xi < 0 || xi >= i32(GRID_SIZE)) { continue; }
-        let idx = y * GRID_SIZE + u32(xi);
-        let depth_frac = 1.0 - (f32(y) + 0.5) / f32(GRID_SIZE);
-        let light = exp(-atten * depth_frac) * exp(-UV_SHADOW_ABSORB * absorbed);
-        atomicAdd(&gamma_grid[GAMMA_LIGHT_OFFSET + idx], u32(light / f32(UV_DIRS) * UV_FIXED_SCALE));
+@compute @workgroup_size(256)
+fn compute_uv_light(@builtin(local_invocation_id) lid_v: vec3<u32>) {
+    let lid = lid_v.x;
+    let cols = (GRID_SIZE + UV_SWEEP_THREADS - 1u) / UV_SWEEP_THREADS;
+    let row_water = exp(-max(params.dye_alpha_color_g, 0.5) / f32(GRID_SIZE));
+    // Surface row: full light (minus its own absorption).
+    let top = GRID_SIZE - 1u;
+    for (var c = 0u; c < cols; c++) {
+        let x = lid * cols + c;
+        if (x >= GRID_SIZE) { continue; }
+        let idx = top * GRID_SIZE + x;
         let g = gamma_count(idx);
-        if (g >= GAMMA_SOLID_THRESHOLD) { absorbed += f32(g); }
+        var l = row_water;
+        if (g >= GAMMA_SOLID_THRESHOLD) { l *= exp(-UV_SHADOW_ABSORB * f32(g)); }
+        atomicStore(&gamma_grid[GAMMA_LIGHT_OFFSET + idx], bitcast<u32>(l));
+    }
+    storageBarrier();
+    workgroupBarrier();
+    for (var t = 1u; t < GRID_SIZE; t++) {
+        let y = GRID_SIZE - 1u - t;
+        let up = (y + 1u) * GRID_SIZE;
+        for (var c = 0u; c < cols; c++) {
+            let x = lid * cols + c;
+            if (x >= GRID_SIZE) { continue; }
+            let xl = select(x - 1u, x, x == 0u);
+            let xr = min(x + 1u, GRID_SIZE - 1u);
+            let above = (bitcast<f32>(atomicLoad(&gamma_grid[GAMMA_LIGHT_OFFSET + up + xl]))
+                + bitcast<f32>(atomicLoad(&gamma_grid[GAMMA_LIGHT_OFFSET + up + x]))
+                + bitcast<f32>(atomicLoad(&gamma_grid[GAMMA_LIGHT_OFFSET + up + xr]))) / 3.0;
+            let idx = y * GRID_SIZE + x;
+            let g = gamma_count(idx);
+            var l = above * row_water;
+            if (g >= GAMMA_SOLID_THRESHOLD) { l *= exp(-UV_SHADOW_ABSORB * f32(g)); }
+            atomicStore(&gamma_grid[GAMMA_LIGHT_OFFSET + idx], bitcast<u32>(l));
+        }
+        storageBarrier();
+        workgroupBarrier();
     }
 }
 fn uv_light_at_world(p: vec2<f32>) -> f32 {

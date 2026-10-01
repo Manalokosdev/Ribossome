@@ -10393,12 +10393,10 @@ impl GpuState {
                 // Exact column-scan UV light, refreshed every 100 epochs
                 // (terrain changes slowly).
                 if self.epoch % 100 == 0 || self.epoch < 2 {
-                    cpass.set_pipeline(&self.uv_clear_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups((GRID_DIM_U32 + 15) / 16, (GRID_DIM_U32 + 15) / 16, 1);
-                    // 5 sky directions; ray origins span the slanted margins.
+                    // Single-workgroup row sweep (diffuse average of the 3 cells above).
                     cpass.set_pipeline(&self.uv_light_pipeline);
-                    cpass.dispatch_workgroups((GRID_DIM_U32 * 3 + 63) / 64, 5, 1);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(1, 1, 1);
                 }
 
                 self.frame_profiler
@@ -10625,12 +10623,10 @@ impl GpuState {
                 // Exact column-scan UV light, refreshed every 100 epochs
                 // (terrain changes slowly).
                 if self.epoch % 100 == 0 || self.epoch < 2 {
-                    cpass.set_pipeline(&self.uv_clear_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups((GRID_DIM_U32 + 15) / 16, (GRID_DIM_U32 + 15) / 16, 1);
-                    // 5 sky directions; ray origins span the slanted margins.
+                    // Single-workgroup row sweep (diffuse average of the 3 cells above).
                     cpass.set_pipeline(&self.uv_light_pipeline);
-                    cpass.dispatch_workgroups((GRID_DIM_U32 * 3 + 63) / 64, 5, 1);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(1, 1, 1);
                 }
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_SLOPE);
