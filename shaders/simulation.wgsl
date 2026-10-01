@@ -4034,8 +4034,8 @@ const TEMP_DEATH_MULT_TOP: f32 = 2.5;
 // zone costs swimming; passive drifters and carcass-feeders sink.
 const AGENT_SINK_RATE: f32 = 0.05;
 // Thermal mortality multipliers (cold water / vent cores).
-const COLD_DEATH_MULT: f32 = 0.3;
-const HOT_DEATH_MULT: f32 = 3.0;
+const COLD_DEATH_MULT: f32 = 0.1;
+const HOT_DEATH_MULT: f32 = 10.0;
 
 @compute @workgroup_size(16, 16)
 fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
