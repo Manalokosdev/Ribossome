@@ -142,6 +142,11 @@ const TEMP_MAX: f32 = 12.0;
 // Water hotter than this re-activates spent monomers (keep in sync with
 // the key-7 contour in composite.wgsl).
 const TEMP_ACT_THRESHOLD: f32 = 2.0;
+// Solar heating per second at full light: water absorbs SUN_WATER_ABSORB of
+// it, gamma up to 1 more (opaque rock). Kept below the activation isotherm
+// so sunlit rocks drive convection without becoming activation oases.
+const SUN_HEAT_RATE: f32 = 0.15;
+const SUN_WATER_ABSORB: f32 = 0.05;
 const TEMP_BUOYANCY: f32 = 12.0;   // force per unit of DEVIATION from ambient (screen-up = +y)
 // AMBIENT CLIMATE: the sun's role in this world is PHOTOCHEMISTRY (UV
 // activates monomers), not heating — water barely warms at the surface,
@@ -514,6 +519,19 @@ fn update_temperature(@builtin(global_invocation_id) gid: vec3<u32>) {
             let w0 = 1.0 - d / r;
             t += strength * TEMP_HEAT_RATE * w0 * w0 * dt;
         }
+    }
+
+    // SOLAR HEATING: heat = absorbed sunlight. Water absorbs weakly (gentle,
+    // stable surface warming); gamma is opaque and absorbs strongly, so
+    // SUNLIT ROCKS become local heat sources that seed convection plumes,
+    // while shadowed water stays cool. Light comes from the precomputed
+    // plane (4th gamma plane, written by compute_uv_light).
+    {
+        let gidx = gamma_idx_for_fluid_cell(x, y);
+        let light = bitcast<f32>(atomicLoad(&gamma_grid[gidx + GAMMA_LAYER_SIZE * 3u]));
+        let g = f32(atomicLoad(&gamma_grid[gidx]));
+        let absorb = SUN_WATER_ABSORB + (1.0 - exp(-0.6 * g));
+        t += SUN_HEAT_RATE * max(light, 0.0) * absorb * dt;
     }
 
     // Cooling toward the LOCAL ambient climate (warm surface, cold depths).

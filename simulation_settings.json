@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 2.4779341,
+  "camera_zoom": 1.180253,
   "spawn_probability": 3.0,
   "death_probability": 0.02,
   "mutation_rate": 0.003,
@@ -53,7 +53,7 @@
   "fluid_enabled": true,
   "fluid_show": true,
   "fluid_dt": 0.017,
-  "fluid_decay": 0.998,
+  "fluid_decay": 1.0,
   "fluid_jacobi_iters": 10,
   "fluid_substep": 2,
   "fluid_vorticity": 7.0,
