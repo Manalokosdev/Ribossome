@@ -796,7 +796,13 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         // Preserve essential values
         total_mass_morphology = agents_in[agent_id].total_mass;
-        color_sum_morphology = agents_in[agent_id].body[0].data; // Approximation: stored in first part's data field if needed
+        // Recompute the color sum (body[].data now carries per-part feeding
+        // for diffusiophoresis and can no longer stand in for it).
+        var csum = 0.0;
+        for (var i = 0u; i < min(body_count_val, MAX_BODY_PARTS); i++) {
+            csum += get_amino_acid_properties(get_base_part_type(agents_in[agent_id].body[i].part_type)).beta_damage;
+        }
+        color_sum_morphology = csum;
     }
 
     // Cache previous frame's *already-recentered* positions.
@@ -1879,6 +1885,18 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let rotated_midpoint = apply_agent_rotation(segment_midpoint, agent_rot);
         let world_pos = agent_pos + rotated_midpoint;
 
+        // DIFFUSIOPHORESIS (self-propulsion by asymmetric feeding): a part
+        // that consumed a monomer last frame depleted the medium on its side,
+        // and the gradient pushes the body toward that side. Symmetric eating
+        // cancels; no food, no thrust. Read from last frame (agents_in).
+        {
+            let ate_prev = agents_in[agent_id].body[i].data;
+            let rl = length(r_com);
+            if (ate_prev > 0.0 && rl > 1e-4) {
+                force += (r_com / rl) * (ate_prev * PHORETIC_GAIN) * drag_coefficient;
+            }
+        }
+
         let part_weight = part_mass / max(total_mass, 1e-6);
         let part_area_weight = get_part_area_estimate(part.part_type) / total_area;
 
@@ -2535,6 +2553,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // QUANTIZED uptake: each part attempts to capture ONE whole monomer
         // from the cell under it per frame. Attempt probability scales with
         // how many monomers are present (first-order, discrete events).
+        // body[i].data records what this part ate THIS frame (0/1): next
+        // frame's physics turns the asymmetry into diffusiophoretic thrust.
+        var ate_here = 0.0;
         {
             // FEEDING = harvesting ACTIVATION: only charged monomers are
             // food; the spent monomer stays in the cell (mass never leaves
@@ -2557,7 +2578,11 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Satiated agents leave the monomers alone; hungry newborns
                 // feed fast.
                 let hunger = clamp(1.0 - agent_energy_cur / max(capacity, 1e-3), 0.0, 1.0);
-                let p_take = clamp(UPTAKE_P_PER_QUANTUM * max(props.mass, 0.1) * speed_mult * susp * f32(total_q) * food_power_multiplier * hunger, 0.0, 1.0);
+                // ENABLER-REGULATED UPTAKE: parts near an active enabler absorb
+                // more (transporter up-regulation). Uneven uptake around the
+                // body is what drives diffusiophoretic locomotion.
+                let uptake_reg = 1.0 + UPTAKE_ENABLER_BOOST * amplification_per_part[i];
+                let p_take = clamp(UPTAKE_P_PER_QUANTUM * max(props.mass, 0.1) * speed_mult * susp * f32(total_q) * food_power_multiplier * hunger * uptake_reg, 0.0, 1.0);
                 let useed = (agent_id + 1u) * 374761393u ^ (i * 668265263u) ^ (params.random_seed * 2246822519u);
                 if (hash_f32(useed) < p_take) {
                     // Pick one present monomer, weighted by counts.
@@ -2570,16 +2595,12 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         agent_energy_cur += yield_per_q;
                         if (ch < 2u) { total_consumed_alpha += 1.0; } else { total_consumed_beta += 1.0; }
                         consumed_frame[ch] += 1.0;
-                        // Visual: the dye tracks ACTIVATED monomers — the
-                        // bite dims the color (the monomer greys out).
-                        let after = chem_act_count(idx, ch);
-                        var dv = fluid_dye[idx];
-                        dv[ch] = dv[ch] * f32(after) / f32(after + 1u);
-                        fluid_dye[idx] = dv;
+                        ate_here = 1.0;
                     }
                 }
             }
         }
+        agents_out[agent_id].body[i].data = ate_here;
 
         // BULLDOZING: a moving body shoves inert gamma mass from under it to
         // the cell behind (relative to motion) — passive digging. Species can
@@ -3497,6 +3518,10 @@ const TEMP_DEATH_MULT_TOP: f32 = 2.5;
 // (world units/epoch per unit mass, downward = -y). Staying in the lit
 // zone costs swimming; passive drifters and carcass-feeders sink.
 const AGENT_SINK_RATE: f32 = 0.05;
+// Diffusiophoresis: world units/frame of thrust per monomer eaten on one
+// side; and how strongly enablers up-regulate local uptake.
+const PHORETIC_GAIN: f32 = 4.0;
+const UPTAKE_ENABLER_BOOST: f32 = 3.0;
 // Thermal mortality multipliers (cold water / vent cores).
 const COLD_DEATH_MULT: f32 = 0.1;
 const HOT_DEATH_MULT: f32 = 10.0;
