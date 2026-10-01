@@ -3863,6 +3863,28 @@ const CHEM_SHIELD: f32 = 0.5;         // decay reduction per extra activated mon
 const CHEM_INTERCONV_P: f32 = 0.0002; // spent purine<->purine / pyrimidine<->pyrimidine per epoch
 const CHEM_COHESION: f32 = 0.6;       // diffusion bias toward activated same-type neighbors
 const GAMMA_POROSITY_K: f32 = 0.3;
+// PORE CAPACITY per cell (total monomers, all channels and states):
+// open water holds up to CHEM_CELL_CAP; each gamma quantum removes pore
+// volume; solid rock (>= GAMMA_SOLID_THRESHOLD) holds none.
+const CHEM_CELL_CAP: u32 = 48u;
+const CHEM_SQUEEZE_P: f32 = 0.25;
+
+fn chem_cell_total(cell: u32) -> u32 {
+    var t = 0u;
+    for (var c = 0u; c < 4u; c++) {
+        let v = atomicLoad(&chem_grid[cell * 4u + c]);
+        t += (v & CHEM_STATE_MASK) + (v >> 16u);
+    }
+    return t;
+}
+
+fn chem_capacity(g: u32) -> u32 {
+    if (g >= GAMMA_SOLID_THRESHOLD) { return 0u; }
+    // rubble: 1 quantum -> 1/3 of the pore volume, 2 -> ~1/9
+    if (g == 2u) { return CHEM_CELL_CAP / 9u; }
+    if (g == 1u) { return CHEM_CELL_CAP / 3u; }
+    return CHEM_CELL_CAP;
+}
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
 // Aquarium thermodynamics: UV activation at full light (per spent monomer
 // per epoch), light attenuation with depth (top of world = high y = lit;
@@ -3909,11 +3931,19 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
     // down by occupancy and independent of water agitation (the water does
     // not reach inside the rock).
     let g_src = gamma_count(idx);
+    let src_total = chem_cell_total(idx);
+    let src_over = g_src > 0u && src_total > chem_capacity(g_src);
     var p_adv_eff = p_adv;
     var p_diff_eff = p_diff;
     if (g_src > 0u) {
         p_adv_eff = 0.0;
         p_diff_eff = DIFF_HOP_P * BURIED_DIFF_FACTOR / (1.0 + GAMMA_POROSITY_K * f32(g_src));
+        // SQUEEZE: a cell over its pore capacity (terrain slid, was shoved
+        // or consolidated ON TOP of monomers) expels the excess fast, into
+        // neighbors that still have room. Rock no longer hoards matter.
+        if (src_over) {
+            p_diff_eff = CHEM_SQUEEZE_P;
+        }
     }
 
     // AQUARIUM LIGHT: UV enters at the TOP of the screen — empirically
@@ -4035,13 +4065,17 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
             // occupancy, so nutrients seep slowly into buried veins and
             // stay there until eroded or dug out.
             let g_tgt = gamma_count(t_idx);
+            // PORE CAPACITY: a cell can hold at most chem_capacity(gamma)
+            // monomers (all channels). Full or solid targets refuse hops.
+            let tgt_total = chem_cell_total(t_idx);
+            if (tgt_total >= chem_capacity(g_tgt)) {
+                // Overpressure percolation: an over-capacity cell may still
+                // push into a LESS loaded neighbor, so excess deep inside a
+                // massif migrates outward to the surface instead of sticking.
+                if (!(src_over && tgt_total + 1u < src_total)) { continue; }
+            }
             if (g_tgt > 0u) {
                 if (is_adv) { continue; }
-                // SOLID ROCK accepts no new monomers (only rubble is porous).
-                // Measured: with porous solid rock, half of all free matter
-                // migrated inside — dark, unheated, unreachable — and the
-                // world starved. Monomers already inside can still leave.
-                if (g_tgt >= GAMMA_SOLID_THRESHOLD) { continue; }
                 let gperm = 1.0 / (1.0 + GAMMA_POROSITY_K * f32(g_tgt));
                 if (hash_f32(h ^ 0x27D4EB2Fu) >= gperm) { continue; }
             }

@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.8892167,
+  "camera_zoom": 0.7042162,
   "spawn_probability": 1.0,
   "death_probability": 0.01,
   "mutation_rate": 0.003,
@@ -12,7 +12,7 @@
   "alpha_fluid_convolution": 0.11,
   "beta_fluid_convolution": 0.0,
   "fluid_slope_force_scale": 210.0,
-  "fluid_obstacle_strength": 1000.0,
+  "fluid_obstacle_strength": 0.0,
   "gamma_blur": 1.0,
   "gamma_shift": 0.0,
   "alpha_slope_bias": 0.0,
