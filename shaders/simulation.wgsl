@@ -376,6 +376,7 @@ const SENSOR_CHARGE_PER_HIT: f32 = 0.12;
 // capacity-respecting, paid in energy. Predation (drain / spike kill) is
 // retired.
 // ============================================================================
+const SWEEPERS_ENABLED: bool = false;
 const SWEEP_REACH_MULT: f32 = 4.0; // x the organ's defense radius (world units)
 const SWEEP_TRIES: u32 = 4u;       // random cells sampled per sweeper per frame
 const SWEEP_RATE: f32 = 0.5;       // chance a sweeper acts this frame
@@ -457,7 +458,11 @@ fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     // Vampire drain retired: this pass now runs the sweepers.
-    sweep_monomers(agent_id);
+    // DISABLED: sweepers kept finding loopholes (hoarding food at the lit
+    // surface, etc). Organs 33/46 are now inert; flip to re-enable.
+    if (SWEEPERS_ENABLED) {
+        sweep_monomers(agent_id);
+    }
 }
 
 // ============================================================================
