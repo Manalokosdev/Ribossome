@@ -2285,6 +2285,15 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let pl = length(pv);
         if (pl > PHORETIC_MAX_VEL) { pv = pv * (PHORETIC_MAX_VEL / pl); }
         force += pv * drag_coefficient;
+        // FORCE-FREE SWIMMING: the phoretic slip pushes the water backward
+        // as hard as it pushes the body forward, so the fluid receives no
+        // net momentum — only a dipole wake around the swimmer (same
+        // pusher-type stirring as propellers, same "Agent push on fluid"
+        // slider). Without this the drift would be momentum from nowhere.
+        if (pl > 1e-3) {
+            let fmag_ph = length(pv) * drag_coefficient * FLUID_FORCE_SCALE * 0.1 * params.prop_wash_strength_fluid;
+            add_fluid_force_dipole(agent_pos, pv, -fmag_ph, 6.0);
+        }
     }
 
     // Apply global vector force (wind/gravity)
