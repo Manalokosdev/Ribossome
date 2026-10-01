@@ -3905,13 +3905,8 @@ fn gamma_move_one(src_c: u32, dst_c: u32) -> bool {
 }
 
 fn chem_capacity(g: u32) -> u32 {
-    if (g >= GAMMA_SOLID_THRESHOLD) { return 0u; }
-    // rubble: 1 quantum -> 1/3 of the pore volume, 2 -> ~1/9
-    // Rubble is nearly closed: scattered specks across open water were a
-    // world-wide sponge (measured: rubble held 26 -> 38 percent of free
-    // matter and rising). Excess is squeezed out by the overflow rule.
-    if (g == 2u) { return 0u; }
-    if (g == 1u) { return 1u; }
+    // ANY gamma (rubble or rock) holds no monomers: terrain is solid matter.
+    if (g > 0u) { return 0u; }
     return CHEM_CELL_CAP;
 }
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
