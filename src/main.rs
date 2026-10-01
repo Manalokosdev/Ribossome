@@ -5339,8 +5339,9 @@ impl GpuState {
             queue.submit(Some(encoder.finish()));
         }
 
-        // Gamma grid packs height + 2 slope components + UV light per cell (4 planes)
-        let gamma_buffer_size = (grid_size * 4 * std::mem::size_of::<f32>()) as u64;
+        // Gamma grid packs height + 2 slope components + UV light + temperature
+        // (5 planes; temperature is written by the fluid module at fluid res).
+        let gamma_buffer_size = (grid_size * 5 * std::mem::size_of::<f32>()) as u64;
         let gamma_grid = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Gamma Grid"),
             size: gamma_buffer_size,

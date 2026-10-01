@@ -538,6 +538,8 @@ fn update_temperature(@builtin(global_invocation_id) gid: vec3<u32>) {
     let amb = temp_ambient_at(y);
     t = amb + (t - amb) * exp(-TEMP_COOL_RATE * dt);
     temp_out[idx] = clamp(t, 0.0, TEMP_MAX);
+    // Publish to the 5th gamma plane so agents can feel the water.
+    atomicStore(&gamma_grid[GAMMA_LAYER_SIZE * 4u + idx], bitcast<u32>(clamp(t, 0.0, TEMP_MAX)));
 }
 
 @compute @workgroup_size(16, 16)

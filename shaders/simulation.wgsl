@@ -3413,7 +3413,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // rate in the rich fast lane at the top; the deep is cold, slow,
         // safe and poor. Same light curve as photo-activation.
         let light_a = uv_light_at_world(agent_pos);
-        let temp_mult = mix(1.0, max(params.dye_alpha_color_b, 1.0), light_a);
+        let uv_mult = mix(1.0, max(params.dye_alpha_color_b, 1.0), light_a);
+        // THERMAL MORTALITY: cold water is safe (slow metabolism, x0.3),
+        // lukewarm at the activation isotherm is neutral (x1), vent cores
+        // are harsh (up to x3). Energy-rich warm zones vs safe cold ones.
+        let wt = water_temperature_at(agent_pos);
+        var thermal_mult = mix(COLD_DEATH_MULT, 1.0, clamp(wt / 2.0, 0.0, 1.0));
+        if (wt > 2.0) { thermal_mult = mix(1.0, HOT_DEATH_MULT, clamp((wt - 2.0) / 6.0, 0.0, 1.0)); }
+        let temp_mult = uv_mult * thermal_mult;
         let final_death_prob = clamp(energy_adjusted_death_prob * pop_mult * temp_mult, 0.0, 1.0);
 
         should_die = death_rnd < final_death_prob;
@@ -4026,6 +4033,9 @@ const TEMP_DEATH_MULT_TOP: f32 = 2.5;
 // (world units/epoch per unit mass, downward = -y). Staying in the lit
 // zone costs swimming; passive drifters and carcass-feeders sink.
 const AGENT_SINK_RATE: f32 = 0.05;
+// Thermal mortality multipliers (cold water / vent cores).
+const COLD_DEATH_MULT: f32 = 0.3;
+const HOT_DEATH_MULT: f32 = 3.0;
 
 @compute @workgroup_size(16, 16)
 fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {

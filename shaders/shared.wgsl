@@ -1300,6 +1300,15 @@ const GAMMA_SLOPE_X_OFFSET: u32 = GAMMA_LAYER_SIZE;
 const GAMMA_SLOPE_Y_OFFSET: u32 = GAMMA_LAYER_SIZE * 2u;
 // 4th plane: precomputed UV light (f32 bits), written by compute_uv_light.
 const GAMMA_LIGHT_OFFSET: u32 = GAMMA_LAYER_SIZE * 3u;
+// 5th plane: fluid temperature (f32 bits, indexed at FLUID resolution),
+// written by the fluid module so agents can feel it.
+const GAMMA_TEMP_OFFSET: u32 = GAMMA_LAYER_SIZE * 4u;
+
+fn water_temperature_at(p: vec2<f32>) -> f32 {
+    let fx = u32(clamp(p.x / f32(SIM_SIZE), 0.0, 0.9999) * f32(FLUID_GRID_SIZE));
+    let fy = u32(clamp(p.y / f32(SIM_SIZE), 0.0, 0.9999) * f32(FLUID_GRID_SIZE));
+    return bitcast<f32>(atomicLoad(&gamma_grid[GAMMA_TEMP_OFFSET + fy * FLUID_GRID_SIZE + fx]));
+}
 
 fn clamp_gamma_coords(ix: i32, iy: i32) -> u32 {
     let clamped_x = clamp(ix, 0, i32(GRID_SIZE) - 1);
