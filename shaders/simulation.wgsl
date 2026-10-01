@@ -3910,8 +3910,8 @@ fn chem_capacity(g: u32) -> u32 {
     // Rubble is nearly closed: scattered specks across open water were a
     // world-wide sponge (measured: rubble held 26 -> 38 percent of free
     // matter and rising). Excess is squeezed out by the overflow rule.
-    if (g == 2u) { return 1u; }
-    if (g == 1u) { return 3u; }
+    if (g == 2u) { return 0u; }
+    if (g == 1u) { return 1u; }
     return CHEM_CELL_CAP;
 }
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
