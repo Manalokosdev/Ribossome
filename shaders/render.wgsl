@@ -345,8 +345,7 @@ fn render_body_part_ctx(
         draw_asterisk_8_ctx(world_pos, mouth_radius, vec4<f32>(mouth_color, 0.9), ctx);
     }
 
-    // Vampire mouths (33) and spikes (46): render as radial spikes.
-    // They open to 360° when enabled (open=1) and fold into a narrow fan along the organ angle when disabled.
+    // Sweepers (33, 46): ciliated collectors.
     if (base_type == 33u || base_type == 46u) {
         // Open/close state stored in _pad.y (0..1).
         let open = clamp(part._pad.y, 0.0, 1.0);
@@ -389,49 +388,61 @@ fn render_body_part_ctx(
         let tangent_world = normalize(apply_agent_rotation(tangent_local, agent_rotation));
         let organ_angle = atan2(tangent_world.y, tangent_world.x);
 
-        // Always draw a fixed count for readability.
-        let spike_count = 12u;
+        // SWEEPER CILIA: 12 beating filaments. Open = splayed 360 deg and
+        // long; closed = folded fan along the organ, short. Each cilium
+        // wears the color of one of the last 12 nucleotides this sweeper
+        // carried (ring in _pad.x, written by sweep_monomers): A red,
+        // U yellow, G green, C blue; grey until it has swept anything.
+        let cilia_count = 12u;
         let spread = open * 6.28318530718;
-        let base_len = r;
+        let base_len = r * (0.35 + 0.65 * open);
+        let hist = bitcast<u32>(part._pad.x);
+        var n_hist = (hist >> 24u) & 0xFu;
+        if (n_hist > 12u) { n_hist = 0u; }
 
-        // Colors: vampire mouths inherit their red-ish amino color, spikes use green-ish.
-        let spike_color = select(vec3<f32>(0.3, 0.8, 0.4), amino_props.color, base_type == 33u);
-
-        // Flash on recent drain/kill events.
-        // Both vampire mouths and spikes use part._pad.x as a short cooldown timer.
-        // When cooldown is freshly set (≈2 frames), brighten toward white.
-        let cooldown = max(part._pad.x, 0.0);
-        let flash = clamp(cooldown / 2.0, 0.0, 1.0);
-        let spike_color_flash = mix(spike_color, vec3<f32>(1.0, 1.0, 1.0), flash);
-        let spike_alpha = 0.9 + 0.1 * flash;
-
-        // Deterministic per-ray jitter in organ-local space.
-        // IMPORTANT: seed uses only generation + part_index so it doesn't flicker if agents get reindexed.
         let generation = select(agents_out[agent_id].generation, selected_agent_buffer[0].generation, use_selected_buffer);
         let seed = ((generation + 1u) * 2654435761u) ^ ((part_index + 1u) * 3266489917u);
+        let beat_t = f32(params.epoch % 100000u) * 0.25;
 
-        for (var k = 0u; k < spike_count; k++) {
-            let t = (f32(k) + 0.5) / f32(spike_count);
-
-            // Two stable randoms in [0,1].
+        for (var k = 0u; k < cilia_count; k++) {
+            let t = (f32(k) + 0.5) / f32(cilia_count);
             let h1 = hash_f32(seed * (k + 1u) * 2654435761u);
             let h2 = hash_f32(seed * (k + 1u) * 1103515245u);
+            let angle = organ_angle + (t - 0.5) * spread + (h2 - 0.5) * 0.4;
+            let len = base_len * (0.75 + 0.5 * h1);
 
-            // Angular jitter (in radians). Increased for more organic look.
-            let angle_jitter = (h2 - 0.5) * 0.8;
-            let angle = organ_angle + (t - 0.5) * spread + angle_jitter;
+            // Metachronal beat: phase advances along the ring of cilia, so
+            // a wave travels around the organ while it is open.
+            let beat = sin(beat_t + f32(k) * 0.9 + h1 * 6.28) * (0.15 + 0.35 * open);
+            let dir0 = vec2<f32>(cos(angle), sin(angle));
+            let dir1 = vec2<f32>(cos(angle + beat), sin(angle + beat));
+            let dir2 = vec2<f32>(cos(angle + beat * 2.2), sin(angle + beat * 2.2));
+            let p1 = world_pos + dir0 * (len * 0.35);
+            let p2 = p1 + dir1 * (len * 0.35);
+            let p3 = p2 + dir2 * (len * 0.30);
 
-            // Length jitter.
-            let len = base_len * (0.6 + 0.8 * h1);
+            var c = vec3<f32>(0.55, 0.55, 0.6);
+            if (k < n_hist) {
+                let code = (hist >> (k * 2u)) & 3u;
+                if (code == 0u) { c = vec3<f32>(1.0, 0.15, 0.1); }
+                else if (code == 1u) { c = vec3<f32>(1.0, 0.85, 0.1); }
+                else if (code == 2u) { c = vec3<f32>(0.15, 0.9, 0.25); }
+                else { c = vec3<f32>(0.2, 0.45, 1.0); }
+            }
+            let col = vec4<f32>(c, 0.55 + 0.4 * open);
 
-            let spike_end = world_pos + vec2<f32>(cos(angle), sin(angle)) * len;
-
-            // Main view: 1px screen-space line for low-zoom visibility.
-            // Inspector: keep ctx-aware thick-line drawing.
             if (ctx.use_inspector_coords.x >= 0.0) {
-                draw_thick_line_ctx(world_pos, spike_end, 0.5, vec4<f32>(spike_color_flash, spike_alpha), ctx);
+                draw_thick_line_ctx(world_pos, p1, 0.5, col, ctx);
+                draw_thick_line_ctx(p1, p2, 0.5, col, ctx);
+                draw_thick_line_ctx(p2, p3, 0.4, col, ctx);
             } else {
-                draw_screen_line(world_to_screen(world_pos), world_to_screen(spike_end), vec4<f32>(spike_color_flash, spike_alpha));
+                let s0 = world_to_screen(world_pos);
+                let s1 = world_to_screen(p1);
+                let s2 = world_to_screen(p2);
+                let s3 = world_to_screen(p3);
+                draw_screen_line(s0, s1, col);
+                draw_screen_line(s1, s2, col);
+                draw_screen_line(s2, s3, col);
             }
         }
     }
@@ -2911,29 +2922,6 @@ fn render_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             vec4<f32>(1.0, 1.0, 1.0, 1.0),
         );
 
-        // Check if agent has vampire mouth (organ 33) and mark with red circle
-        var has_vampire_mouth = false;
-        for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
-            let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
-            if (base_type == 33u) {
-                has_vampire_mouth = true;
-                break;
-            }
-        }
-
-        if (has_vampire_mouth) {
-            // Draw red circle around agent with vampire mouth
-            let circle_radius = 15.0;
-            let segments = 24u;
-            var prev = center + vec2<f32>(circle_radius, 0.0);
-            for (var s = 1u; s <= segments; s++) {
-                let t = f32(s) / f32(segments);
-                let ang = t * 6.28318530718;
-                let p = center + vec2<f32>(cos(ang) * circle_radius, sin(ang) * circle_radius);
-                draw_thick_line(prev, p, 2.0, vec4<f32>(1.0, 0.0, 0.0, 0.9));
-                prev = p;
-            }
-        }
     }
 
     // Debug: count visible agents

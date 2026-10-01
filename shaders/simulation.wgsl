@@ -426,6 +426,15 @@ fn sweep_monomers(agent_id: u32) {
             if (chem_take_state_one(src * 4u + ch, false)) {
                 chem_add_state(dst, ch, 1u, false);
                 spent_energy += SWEEP_COST;
+                // Render history: _pad.x = last 12 swept nucleotides (2 bits
+                // each, bits 0..23) + fill count (bits 24..27). The count
+                // keeps the float exponent non-zero, so the bits survive
+                // f32 copies (no denormal flush).
+                let hist = bitcast<u32>(agents_out[agent_id].body[i]._pad.x);
+                var n_h = (hist >> 24u) & 0xFu;
+                if (n_h > 12u) { n_h = 0u; }
+                let ring = ((hist << 2u) | ch) & 0xFFFFFFu;
+                agents_out[agent_id].body[i]._pad.x = bitcast<f32>(ring | (min(n_h + 1u, 12u) << 24u));
                 break;
             }
         }
@@ -1845,6 +1854,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
     var moment_of_inertia = 0.0;
     var has_vampire_mouth = false;
     var has_beta_mouth = false;
+    var phoretic_v = vec2<f32>(0.0);
     for (var i = 0u; i < min(body_count, MAX_BODY_PARTS); i++) {
         let part = agents_out[agent_id].body[i];
 
@@ -1886,14 +1896,16 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         let world_pos = agent_pos + rotated_midpoint;
 
         // DIFFUSIOPHORESIS (self-propulsion by asymmetric feeding): a part
-        // that consumed a monomer last frame depleted the medium on its side,
-        // and the gradient pushes the body toward that side. Symmetric eating
-        // cancels; no food, no thrust. Read from last frame (agents_in).
+        // that is consuming depletes the medium on its side, and the gradient
+        // pushes the body toward that side. body[i].data holds last frame's
+        // uptake RATE (expected monomers/frame, a smooth flux — the old 0/1
+        // eat events were ~1%-probability kicks that averaged to noise).
+        // Symmetric uptake cancels; no food or a full belly, no thrust.
         {
-            let ate_prev = agents_in[agent_id].body[i].data;
+            let flux_prev = agents_in[agent_id].body[i].data;
             let rl = length(r_com);
-            if (ate_prev > 0.0 && rl > 1e-4) {
-                force += (r_com / rl) * (ate_prev * PHORETIC_GAIN) * drag_coefficient;
+            if (flux_prev > 0.0 && rl > 1e-4) {
+                phoretic_v += (r_com / rl) * flux_prev;
             }
         }
 
@@ -2267,6 +2279,14 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // NOTE: torque_debug is repurposed as packed RGB; do not overwrite it with torque.
 
+    // Net phoretic drift (velocity, overdamped), capped like swim thrust.
+    {
+        var pv = phoretic_v * PHORETIC_GAIN;
+        let pl = length(pv);
+        if (pl > PHORETIC_MAX_VEL) { pv = pv * (PHORETIC_MAX_VEL / pl); }
+        force += pv * drag_coefficient;
+    }
+
     // Apply global vector force (wind/gravity)
     if (params.vector_force_power > 0.0) {
         let vector_force = vec2<f32>(
@@ -2553,8 +2573,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         // QUANTIZED uptake: each part attempts to capture ONE whole monomer
         // from the cell under it per frame. Attempt probability scales with
         // how many monomers are present (first-order, discrete events).
-        // body[i].data records what this part ate THIS frame (0/1): next
-        // frame's physics turns the asymmetry into diffusiophoretic thrust.
+        // body[i].data records this part's uptake RATE this frame (expected
+        // monomers/frame): next frame's physics turns the asymmetry into
+        // diffusiophoretic thrust.
         var ate_here = 0.0;
         {
             // FEEDING = harvesting ACTIVATION: only charged monomers are
@@ -2583,6 +2604,7 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // body is what drives diffusiophoretic locomotion.
                 let uptake_reg = 1.0 + UPTAKE_ENABLER_BOOST * amplification_per_part[i];
                 let p_take = clamp(UPTAKE_P_PER_QUANTUM * max(props.mass, 0.1) * speed_mult * susp * f32(total_q) * food_power_multiplier * hunger * uptake_reg, 0.0, 1.0);
+                ate_here = p_take;
                 let useed = (agent_id + 1u) * 374761393u ^ (i * 668265263u) ^ (params.random_seed * 2246822519u);
                 if (hash_f32(useed) < p_take) {
                     // Pick one present monomer, weighted by counts.
@@ -2595,7 +2617,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                         agent_energy_cur += yield_per_q;
                         if (ch < 2u) { total_consumed_alpha += 1.0; } else { total_consumed_beta += 1.0; }
                         consumed_frame[ch] += 1.0;
-                        ate_here = 1.0;
                     }
                 }
             }
@@ -3518,9 +3539,11 @@ const TEMP_DEATH_MULT_TOP: f32 = 2.5;
 // (world units/epoch per unit mass, downward = -y). Staying in the lit
 // zone costs swimming; passive drifters and carcass-feeders sink.
 const AGENT_SINK_RATE: f32 = 0.05;
-// Diffusiophoresis: world units/frame of thrust per monomer eaten on one
-// side; and how strongly enablers up-regulate local uptake.
-const PHORETIC_GAIN: f32 = 4.0;
+// Diffusiophoresis: world units/frame of drift per unit of uncompensated
+// uptake flux (monomers/frame) on one side, capped at PHORETIC_MAX_VEL;
+// and how strongly enablers up-regulate local uptake.
+const PHORETIC_GAIN: f32 = 40.0;
+const PHORETIC_MAX_VEL: f32 = 2.0;
 const UPTAKE_ENABLER_BOOST: f32 = 3.0;
 // Thermal mortality multipliers (cold water / vent cores).
 const COLD_DEATH_MULT: f32 = 0.1;
