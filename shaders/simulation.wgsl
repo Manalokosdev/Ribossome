@@ -3851,7 +3851,7 @@ const MONOMER_SETTLE_P: f32 = 0.002;
 // never create or destroy them).
 const CHEM_SENSITIZE: f32 = 0.5;      // photo-activation boost per activated monomer in cell
 const CHEM_SHIELD: f32 = 0.5;         // decay reduction per extra activated monomer in cell
-const CHEM_INTERCONV_P: f32 = 0.0002; // spent purine<->purine / pyrimidine<->pyrimidine per epoch
+const CHEM_INTERCONV_P: f32 = 0.001;  // spent purine<->purine / pyrimidine<->pyrimidine per epoch
 const CHEM_COHESION: f32 = 0.6;       // diffusion bias toward activated same-type neighbors
 const GAMMA_POROSITY_K: f32 = 0.3;
 // PORE CAPACITY per cell (total monomers, all channels and states):
@@ -4013,11 +4013,14 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         // chemical family — purines A<->G (ch 0<->2), pyrimidines U<->C
         // (ch 1<->3). Conserving (one quantum moves between channels of
         // the same cell); lets world composition drift and re-balance.
-        if (spent_n > 0u) {
-            let exp_ic = f32(min(spent_n, 8u)) * CHEM_INTERCONV_P;
+        // Acts on BOTH states (state preserved): a reloaded snapshot is fully
+        // activated, and spent-only interconversion could not rebalance it.
+        if (act_n + spent_n > 0u) {
+            let exp_ic = f32(min(act_n + spent_n, 8u)) * CHEM_INTERCONV_P;
             if (hash_f32(slot ^ (params.random_seed * 3266489917u) ^ (params.epoch * 2246822519u)) < exp_ic) {
-                if (chem_take_state_one(slot, true)) {
-                    chem_add_state(idx, ch ^ 2u, 1u, true);
+                let ic_spent = hash_f32(slot ^ 0x7F4A7C15u ^ params.epoch) < f32(spent_n) / f32(act_n + spent_n);
+                if (chem_take_state_one(slot, ic_spent)) {
+                    chem_add_state(idx, ch ^ 2u, 1u, ic_spent);
                 }
             }
         }
