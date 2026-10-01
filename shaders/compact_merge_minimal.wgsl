@@ -100,12 +100,16 @@ fn merge_agents_cooperative(@builtin(global_invocation_id) gid: vec3<u32>) {
             var counts = array<u32, 4>(0u, 0u, 0u, 0u);
             for (var i = 0u; i < nb.gene_length; i++) {
                 let bi = nb.genome_offset + i;
-                let code = (nb.genome_packed[bi / 16u] >> ((bi % 16u) * 2u)) & 3u;
-                counts[code] += 1u;
+                // Index through the storage buffer (a local copy can only be indexed by
+                // constants on wgpu 22's naga).
+                let code = (new_agents[spawn_id].genome_packed[bi / 16u] >> ((bi % 16u) * 2u)) & 3u;
+                if (code == 0u) { counts[0] += 1u; } else if (code == 1u) { counts[1] += 1u; } else if (code == 2u) { counts[2] += 1u; } else { counts[3] += 1u; }
             }
             for (var c = 0u; c < 4u; c++) {
-                if (counts[c] > 0u) {
-                    atomicAdd(&chem_grid[cell * 4u + c], counts[c] << 16u);
+                var n_c = counts[0];
+                if (c == 1u) { n_c = counts[1]; } else if (c == 2u) { n_c = counts[2]; } else if (c == 3u) { n_c = counts[3]; }
+                if (n_c > 0u) {
+                    atomicAdd(&chem_grid[cell * 4u + c], n_c << 16u);
                 }
             }
         }
