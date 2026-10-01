@@ -3856,6 +3856,12 @@ const BURIED_DIFF_FACTOR: f32 = 1.0;
 // Downward settling hop probability per free monomer per epoch (light
 // gravity: ~1 cell every 500 epochs, much slower than plume lift).
 const MONOMER_SETTLE_P: f32 = 0.002;
+// MONOMER REACTION RULES (all conserving: they move or transform quanta,
+// never create or destroy them).
+const CHEM_SENSITIZE: f32 = 0.5;      // photo-activation boost per activated monomer in cell
+const CHEM_SHIELD: f32 = 0.5;         // decay reduction per extra activated monomer in cell
+const CHEM_INTERCONV_P: f32 = 0.0002; // spent purine<->purine / pyrimidine<->pyrimidine per epoch
+const CHEM_COHESION: f32 = 0.6;       // diffusion bias toward activated same-type neighbors
 const GAMMA_POROSITY_K: f32 = 0.3;
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
 // Aquarium thermodynamics: UV activation at full light (per spent monomer
@@ -3926,7 +3932,12 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Together with feeding (act->spent) this closes the energy cycle:
         // light pumps, life and decay drain.
         if (spent_n > 0u) {
-            let exp_act = f32(min(spent_n, 8u)) * LIGHT_ACT_P * max(params.dye_alpha_color_r, 0.0) * light_t;
+            // PHOTOSENSITIZATION (autocatalysis with an external fuel):
+            // activated monomers in the cell act as antennae and boost the
+            // photo-activation of their spent neighbors. Energy still comes
+            // only from light; the reaction just concentrates it.
+            let sens = 1.0 + CHEM_SENSITIZE * f32(min(act_n, 8u));
+            let exp_act = f32(min(spent_n, 8u)) * LIGHT_ACT_P * max(params.dye_alpha_color_r, 0.0) * light_t * sens;
             let wa = u32(floor(exp_act));
             var na = wa;
             if (hash_f32(slot ^ (params.random_seed * 1597334677u) ^ (params.epoch * 3812015801u)) < exp_act - f32(wa)) { na += 1u; }
@@ -3935,11 +3946,39 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         if (act_n > 0u) {
-            let exp_dec = f32(min(act_n, 8u)) * CHEM_DECAY_P;
+            // SHIELDING: clustered activated monomers protect each other
+            // from hydrolysis (decay slows with local activated density).
+            let shield = 1.0 / (1.0 + CHEM_SHIELD * f32(min(act_n, 8u) - 1u));
+            let exp_dec = f32(min(act_n, 8u)) * CHEM_DECAY_P * shield;
             if (hash_f32(slot ^ (params.random_seed * 2654435761u) ^ (params.epoch * 668265263u)) < exp_dec) {
                 chem_spend_one(slot);
             }
         }
+
+        // INTERCONVERSION: spent monomers slowly convert within their
+        // chemical family — purines A<->G (ch 0<->2), pyrimidines U<->C
+        // (ch 1<->3). Conserving (one quantum moves between channels of
+        // the same cell); lets world composition drift and re-balance.
+        if (spent_n > 0u) {
+            let exp_ic = f32(min(spent_n, 8u)) * CHEM_INTERCONV_P;
+            if (hash_f32(slot ^ (params.random_seed * 3266489917u) ^ (params.epoch * 2246822519u)) < exp_ic) {
+                if (chem_take_state_one(slot, true)) {
+                    chem_add_state(idx, ch ^ 2u, 1u, true);
+                }
+            }
+        }
+
+        // COHESION weights: activated monomers bias their diffusion toward
+        // neighbors already rich in activated monomers of the SAME type
+        // (droplets / coacervates). Neighbor counts read once per channel.
+        var coh = array<f32, 4>(1.0, 1.0, 1.0, 1.0);
+        if (act_n > 0u && CHEM_COHESION > 0.0) {
+            if (x + 1u < GRID_SIZE) { coh[0] = 1.0 + CHEM_COHESION * f32(min(chem_act_count(idx + 1u, ch), 8u)); }
+            if (x > 0u) { coh[1] = 1.0 + CHEM_COHESION * f32(min(chem_act_count(idx - 1u, ch), 8u)); }
+            if (y + 1u < GRID_SIZE) { coh[2] = 1.0 + CHEM_COHESION * f32(min(chem_act_count(idx + GRID_SIZE, ch), 8u)); }
+            if (y > 0u) { coh[3] = 1.0 + CHEM_COHESION * f32(min(chem_act_count(idx - GRID_SIZE, ch), 8u)); }
+        }
+        let coh_sum = coh[0] + coh[1] + coh[2] + coh[3];
 
         let n = min(act_n + spent_n, MAX_HOPS_PER_CELL_CH);
         for (var k = 0u; k < n; k++) {
@@ -3948,6 +3987,8 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
             var dx = 0;
             var dy = 0;
             var is_adv = false;
+            // State of the hopping monomer, chosen proportionally to the mix.
+            let pick_spent = hash_f32(h ^ 0x51ED270Bu) < f32(spent_n) / f32(max(act_n + spent_n, 1u));
             if (r < p_adv_eff) {
                 // Downstream hop: axis chosen by |vx| vs |vy| weight.
                 is_adv = true;
@@ -3959,7 +4000,16 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
                     dy = select(-1, 1, v.y > 0.0);
                 }
             } else if (r < p_adv_eff + p_diff_eff) {
-                let d = hash(h ^ 0xC2B2AE35u) & 3u;
+                var d = hash(h ^ 0xC2B2AE35u) & 3u;
+                if (!pick_spent && coh_sum > 4.0001) {
+                    // Cohesive (weighted) direction for activated monomers.
+                    var u = hash_f32(h ^ 0x9E3779B9u) * coh_sum;
+                    d = 3u;
+                    for (var cd = 0u; cd < 4u; cd++) {
+                        if (u < coh[cd]) { d = cd; break; }
+                        u -= coh[cd];
+                    }
+                }
                 if (d == 0u) { dx = 1; } else if (d == 1u) { dx = -1; }
                 else if (d == 2u) { dy = 1; } else { dy = -1; }
             } else if (g_src == 0u && r < p_adv_eff + p_diff_eff + MONOMER_SETTLE_P) {
@@ -3990,9 +4040,7 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let gperm = 1.0 / (1.0 + GAMMA_POROSITY_K * f32(g_tgt));
                 if (hash_f32(h ^ 0x27D4EB2Fu) >= gperm) { continue; }
             }
-            // Hops preserve the monomer's state (act or spent), chosen
-            // proportionally to the cell's mix.
-            let pick_spent = hash_f32(h ^ 0x51ED270Bu) < f32(spent_n) / f32(max(act_n + spent_n, 1u));
+            // Hops preserve the monomer's state (act or spent).
             if (chem_take_state_one(slot, pick_spent)) {
                 chem_add_state(t_idx, ch, 1u, pick_spent);
             }

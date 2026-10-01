@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 1.3278968,
+  "camera_zoom": 0.66929746,
   "spawn_probability": 5.0,
   "death_probability": 0.005,
   "mutation_rate": 0.003,
@@ -196,7 +196,7 @@
   "monomer_brightness": 0.05,
   "dig_rate": 2.4,
   "uv_strength": 1.0,
-  "uv_depth": 8.0,
+  "uv_depth": 3.0,
   "uv_damage": 4.0,
   "dye_alpha_thinfilm": false,
   "dye_alpha_thinfilm_mult": 5.0,
