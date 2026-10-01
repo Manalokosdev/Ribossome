@@ -4584,7 +4584,9 @@ var<storage, read_write> species_hash_buffer: array<u32>;
 // matter (strands, paired complements, energy) is summed on the CPU from the
 // agents readback that species counting already performs.
 @group(1) @binding(1)
-var<storage, read_write> matter_totals: array<atomic<u32>, 4>;
+// [0..3] free per channel, [4] free inside gamma cells, [5] free in the
+// bottom 10% of rows (low y = screen bottom), [6] activated free total.
+var<storage, read_write> matter_totals: array<atomic<u32>, 8>;
 
 const MATTER_REDUCE_THREADS: u32 = 4096u;
 
@@ -4598,6 +4600,9 @@ fn reduce_matter_chem(@builtin(global_invocation_id) gid: vec3<u32>) {
     var s1 = 0u;
     var s2 = 0u;
     var s3 = 0u;
+    var s_rock = 0u;
+    var s_bottom = 0u;
+    var s_act = 0u;
     let total_cells = GRID_SIZE * GRID_SIZE;
     var c = tid;
     loop {
@@ -4607,16 +4612,28 @@ fn reduce_matter_chem(@builtin(global_invocation_id) gid: vec3<u32>) {
         let v1 = atomicLoad(&chem_grid[base + 1u]);
         let v2 = atomicLoad(&chem_grid[base + 2u]);
         let v3 = atomicLoad(&chem_grid[base + 3u]);
-        s0 += (v0 & CHEM_STATE_MASK) + (v0 >> 16u);
-        s1 += (v1 & CHEM_STATE_MASK) + (v1 >> 16u);
-        s2 += (v2 & CHEM_STATE_MASK) + (v2 >> 16u);
-        s3 += (v3 & CHEM_STATE_MASK) + (v3 >> 16u);
+        let a_cell = (v0 & CHEM_STATE_MASK) + (v1 & CHEM_STATE_MASK) + (v2 & CHEM_STATE_MASK) + (v3 & CHEM_STATE_MASK);
+        let t0 = (v0 & CHEM_STATE_MASK) + (v0 >> 16u);
+        let t1 = (v1 & CHEM_STATE_MASK) + (v1 >> 16u);
+        let t2 = (v2 & CHEM_STATE_MASK) + (v2 >> 16u);
+        let t3 = (v3 & CHEM_STATE_MASK) + (v3 >> 16u);
+        s0 += t0;
+        s1 += t1;
+        s2 += t2;
+        s3 += t3;
+        let t_cell = t0 + t1 + t2 + t3;
+        if (gamma_count(c) > 0u) { s_rock += t_cell; }
+        if (c / GRID_SIZE < GRID_SIZE / 10u) { s_bottom += t_cell; }
+        s_act += a_cell;
         c += MATTER_REDUCE_THREADS;
     }
     atomicAdd(&matter_totals[0], s0);
     atomicAdd(&matter_totals[1], s1);
     atomicAdd(&matter_totals[2], s2);
     atomicAdd(&matter_totals[3], s3);
+    atomicAdd(&matter_totals[4], s_rock);
+    atomicAdd(&matter_totals[5], s_bottom);
+    atomicAdd(&matter_totals[6], s_act);
 }
 
 @compute @workgroup_size(256)

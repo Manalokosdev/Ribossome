@@ -4261,6 +4261,9 @@ struct GpuState {
     matter_free: [u32; 4],              // Free monomer counts (A/U/G/C) at last sample
     matter_locked_quanta: u64,          // Quanta locked in living strands + paired complements
     matter_locked_per_ch: [u64; 4],     // Locked quanta broken down by channel (strand + paired)
+    matter_in_rock: u32,                // Free quanta inside gamma cells
+    matter_bottom: u32,                 // Free quanta in the bottom 10% of rows
+    matter_act: u32,                    // Activated free quanta
     matter_energy: f64,                 // Total agent energy (energy units) at last sample
     matter_energy_quanta: f64,          // Exact quanta-equivalent of agent energy (per-agent yield)
     matter_total: f64,                  // free + locked + energy-equivalent at last sample
@@ -4756,7 +4759,7 @@ impl GpuState {
     /// (blocking ~ms; fine for button handlers, do not call per frame).
     fn measure_free_quanta(&mut self) -> u64 {
         self.queue
-            .write_buffer(&self.matter_totals_buffer, 0, &[0u8; 16]);
+            .write_buffer(&self.matter_totals_buffer, 0, &[0u8; 32]);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -4782,7 +4785,7 @@ impl GpuState {
             0,
             &self.matter_totals_readback,
             0,
-            16,
+            32,
         );
         self.queue.submit(Some(encoder.finish()));
         let slice = self.matter_totals_readback.slice(..);
@@ -5409,7 +5412,7 @@ impl GpuState {
         // Matter telemetry: 4 u32 totals (free A/U/G/C monomer counts).
         let matter_totals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Matter Totals"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -5417,7 +5420,7 @@ impl GpuState {
         });
         let matter_totals_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Matter Totals Readback"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -8052,6 +8055,9 @@ impl GpuState {
             matter_free: [0; 4],
             matter_locked_quanta: 0,
             matter_locked_per_ch: [0; 4],
+            matter_in_rock: 0,
+            matter_bottom: 0,
+            matter_act: 0,
             matter_energy: 0.0,
             matter_energy_quanta: 0.0,
             matter_total: 0.0,
@@ -12085,7 +12091,7 @@ impl GpuState {
     fn count_species(&mut self) -> u32 {
         // Step 0: zero the matter totals (executed before the encoder below).
         self.queue
-            .write_buffer(&self.matter_totals_buffer, 0, &[0u8; 16]);
+            .write_buffer(&self.matter_totals_buffer, 0, &[0u8; 32]);
 
         // Step 1: Dispatch GPU compute to hash each agent's phenotype.
         let bg = if self.ping_pong {
@@ -12120,7 +12126,7 @@ impl GpuState {
         // Step 2: Copy hash buffer to readback.
         let hash_size = (self.agent_buffer_capacity * std::mem::size_of::<u32>()) as u64;
         encoder.copy_buffer_to_buffer(&self.species_hash_buffer, 0, &self.species_hash_readback, 0, hash_size);
-        encoder.copy_buffer_to_buffer(&self.matter_totals_buffer, 0, &self.matter_totals_readback, 0, 16);
+        encoder.copy_buffer_to_buffer(&self.matter_totals_buffer, 0, &self.matter_totals_readback, 0, 32);
 
         // Also copy agents for thumbnail data (only needed for top 10 representatives).
         let current_buffer = if self.ping_pong {
@@ -12151,6 +12157,9 @@ impl GpuState {
             let md = matter_slice.get_mapped_range();
             let totals: &[u32] = bytemuck::cast_slice(&md);
             self.matter_free = [totals[0], totals[1], totals[2], totals[3]];
+            self.matter_in_rock = totals[4];
+            self.matter_bottom = totals[5];
+            self.matter_act = totals[6];
         }
         self.matter_totals_readback.unmap();
 
@@ -15873,6 +15882,18 @@ fn main() {
                                                             state.matter_free[2],
                                                             state.matter_free[3],
                                                         ));
+                                                        {
+                                                            let ft = free_total.max(1) as f64;
+                                                            ui.label(format!(
+                                                                "where free is: activated {} ({:.0}%) · inside rock {} ({:.0}%) · bottom 10% {} ({:.0}%)",
+                                                                state.matter_act,
+                                                                state.matter_act as f64 / ft * 100.0,
+                                                                state.matter_in_rock,
+                                                                state.matter_in_rock as f64 / ft * 100.0,
+                                                                state.matter_bottom,
+                                                                state.matter_bottom as f64 / ft * 100.0,
+                                                            ));
+                                                        }
                                                         ui.label(format!(
                                                             "locked  A {} · U {} · G {} · C {}",
                                                             state.matter_locked_per_ch[0],
