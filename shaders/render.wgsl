@@ -436,13 +436,9 @@ fn render_body_part_ctx(
                 draw_thick_line_ctx(p1, p2, 0.5, col, ctx);
                 draw_thick_line_ctx(p2, p3, 0.4, col, ctx);
             } else {
-                let s0 = world_to_screen(world_pos);
-                let s1 = world_to_screen(p1);
-                let s2 = world_to_screen(p2);
-                let s3 = world_to_screen(p3);
-                draw_screen_line(s0, s1, col);
-                draw_screen_line(s1, s2, col);
-                draw_screen_line(s2, s3, col);
+                // Main view: one straight segment per cilium (the curved
+                // 3-segment version tripled line cost across 20k agents).
+                draw_screen_line(world_to_screen(world_pos), world_to_screen(p3), col);
             }
         }
     }
