@@ -539,8 +539,31 @@ fn chem_add_state(idx: u32, ch: u32, n: u32, spent: bool) {
 // activation was consumed by polymerization.
 fn chem_add(idx: u32, ch: u32, n: u32) {
     if (n > 0u) {
-        atomicAdd(&chem_grid[idx * 4u + ch], n * CHEM_SPENT_ONE);
+        atomicAdd(&chem_grid[chem_open_cell(idx) * 4u + ch], n * CHEM_SPENT_ONE);
     }
+}
+
+// Terrain (rubble or rock) never holds monomers: deposits aimed at a gamma
+// cell land in the nearest OPEN-WATER cell instead (ring search, radius up
+// to 12). Falls back to the original cell only if fully enclosed — the
+// over-capacity squeeze then walks it out.
+fn chem_open_cell(idx: u32) -> u32 {
+    if (gamma_count(idx) == 0u) { return idx; }
+    let gx = i32(idx % GRID_SIZE);
+    let gy = i32(idx / GRID_SIZE);
+    for (var r = 1; r <= 12; r++) {
+        for (var dy = -r; dy <= r; dy++) {
+            for (var dx = -r; dx <= r; dx++) {
+                if (abs(dx) != r && abs(dy) != r) { continue; }
+                let qx = gx + dx;
+                let qy = gy + dy;
+                if (qx < 0 || qy < 0 || qx >= i32(GRID_SIZE) || qy >= i32(GRID_SIZE)) { continue; }
+                let q = u32(qy) * GRID_SIZE + u32(qx);
+                if (gamma_count(q) == 0u) { return q; }
+            }
+        }
+    }
+    return idx;
 }
 
 // Deposit a fractional expected amount (in quanta, SPENT state) as whole

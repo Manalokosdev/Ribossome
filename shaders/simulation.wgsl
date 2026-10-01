@@ -4096,7 +4096,9 @@ fn transport_quanta(@builtin(global_invocation_id) gid: vec3<u32>) {
                 // Overpressure percolation: an over-capacity cell may still
                 // push into a LESS loaded neighbor, so excess deep inside a
                 // massif migrates outward to the surface instead of sticking.
-                if (!(src_over && tgt_total + 1u < src_total)) { continue; }
+                // Random-walk percolation (<=, not <): in a uniform rubble
+                // field strict inequality froze everything in place.
+                if (!(src_over && tgt_total <= src_total)) { continue; }
             }
             if (g_tgt > 0u) {
                 if (is_adv) { continue; }
@@ -5083,7 +5085,8 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (hash_f32(idx * 747796405u ^ (mc * 0x9E3779B9u) ^ (seed * 668265263u)) < fr5) {
                 nq5 += 1u;
             }
-            if (nq5 > 0u) {
+            // Terrain holds no monomers: rain only lands in open water.
+            if (nq5 > 0u && gamma_count(idx) == 0u) {
                 // Rain adds FRESH (activated) monomers.
                 atomicAdd(&chem_grid[slot], nq5);
             }
@@ -5111,14 +5114,15 @@ fn generate_map(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         fluid_dye[idx] = dv4;
     } else if (mode == 1u) {
-        write_chem_alpha(idx, output_value);
+        // Terrain holds no monomers: generation writes 0 into gamma cells.
+        write_chem_alpha(idx, select(output_value, 0.0, gamma_count(idx) > 0u));
         // Mirror the ACTUAL quantized ACTIVATED counts into the dye.
         var dv = fluid_dye[idx];
         dv.x = chem_act_f(idx, 0u);
         dv.y = chem_act_f(idx, 1u);
         fluid_dye[idx] = dv;
     } else if (mode == 2u) {
-        write_chem_beta(idx, output_value);
+        write_chem_beta(idx, select(output_value, 0.0, gamma_count(idx) > 0u));
         var dv = fluid_dye[idx];
         dv.z = chem_act_f(idx, 2u);
         dv.w = chem_act_f(idx, 3u);
