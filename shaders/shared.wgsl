@@ -1119,7 +1119,7 @@ fn get_part_name(part_type: u32) -> PartName {
         case 30u:{ name = PartName(array<u32,6>(70u,76u,73u,80u,32u,32u), 4u); }
         case 31u:{ name = PartName(array<u32,6>(67u,76u,79u,67u,75u,32u), 5u); }
         case 32u:{ name = PartName(array<u32,6>(83u,76u,79u,80u,69u,32u), 5u); }
-        case 33u:{ name = PartName(array<u32,6>(86u,77u,80u,82u,69u,32u), 5u); }
+        case 33u:{ name = PartName(array<u32,6>(83u,87u,69u,69u,80u,32u), 5u); }
         case 34u:{ name = PartName(array<u32,6>(65u,71u,83u,78u,65u,32u), 5u); }
         case 35u:{ name = PartName(array<u32,6>(65u,71u,83u,78u,66u,32u), 5u); }
         case 36u:{ name = PartName(array<u32,6>(80u,65u,73u,82u,71u,32u), 5u); }
@@ -1131,7 +1131,7 @@ fn get_part_name(part_type: u32) -> PartName {
         case 43u:{ name = PartName(array<u32,6>(77u,85u,84u,80u,82u,84u), 6u); }
         case 44u:{ name = PartName(array<u32,6>(66u,69u,84u,65u,77u,32u), 5u); }
         case 45u:{ name = PartName(array<u32,6>(65u,84u,84u,82u,65u,67u), 6u); }
-        case 46u:{ name = PartName(array<u32,6>(83u,80u,73u,75u,69u,32u), 5u); }
+        case 46u:{ name = PartName(array<u32,6>(83u,87u,69u,69u,80u,66u), 6u); }
         default: { }
     }
 

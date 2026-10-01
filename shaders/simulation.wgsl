@@ -1,4 +1,4 @@
-// Vampire mouths drain energy from nearby living agents
+// Main simulation kernels (agents, monomers, terrain, light).
 // ============================================================================
 
 // Helper: add a force into the low-res fluid force grid using bilinear splatting.
@@ -170,22 +170,11 @@ const MORPHOLOGY_ORIENT_FOLLOW_ENABLED: bool = true;
 const MORPHOLOGY_ORIENT_FOLLOW_STRENGTH: f32 = 0.25;
 const MORPHOLOGY_ORIENT_MAX_FRAME_ANGVEL: f32 = 0.15;
 
-// Vampire mouth and spike organ constants
-// Reach is now variable per-part (10..80) derived from the next part's parameter1.
+// Sweeper organs (33/46): reach is variable per-part (10..80 world units,
+// x SWEEP_REACH_MULT) derived from the next part's parameter1.
+// Open/close state is stored in body[i]._pad.y (smoothed, 0..1).
 const DEFENSE_RADIUS_DEFAULT: f32 = 30.0;
 const DEFENSE_RADIUS_MAX: f32 = 80.0;
-const SPIKE_CHEM_DEPOSIT_RADIUS: f32 = 30.0; // Radius around mouth to deposit victim energy
-// Vampire finisher: after a successful drain, vampire mouths may kill the victim.
-// Probability scales with victim body length (body_count).
-const VAMPIRE_KILL_PROB_PER_PART: f32 = 0.01;
-const VAMPIRE_KILL_PROB_MAX: f32 = 0.75;
-// Spike tuning:
-// - Cooldown is stored in spike part body[i]._pad.x (no struct changes).
-// - Open/close state is stored in body[i]._pad.y (smoothed, 0..1).
-// - Spikes are meant to be passive defense: keep kill cost low.
-const SPIKE_COOLDOWN_FRAMES: f32 = 2.0;
-const SPIKE_KILL_COST_BASE: f32 = 0.02;
-const SPIKE_KILL_COST_FRAC_OF_VICTIM: f32 = 0.00;
 
 // Decomposition tuning:
 // QUANTIZED uptake: per-frame probability that a part of mass 1.0 captures a
@@ -378,547 +367,91 @@ fn uv_light_at_world(p: vec2<f32>) -> f32 {
 const SENSOR_ION_RADIUS: f32 = 6.0;
 const SENSOR_CHARGE_PER_HIT: f32 = 0.12;
 
+// ============================================================================
+// SWEEPERS (organs 33 and 46 — formerly vampire mouths and spikes)
+// Cilia-like collectors: each open sweeper grabs an ACTIVATED monomer
+// (any channel, by local abundance) within its reach and carries one per
+// frame into the cell under itself, concentrating food where whole-body
+// pairing and uptake can use it. Conserving (one quantum moves),
+// capacity-respecting, paid in energy. Predation (drain / spike kill) is
+// retired.
+// ============================================================================
+const SWEEP_REACH_MULT: f32 = 4.0; // x the organ's defense radius (world units)
+const SWEEP_TRIES: u32 = 4u;       // random cells sampled per sweeper per frame
+const SWEEP_RATE: f32 = 0.5;       // chance a sweeper acts this frame
+const SWEEP_COST: f32 = 0.02;      // energy per monomer carried
+
+fn sweep_monomers(agent_id: u32) {
+    if (agents_out[agent_id].alive != 1u) { return; }
+    var energy = energy_from_u32(atomicLoad(&agents_out[agent_id].energy));
+    if (energy < SWEEP_COST + 1.0) { return; }
+    // Indiscriminate collector: it does not "know" the genome; it grabs any
+    // activated monomer it touches (channel chosen by local abundance).
+
+    let pos = agents_out[agent_id].position;
+    let rot = agents_out[agent_id].rotation;
+    let bc = min(agents_out[agent_id].body_count, MAX_BODY_PARTS);
+    var spent_energy = 0.0;
+    for (var i = 0u; i < bc; i++) {
+        let bt = get_base_part_type(agents_out[agent_id].body[i].part_type);
+        if (bt != 33u && bt != 46u) { continue; }
+        if (clamp(agents_out[agent_id].body[i]._pad.y, 0.0, 1.0) < 0.5) { continue; }
+        let seed = (agent_id + 1u) * 2654435761u ^ (i * 374761393u) ^ (params.random_seed * 668265263u);
+        if (hash_f32(seed) >= SWEEP_RATE) { continue; }
+        if (energy - spent_energy < SWEEP_COST + 1.0) { break; }
+        var reach = DEFENSE_RADIUS_DEFAULT;
+        if (i + 1u < bc) {
+            let nb = get_base_part_type(agents_out[agent_id].body[i + 1u].part_type);
+            reach = param1_to_defense_radius(get_amino_acid_properties(nb).parameter1);
+        }
+        reach *= SWEEP_REACH_MULT;
+        let here = pos + apply_agent_rotation(agents_out[agent_id].body[i].pos, rot);
+        let dst = grid_index(here);
+        if (chem_cell_total(dst) >= chem_capacity(gamma_count(dst))) { continue; }
+        for (var k = 0u; k < SWEEP_TRIES; k++) {
+            let hk = hash(seed ^ (k * 2246822519u) ^ 0x9E3779B9u);
+            let ang = hash_f32(hk) * 6.2831853;
+            let rad = sqrt(hash_f32(hk ^ 0x85EBCA6Bu)) * reach;
+            let src = grid_index(clamp_position(here + vec2<f32>(cos(ang), sin(ang)) * rad));
+            if (src == dst) { continue; }
+            let a0 = chem_act_count(src, 0u);
+            let a1 = chem_act_count(src, 1u);
+            let a2 = chem_act_count(src, 2u);
+            let a3 = chem_act_count(src, 3u);
+            let at = a0 + a1 + a2 + a3;
+            if (at == 0u) { continue; }
+            let pick = hash(hk ^ 0x27D4EB2Fu) % at;
+            var ch = 3u;
+            if (pick < a0) { ch = 0u; } else if (pick < a0 + a1) { ch = 1u; } else if (pick < a0 + a1 + a2) { ch = 2u; }
+            if (chem_take_state_one(src * 4u + ch, false)) {
+                chem_add_state(dst, ch, 1u, false);
+                spent_energy += SWEEP_COST;
+                break;
+            }
+        }
+    }
+    if (spent_energy > 0.0) {
+        // No other kernel writes this agent's energy in this pass (predation
+        // is retired), so a plain store is safe.
+        atomicStore(&agents_out[agent_id].energy, energy_to_u32(max(energy - spent_energy, 0.0)));
+    }
+}
+
 @compute @workgroup_size(256)
 fn drain_energy(@builtin(global_invocation_id) gid: vec3<u32>) {
     let agent_id = gid.x;
     if (agent_id >= params.agent_count) {
         return;
     }
-
-    // Spatial grid uses an epoch stamp so we don't have to clear it every frame.
-    // Store stamp = (epoch + 1) so a zero-initialized buffer is always treated as empty.
-    let current_stamp = params.epoch + 1u;
-
-    // NOTE: This pass is intended to run after process_agents so that it can
-    // operate on the fully materialized per-agent state in agents_out.
-    let agent_ptr = &agents_out[agent_id];
-    let agent_alive = (*agent_ptr).alive;
-    let agent_energy = energy_from_u32(atomicLoad(&(*agent_ptr).energy));
-
-    // Skip dead agents and pending-kill agents.
-    // alive==2u is a kill signal (agent will decompose itself next tick in process_agents).
-    if (agent_alive != 1u || agent_energy <= 0.0) {
-        return;
-    }
-
-    // Newborn grace: don't attack or get attacked in the first few frames after spawning
-    if ((*agent_ptr).age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
-        return;
-    }
-
-    // Collect vampire mouth organ indices (type 33).
-    // This lets us iterate only vampire mouths later, instead of scanning every body part.
-    let body_count = min((*agent_ptr).body_count, MAX_BODY_PARTS);
-    var total_energy_gained = 0.0;
-    var vampire_mouth_indices: array<u32, MAX_BODY_PARTS>;
-    var vampire_mouth_count = 0u;
-    for (var i = 0u; i < body_count; i++) {
-        let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
-        if (base_type == 33u) {
-            vampire_mouth_indices[vampire_mouth_count] = i;
-            vampire_mouth_count += 1u;
-        }
-    }
-    if (vampire_mouth_count == 0u) {
-        return;
-    }
-
-    // Vampire reach and corresponding grid search radius.
-    // NOTE: cap to 10 (previous behavior) to avoid pathological loop sizes.
-    let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
-    let cell_size = f32(SIM_SIZE) / f32(SPATIAL_GRID_SIZE);
-    // Conservative grid search radius: max possible reach.
-    let grid_radius = clamp(i32(ceil(DEFENSE_RADIUS_MAX / cell_size)), 1, 10);
-
-    // Process each vampire mouth organ
-
-    for (var mi = 0u; mi < vampire_mouth_count; mi++) {
-        let i = vampire_mouth_indices[mi];
-        let part = agents_out[agent_id].body[i];
-        let mouth_local_pos = part.pos;
-
-        // Open/close state stored in _pad.y (0..1). When closed, do nothing.
-        let mouth_open = clamp(part._pad.y, 0.0, 1.0);
-        if (mouth_open < 0.5) {
-            // Keep visualization stable.
-            continue;
-        }
-
-        // Variable reach from the NEXT part's parameter1 (or default when last).
-        var reach = DEFENSE_RADIUS_DEFAULT;
-        if (i + 1u < agents_out[agent_id].body_count) {
-            let next_base = get_base_part_type(agents_out[agent_id].body[i + 1u].part_type);
-            reach = param1_to_defense_radius(get_amino_acid_properties(next_base).parameter1);
-        }
-
-        // World position for this mouth. Keep this computed regardless of enable state so
-        // we can always update the tracking data.
-        let rotated_pos = apply_agent_rotation(mouth_local_pos, (*agent_ptr).rotation);
-        let mouth_world_pos = (*agent_ptr).position + rotated_pos;
-
-            // Cooldown timer (stored in _pad.x)
-            var current_cooldown = agents_out[agent_id].body[i]._pad.x;
-            if (current_cooldown > 0.0) {
-                current_cooldown -= 1.0;
-                agents_out[agent_id].body[i]._pad.x = current_cooldown;
-            }
-
-            // No longer disable vampire mouths when enablers are present
-            var block = 0.0;
-            block = min(block, 1.0);
-            let quadratic_block = block * block;
-            let mouth_activity = 1.0 - quadratic_block;
-
-            // Only work if not fully suppressed
-            if (mouth_activity > 0.0001) {
-                // Mouth-centered spiral search over spatial grid.
-                // We break early on the first in-range victim to save compute.
-                var closest_victim_id = 0xFFFFFFFFu;
-                let vamp_size = max(f32(body_count), 1.0);
-
-                let mouth_grid_x = u32(clamp(mouth_world_pos.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-                let mouth_grid_y = u32(clamp(mouth_world_pos.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-
-                var found_victim = false;
-                for (var radius: i32 = 0; radius <= grid_radius; radius++) {
-                    if (found_victim) {
-                        break;
-                    }
-                    if (radius == 0) {
-                        // Single center cell
-                        let check_x = i32(mouth_grid_x);
-                        let check_y = i32(mouth_grid_y);
-                        let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                        let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                        if (stamp == current_stamp) {
-                            let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                            let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                            if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                let neighbor_alive = agents_out[neighbor_id].alive;
-                                let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
-                                let neighbor_age = agents_out[neighbor_id].age;
-                                if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                    let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
-                                    if (dist < reach) {
-                                        // Size-based attack probability: larger vampires better at catching small prey.
-                                        // Same size => 100%, vampire 2x bigger => 100%, victim 2x bigger => 50%.
-                                        let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                                        let attack_prob = clamp(vamp_size / victim_size, 0.0, 1.0);
-                                        let attack_seed = (agent_id * 747796405u)
-                                            ^ (neighbor_id * 2891336453u)
-                                            ^ (params.epoch * 196613u)
-                                            ^ (params.random_seed * 83492791u)
-                                            ^ (i * 374761393u)
-                                            ^ (check_cell * 668265263u);
-                                        let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
-                                        if (attack_rnd <= attack_prob) {
-                                            closest_victim_id = neighbor_id;
-                                            found_victim = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Top and bottom edges
-                        for (var dx: i32 = -radius; dx <= radius; dx++) {
-                            if (found_victim) {
-                                break;
-                            }
-                            // Top
-                            var check_x = i32(mouth_grid_x) + dx;
-                            var check_y = i32(mouth_grid_y) - radius;
-                            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                                if (stamp == current_stamp) {
-                                    let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                                    let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                                    if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                        let neighbor_alive = agents_out[neighbor_id].alive;
-                                        let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
-                                        let neighbor_age = agents_out[neighbor_id].age;
-                                        if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                            let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
-                                            if (dist < reach) {
-                                                let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                                                let attack_prob = clamp(victim_size / vamp_size, 0.0, 1.0);
-                                                let attack_seed = (agent_id * 747796405u)
-                                                    ^ (neighbor_id * 2891336453u)
-                                                    ^ (params.epoch * 196613u)
-                                                    ^ (params.random_seed * 83492791u)
-                                                    ^ (i * 374761393u)
-                                                    ^ (check_cell * 668265263u);
-                                                let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
-                                                if (attack_rnd <= attack_prob) {
-                                                    closest_victim_id = neighbor_id;
-                                                    found_victim = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Bottom
-                            if (!found_victim) {
-                                check_x = i32(mouth_grid_x) + dx;
-                                check_y = i32(mouth_grid_y) + radius;
-                                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                                    if (stamp == current_stamp) {
-                                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                            let neighbor_alive = agents_out[neighbor_id].alive;
-                                            let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
-                                            let neighbor_age = agents_out[neighbor_id].age;
-                                            if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                                let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
-                                                if (dist < reach) {
-                                                    let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                                                    let attack_prob = clamp(vamp_size / victim_size, 0.0, 1.0);
-                                                    let attack_seed = (agent_id * 747796405u)
-                                                        ^ (neighbor_id * 2891336453u)
-                                                        ^ (params.epoch * 196613u)
-                                                        ^ (params.random_seed * 83492791u)
-                                                        ^ (i * 374761393u)
-                                                        ^ (check_cell * 668265263u);
-                                                    let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
-                                                    if (attack_rnd <= attack_prob) {
-                                                        closest_victim_id = neighbor_id;
-                                                        found_victim = true;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Left and right edges (excluding corners already covered)
-                        for (var dy: i32 = -radius + 1; dy <= radius - 1; dy++) {
-                            if (found_victim) {
-                                break;
-                            }
-                            // Left
-                            var check_x = i32(mouth_grid_x) - radius;
-                            var check_y = i32(mouth_grid_y) + dy;
-                            if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                                if (stamp == current_stamp) {
-                                    let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                                    let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                                    if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                        let neighbor_alive = agents_out[neighbor_id].alive;
-                                        let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
-                                        let neighbor_age = agents_out[neighbor_id].age;
-                                        if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                            let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
-                                            if (dist < reach) {
-                                                let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                                                let attack_prob = clamp(vamp_size / victim_size, 0.0, 1.0);
-                                                let attack_seed = (agent_id * 747796405u)
-                                                    ^ (neighbor_id * 2891336453u)
-                                                    ^ (params.epoch * 196613u)
-                                                    ^ (params.random_seed * 83492791u)
-                                                    ^ (i * 374761393u)
-                                                    ^ (check_cell * 668265263u);
-                                                let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
-                                                if (attack_rnd <= attack_prob) {
-                                                    closest_victim_id = neighbor_id;
-                                                    found_victim = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Right
-                            if (!found_victim) {
-                                check_x = i32(mouth_grid_x) + radius;
-                                check_y = i32(mouth_grid_y) + dy;
-                                if (check_x >= 0 && check_x < i32(SPATIAL_GRID_SIZE) && check_y >= 0 && check_y < i32(SPATIAL_GRID_SIZE)) {
-                                    let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                                    let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                                    if (stamp == current_stamp) {
-                                        let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                                        let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                                        if (neighbor_id != SPATIAL_GRID_EMPTY && neighbor_id != SPATIAL_GRID_CLAIMED && neighbor_id != agent_id) {
-                                            let neighbor_alive = agents_out[neighbor_id].alive;
-                                            let neighbor_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
-                                            let neighbor_age = agents_out[neighbor_id].age;
-                                            if (neighbor_alive == 1u && neighbor_energy > 0.0 && neighbor_age >= VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                                                let dist = length(mouth_world_pos - agents_out[neighbor_id].position);
-                                                if (dist < reach) {
-                                                    let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                                                    let attack_prob = clamp(vamp_size / victim_size, 0.0, 1.0);
-                                                    let attack_seed = (agent_id * 747796405u)
-                                                        ^ (neighbor_id * 2891336453u)
-                                                        ^ (params.epoch * 196613u)
-                                                        ^ (params.random_seed * 83492791u)
-                                                        ^ (i * 374761393u)
-                                                        ^ (check_cell * 668265263u);
-                                                    let attack_rnd = f32(hash(attack_seed)) / 4294967295.0;
-                                                    if (attack_rnd <= attack_prob) {
-                                                        closest_victim_id = neighbor_id;
-                                                        found_victim = true;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // Drain from closest victim only
-                if (closest_victim_id != 0xFFFFFFFFu) {
-                    // Energy is updated atomically, so we don't need a per-victim lock.
-                    // Allow multiple vampires to drain concurrently; the victim loss is saturating.
-                    if (current_cooldown <= 0.0) {
-                        let victim_energy = energy_from_u32(atomicLoad(&agents_out[closest_victim_id].energy));
-                        if (victim_energy > 0.0001) {
-                            // VAMPIRE DRAIN: Gradually drain energy from victim
-                            // Distance-based falloff: full power at 0 distance, 0 power at max reach
-                            let victim_pos = agents_out[closest_victim_id].position;
-                            let victim_dist = length(mouth_world_pos - victim_pos);
-                            let distance_factor = max(0.0, 1.0 - (victim_dist / max(reach, 1e-3)));
-
-                            // Poison protection organs reduce vampire drain effectiveness by 50% each
-                            let victim_poison_protection = agents_out[closest_victim_id].poison_resistant_count;
-                            var drain_effectiveness = distance_factor;
-                            if (victim_poison_protection > 0u) {
-                                drain_effectiveness *= pow(0.5, f32(victim_poison_protection));
-                            }
-
-                            // Drain rate: scale by size ratio (vampire / victim) using body-part count proxy.
-                            let vamp_size = max(f32(body_count), 1.0);
-                            let victim_size = max(f32(min(agents_out[closest_victim_id].body_count, MAX_BODY_PARTS)), 1.0);
-                            let size_ratio = vamp_size / victim_size;
-                            let drain_rate = clamp(0.2 * size_ratio, 0.0, 0.95);
-                            let drain_amount = victim_energy * drain_rate * drain_effectiveness;
-
-                            // Minimum drain threshold
-                            if (drain_amount >= 0.01) {
-                                // Victim loses 2x the amount drained (harsh penalty), atomically.
-                                // Compute vampire gain from the actual amount removed so we never mint energy via races.
-                                let victim_energy_loss = drain_amount * 2.0;
-
-                                // Saturating atomic subtract (CAS loop). Returns actual loss in f32.
-                                let victim_loss_u = energy_to_u32(victim_energy_loss);
-                                var actual_loss_u = 0u;
-                                if (victim_loss_u != 0u) {
-                                    loop {
-                                        let old_u = atomicLoad(&agents_out[closest_victim_id].energy);
-                                        if (old_u == 0u) {
-                                            break;
-                                        }
-                                        let sub_u = min(old_u, victim_loss_u);
-                                        let new_u = old_u - sub_u;
-                                        let res = atomicCompareExchangeWeak(&agents_out[closest_victim_id].energy, old_u, new_u);
-                                        if (res.exchanged) {
-                                            actual_loss_u = sub_u;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                let actual_loss = energy_from_u32(actual_loss_u);
-                                let actual_gain = actual_loss * 0.5;
-                                total_energy_gained += actual_gain;
-                                // Energy is harvested activation, not matter:
-                                // the destroyed half of the drain dissipates
-                                // as heat (depositing it would mint mass).
-                                // Set cooldown timer
-                                agents_out[agent_id].body[i]._pad.x = VAMPIRE_MOUTH_COOLDOWN;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Store current position for next frame's movement calculation
-            agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
-    }
-
-    // Add gained energy to vampire
-    if (total_energy_gained > 0.0) {
-        let gain_u = energy_to_u32(total_energy_gained);
-        if (gain_u != 0u) {
-            _ = atomicAdd(&(*agent_ptr).energy, gain_u);
-        }
-    }
+    // Vampire drain retired: this pass now runs the sweepers.
+    sweep_monomers(agent_id);
 }
 
 // ============================================================================
 // SPIKE ORGAN KILL LOGIC - Deferred kill signal (victim decomposes next tick)
 // ============================================================================
 
-@compute @workgroup_size(256)
-fn spike_kill(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let agent_id = gid.x;
-    if (agent_id >= params.agent_count) {
-        return;
-    }
-
-    // Avoid copying full Agent (contains body arrays) into a local variable.
-    let agent_alive = agents_out[agent_id].alive;
-    let agent_energy = energy_from_u32(atomicLoad(&agents_out[agent_id].energy));
-    let agent_age = agents_out[agent_id].age;
-    let agent_position = agents_out[agent_id].position;
-    let agent_rotation = agents_out[agent_id].rotation;
-    let body_count = agents_out[agent_id].body_count;
-
-    // Skip dead agents and pending-kill agents.
-    if (agent_alive != 1u || agent_energy <= 0.0) {
-        return;
-    }
-
-    // Newborn grace: don't attack or get attacked in the first few frames after spawning
-    if (agent_age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
-        return;
-    }
-
-    // Spatial grid uses an epoch stamp so we don't have to clear it every frame.
-    // Store stamp = (epoch + 1) so a zero-initialized buffer is always treated as empty.
-    let current_stamp = params.epoch + 1u;
-
-    let scale = f32(SPATIAL_GRID_SIZE) / f32(SIM_SIZE);
-    let cell_size = f32(SIM_SIZE) / f32(SPATIAL_GRID_SIZE);
-    let grid_radius = clamp(i32(ceil(DEFENSE_RADIUS_MAX / cell_size)), 1, 10);
-
-    // Collect spike organ indices (type 46)
-    var spike_indices: array<u32, MAX_BODY_PARTS>;
-    var spike_count = 0u;
-
-    for (var i = 0u; i < body_count; i++) {
-        let base_type = get_base_part_type(agents_out[agent_id].body[i].part_type);
-        if (base_type == 46u) {
-            spike_indices[spike_count] = i;
-            spike_count += 1u;
-        }
-    }
-
-    // No spikes, nothing to do
-    if (spike_count == 0u) {
-        return;
-    }
-
-    // For each spike organ
-    for (var si = 0u; si < spike_count; si++) {
-        let i = spike_indices[si];
-
-        // Open/close state stored in _pad.y (0..1). When closed, do nothing.
-        let spike_open = clamp(agents_out[agent_id].body[i]._pad.y, 0.0, 1.0);
-        if (spike_open < 0.5) {
-            continue;
-        }
-
-        // Variable reach from the NEXT part's parameter1 (or default when last).
-        var reach = DEFENSE_RADIUS_DEFAULT;
-        if (i + 1u < body_count) {
-            let next_base = get_base_part_type(agents_out[agent_id].body[i + 1u].part_type);
-            reach = param1_to_defense_radius(get_amino_acid_properties(next_base).parameter1);
-        }
-
-        // Per-spike cooldown countdown (stored in body[i]._pad.x).
-        let cd = agents_out[agent_id].body[i]._pad.x;
-        if (cd > 0.0) {
-            agents_out[agent_id].body[i]._pad.x = max(cd - 1.0, 0.0);
-            continue;
-        }
-
-        let spike_rel_pos = agents_out[agent_id].body[i].pos;
-        let spike_world_pos = agent_position + apply_agent_rotation(spike_rel_pos, agent_rotation);
-
-        let spike_grid_x = u32(clamp(spike_world_pos.x * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-        let spike_grid_y = u32(clamp(spike_world_pos.y * scale, 0.0, f32(SPATIAL_GRID_SIZE - 1u)));
-
-        // Scan neighborhood cells and kill any nearby living victim.
-        for (var dy: i32 = -grid_radius; dy <= grid_radius; dy++) {
-            for (var dx: i32 = -grid_radius; dx <= grid_radius; dx++) {
-                let check_x = i32(spike_grid_x) + dx;
-                let check_y = i32(spike_grid_y) + dy;
-                if (check_x < 0 || check_x >= i32(SPATIAL_GRID_SIZE) || check_y < 0 || check_y >= i32(SPATIAL_GRID_SIZE)) {
-                    continue;
-                }
-
-                let check_cell = u32(check_y) * SPATIAL_GRID_SIZE + u32(check_x);
-                let stamp = atomicLoad(&agent_spatial_grid[spatial_epoch_index(check_cell)]);
-                if (stamp != current_stamp) {
-                    continue;
-                }
-
-                let raw_neighbor_id = atomicLoad(&agent_spatial_grid[spatial_id_index(check_cell)]);
-                let neighbor_id = raw_neighbor_id & 0x7FFFFFFFu;
-                if (neighbor_id == SPATIAL_GRID_EMPTY || neighbor_id == SPATIAL_GRID_CLAIMED || neighbor_id == agent_id) {
-                    continue;
-                }
-
-                let victim_alive = agents_out[neighbor_id].alive;
-                let victim_energy = energy_from_u32(atomicLoad(&agents_out[neighbor_id].energy));
-                let victim_age = agents_out[neighbor_id].age;
-                if (victim_alive != 1u || victim_energy <= 0.0 || victim_age < VAMPIRE_NEWBORN_GRACE_FRAMES) {
-                    continue;
-                }
-
-                let dist = length(spike_world_pos - agents_out[neighbor_id].position);
-                if (dist < reach) {
-                    // Size-based spike hit probability: small victims can slip past.
-                    // Same size => 100%, half size => 50%, etc.
-                    let spike_owner_size = max(f32(min(body_count, MAX_BODY_PARTS)), 1.0);
-                    let victim_size = max(f32(min(agents_out[neighbor_id].body_count, MAX_BODY_PARTS)), 1.0);
-                    let hit_prob = clamp(victim_size / spike_owner_size, 0.0, 1.0);
-                    let hit_seed = (agent_id * 747796405u)
-                        ^ (neighbor_id * 2891336453u)
-                        ^ (params.epoch * 196613u)
-                        ^ (params.random_seed * 83492791u)
-                        ^ (i * 374761393u)
-                        ^ (check_cell * 668265263u);
-                    let hit_rnd = f32(hash(hit_seed)) / 4294967295.0;
-                    if (hit_rnd > hit_prob) {
-                        continue;
-                    }
-
-                    // No per-victim lock required here; redundant kill signals are harmless.
-
-                    // Send kill signal: victim will decompose itself next tick in process_agents.
-                    // alive==2u means "pending kill".
-                    agents_out[neighbor_id].alive = 2u;
-                    agents_out[neighbor_id].velocity = vec2<f32>(0.0);
-
-                    // Pay an energy cost to prevent self-sustaining stationary spike blobs.
-                    let cost = SPIKE_KILL_COST_BASE + SPIKE_KILL_COST_FRAC_OF_VICTIM * victim_energy;
-                    let cost_u = energy_to_u32(cost);
-                    if (cost_u != 0u) {
-                        loop {
-                            let old_u = atomicLoad(&agents_out[agent_id].energy);
-                            if (old_u == 0u) {
-                                break;
-                            }
-                            let sub_u = min(old_u, cost_u);
-                            let new_u = old_u - sub_u;
-                            let res = atomicCompareExchangeWeak(&agents_out[agent_id].energy, old_u, new_u);
-                            if (res.exchanged) {
-                                break;
-                            }
-                        }
-                    }
-
-                    // Set cooldown and limit to one kill per agent per epoch.
-                    agents_out[agent_id].body[i]._pad.x = SPIKE_COOLDOWN_FRAMES;
-                    return;
-                }
-            }
-        }
-    }
-}
+// spike_kill retired (organ 46 is a sweeper).
 
 // ============================================================================
 

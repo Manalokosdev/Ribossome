@@ -130,10 +130,10 @@ const PART_TYPE_NAMES: [&str; PART_TYPE_COUNT] = [
     "A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y",
     // 20�45 organs / specials (keep in sync with shaders/shared.wgsl table comments)
     "MOUTH", "PROPELLER", "ALPHA_SENSOR", "BETA_SENSOR", "ENERGY_SENSOR", "ALPHA_EMITTER", "ENABLER", "BETA_EMITTER",
-    "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "VAMPIRE_MOUTH", "AGENT_ALPHA_SENSOR",
+    "STORAGE", "POISON_RESIST", "CHIRAL_FLIPPER", "CLOCK", "SLOPE_SENSOR", "SWEEPER", "AGENT_ALPHA_SENSOR",
     "AGENT_BETA_SENSOR", "UNUSED_36", "TRAIL_ENERGY_SENSOR", "ALPHA_MAG_SENSOR", "ALPHA_MAG_SENSOR_V2",
     "BETA_MAG_SENSOR", "BETA_MAG_SENSOR_V2", "ANCHOR", "MUTATION_PROTECTION", "BetaMouth", "ATTRACTOR_REPULSOR",
-    "SPIKE",
+    "SWEEPER_B",
 ];
 
 const APP_NAME: &str = "Ribossome";
@@ -2213,7 +2213,7 @@ fn part_base_name(base_type: u32) -> &'static str {
         30 => "Chiral Flipper",
         31 => "Clock",
         32 => "Slope Sensor",
-        33 => "Vampire Mouth",
+        33 => "Sweeper",
         34 => "Agent Alpha Sensor",
         35 => "Agent Beta Sensor",
         36 => "Pairing Sensor",
@@ -2226,7 +2226,7 @@ fn part_base_name(base_type: u32) -> &'static str {
         43 => "Mutation Protection",
         44 => "BetaMouth",
         45 => "ATTRAC",
-        46 => "Spike",
+        46 => "Sweeper (B)",
         _ => "Organ",
     }
 }
@@ -4175,8 +4175,7 @@ struct GpuState {
     generate_map_pipeline: wgpu::ComputePipeline, // Generate specific map (flat/noise)
     clear_agent_spatial_grid_pipeline: wgpu::ComputePipeline, // Clear agent spatial grid
     populate_agent_spatial_grid_pipeline: wgpu::ComputePipeline, // Populate agent spatial grid
-    drain_energy_pipeline: wgpu::ComputePipeline, // Vampire mouths drain energy from neighbors
-    spike_kill_pipeline: wgpu::ComputePipeline, // Spike organs kill on contact
+    drain_energy_pipeline: wgpu::ComputePipeline, // Runs the sweeper organs (33/46)
     render_pipeline: wgpu::RenderPipeline,
     inspector_overlay_pipeline: wgpu::RenderPipeline,
 
@@ -7004,16 +7003,6 @@ impl GpuState {
             });
         profiler.mark("drain energy pipeline");
 
-        let spike_kill_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("Spike Kill Pipeline"),
-                layout: Some(&compute_pipeline_layout),
-                module: &shader,
-                entry_point: "spike_kill",
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        profiler.mark("spike kill pipeline");
 
         // Create render bind group layout
         let render_bind_group_layout =
@@ -8004,7 +7993,6 @@ impl GpuState {
             clear_agent_spatial_grid_pipeline,
             populate_agent_spatial_grid_pipeline,
             drain_energy_pipeline,
-            spike_kill_pipeline,
             render_pipeline,
             inspector_overlay_pipeline,
             compute_bind_group_a,
@@ -10823,7 +10811,7 @@ impl GpuState {
             });
 
             if should_run_simulation {
-                // Drain energy from neighbors (vampire mouths) - workgroup_size(256)
+                // Sweeper organs (33/46) carry activated monomers to the body - workgroup_size(256)
                 // Runs after process_agents so it can operate on agents_out without requiring
                 // write access to agents_in (which would slow down all compute).
                 cpass.set_pipeline(&self.drain_energy_pipeline);
@@ -10852,23 +10840,7 @@ impl GpuState {
             "Update Encoder (Timed Segment)",
         );
 
-        // Spike kill pass - runs right after drain energy
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Compute Pass (Spike Kill)"),
-                timestamp_writes: None,
-            });
-
-            if should_run_simulation {
-                cpass.set_pipeline(&self.spike_kill_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(
-                    ((self.agent_buffer_capacity as u32) + 255) / 256,
-                    1,
-                    1,
-                );
-            }
-        }
+        // (Spike kill pass retired: organ 46 is a sweeper.)
 
         self.frame_profiler
             .write_ts_encoder(&mut encoder, TS_UPDATE_AFTER_SIM);
