@@ -4165,7 +4165,6 @@ struct GpuState {
     composite_agents_pipeline: wgpu::ComputePipeline,
     gamma_slope_pipeline: wgpu::ComputePipeline,
     uv_light_pipeline: wgpu::ComputePipeline,
-    uv_clear_pipeline: wgpu::ComputePipeline,
     merge_pipeline: wgpu::ComputePipeline, // Merge spawned agents
     compact_pipeline: wgpu::ComputePipeline, // Remove dead agents
     finalize_merge_pipeline: wgpu::ComputePipeline, // Reset spawn counter
@@ -6719,16 +6718,6 @@ impl GpuState {
             });
         profiler.mark("rain pipeline");
 
-        let uv_clear_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("UV Light Clear Pipeline"),
-                layout: Some(&compute_pipeline_layout),
-                module: &shader,
-                entry_point: "clear_uv_light",
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
         let uv_light_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("UV Light Pipeline"),
@@ -8003,7 +7992,6 @@ impl GpuState {
             composite_agents_pipeline,
             gamma_slope_pipeline,
             uv_light_pipeline,
-            uv_clear_pipeline,
             merge_pipeline,
             compact_pipeline,
             finalize_merge_pipeline,
