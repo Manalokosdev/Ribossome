@@ -481,62 +481,6 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Pending-kill: decompose remaining energy using mouth-rule ratios, then die.
-    // This is the deferred "kill signal" path (e.g. from spike kills) and avoids
-    // double-counting / contention issues in the attacker kernel.
-    if (agent_alive == 2u) {
-        let body_count = min(agents_in[agent_id].body_count, MAX_BODY_PARTS);
-        if (body_count > 0u) {
-            // RNA-world decomposition (closed world): return exactly what the
-            // agent embodies — the strand's mass (gene_length bases, split by
-            // genome composition), the complements captured by the partial
-            // pairing strand, and the remaining energy converted to matter.
-            let comp = genome_composition(
-                agents_in[agent_id].genome_packed,
-                agents_in[agent_id].genome_offset,
-                agents_in[agent_id].gene_length
-            );
-            let paired_counts = genome_paired_complement_counts(
-                agents_in[agent_id].genome_packed,
-                agents_in[agent_id].genome_offset,
-                agents_in[agent_id].gene_length,
-                agents_in[agent_id].pairing_counter
-            );
-            // Quantized: 1 monomer per genome base; paired complements are
-            // already whole monomer counts; stored energy converts back at
-            // (food_power x resistance multiplier) energy per monomer.
-            // PRIMORDIAL SEEDS (generation 0): their strand was minted from
-            // nothing at world start, so it vanishes on death instead of
-            // depositing (keeps world total = what generation set). Their
-            // paired complements and energy DID come from the environment
-            // and are returned normally.
-            let strand_quanta = select(f32(agents_in[agent_id].gene_length), 0.0, agents_in[agent_id].generation == 0u);
-            // Energy = harvested activation, NOT matter: it evaporates on
-            // death. Only strand + captured complements return (SPENT).
-            let per_part = (comp * strand_quanta + paired_counts) * (1.0 / f32(body_count));
-            let agent_pos = agents_in[agent_id].position;
-            let agent_rot = agents_in[agent_id].rotation;
-            for (var i = 0u; i < body_count; i++) {
-                let part = agents_in[agent_id].body[i];
-                let world_pos = agent_pos + apply_agent_rotation(part.pos, agent_rot);
-                let idx = grid_index(world_pos);
-                let dseed = (agent_id + 1u) * 2654435761u ^ (i * 668265263u) ^ params.random_seed;
-                for (var dc = 0u; dc < 4u; dc++) {
-                    chem_deposit_prob(idx, dc, per_part[dc], dseed ^ (dc * 374761393u));
-                }
-            }
-        }
-
-        // Kill now.
-        agents_out[agent_id].alive = 0u;
-        agents_out[agent_id].body_count = 0u;
-        atomicStore(&agents_out[agent_id].energy, 0u);
-        agents_out[agent_id].velocity = vec2<f32>(0.0);
-        agents_out[agent_id].pairing_counter = 0u;
-        agents_out[agent_id].is_selected = 0u;
-        return;
-    }
-
     // Pull only the scalar fields we use frequently into locals.
     let agent_position = agents_in[agent_id].position;
     let agent_velocity = agents_in[agent_id].velocity;
@@ -792,22 +736,9 @@ fn process_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             com_sum += current_pos * m;
             mass_sum += m;
 
-            // Check organ type once for both data field and _pad handling
-            let is_vampire_mouth = (base_type == 33u);
-
             // Preserve organ internal state across frames by default.
-            // Non-organs and vampire mouths may overwrite _pad below.
             agents_out[agent_id].body[i]._pad = agents_in[agent_id].body[i]._pad;
-
-            // Data field: for vampire mouths (type 33), store packed world position for movement tracking
-            if (is_vampire_mouth) {
-                // Store current world position (agent.position + rotated local offset)
-                let rotated_pos = apply_agent_rotation(current_pos, agent_rotation);
-                let mouth_world_pos = agent_position + rotated_pos;
-                agents_out[agent_id].body[i].data = pack_position_to_f32(mouth_world_pos, f32(SIM_SIZE));
-            } else {
-                agents_out[agent_id].body[i].data = 0.0;
-            }
+            agents_out[agent_id].body[i].data = 0.0;
         }
 
         // Energy capacity

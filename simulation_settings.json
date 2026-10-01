@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.97230107,
+  "camera_zoom": 1.6235068,
   "spawn_probability": 3.0,
   "death_probability": 0.02,
   "mutation_rate": 0.003,
@@ -234,7 +234,7 @@
       "y_frac": 0.4915183,
       "dir_degrees": 0.0,
       "strength": 500.0,
-      "spread": 58.88,
+      "spread": 64.0,
       "alpha_dye_rate": 1.0,
       "beta_dye_rate": 0.0,
       "variation": 0.0
