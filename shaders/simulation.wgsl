@@ -320,7 +320,10 @@ fn uv_light_at_cell(x: u32, y: u32) -> f32 {
     var q = 0.0;
     for (var k = 1u; k <= UV_SHADOW_SAMPLES; k++) {
         let sy = y + u32(span * f32(k) / f32(UV_SHADOW_SAMPLES));
-        q += f32(gamma_count(min(sy, GRID_SIZE - 1u) * GRID_SIZE + x));
+        // Only SOLID rock casts shade; scattered rubble specks are
+        // translucent (counting them darkened the whole water column).
+        let gq = gamma_count(min(sy, GRID_SIZE - 1u) * GRID_SIZE + x);
+        if (gq >= GAMMA_SOLID_THRESHOLD) { q += f32(gq); }
     }
     return water * exp(-UV_SHADOW_ABSORB * q);
 }
@@ -3904,8 +3907,11 @@ fn gamma_move_one(src_c: u32, dst_c: u32) -> bool {
 fn chem_capacity(g: u32) -> u32 {
     if (g >= GAMMA_SOLID_THRESHOLD) { return 0u; }
     // rubble: 1 quantum -> 1/3 of the pore volume, 2 -> ~1/9
-    if (g == 2u) { return CHEM_CELL_CAP / 9u; }
-    if (g == 1u) { return CHEM_CELL_CAP / 3u; }
+    // Rubble is nearly closed: scattered specks across open water were a
+    // world-wide sponge (measured: rubble held 26 -> 38 percent of free
+    // matter and rising). Excess is squeezed out by the overflow rule.
+    if (g == 2u) { return 1u; }
+    if (g == 1u) { return 3u; }
     return CHEM_CELL_CAP;
 }
 const MAX_HOPS_PER_CELL_CH: u32 = 8u;
