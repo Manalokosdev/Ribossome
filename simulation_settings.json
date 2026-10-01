@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 3.86571,
+  "camera_zoom": 1.1422906,
   "spawn_probability": 3.0,
   "death_probability": 0.02,
   "mutation_rate": 0.003,
@@ -193,13 +193,14 @@
     0.0,
     0.0
   ],
-  "monomer_brightness": 0.05,
+  "monomer_brightness": 0.1,
   "dig_rate": 2.0,
   "uv_strength": 1.0,
   "uv_depth": 30.0,
   "uv_damage": 2.7,
   "gravity_monomer": 1.0,
   "gravity_agent": 1.0,
+  "monomer_diffusion": 20.0,
   "dye_alpha_thinfilm": false,
   "dye_alpha_thinfilm_mult": 5.0,
   "dye_beta_thinfilm": false,
@@ -211,7 +212,7 @@
       "y_frac": 0.039822534,
       "dir_degrees": 230.0,
       "strength": 5000.0,
-      "spread": 45.502464,
+      "spread": 29.538015,
       "alpha_dye_rate": 0.0,
       "beta_dye_rate": 0.0,
       "variation": 0.93

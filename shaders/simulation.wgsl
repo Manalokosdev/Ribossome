@@ -304,7 +304,7 @@ fn fluid_ride_velocity(world_pos: vec2<f32>) -> vec2<f32> {
 // is sampled at 16 points and each sample's quanta dim the light. Below
 // the lit band the column scan is skipped (light is negligible anyway),
 // which keeps the cost confined to the upper layer.
-const UV_SHADOW_ABSORB: f32 = 0.3; // per solid gamma quantum crossed
+const UV_SHADOW_ABSORB: f32 = 0.6; // opacity per gamma quantum (any cell)
 
 fn uv_light_at_cell(x: u32, y: u32) -> f32 {
     // Precomputed by compute_uv_light (row sweep, refreshed every ~100 epochs).
@@ -334,7 +334,8 @@ fn compute_uv_light(@builtin(local_invocation_id) lid_v: vec3<u32>) {
         let idx = top * GRID_SIZE + x;
         let g = gamma_count(idx);
         var l = row_water;
-        if (g >= GAMMA_SOLID_THRESHOLD) { l *= exp(-UV_SHADOW_ABSORB * f32(g)); }
+        // Gamma is OPAQUE in proportion to its quanta (rubble included).
+            if (g > 0u) { l *= exp(-UV_SHADOW_ABSORB * f32(g)); }
         atomicStore(&gamma_grid[GAMMA_LIGHT_OFFSET + idx], bitcast<u32>(l));
     }
     storageBarrier();
@@ -353,7 +354,8 @@ fn compute_uv_light(@builtin(local_invocation_id) lid_v: vec3<u32>) {
             let idx = y * GRID_SIZE + x;
             let g = gamma_count(idx);
             var l = above * row_water;
-            if (g >= GAMMA_SOLID_THRESHOLD) { l *= exp(-UV_SHADOW_ABSORB * f32(g)); }
+            // Gamma is OPAQUE in proportion to its quanta (rubble included).
+            if (g > 0u) { l *= exp(-UV_SHADOW_ABSORB * f32(g)); }
             atomicStore(&gamma_grid[GAMMA_LIGHT_OFFSET + idx], bitcast<u32>(l));
         }
         storageBarrier();
