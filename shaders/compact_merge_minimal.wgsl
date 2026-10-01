@@ -67,10 +67,17 @@ fn compact_agents(@builtin(local_invocation_id) lid_v: vec3<u32>) {
     }
 }
 
+// Monomer grid (same binding as the main module) — used only to return the
+// strand of a newborn that cannot be placed (population at capacity).
+@group(0) @binding(2) var<storage, read_write> chem_grid: array<atomic<u32>>;
+
 @compute @workgroup_size(64)
 fn merge_agents_cooperative(@builtin(global_invocation_id) gid: vec3<u32>) {
     let spawn_id = gid.x;
-    let spawn_count = min(atomicLoad(&spawn_debug_counters[0]), 2000u);
+    // Must match MAX_SPAWN_REQUESTS (2048): the old 2000 cap silently
+    // dropped spawn slots 2000..2047 that reproduction had already filled
+    // with real offspring — a matter leak in busy frames.
+    let spawn_count = min(atomicLoad(&spawn_debug_counters[0]), 2048u);
     if (spawn_id >= spawn_count) {
         return;
     }
@@ -78,5 +85,29 @@ fn merge_agents_cooperative(@builtin(global_invocation_id) gid: vec3<u32>) {
     let target_index = atomicAdd(&spawn_debug_counters[2], 1u);
     if (target_index < params.max_agents) {
         agents_out[target_index] = new_agents[spawn_id];
+    } else {
+        // POPULATION AT CAPACITY: the newborn cannot be placed. Its strand
+        // was built from captured monomers, so return them (SPENT) to the
+        // grid at its position instead of letting them vanish.
+        // (Generation-0 spawns carry minted strands and are not returned.)
+        let nb = new_agents[spawn_id];
+        if (nb.generation > 0u && nb.gene_length > 0u) {
+            let cells = arrayLength(&chem_grid) / 4u;
+            let dim = u32(sqrt(f32(cells)) + 0.5);
+            let fx = clamp(nb.position.x / f32(SIM_SIZE), 0.0, 0.9999);
+            let fy = clamp(nb.position.y / f32(SIM_SIZE), 0.0, 0.9999);
+            let cell = u32(fy * f32(dim)) * dim + u32(fx * f32(dim));
+            var counts = array<u32, 4>(0u, 0u, 0u, 0u);
+            for (var i = 0u; i < nb.gene_length; i++) {
+                let bi = nb.genome_offset + i;
+                let code = (nb.genome_packed[bi / 16u] >> ((bi % 16u) * 2u)) & 3u;
+                counts[code] += 1u;
+            }
+            for (var c = 0u; c < 4u; c++) {
+                if (counts[c] > 0u) {
+                    atomicAdd(&chem_grid[cell * 4u + c], counts[c] << 16u);
+                }
+            }
+        }
     }
 }

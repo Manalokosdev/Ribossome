@@ -4646,7 +4646,7 @@ var<storage, read_write> species_hash_buffer: array<u32>;
 // matter (strands, paired complements, energy) is summed on the CPU from the
 // agents readback that species counting already performs.
 @group(1) @binding(1)
-// [0..3] free per channel, [4] free inside gamma cells, [5] free in the
+// [0..3] free per channel, [4] free inside SOLID rock, [7] in rubble, [5] free in the
 // bottom 10% of rows (low y = screen bottom), [6] activated free total.
 var<storage, read_write> matter_totals: array<atomic<u32>, 8>;
 
@@ -4665,6 +4665,7 @@ fn reduce_matter_chem(@builtin(global_invocation_id) gid: vec3<u32>) {
     var s_rock = 0u;
     var s_bottom = 0u;
     var s_act = 0u;
+    var s_rubble = 0u;
     let total_cells = GRID_SIZE * GRID_SIZE;
     var c = tid;
     loop {
@@ -4684,7 +4685,8 @@ fn reduce_matter_chem(@builtin(global_invocation_id) gid: vec3<u32>) {
         s2 += t2;
         s3 += t3;
         let t_cell = t0 + t1 + t2 + t3;
-        if (gamma_count(c) > 0u) { s_rock += t_cell; }
+        let g_c = gamma_count(c);
+        if (g_c >= GAMMA_SOLID_THRESHOLD) { s_rock += t_cell; } else if (g_c > 0u) { s_rubble += t_cell; }
         if (c / GRID_SIZE < GRID_SIZE / 10u) { s_bottom += t_cell; }
         s_act += a_cell;
         c += MATTER_REDUCE_THREADS;
@@ -4696,6 +4698,7 @@ fn reduce_matter_chem(@builtin(global_invocation_id) gid: vec3<u32>) {
     atomicAdd(&matter_totals[4], s_rock);
     atomicAdd(&matter_totals[5], s_bottom);
     atomicAdd(&matter_totals[6], s_act);
+    atomicAdd(&matter_totals[7], s_rubble);
 }
 
 @compute @workgroup_size(256)

@@ -4264,6 +4264,7 @@ struct GpuState {
     matter_in_rock: u32,                // Free quanta inside gamma cells
     matter_bottom: u32,                 // Free quanta in the bottom 10% of rows
     matter_act: u32,                    // Activated free quanta
+    matter_rubble: u32,                 // Free quanta in rubble cells (1-2 gamma quanta)
     matter_energy: f64,                 // Total agent energy (energy units) at last sample
     matter_energy_quanta: f64,          // Exact quanta-equivalent of agent energy (per-agent yield)
     matter_total: f64,                  // free + locked + energy-equivalent at last sample
@@ -8058,6 +8059,7 @@ impl GpuState {
             matter_in_rock: 0,
             matter_bottom: 0,
             matter_act: 0,
+            matter_rubble: 0,
             matter_energy: 0.0,
             matter_energy_quanta: 0.0,
             matter_total: 0.0,
@@ -12160,6 +12162,7 @@ impl GpuState {
             self.matter_in_rock = totals[4];
             self.matter_bottom = totals[5];
             self.matter_act = totals[6];
+            self.matter_rubble = totals[7];
         }
         self.matter_totals_readback.unmap();
 
@@ -15885,11 +15888,13 @@ fn main() {
                                                         {
                                                             let ft = free_total.max(1) as f64;
                                                             ui.label(format!(
-                                                                "where free is: activated {} ({:.0}%) · inside rock {} ({:.0}%) · bottom 10% {} ({:.0}%)",
+                                                                "where free is: activated {} ({:.0}%) · solid rock {} ({:.0}%) · rubble {} ({:.0}%) · bottom 10% {} ({:.0}%)",
                                                                 state.matter_act,
                                                                 state.matter_act as f64 / ft * 100.0,
                                                                 state.matter_in_rock,
                                                                 state.matter_in_rock as f64 / ft * 100.0,
+                                                                state.matter_rubble,
+                                                                state.matter_rubble as f64 / ft * 100.0,
                                                                 state.matter_bottom,
                                                                 state.matter_bottom as f64 / ft * 100.0,
                                                             ));

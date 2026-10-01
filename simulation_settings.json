@@ -1,5 +1,5 @@
 {
-  "camera_zoom": 0.32425773,
+  "camera_zoom": 0.62745655,
   "spawn_probability": 1.0,
   "death_probability": 0.01,
   "mutation_rate": 0.003,
@@ -216,11 +216,11 @@
     },
     {
       "enabled": true,
-      "x_frac": 0.72824466,
-      "y_frac": 0.18275778,
+      "x_frac": 0.709903,
+      "y_frac": 0.18962309,
       "dir_degrees": 0.0,
       "strength": 3000.0,
-      "spread": 23.360641,
+      "spread": 30.0,
       "alpha_dye_rate": 0.0,
       "beta_dye_rate": 0.0,
       "variation": 0.5
