@@ -11013,24 +11013,17 @@ impl GpuState {
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_BOUNDARIES);
 
-                    // 10. Inject dye at propeller locations (A->B)
-                    cpass.set_pipeline(&self.fluid_inject_dye_pipeline);
-                    cpass.set_bind_group(0, bg_ab, &[]);
-                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
+                    // 10-11. DYE RETIRED: no inject/advect passes (the composite
+                    // reads the monomer grid directly).
 
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_INJECT_DYE);
 
-                    // 11. Advect dye with velocity field (B->A, final result in dye_a)
-                    cpass.set_pipeline(&self.fluid_advect_dye_pipeline);
-                    cpass.set_bind_group(0, bg_ba, &[]);
-                    cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
 
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_FLUID_AFTER_ADVECT_DYE);
 
-                    // 11b. Inject fumarole alpha dye into the final dye buffer (dye_a).
-                    // This keeps the point source visible even under strong local flow.
+                    // 11b. Thermal re-activation of spent monomers in hot water.
                     cpass.set_pipeline(&self.fluid_fumarole_dye_pipeline);
                     cpass.set_bind_group(0, bg_ba, &[]);
                     cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);
@@ -11064,7 +11057,8 @@ impl GpuState {
                     let dye_workgroups = (self.env_grid_resolution + 15) / 16;
 
                     // Diffuse dye once (A->B) then copy back (B->A) so the final stays in dye_a.
-                    if !self.perf_skip_nofluid_dye {
+                    if false {
+                        // Dye retired (no-fluid dye passes disabled).
                         cpass.set_pipeline(&self.fluid_diffuse_dye_no_fluid_pipeline);
                         cpass.set_bind_group(0, &self.fluid_bind_group_ab, &[]);
                         cpass.dispatch_workgroups(dye_workgroups, dye_workgroups, 1);

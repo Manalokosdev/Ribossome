@@ -216,8 +216,19 @@ fn chem_spent_total_f(cell_idx: u32) -> f32 {
     return f32(t) / 3.0;
 }
 
-// Bilinear dye sampling (used when Grid Interpolation is smooth/bicubic so
-// the dye layer matches the deposit's smoothness).
+// DYE RETIRED: the monomer layer is read straight from the quantized grid
+// (activated counts, low 16 bits, in REF units of 3 quanta).
+fn act_cell4(cell: u32) -> vec4<f32> {
+    let b = cell * 4u;
+    return vec4<f32>(
+        f32(chem_grid[b] & 0xFFFFu),
+        f32(chem_grid[b + 1u] & 0xFFFFu),
+        f32(chem_grid[b + 2u] & 0xFFFFu),
+        f32(chem_grid[b + 3u] & 0xFFFFu)
+    ) / 3.0;
+}
+
+// Bilinear sampling of activated counts (Grid Interpolation smooth).
 fn sample_dye_bilinear(world_pos: vec2<f32>, ws: f32) -> vec4<f32> {
     let grid_f = f32(GAMMA_GRID_DIM);
     let gx = clamp(world_pos.x / ws * grid_f - 0.5, 0.0, grid_f - 1.0);
@@ -228,10 +239,10 @@ fn sample_dye_bilinear(world_pos: vec2<f32>, ws: f32) -> vec4<f32> {
     let y1 = min(y0 + 1u, GAMMA_GRID_DIM - 1u);
     let fx = fract(gx);
     let fy = fract(gy);
-    let v00 = fluid_dye[y0 * GAMMA_GRID_DIM + x0];
-    let v10 = fluid_dye[y0 * GAMMA_GRID_DIM + x1];
-    let v01 = fluid_dye[y1 * GAMMA_GRID_DIM + x0];
-    let v11 = fluid_dye[y1 * GAMMA_GRID_DIM + x1];
+    let v00 = act_cell4(y0 * GAMMA_GRID_DIM + x0);
+    let v10 = act_cell4(y0 * GAMMA_GRID_DIM + x1);
+    let v01 = act_cell4(y1 * GAMMA_GRID_DIM + x0);
+    let v11 = act_cell4(y1 * GAMMA_GRID_DIM + x1);
     return mix(mix(v00, v10, fx), mix(v01, v11, fx), fy);
 }
 
@@ -300,7 +311,7 @@ fn composite_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Sample the per-monomer dye (x=A, y=U, z=G, w=C), honoring the
             // Grid Interpolation setting like the deposit renderer does.
-            var dye_raw4 = max(fluid_dye[dye_idx], vec4<f32>(0.0));
+            var dye_raw4 = act_cell4(dye_idx);
             if (params.grid_interpolation >= 1u) {
                 dye_raw4 = max(sample_dye_bilinear(world_pos, ws), vec4<f32>(0.0));
             }

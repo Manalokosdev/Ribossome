@@ -538,132 +538,32 @@ fn copy_temperature(@builtin(global_invocation_id) gid: vec3<u32>) {
 // IMPORTANT: This must be parallel. A single-threaded nested loop here will tank FPS.
 @compute @workgroup_size(16, 16)
 fn inject_fumarole_dye(@builtin(global_invocation_id) gid: vec3<u32>) {
+    // THERMAL RE-ACTIVATION only (the dye this kernel used to paint is
+    // retired). One temperature load per cell; cold water exits at once.
     let x = gid.x;
     let y = gid.y;
     if (x >= GAMMA_GRID_DIM || y >= GAMMA_GRID_DIM) {
         return;
     }
-
-    let count_f = fumaroles[0u];
-    let count = u32(clamp(floor(count_f + 0.0001), 0.0, f32(MAX_FUMAROLES)));
-    if (count == 0u) {
+    let fx_t = min((x * FLUID_GRID_SIZE) / GAMMA_GRID_DIM, FLUID_GRID_SIZE - 1u);
+    let fy_t = min((y * FLUID_GRID_SIZE) / GAMMA_GRID_DIM, FLUID_GRID_SIZE - 1u);
+    let t_loc = temp_in[fy_t * FLUID_GRID_SIZE + fx_t];
+    if (t_loc <= TEMP_ACT_THRESHOLD) {
         return;
     }
-
-    let dt = clamp(fp_f32(FP_DT), 0.0, MAX_DT);
-    let size_f = f32(FLUID_GRID_SIZE);
-    let fluid_to_dye = FLUID_TO_DYE_SCALE;
-    let time_bucket = u32(fp_f32(FP_TIME)) / 16u;
-
-    let xi = i32(x);
-    let yi = i32(y);
+    let p_act = clamp(FUMAROLE_ACT_P * (t_loc - TEMP_ACT_THRESHOLD) / TEMP_ACT_THRESHOLD, 0.0, 0.9);
     let dye_idx = dye_grid_index(x, y);
-
-    var add_beta = 0.0;
-    var add_alpha = 0.0;
-
-    for (var i = 0u; i < count; i = i + 1u) {
-        let base = 1u + i * FUM_STRIDE;
-        let enabled = fum_f32(base, FUM_ENABLED);
-        if (enabled < 0.5) {
-            continue;
-        }
-
-        let base_rate_alpha = max(fum_f32(base, FUM_ALPHA_DYE_RATE), 0.0);
-        let base_rate_beta = max(fum_f32(base, FUM_BETA_DYE_RATE), 0.0);
-        if (base_rate_alpha <= 0.0 && base_rate_beta <= 0.0) {
-            continue;
-        }
-
-        let x_frac = clamp(fum_f32(base, FUM_X_FRAC), 0.0, 1.0);
-        let y_frac = clamp(fum_f32(base, FUM_Y_FRAC), 0.0, 1.0);
-
-        let fx_i = clamp(i32(round(size_f * x_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
-        let fy_i = clamp(i32(round(size_f * y_frac)), 1, i32(FLUID_GRID_SIZE) - 2);
-
-        // Convert to dye grid coordinates.
-        let dye_x0 = i32(clamp(f32(fx_i) * fluid_to_dye, 0.0, f32(GAMMA_GRID_DIM - 1u)));
-        let dye_y0 = i32(clamp(f32(fy_i) * fluid_to_dye, 0.0, f32(GAMMA_GRID_DIM - 1u)));
-
-        let spread_f = max(fum_f32(base, FUM_SPREAD), 0.0);
-        // Map fluid-cell radius to dye-cell radius.
-        let r_dye = i32(clamp(round(spread_f * fluid_to_dye), 1.0, 128.0));
-
-        let dx = xi - dye_x0;
-        let dy = yi - dye_y0;
-        if (abs(dx) > r_dye || abs(dy) > r_dye) {
-            continue;
-        }
-
-        let dist2 = f32(dx * dx + dy * dy);
-        let rr = f32(r_dye * r_dye);
-        if (dist2 > rr) {
-            continue;
-        }
-
-        let dist = sqrt(dist2);
-        let w0 = clamp(1.0 - dist / (f32(r_dye) + 0.001), 0.0, 1.0);
-        let w = w0 * w0;
-
-        let variation = clamp(fum_f32(base, FUM_VARIATION), 0.0, 1.0);
-        var jitter = 1.0;
-        if (variation > 1e-5) {
-            let seed_base = hash_u32(i * 0x9E3779B9u ^ time_bucket * 0x85EBCA6Bu ^ 0x27D4EB2Fu);
-            let seed0 = hash_u32(seed_base ^ dye_idx);
-            let seed1 = hash_u32(seed0 ^ 0xB7E15162u);
-            let rate_jitter = 1.0 + (rand01(seed1) * 2.0 - 1.0) * variation;
-            jitter = max(rate_jitter, 0.0);
-        }
-
-        // Frame-rate independent injection: amount = rate * dt.
-        add_alpha = add_alpha + base_rate_alpha * jitter * dt * w;
-        add_beta = add_beta + base_rate_beta * jitter * dt * w;
-
-        // GEOTHERMAL RE-ACTIVATION: the vent recharges SPENT monomers in
-        // its plume — the deep-world counterpart of surface UV. Energy
-        // enters the closed world only here and at the lit surface.
-        // (Activation moved out of the per-vent loop: it is now driven by
-        // the local TEMPERATURE, below.)
-        let _unused_w = w * jitter;
-    }
-
-    // THERMAL RE-ACTIVATION: hot water recharges SPENT monomers wherever
-    // it is above the activation isotherm — the active zone travels with
-    // the plume instead of being a fixed disc around the vent. Visible as
-    // the white contour on the key-7 heatmap.
-    {
-        let fx_t = min((x * FLUID_GRID_SIZE) / GAMMA_GRID_DIM, FLUID_GRID_SIZE - 1u);
-        let fy_t = min((y * FLUID_GRID_SIZE) / GAMMA_GRID_DIM, FLUID_GRID_SIZE - 1u);
-        let t_loc = temp_in[fy_t * FLUID_GRID_SIZE + fx_t];
-        let p_act = clamp(FUMAROLE_ACT_P * (t_loc - TEMP_ACT_THRESHOLD) / TEMP_ACT_THRESHOLD, 0.0, 0.9);
-        if (p_act > 0.0) {
-            for (var ac = 0u; ac < 4u; ac++) {
-                let slot = dye_idx * 4u + ac;
-                let spent_here = atomicLoad(&chem_grid[slot]) >> 16u;
-                if (spent_here > 0u) {
-                    let hseed = hash_u32(slot ^ (time_bucket * 0x85EBCA6Bu) ^ 0x51ED270Bu ^ u32(fp_f32(FP_TIME)));
-                    if (rand01(hseed) < p_act) {
-                        let _ok = fluid_chem_activate_one(slot);
-                    }
-                }
+    let time_bucket = u32(fp_f32(FP_TIME)) / 16u;
+    for (var ac = 0u; ac < 4u; ac++) {
+        let slot = dye_idx * 4u + ac;
+        if ((atomicLoad(&chem_grid[slot]) >> 16u) > 0u) {
+            let hseed = hash_u32(slot ^ (time_bucket * 0x85EBCA6Bu) ^ 0x51ED270Bu ^ u32(fp_f32(FP_TIME)));
+            if (rand01(hseed) < p_act) {
+                let _ok = fluid_chem_activate_one(slot);
             }
         }
     }
-
-    // Dye is an exact mirror of the counts now: no fake color injection.
-    if (false && (add_alpha != 0.0 || add_beta != 0.0)) {
-        // Dye layout: x=A, y=U, z=G, w=C. Alpha rate feeds the AU pair,
-        // beta rate the GC pair (even split).
-        let current = dye_out[dye_idx];
-        dye_out[dye_idx] = vec4<f32>(
-            min(current.x + add_alpha * 0.5, 1.0),
-            min(current.y + add_alpha * 0.5, 1.0),
-            min(current.z + add_beta * 0.5, 1.0),
-            min(current.w + add_beta * 0.5, 1.0)
-        );
-    }
 }
-
 // Combine propeller forces with test force - reads from fluid_force_vectors, writes to fluid_forces
 @compute @workgroup_size(16, 16)
 fn inject_test_force(@builtin(global_invocation_id) gid: vec3<u32>) {

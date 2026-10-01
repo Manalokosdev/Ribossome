@@ -1220,14 +1220,14 @@ fn sample_env_gradient_sobel(center: vec2<f32>, grid_type: u32) -> vec2<f32> {
     // No per-sample clamp here: let the downstream sensor nonlinearity clamp/saturate.
     // This reduces ALU and keeps the gradient faithful to the raw combined field.
     let pool_sel = select(1u, 0u, use_alpha);
-    let v00 = chem_pool_of(fluid_dye[idx00], use_alpha) + chem_pool_count_f(idx00, pool_sel);
-    let v10 = chem_pool_of(fluid_dye[idx10], use_alpha) + chem_pool_count_f(idx10, pool_sel);
-    let v20 = chem_pool_of(fluid_dye[idx20], use_alpha) + chem_pool_count_f(idx20, pool_sel);
-    let v01 = chem_pool_of(fluid_dye[idx01], use_alpha) + chem_pool_count_f(idx01, pool_sel);
-    let v21 = chem_pool_of(fluid_dye[idx21], use_alpha) + chem_pool_count_f(idx21, pool_sel);
-    let v02 = chem_pool_of(fluid_dye[idx02], use_alpha) + chem_pool_count_f(idx02, pool_sel);
-    let v12 = chem_pool_of(fluid_dye[idx12], use_alpha) + chem_pool_count_f(idx12, pool_sel);
-    let v22 = chem_pool_of(fluid_dye[idx22], use_alpha) + chem_pool_count_f(idx22, pool_sel);
+    let v00 = chem_pool_count_f(idx00, pool_sel);
+    let v10 = chem_pool_count_f(idx10, pool_sel);
+    let v20 = chem_pool_count_f(idx20, pool_sel);
+    let v01 = chem_pool_count_f(idx01, pool_sel);
+    let v21 = chem_pool_count_f(idx21, pool_sel);
+    let v02 = chem_pool_count_f(idx02, pool_sel);
+    let v12 = chem_pool_count_f(idx12, pool_sel);
+    let v22 = chem_pool_count_f(idx22, pool_sel);
 
     // Distance-aware (isotropic) weighting:
     // - axis neighbors are 1 cell away
@@ -1503,10 +1503,10 @@ fn sample_magnitude_only(center: vec2<f32>, signal_gain: f32, seed: u32, grid_ty
 
     // NOTE: fluid_dye is stored at ENV_GRID_SIZE resolution.
     let idx = grid_index(center);
-    let d = fluid_dye[idx];
+    // Dye retired: sensors read the real activated counts only.
     var v = 0.0;
-    if (grid_type == 0u) { v = clamp(d.x + d.y + chem_pool_count_f(idx, 0u), 0.0, 1.0); }
-    else if (grid_type == 1u) { v = clamp(d.z + d.w + chem_pool_count_f(idx, 1u), 0.0, 1.0); }
+    if (grid_type == 0u) { v = clamp(chem_pool_count_f(idx, 0u), 0.0, 1.0); }
+    else if (grid_type == 1u) { v = clamp(chem_pool_count_f(idx, 1u), 0.0, 1.0); }
 
     if (debug_mode) {
         draw_filled_circle(center, 4.0, vec4<f32>(1.0, 0.7, 0.0, 0.7));
