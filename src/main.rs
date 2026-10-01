@@ -4275,6 +4275,7 @@ struct GpuState {
     matter_bottom: u32,                 // Free quanta in the bottom 10% of rows
     matter_act: u32,                    // Activated free quanta
     matter_rubble: u32,                 // Free quanta in rubble cells (1-2 gamma quanta)
+    pop_health: [f64; 5],               // mean height (1=surface), mean energy, starving frac, pairing progress, mean age
     matter_energy: f64,                 // Total agent energy (energy units) at last sample
     matter_energy_quanta: f64,          // Exact quanta-equivalent of agent energy (per-agent yield)
     matter_total: f64,                  // free + locked + energy-equivalent at last sample
@@ -8072,6 +8073,7 @@ impl GpuState {
             matter_bottom: 0,
             matter_act: 0,
             matter_rubble: 0,
+            pop_health: [0.0; 5],
             matter_energy: 0.0,
             matter_energy_quanta: 0.0,
             matter_total: 0.0,
@@ -12212,8 +12214,27 @@ impl GpuState {
             let mut energy_raw: u64 = 0;
             let mut energy_quanta: f64 = 0.0;
             let fp = self.food_power as f64;
+            // Population health telemetry (depth / energy / pairing progress).
+            let mut n_alive = 0u64;
+            let mut sum_height = 0.0f64;
+            let mut sum_energy = 0.0f64;
+            let mut n_starving = 0u64;
+            let mut sum_pair_frac = 0.0f64;
+            let mut sum_age = 0.0f64;
             for agent in agents.iter().take(take_len) {
                 if agent.alive == 1 {
+                    n_alive += 1;
+                    // Height fraction: 1 = surface (screen top = high y), 0 = bottom.
+                    sum_height += (agent.position[1] as f64 / self.sim_size as f64).clamp(0.0, 1.0);
+                    let e = agent.energy as f64 / ENERGY_SCALE as f64;
+                    sum_energy += e;
+                    if e < 1.0 {
+                        n_starving += 1;
+                    }
+                    if agent.gene_length > 0 {
+                        sum_pair_frac += agent.pairing_counter as f64 / agent.gene_length as f64;
+                    }
+                    sum_age += agent.age as f64;
                     // PRIMORDIAL SEEDS (generation 0): their strand was
                     // minted at world start and vanishes on death, so it is
                     // NOT world matter — only their captured complements and
@@ -12253,6 +12274,14 @@ impl GpuState {
                 }
             }
             self.matter_locked_quanta = locked;
+            let na = n_alive.max(1) as f64;
+            self.pop_health = [
+                sum_height / na,
+                sum_energy / na,
+                n_starving as f64 / na,
+                sum_pair_frac / na,
+                sum_age / na,
+            ];
             self.matter_locked_per_ch = locked_ch;
             self.matter_energy = energy_raw as f64 / ENERGY_SCALE as f64;
             self.matter_energy_quanta = energy_quanta;
@@ -15916,6 +15945,14 @@ fn main() {
                                                                 state.matter_bottom as f64 / ft * 100.0,
                                                             ));
                                                         }
+                                                        ui.label(format!(
+                                                            "agents: height {:.0}% (100 = surface) · energy {:.1} · starving {:.0}% · pairing {:.0}% · age {:.0}",
+                                                            state.pop_health[0] * 100.0,
+                                                            state.pop_health[1],
+                                                            state.pop_health[2] * 100.0,
+                                                            state.pop_health[3] * 100.0,
+                                                            state.pop_health[4],
+                                                        ));
                                                         ui.label(format!(
                                                             "locked  A {} · U {} · G {} · C {}",
                                                             state.matter_locked_per_ch[0],
