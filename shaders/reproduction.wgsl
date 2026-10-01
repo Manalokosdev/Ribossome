@@ -77,6 +77,14 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         if (inherited_energy > 0.0) {
+            // MATTER LEDGER for this replication: per-channel monomers that
+            // left the parent as offspring strands (or were refunded). The
+            // parent captured exactly the complements of its whole strand;
+            // mutations (insertions, tandem duplications, deletions, X-point
+            // mutations, end trimming) and split reproduction change what
+            // the children actually embody, so the difference is reconciled
+            // with the environment after the loop.
+            var child_counts = vec4<f32>(0.0);
             let spawn_index = atomicAdd(&spawn_debug_counters[0], num_offspring);
 
             for (var offspring_idx = 0u; offspring_idx < num_offspring; offspring_idx++) {
@@ -105,6 +113,7 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     for (var rc = 0u; rc < 4u; rc++) {
                         chem_deposit_prob(ridx, rc, refund[rc], rseed ^ (rc * 374761393u));
                     }
+                    child_counts += refund;
                     continue;
                 }
 
@@ -607,6 +616,9 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                 }
 
+                child_counts += genome_composition(offspring.genome_packed, offspring.genome_offset, offspring.gene_length)
+                    * f32(offspring.gene_length);
+
                 let energy_per_offspring = inherited_energy / f32(num_offspring);
                 offspring.energy = energy_to_u32(energy_per_offspring);
 
@@ -639,6 +651,41 @@ fn reproduce_agents(@builtin(global_invocation_id) gid: vec3<u32>) {
                 (*dst).gene_length = offspring.gene_length;
                 (*dst).genome_offset = offspring.genome_offset;
                 (*dst).genome_packed = offspring.genome_packed;
+            }
+
+            // RECONCILE: captured complements vs what the children embody.
+            // Surplus (deletions, trimming, split gaps) is deposited as SPENT
+            // matter at the parent; deficit (insertions, duplications) is
+            // withdrawn from the parent's 3x3 neighborhood (spent first,
+            // then activated). Only an unaffordable remainder can mint.
+            let captured = genome_paired_complement_counts(agent_genome_packed, genome_offset, gene_length, gene_length);
+            let delta = captured - child_counts;
+            let pidx = grid_index(agent_pos);
+            let px = i32(pidx % GRID_SIZE);
+            let py = i32(pidx / GRID_SIZE);
+            let rseed2 = (agent_id + 1u) * 2891336453u ^ (params.random_seed * 1597334677u);
+            for (var rc = 0u; rc < 4u; rc++) {
+                let d = delta[rc];
+                if (d > 0.0) {
+                    chem_deposit_prob(pidx, rc, d, rseed2 ^ (rc * 374761393u));
+                } else if (d < -0.0) {
+                    var need = u32(round(-d));
+                    for (var oy = -1; oy <= 1; oy++) {
+                        for (var ox = -1; ox <= 1; ox++) {
+                            if (need == 0u) { break; }
+                            let qx = px + ox;
+                            let qy = py + oy;
+                            if (qx < 0 || qy < 0 || qx >= i32(GRID_SIZE) || qy >= i32(GRID_SIZE)) { continue; }
+                            let qslot = (u32(qy) * GRID_SIZE + u32(qx)) * 4u + rc;
+                            loop {
+                                if (need == 0u) { break; }
+                                if (chem_take_state_one(qslot, true)) { need -= 1u; continue; }
+                                if (chem_take_state_one(qslot, false)) { need -= 1u; continue; }
+                                break;
+                            }
+                        }
+                    }
+                }
             }
 
             agent_energy_cur -= inherited_energy;
