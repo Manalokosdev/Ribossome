@@ -17510,6 +17510,25 @@ fn main() {
                                                             ui.checkbox(&mut state.fluid_enabled, "Enable Fluids");
                                                         });
 
+                                                        ui.separator();
+                                                        ui.heading("Agents -> Fluid");
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.prop_wash_strength_fluid, -5.0..=5.0)
+                                                                .text("Agent push on fluid")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        )
+                                                        .on_hover_text(
+                                                            "How strongly agents stir the water: body deformation while swimming (and propellers) injects force into the fluid. 0 = agents do not move the water; negative reverses the direction.",
+                                                        );
+                                                        ui.add(
+                                                            egui::Slider::new(&mut state.prop_wash_strength, 0.0..=5.0)
+                                                                .text("Direct body wash")
+                                                                .clamping(egui::SliderClamping::Always),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Direct (non-fluid) displacement by moving body parts, e.g. shoving loose terrain.",
+                                                        );
+
 
                                                         ui.separator();
                                                         ui.add(
