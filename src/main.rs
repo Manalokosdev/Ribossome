@@ -1035,6 +1035,8 @@ struct FrameProfiler {
 struct DispatchTimings {
     sim_pre_ms: Option<f64>,
     backlog_ms: Option<f64>,
+    post_compact_ms: Option<f64>,
+    post_init_dead_ms: Option<f64>,
     sim_pre_diffuse_ms: Option<f64>,
     sim_pre_diffuse_commit_ms: Option<f64>,
     sim_pre_trails_ms: Option<f64>,
@@ -1059,6 +1061,8 @@ enum DispatchSegment {
     // render/present, earlier commands in this encoder) so it is not billed
     // to the first timed segment.
     Backlog,
+    PostCompact,
+    PostInitDead,
     SimPre,
     SimPreDiffuse,
     SimPreDiffuseCommit,
@@ -1260,6 +1264,8 @@ but required timestamp-query features are unavailable on this device."
         let ms = ms.max(0.0);
         match segment {
             DispatchSegment::Backlog => self.dispatch_timings.backlog_ms = Some(ms),
+            DispatchSegment::PostCompact => self.dispatch_timings.post_compact_ms = Some(ms),
+            DispatchSegment::PostInitDead => self.dispatch_timings.post_init_dead_ms = Some(ms),
             DispatchSegment::SimPre => self.dispatch_timings.sim_pre_ms = Some(ms),
             DispatchSegment::SimPreDiffuse => self.dispatch_timings.sim_pre_diffuse_ms = Some(ms),
             DispatchSegment::SimPreDiffuseCommit => {
@@ -1444,6 +1450,12 @@ but required timestamp-query features are unavailable on this device."
 
             if self.dispatch_timing_detail {
                 println!(
+                    "[perf] post_parts(ms): compact+merge={} init_dead={} render_agents+inspector={}",
+                    fmt(self.dispatch_timings.post_compact_ms),
+                    fmt(self.dispatch_timings.post_init_dead_ms),
+                    fmt(self.dispatch_timings.post_ms),
+                );
+                println!(
                     "[perf] simPre_parts(ms): backlog={} diffuse={} commit={} rain={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
                     fmt(self.dispatch_timings.backlog_ms),
                     fmt(self.dispatch_timings.sim_pre_diffuse_ms),
@@ -1495,6 +1507,12 @@ but required timestamp-query features are unavailable on this device."
                 );
 
                 if self.dispatch_timing_detail {
+                    println!(
+                        "[perf] post_parts(ms): compact+merge={} init_dead={} render_agents+inspector={}",
+                        fmt(self.dispatch_timings.post_compact_ms),
+                        fmt(self.dispatch_timings.post_init_dead_ms),
+                        fmt(self.dispatch_timings.post_ms),
+                    );
                     println!(
                         "[perf] simPre_parts(ms): backlog={} diffuse={} commit={} rain={} trails={} slope={} draw={} repro={}  (sum shown as simPre)",
                         fmt(self.dispatch_timings.backlog_ms),
@@ -10827,26 +10845,10 @@ impl GpuState {
                 timestamp_writes: None,
             });
 
-            if should_run_simulation {
-                // Sweeper organs (33/46) carry activated monomers to the body - workgroup_size(256)
-                // Runs after process_agents so it can operate on agents_out without requiring
-                // write access to agents_in (which would slow down all compute).
-                cpass.set_pipeline(&self.drain_energy_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(
-                    ((self.agent_buffer_capacity as u32) + 255) / 256,
-                    1,
-                    1,
-                );
-
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
-            }
-
-            if !should_run_simulation {
-                self.frame_profiler
-                    .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
-            }
+            // Sweeper pass (drain_energy) retired: sweepers are disabled,
+            // so the dispatch is skipped entirely.
+            self.frame_profiler
+                .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DRAIN_ENERGY);
         }
 
         self.frame_profiler.maybe_submit_encoder_segment(
@@ -11177,6 +11179,14 @@ impl GpuState {
                 }
             }
 
+            self.frame_profiler.maybe_submit_encoder_segment(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                DispatchSegment::PostCompact,
+                "Update Encoder (Timed Segment)",
+            );
+
             // Post-fluid Pass 1b: write init-dead indirect args.
             // This pass boundary ensures merge/compact counters are visible when we compute args.
             if should_run_simulation {
@@ -11225,6 +11235,18 @@ impl GpuState {
             // every frame (flickering + invisible "ghost" agents). The
             // kernel early-exits on dead slots, so this is cheap.
             if should_draw {
+                drop(cpass);
+                self.frame_profiler.maybe_submit_encoder_segment(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    DispatchSegment::PostInitDead,
+                    "Update Encoder (Timed Segment)",
+                );
+                cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Post-Fluid Compute Pass 2 (render agents)"),
+                    timestamp_writes: None,
+                });
                 cpass.set_pipeline(&self.render_agents_pipeline);
                 cpass.set_bind_group(0, bg_process, &[]);
                 cpass.dispatch_workgroups(
