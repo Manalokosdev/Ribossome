@@ -304,30 +304,57 @@ fn fluid_ride_velocity(world_pos: vec2<f32>) -> vec2<f32> {
 // is sampled at 16 points and each sample's quanta dim the light. Below
 // the lit band the column scan is skipped (light is negligible anyway),
 // which keeps the cost confined to the upper layer.
-const UV_SHADOW_SAMPLES: u32 = 16u;
-const UV_SHADOW_ABSORB: f32 = 0.35; // per gamma quantum per sample
+const UV_SHADOW_ABSORB: f32 = 0.1; // per solid gamma quantum crossed
 
 fn uv_light_at_cell(x: u32, y: u32) -> f32 {
-    let depth_frac = 1.0 - (f32(y) + 0.5) / f32(GRID_SIZE);
-    let water = exp(-max(params.dye_alpha_color_g, 0.5) * depth_frac);
-    if (water < 1e-2) {
-        return water;
-    }
-    let span = f32(GRID_SIZE - 1u - min(y, GRID_SIZE - 1u));
-    if (span < 1.0) {
-        return water;
-    }
-    var q = 0.0;
-    for (var k = 1u; k <= UV_SHADOW_SAMPLES; k++) {
-        let sy = y + u32(span * f32(k) / f32(UV_SHADOW_SAMPLES));
-        // Only SOLID rock casts shade; scattered rubble specks are
-        // translucent (counting them darkened the whole water column).
-        let gq = gamma_count(min(sy, GRID_SIZE - 1u) * GRID_SIZE + x);
-        if (gq >= GAMMA_SOLID_THRESHOLD) { q += f32(gq); }
-    }
-    return water * exp(-UV_SHADOW_ABSORB * q);
+    // Precomputed by clear_uv_light + compute_uv_light (diffuse sky, exact
+    // ray marches, refreshed every ~100 epochs — terrain changes slowly).
+    let cx = min(x, GRID_SIZE - 1u);
+    let cy = min(y, GRID_SIZE - 1u);
+    return f32(atomicLoad(&gamma_grid[GAMMA_LIGHT_OFFSET + cy * GRID_SIZE + cx])) / UV_FIXED_SCALE;
 }
 
+// DIFFUSE SKY: light arrives from UV_DIRS directions (vertical and slants up
+// to |dx/dy| = 0.6, ~31 deg). Each direction is traced by parallel rays from
+// the surface (top of screen = high y) down through EVERY cell, attenuating
+// with water depth and absorbing through solid gamma; each ray adds its
+// share to the cells it crosses (fixed-point atomic sum), giving soft
+// penumbrae instead of hard vertical shadows.
+const UV_DIRS: u32 = 5u;
+const UV_FIXED_SCALE: f32 = 1000000.0;
+
+fn uv_dir_slope(d: u32) -> f32 {
+    return (f32(d) - f32(UV_DIRS - 1u) * 0.5) * 0.3;
+}
+
+@compute @workgroup_size(16, 16)
+fn clear_uv_light(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= GRID_SIZE || gid.y >= GRID_SIZE) { return; }
+    atomicStore(&gamma_grid[GAMMA_LIGHT_OFFSET + gid.y * GRID_SIZE + gid.x], 0u);
+}
+
+@compute @workgroup_size(64)
+fn compute_uv_light(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let d = gid.y;
+    if (d >= UV_DIRS) { return; }
+    let slope = uv_dir_slope(d);
+    let margin = i32(ceil(abs(slope) * f32(GRID_SIZE)));
+    let x0 = i32(gid.x) - margin;
+    if (x0 >= i32(GRID_SIZE) + margin) { return; }
+    let atten = max(params.dye_alpha_color_g, 0.5);
+    var absorbed = 0.0;
+    for (var t = 0u; t < GRID_SIZE; t++) {
+        let y = GRID_SIZE - 1u - t;
+        let xi = x0 + i32(round(f32(t) * slope));
+        if (xi < 0 || xi >= i32(GRID_SIZE)) { continue; }
+        let idx = y * GRID_SIZE + u32(xi);
+        let depth_frac = 1.0 - (f32(y) + 0.5) / f32(GRID_SIZE);
+        let light = exp(-atten * depth_frac) * exp(-UV_SHADOW_ABSORB * absorbed);
+        atomicAdd(&gamma_grid[GAMMA_LIGHT_OFFSET + idx], u32(light / f32(UV_DIRS) * UV_FIXED_SCALE));
+        let g = gamma_count(idx);
+        if (g >= GAMMA_SOLID_THRESHOLD) { absorbed += f32(g); }
+    }
+}
 fn uv_light_at_world(p: vec2<f32>) -> f32 {
     let cx = u32(clamp(p.x / f32(SIM_SIZE) * f32(GRID_SIZE), 0.0, f32(GRID_SIZE - 1u)));
     let cy = u32(clamp(p.y / f32(SIM_SIZE) * f32(GRID_SIZE), 0.0, f32(GRID_SIZE - 1u)));

@@ -1298,6 +1298,8 @@ fn sample_grid_bicubic(pos: vec2<f32>, grid_type: u32) -> f32 {
 const GAMMA_LAYER_SIZE: u32 = GRID_SIZE * GRID_SIZE;
 const GAMMA_SLOPE_X_OFFSET: u32 = GAMMA_LAYER_SIZE;
 const GAMMA_SLOPE_Y_OFFSET: u32 = GAMMA_LAYER_SIZE * 2u;
+// 4th plane: precomputed UV light (f32 bits), written by compute_uv_light.
+const GAMMA_LIGHT_OFFSET: u32 = GAMMA_LAYER_SIZE * 3u;
 
 fn clamp_gamma_coords(ix: i32, iy: i32) -> u32 {
     let clamped_x = clamp(ix, 0, i32(GRID_SIZE) - 1);

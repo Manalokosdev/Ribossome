@@ -4159,6 +4159,8 @@ struct GpuState {
     draw_inspector_agent_pipeline: wgpu::ComputePipeline,
     composite_agents_pipeline: wgpu::ComputePipeline,
     gamma_slope_pipeline: wgpu::ComputePipeline,
+    uv_light_pipeline: wgpu::ComputePipeline,
+    uv_clear_pipeline: wgpu::ComputePipeline,
     merge_pipeline: wgpu::ComputePipeline, // Merge spawned agents
     compact_pipeline: wgpu::ComputePipeline, // Remove dead agents
     finalize_merge_pipeline: wgpu::ComputePipeline, // Reset spawn counter
@@ -5332,8 +5334,8 @@ impl GpuState {
             queue.submit(Some(encoder.finish()));
         }
 
-        // Gamma grid packs height + 2 slope components per cell (3 floats)
-        let gamma_buffer_size = (grid_size * 3 * std::mem::size_of::<f32>()) as u64;
+        // Gamma grid packs height + 2 slope components + UV light per cell (4 planes)
+        let gamma_buffer_size = (grid_size * 4 * std::mem::size_of::<f32>()) as u64;
         let gamma_grid = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Gamma Grid"),
             size: gamma_buffer_size,
@@ -6711,6 +6713,26 @@ impl GpuState {
             });
         profiler.mark("rain pipeline");
 
+        let uv_clear_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("UV Light Clear Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "clear_uv_light",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let uv_light_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("UV Light Pipeline"),
+                layout: Some(&compute_pipeline_layout),
+                module: &shader,
+                entry_point: "compute_uv_light",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
         let gamma_slope_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Gamma Slope Pipeline"),
@@ -7974,6 +7996,8 @@ impl GpuState {
             draw_inspector_agent_pipeline,
             composite_agents_pipeline,
             gamma_slope_pipeline,
+            uv_light_pipeline,
+            uv_clear_pipeline,
             merge_pipeline,
             compact_pipeline,
             finalize_merge_pipeline,
@@ -10296,19 +10320,25 @@ impl GpuState {
                     .write_ts_compute_pass(&mut cpass, TS_SIM_PASS_START);
 
                 if run_diffusion && !self.perf_skip_diffusion {
-                    cpass.set_pipeline(&self.diffuse_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
+                    // Gamma grain physics every 4th epoch: geology is slow.
+                    let gamma_tick = self.epoch % 4 == 0;
                     let groups_x = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_X - 1) / DIFFUSE_WG_SIZE_X;
                     let groups_y = (GRID_DIM_U32 + DIFFUSE_WG_SIZE_Y - 1) / DIFFUSE_WG_SIZE_Y;
-                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                    if gamma_tick {
+                        cpass.set_pipeline(&self.diffuse_pipeline);
+                        cpass.set_bind_group(0, bg_process, &[]);
+                        cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                    }
 
                     self.frame_profiler
                         .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
 
                     // Commit staged gamma back into the environment grid.
-                    cpass.set_pipeline(&self.diffuse_commit_pipeline);
-                    cpass.set_bind_group(0, bg_process, &[]);
-                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                    if gamma_tick {
+                        cpass.set_pipeline(&self.diffuse_commit_pipeline);
+                        cpass.set_bind_group(0, bg_process, &[]);
+                        cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                    }
 
                     // Quantized monomer transport (diffusion + fluid advection).
                     cpass.set_pipeline(&self.transport_quanta_pipeline);
@@ -10359,6 +10389,16 @@ impl GpuState {
                     let groups_x = (GRID_DIM_U32 + SLOPE_WG_SIZE_X - 1) / SLOPE_WG_SIZE_X;
                     let groups_y = (GRID_DIM_U32 + SLOPE_WG_SIZE_Y - 1) / SLOPE_WG_SIZE_Y;
                     cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
+                // Exact column-scan UV light, refreshed every 100 epochs
+                // (terrain changes slowly).
+                if self.epoch % 100 == 0 || self.epoch < 2 {
+                    cpass.set_pipeline(&self.uv_clear_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups((GRID_DIM_U32 + 15) / 16, (GRID_DIM_U32 + 15) / 16, 1);
+                    // 5 sky directions; ray origins span the slanted margins.
+                    cpass.set_pipeline(&self.uv_light_pipeline);
+                    cpass.dispatch_workgroups((GRID_DIM_U32 * 3 + 63) / 64, 5, 1);
                 }
 
                 self.frame_profiler
@@ -10467,9 +10507,11 @@ impl GpuState {
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_PASS_START);
 
-                cpass.set_pipeline(&self.diffuse_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                if self.epoch % 4 == 0 {
+                    cpass.set_pipeline(&self.diffuse_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
 
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_DIFFUSE);
@@ -10492,9 +10534,11 @@ impl GpuState {
                     timestamp_writes: None,
                 });
 
-                cpass.set_pipeline(&self.diffuse_commit_pipeline);
-                cpass.set_bind_group(0, bg_process, &[]);
-                cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                if self.epoch % 4 == 0 {
+                    cpass.set_pipeline(&self.diffuse_commit_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                }
 
                 // Quantized monomer transport (diffusion + fluid advection).
                 cpass.set_pipeline(&self.transport_quanta_pipeline);
@@ -10578,6 +10622,16 @@ impl GpuState {
                 let groups_x = (GRID_DIM_U32 + SLOPE_WG_SIZE_X - 1) / SLOPE_WG_SIZE_X;
                 let groups_y = (GRID_DIM_U32 + SLOPE_WG_SIZE_Y - 1) / SLOPE_WG_SIZE_Y;
                 cpass.dispatch_workgroups(groups_x, groups_y, 1);
+                // Exact column-scan UV light, refreshed every 100 epochs
+                // (terrain changes slowly).
+                if self.epoch % 100 == 0 || self.epoch < 2 {
+                    cpass.set_pipeline(&self.uv_clear_pipeline);
+                    cpass.set_bind_group(0, bg_process, &[]);
+                    cpass.dispatch_workgroups((GRID_DIM_U32 + 15) / 16, (GRID_DIM_U32 + 15) / 16, 1);
+                    // 5 sky directions; ray origins span the slanted margins.
+                    cpass.set_pipeline(&self.uv_light_pipeline);
+                    cpass.dispatch_workgroups((GRID_DIM_U32 * 3 + 63) / 64, 5, 1);
+                }
                 self.frame_profiler
                     .write_ts_compute_pass(&mut cpass, TS_SIM_AFTER_SLOPE);
             }
