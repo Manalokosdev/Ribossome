@@ -3542,8 +3542,8 @@ const AGENT_SINK_RATE: f32 = 0.05;
 // Diffusiophoresis: world units/frame of drift per unit of uncompensated
 // uptake flux (monomers/frame) on one side, capped at PHORETIC_MAX_VEL;
 // and how strongly enablers up-regulate local uptake.
-const PHORETIC_GAIN: f32 = 40.0;
-const PHORETIC_MAX_VEL: f32 = 2.0;
+const PHORETIC_GAIN: f32 = 400.0;
+const PHORETIC_MAX_VEL: f32 = 3.0;
 const UPTAKE_ENABLER_BOOST: f32 = 3.0;
 // Thermal mortality multipliers (cold water / vent cores).
 const COLD_DEATH_MULT: f32 = 0.1;
